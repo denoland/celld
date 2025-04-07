@@ -1,0 +1,6 @@
+[package]
+name = "self-hosted-deno-deploy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
