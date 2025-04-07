@@ -1,0 +1,5 @@
+# Copyright Deno Land Inc. All Rights Reserved. Proprietary and confidential.
+
+max_width = 80
+tab_spaces = 2
+edition = "2021"

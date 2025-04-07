@@ -9,6 +9,30 @@ Push code. Route traffic. Enforce limits. Observe everything.
 
 **One container. Multi-tenant. No cloud needed.**
 
+## Development Setup
+
+This project is a Rust application that requires building for Linux ARM64, even if you're developing on another platform like macOS. We use Docker to build and run the project.
+
+### Prerequisites
+
+- Docker installed on your development machine
+- Rust (optional, for local development)
+
+### Building and Running
+
+1. Clone this repository
+2. Run the build script:
+
+```bash
+./build.sh
+```
+
+This will build a Docker image and run the container with the proxy listening on port 3000.
+
+### Environment Variables
+
+- `APPS_DIR`: Directory where app code is stored (default: "./apps")
+
 ## Why?
 
 You need to run dynamic code in production—but:
