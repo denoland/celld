@@ -1,32 +1,51 @@
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
 use hyper::header::HOST;
 use hyper::server::conn::http1;
 use hyper::service::Service;
 use hyper::{Request, Response};
-use hyper_util::rt::TokioExecutor;
 use hyper_util::rt::TokioIo;
+use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt}; // For manual proxying if needed
+use tokio::net::TcpListener;
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
-use tracing::{error, info, instrument, warn};
-use tracing_subscriber::{
-  layer::SubscriberExt, util::SubscriberInitExt, EnvFilter,
-};
+use tracing::{error, info, instrument, trace, warn};
 use uuid::Uuid;
 
-const IDLE_TIMEOUT_SECONDS: u64 = 300; // 5 minutes
-const REAPER_INTERVAL_SECONDS: u64 = 60; // Check every minute
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const REAPER_INTERVAL: Duration = Duration::from_secs(10);
+
+static DATA_PORT: Lazy<u16> = Lazy::new(|| {
+  std::env::var("DATA_PORT")
+    .ok()
+    .and_then(|s| s.parse().ok())
+    .map_or_else(|| 3000u16, |port| port)
+});
+
+static DATA_DIR: Lazy<PathBuf> = Lazy::new(|| {
+  let path = PathBuf::from(
+    std::env::var("DATA").unwrap_or_else(|_| "./data".to_string()),
+  );
+
+  if !path.is_dir() {
+    error!(
+      "DATA_DIR ('{}') is not an existing directory.",
+      path.display()
+    );
+    std::process::exit(1);
+  }
+
+  info!("Using DATA_DIR: {}", path.display());
+  path
+});
 
 #[derive(Debug, thiserror::Error)]
 enum ProxyError {
@@ -55,17 +74,15 @@ struct ProcessEntry {
 type SharedProcessMap = Arc<Mutex<HashMap<String, ProcessEntry>>>;
 
 struct ProcessManager {
-  apps_dir: PathBuf,
+  data_dir: PathBuf,
   processes: SharedProcessMap,
-  idle_timeout: Duration,
 }
 
 impl ProcessManager {
-  fn new(apps_dir: PathBuf, idle_timeout: Duration) -> Self {
+  fn new(data_dir: PathBuf) -> Self {
     ProcessManager {
-      apps_dir,
+      data_dir,
       processes: Arc::new(Mutex::new(HashMap::new())),
-      idle_timeout,
     }
   }
 
@@ -90,9 +107,9 @@ impl ProcessManager {
       return Err(ProxyError::InvalidHost);
     }
 
-    let app_code_dir = self.apps_dir.join(host).join("code");
+    let app_code_dir = self.data_dir.join(host).join("code");
     let main_script = app_code_dir.join("main.ts");
-    let sockets_dir = self.apps_dir.join(host).join("sockets");
+    let sockets_dir = self.data_dir.join(host).join("sockets");
 
     if !main_script.exists() {
       warn!("Application code not found at {}", main_script.display());
@@ -111,34 +128,17 @@ impl ProcessManager {
 
     let socket_name = format!("{}.sock", Uuid::new_v4());
     let socket_path = sockets_dir.join(socket_name);
-    let socket_path_str = socket_path
-      .to_str()
-      .ok_or_else(|| anyhow::anyhow!("Invalid socket path"))?
-      .to_string();
 
-    // Permissions: Allow reading app code dir, allow listening on the specific socket
-    let allow_read_perm = format!("--allow-read={}", app_code_dir.display());
-    // Note: Deno needs permission to the *specific* socket path
-    let allow_listen_perm = format!("--allow-listen=unix:{}", socket_path_str);
+    info!(script = %main_script.display(), socket = %socket_path.display(), "Spawning Deno process");
 
-    let deno_cmd = "deno"; // Assuming deno is in PATH
-
-    info!(command = %deno_cmd, script = %main_script.display(), socket = %socket_path_str, "Spawning Deno process");
-
-    let mut cmd = Command::new(deno_cmd);
-    cmd.arg("run");
-    cmd.arg(allow_read_perm);
-    cmd.arg(allow_listen_perm);
-    // Add other permissions as needed, e.g., --allow-env
-    cmd.arg("--no-check"); // Faster startup for dev/MVP
-    cmd.arg(&main_script);
-    cmd.arg(format!("--listen-socket={}", socket_path_str)); // Pass socket path to script
-
-    // Stdio setup - inherit for easy debugging in MVP
-    cmd.stdout(std::process::Stdio::inherit());
-    cmd.stderr(std::process::Stdio::inherit());
-
-    let mut process_handle = cmd
+    let mut process_handle = Command::new("deno")
+      .env("DENO_SERVE_ADDRESS", socket_path.clone())
+      .arg("run")
+      .arg(format!("--allow-read={}", app_code_dir.display()))
+      .arg(format!("--allow-read={}", socket_path.display()))
+      .arg(format!("--allow-write={}", socket_path.display()))
+      .arg("--allow-net")
+      .arg(&main_script)
       .spawn()
       .with_context(|| format!("Failed to spawn Deno process for {}", host))?;
 
@@ -204,16 +204,15 @@ impl ProcessManager {
   async fn start_reaper(self: Arc<Self>) {
     info!("Starting idle process reaper task");
     loop {
-      sleep(Duration::from_secs(REAPER_INTERVAL_SECONDS)).await;
+      sleep(REAPER_INTERVAL).await;
       trace!("Reaper checking for idle processes...");
 
       let mut processes = self.processes.lock().await;
       let now = Instant::now();
-      let idle_timeout = self.idle_timeout;
       let mut hosts_to_reap = Vec::new();
 
       for (host, entry) in processes.iter() {
-        if now.duration_since(entry.last_used) > idle_timeout {
+        if now.duration_since(entry.last_used) > IDLE_TIMEOUT {
           info!(host = %host, pid = entry.pid, idle_duration = ?now.duration_since(entry.last_used), "Process marked for reaping due to inactivity");
           hosts_to_reap.push(host.clone());
         }
@@ -290,7 +289,11 @@ impl Service<Request<Incoming>> for ProxyService {
       info!("Connected to Unix socket");
 
       // 4. Use Hyper client handshake over the Unix Stream
-      let (mut sender, conn) = match http1::handshake(stream).await {
+      let (mut sender, conn) = match hyper::client::conn::http1::handshake(
+        stream,
+      )
+      .await
+      {
         Ok((s, c)) => (s, c),
         Err(e) => {
           error!(host=%host, socket=%socket_path.display(), error=%e, "Hyper handshake failed with upstream");
@@ -304,10 +307,13 @@ impl Service<Request<Incoming>> for ProxyService {
 
       // 5. Spawn the connection task to poll the connection
       // The connection task is responsible for driving the underlying IO.
+      // Clone values that will be moved into the async block
+      let host_clone = host.clone();
+      let socket_path_clone = socket_path.clone();
       tokio::spawn(async move {
         if let Err(e) = conn.await {
           // Log connection errors (e.g., upstream closed unexpectedly)
-          warn!(host=%host, socket=%socket_path.display(), error = %e, "Upstream connection error during processing");
+          warn!(host=%host_clone, socket=%socket_path_clone.display(), error = %e, "Upstream connection error during processing");
         }
         trace!("Upstream connection task finished");
       });
@@ -346,110 +352,72 @@ impl Service<Request<Incoming>> for ProxyService {
   }
 }
 
-// Helper function to convert ProxyError to a Hyper Response
-fn error_response(err: ProxyError) -> Response<Full<Bytes>> {
-  let status = match err {
-    ProxyError::MissingHost | ProxyError::InvalidHost => {
-      hyper::StatusCode::BAD_REQUEST
-    }
-    ProxyError::AppNotFound(_) => hyper::StatusCode::NOT_FOUND,
-    ProxyError::InternalError(_) => hyper::StatusCode::INTERNAL_SERVER_ERROR,
-    ProxyError::UpstreamError(_) | ProxyError::UpstreamConnectionFailed => {
-      hyper::StatusCode::BAD_GATEWAY
-    }
-  };
-
-  // Log internal errors fully
-  if matches!(err, ProxyError::InternalError(_))
-    || matches!(err, ProxyError::UpstreamError(_))
-  {
-    error!("Responding with status {}: {}", status, err);
-  } else {
-    warn!("Responding with status {}: {}", status, err);
-  }
-
-  Response::builder()
-    .status(status)
-    .header(hyper::header::CONTENT_TYPE, "text/plain")
-    .body(Full::new(Bytes::from(err.to_string())))
-    .unwrap_or_else(|_| {
-      Response::builder()
-        .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-        .body(Full::new(Bytes::from("Internal Server Error")))
-        .unwrap()
-    }) // Should not fail
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-  // Setup tracing subscriber
-  tracing_subscriber::registry()
-    .with(tracing_subscriber::fmt::layer())
-    .with(
-      EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info")),
-    ) // Default to 'info'
-    .init();
+  // Initialize tracing for console logging
+  tracing_subscriber::fmt::init();
 
-  info!("Starting Deno Host MVP...");
+  let process_manager = Arc::new(ProcessManager::new(DATA_DIR.clone()));
 
-  // 1. Read APPS env var
-  let apps_dir_str =
-    std::env::var("APPS").context("APPS environment variable not set")?;
-  let apps_dir = PathBuf::from(apps_dir_str);
-  if !apps_dir.is_dir() {
-    anyhow::bail!(
-      "APPS directory not found or not a directory: {}",
-      apps_dir.display()
-    );
-  }
-  info!("Using APPS directory: {}", apps_dir.display());
-
-  // 2. Create Process Manager
-  let idle_timeout = Duration::from_secs(IDLE_TIMEOUT_SECONDS);
-  let process_manager =
-    Arc::new(ProcessManager::new(apps_dir.clone(), idle_timeout));
-
-  // 3. Start the reaper task
   let reaper_manager = Arc::clone(&process_manager);
   tokio::spawn(async move {
     reaper_manager.start_reaper().await;
   });
 
-  // 4. Setup Hyper Server
-  let addr = SocketAddr::from(([0, 0, 0, 0], 3000)); // Listen on 0.0.0.0:3000
+  let addr = SocketAddr::from(([0, 0, 0, 0], *DATA_PORT));
+
+  let listener = TcpListener::bind(addr).await?;
   info!("Listening on http://{}", addr);
 
-  // Create a service maker function
-  let make_svc = move || {
-    let manager_clone = Arc::clone(&process_manager);
-    async move {
-      Ok::<_, Infallible>(hyper::service::service_fn(
-        move |req: Request<Incoming>| {
-          let service = ProxyService {
-            process_manager: manager_clone.clone(),
-          };
-          async move {
-            match service.call(req).await {
-              Ok(resp) => Ok(resp),
-              Err(e) => Ok(error_response(e)), // Convert our error to a response
-            }
-          }
-        },
-      ))
-    }
-  };
+  // 6. The main accept loop
+  loop {
+    let (stream, remote_addr) = match listener.accept().await {
+      Ok(s) => s,
+      Err(e) => {
+        // Log listener accept errors (less common)
+        error!("Failed to accept connection: {:?}", e);
+        continue; // Keep listening
+      }
+    };
+    trace!("Accepted connection from {}", remote_addr);
 
-  // Build the server
-  let builder = hyper::server::Server::bind(&addr);
-  let server =
-    builder.serve(hyper::service::make_service_fn(|_conn| make_svc())); // Use make_service_fn
+    // Wrap the raw TCP stream in Hyper's TokioIo adapter
+    let io = TokioIo::new(stream);
 
-  // Run the server
-  if let Err(e) = server.await {
-    error!("Server error: {}", e);
-    return Err(e.into());
+    // Clone the Arc for the service instance needed by this connection's task.
+    // This is cheap as it only bumps the reference count.
+    let process_manager_ = process_manager.clone();
+
+    // Spawn a Tokio task for each connection.
+    // The `move` keyword moves ownership of `io` and `manager_for_task` into the task.
+    tokio::task::spawn(async move {
+      // Create an instance of our Service (`ProxyService`) for this connection.
+      // It captures the cloned Arc<ProcessManager>.
+      let service = ProxyService {
+        process_manager: process_manager_,
+      };
+
+      // Use hyper's connection builder to serve the connection.
+      // It will internally call `service.call` for each request on this connection.
+      let builder = http1::Builder::new();
+
+      // Configure the executor (required by hyper-util builders)
+      let conn_builder = builder; // http1::Builder doesn't have executor in hyper 1.x
+
+      // Serve the connection.
+      // `serve_connection` drives the HTTP state machine for the connection.
+      if let Err(err) = conn_builder.serve_connection(io, service).await {
+        // Log errors specific to *this* connection (e.g., IO errors,
+        // malformed HTTP requests that Hyper rejects before your service sees them).
+        // Errors *returned* by your `service.call` (like ProxyError) should ideally
+        // be handled by your service logic to produce an appropriate HTTP error response,
+        // they typically won't cause `serve_connection` itself to return an Err here unless
+        // there's an issue writing the response back, etc.
+        warn!("Error serving connection from {}: {:?}", remote_addr, err);
+      }
+      trace!("Connection task finished for {}", remote_addr);
+    });
   }
-
-  Ok(())
+  // Note: This loop runs forever, so Ok(()) is never reached in practice.
+  // You might add signal handling (e.g., Ctrl+C) to break the loop for graceful shutdown.
 }
