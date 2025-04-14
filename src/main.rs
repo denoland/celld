@@ -68,6 +68,7 @@ struct ProcessEntry {
   socket_path: PathBuf,
   last_used: Instant,
   process_handle: Child, // To kill the process
+  single_use: bool,      // Flag for single-use isolates
 }
 
 // Shared mutable state for process entries
@@ -80,23 +81,78 @@ struct ProcessManager {
 
 impl ProcessManager {
   fn new(data_dir: PathBuf) -> Self {
-    ProcessManager {
-      data_dir,
+    let pm = ProcessManager {
+      data_dir: data_dir.clone(),
       processes: Arc::new(Mutex::new(HashMap::new())),
-    }
+    };
+
+    // Spawn a task to clean up any stale socket files at startup
+    tokio::spawn(async move {
+      // Clean up any leftover socket files from previous runs
+      if let Ok(entries) = tokio::fs::read_dir(&data_dir).await {
+        let mut entries = entries;
+        while let Ok(Some(entry)) = entries.next_entry().await {
+          let host_dir = entry.path();
+          if !host_dir.is_dir() {
+            continue;
+          }
+
+          let sockets_dir = host_dir.join("sockets");
+          if !sockets_dir.exists() || !sockets_dir.is_dir() {
+            continue;
+          }
+
+          if let Ok(socket_entries) = tokio::fs::read_dir(&sockets_dir).await {
+            let mut socket_entries = socket_entries;
+            while let Ok(Some(socket_entry)) = socket_entries.next_entry().await
+            {
+              let socket_path = socket_entry.path();
+              if socket_path.extension().map_or(false, |ext| ext == "sock") {
+                // Try to remove the socket file
+                if let Err(e) = tokio::fs::remove_file(&socket_path).await {
+                  if e.kind() != std::io::ErrorKind::NotFound {
+                    // Ignore "not found" errors
+                    eprintln!(
+                      "Failed to remove stale socket file {}: {}",
+                      socket_path.display(),
+                      e
+                    );
+                  }
+                } else {
+                  eprintln!(
+                    "Removed stale socket file: {}",
+                    socket_path.display()
+                  );
+                }
+              }
+            }
+          }
+        }
+      }
+    });
+
+    pm
   }
 
   #[instrument(skip(self), fields(host = %host))]
   async fn get_or_spawn_process(
     &self,
     host: &str,
+    single_use: bool,
   ) -> Result<PathBuf, ProxyError> {
     let mut processes = self.processes.lock().await;
 
-    if let Some(entry) = processes.get_mut(host) {
-      entry.last_used = Instant::now();
-      info!("Found running process for host");
-      return Ok(entry.socket_path.clone());
+    // For single_use requests, always spawn a new process
+    // TODO: This should not be supported in production
+    if !single_use {
+      if let Some(entry) = processes.get_mut(host) {
+        // Skip single-use entries when looking for a regular process
+        if !entry.single_use {
+          entry.last_used = Instant::now();
+          info!("Found running process for host");
+          return Ok(entry.socket_path.clone());
+        }
+      }
     }
 
     // --- Process not running, need to spawn ---
@@ -148,38 +204,44 @@ impl ProcessManager {
     info!(pid = pid, "Deno process spawned");
 
     // --- Wait for the socket to become available (crucial for cold start) ---
-    let socket_clone = socket_path.clone();
+    let socket_ = socket_path.clone();
     let wait_start = Instant::now();
     let wait_timeout = Duration::from_secs(10); // Timeout for socket connection
 
+    // Use exponential backoff for more efficient waiting
+    let mut delay = Duration::from_millis(1); // Start with very small delay
+    let max_delay = Duration::from_millis(10); // Max delay between attempts
+
     loop {
       if wait_start.elapsed() > wait_timeout {
-        error!(pid = pid, socket = %socket_clone.display(), "Timeout waiting for Deno process socket");
+        error!(pid = pid, socket = %socket_.display(), "Timeout waiting for Deno process socket");
         // Attempt to kill the potentially zombie process
         let _ = process_handle.kill().await;
         // Also try cleaning up the socket file if it exists
-        let _ = tokio::fs::remove_file(&socket_clone).await;
+        let _ = tokio::fs::remove_file(&socket_).await;
         return Err(
           anyhow::anyhow!("Timeout waiting for process socket").into(),
         );
       }
 
-      match UnixStream::connect(&socket_clone).await {
+      match UnixStream::connect(&socket_).await {
         Ok(_) => {
-          info!(pid = pid, socket = %socket_clone.display(), duration = ?wait_start.elapsed(), "Socket connected!");
+          info!(pid = pid, socket = %socket_.display(), duration = ?wait_start.elapsed(), "Socket connected!");
           break; // Socket is ready
         }
         Err(ref e)
           if e.kind() == std::io::ErrorKind::ConnectionRefused
             || e.kind() == std::io::ErrorKind::NotFound =>
         {
-          // Socket not ready yet, wait and retry
-          sleep(Duration::from_millis(50)).await; // Short delay
+          // Socket not ready yet, wait and retry with exponential backoff
+          sleep(delay).await;
+          // Increase delay for next attempt (with a maximum)
+          delay = std::cmp::min(delay * 2, max_delay);
         }
         Err(e) => {
-          error!(pid = pid, socket = %socket_clone.display(), error = %e, "Error connecting to socket during startup");
+          error!(pid = pid, socket = %socket_.display(), error = %e, "Error connecting to socket during startup");
           let _ = process_handle.kill().await;
-          let _ = tokio::fs::remove_file(&socket_clone).await; // Cleanup attempt
+          let _ = tokio::fs::remove_file(&socket_).await; // Cleanup attempt
           return Err(
             anyhow::anyhow!("Error connecting to process socket: {}", e).into(),
           );
@@ -192,10 +254,19 @@ impl ProcessManager {
       socket_path: socket_path.clone(),
       last_used: Instant::now(),
       process_handle, // Move handle into entry
+      single_use,
     };
 
-    processes.insert(host.to_string(), entry);
-    info!("Process entry added to map");
+    // For single-use isolates, use a unique key with a UUID suffix
+    // This allows multiple single-use isolates for the same host
+    let process_key = if single_use {
+      format!("{}-{}", host, Uuid::new_v4())
+    } else {
+      host.to_string()
+    };
+
+    processes.insert(process_key, entry);
+    info!(single_use = single_use, "Process entry added to map");
 
     Ok(socket_path)
   }
@@ -284,10 +355,14 @@ where
         Some(h) => h.split(':').next().unwrap_or(h).to_string(), // Remove port if present
         None => return Err(ProxyError::MissingHost),
       };
-      info!(host = %host, "Routing request");
+
+      // Check for single-use isolate header
+      // TODO: This header should not be supported in production
+      let single_use = req.headers().get("x-single-use-isolate").is_some();
+      info!(host = %host, single_use = single_use, "Routing request");
 
       // 2. Get or spawn process, get socket path
-      let socket_path = manager.get_or_spawn_process(&host).await?;
+      let socket_path = manager.get_or_spawn_process(&host, single_use).await?;
       info!(socket=%socket_path.display(), "Got socket path");
 
       // 3. Connect to the Unix Socket
@@ -321,12 +396,12 @@ where
       // 5. Spawn the connection task to poll the connection
       // The connection task is responsible for driving the underlying IO.
       // Clone values that will be moved into the async block
-      let host_clone = host.clone();
-      let socket_path_clone = socket_path.clone();
+      let host_ = host.clone();
+      let socket_path_ = socket_path.clone();
       tokio::spawn(async move {
         if let Err(e) = conn.await {
           // Log connection errors (e.g., upstream closed unexpectedly)
-          warn!(host=%host_clone, socket=%socket_path_clone.display(), error = %e, "Upstream connection error during processing");
+          warn!(host=%host_, socket=%socket_path_.display(), error = %e, "Upstream connection error during processing");
         }
         trace!("Upstream connection task finished");
       });
@@ -359,6 +434,48 @@ where
         .to_bytes();
 
       let response = Response::from_parts(parts, Full::new(body_bytes));
+
+      // If this was a single-use isolate request, terminate the process after sending response
+      if single_use {
+        // Use a separate task to avoid holding up the response
+        let host_ = host.clone();
+        let manager_ = manager.clone();
+
+        // Enhanced cleanup for single-use isolates
+        tokio::spawn(async move {
+          // Wait a shorter time - 200ms is typically enough to ensure the response is sent
+          tokio::time::sleep(Duration::from_millis(200)).await;
+
+          info!(host = %host_, "Cleaning up single-use isolate");
+
+          // Find and terminate the single-use process for this host
+          let mut processes = manager_.processes.lock().await;
+
+          // Remove all process entries that are marked as single-use for this host
+          let keys_to_remove: Vec<String> = processes
+            .iter()
+            .filter_map(|(k, v)| {
+              if k.starts_with(&host_) && v.single_use {
+                Some(k.clone())
+              } else {
+                None
+              }
+            })
+            .collect();
+
+          for key in keys_to_remove {
+            if let Some(mut entry) = processes.remove(&key) {
+              info!(host = %host_, pid = entry.pid, "Terminating single-use isolate");
+              // First kill the process, then remove the socket file
+              let _ = entry.process_handle.kill().await;
+
+              // Remove socket file immediately - the connection is already established
+              // and response is delivered, so we don't need to wait
+              let _ = tokio::fs::remove_file(&entry.socket_path).await;
+            }
+          }
+        });
+      }
 
       Ok(response)
     })
@@ -451,7 +568,7 @@ mod tests {
       .to_bytes();
     assert_eq!(
       String::from_utf8_lossy(&response_body),
-      "hello from ry.local"
+      "hello from ry.local\n"
     );
   }
 }

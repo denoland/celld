@@ -1,1 +1,1 @@
-Deno.serve(_ => new Response("hello from ry.local"));
+Deno.serve(_ => new Response("hello from ry.local\n"));
