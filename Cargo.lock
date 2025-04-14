@@ -392,6 +392,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "once_cell",
  "serde",
  "serde_json",
  "tokio",
