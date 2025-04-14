@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use http_body_util::Full;
-use hyper::body::{Bytes, Incoming};
+use hyper::body::{Body, Bytes};
 use hyper::header::HOST;
 use hyper::server::conn::http1;
 use hyper::service::Service;
@@ -250,7 +250,12 @@ struct ProxyService {
   process_manager: Arc<ProcessManager>,
 }
 
-impl Service<Request<Incoming>> for ProxyService {
+// impl Service<Request<Incoming>> for ProxyService {
+impl<B> Service<Request<B>> for ProxyService
+where
+    B: Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
   type Response = Response<Full<Bytes>>; // Using Full for simplicity now
   type Error = ProxyError; // Use our custom error type
   type Future = std::pin::Pin<
@@ -261,7 +266,7 @@ impl Service<Request<Incoming>> for ProxyService {
   >;
 
   #[instrument(skip(self, req), fields(uri = %req.uri(), method = %req.method()))]
-  fn call(&self, req: Request<Incoming>) -> Self::Future {
+  fn call(&self, req: Request<B>) -> Self::Future {
     let manager = self.process_manager.clone();
 
     Box::pin(async move {
@@ -420,4 +425,36 @@ async fn main() -> Result<()> {
   }
   // Note: This loop runs forever, so Ok(()) is never reached in practice.
   // You might add signal handling (e.g., Ctrl+C) to break the loop for graceful shutdown.
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use hyper::service::Service;
+  
+  #[tokio::test]
+  async fn test_proxy_service() {
+    // Create a mock request with host header
+    let req = Request::builder()
+      .uri("http://localhost:3000/foo")
+      .header(HOST, "ry.local")
+      .body(http_body_util::Empty::<Bytes>::new())
+      .unwrap();
+      
+    // Create the service
+    let service = ProxyService {
+      process_manager: Arc::new(ProcessManager::new(DATA_DIR.clone())),
+    };
+    
+    // Call the service directly
+    let response = service.call(req).await.unwrap();
+    assert_eq!(response.status(), hyper::StatusCode::OK);
+    
+    // Check the response body
+    let full_body = response.into_body();
+    let collected = http_body_util::BodyExt::collect(full_body).await.unwrap();
+    let bytes = collected.to_bytes();
+    let body_str = String::from_utf8_lossy(&bytes);
+    assert_eq!(body_str, "hello from ry.local");
+  }
 }
