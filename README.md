@@ -11,7 +11,9 @@ Push code. Route traffic. Enforce limits. Observe everything.
 
 ## Development Setup
 
-This project is a Rust application that requires building for Linux ARM64, even if you're developing on another platform like macOS. We use Docker to build and run the project.
+This project is a Rust application that requires building for Linux ARM64, even
+if you're developing on another platform like macOS. We use Docker to build and
+run the project.
 
 ### Prerequisites
 
@@ -27,7 +29,8 @@ This project is a Rust application that requires building for Linux ARM64, even 
 ./build.sh
 ```
 
-This will build a Docker image and run the container with the proxy listening on port 3000.
+This will build a Docker image and run the container with the proxy listening on
+port 4000.
 
 ### Environment Variables
 
@@ -51,10 +54,10 @@ Self-hosted Deno Deploy gives you a drop-in container to:
 ## Get started
 
 ```bash
-docker run -p 3000:3000 -p 3001:3001 --rm -ti denoland/deploy
+docker run -p 4000:4000 -p 4001:4001 --rm -ti denoland/deploy
 ```
 
-Port 3000 is the data plane, port 3001 is control plane.
+Port 4000 is the data plane, port 4001 is control plane.
 
 ## Deploy an app or plugin
 
@@ -65,7 +68,7 @@ deno deploy -i local -d greeter
 Or via `curl`:
 
 ```bash
-curl -X POST http://localhost:3001/deploy \
+curl -X POST http://localhost:4001/deploy \
   -F 'plugin=greeter' \
   -F 'file=@main.ts'
 ```
@@ -82,7 +85,7 @@ export default app;
 Execute it
 
 ```bash
-curl http://localhost:3000/run/greeter?name=Alice
+curl http://localhost:4000/run/greeter?name=Alice
 # → "Hello Alice"
 ```
 
@@ -103,7 +106,7 @@ Deno.serve(() => {
 ```
 
 ```bash
-curl -H "Host: app.example.com" http://localhost:3000
+curl -H "Host: app.example.com" http://localhost:4000
 ```
 
 Serve full apps over custom domains or wildcard subdomains with proper

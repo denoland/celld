@@ -32,7 +32,7 @@ multiple independent JavaScript/TypeScript applications:
 
 ### Proxy Router (data-plane)
 
-- Listens on port 3000
+- Listens on port 4000
 - Routes requests based on:
   - Host header (for domain-based routing)
   - Path (`/run?plugin=name` for path-based invocation)
@@ -41,7 +41,7 @@ multiple independent JavaScript/TypeScript applications:
 
 ### Deployment API (control-plane)
 
-- Listens on port 3001
+- Listens on port 4001
 - Handles code uploads via `POST /deploy`
   - Accepts plugin name or domain
   - Stores code in local filesystem under `/apps/<name>`
@@ -108,7 +108,7 @@ multiple independent JavaScript/TypeScript applications:
 
 1. User deploys a plugin:
    ```
-   curl -X POST http://localhost:3001/deploy \
+   curl -X POST http://localhost:4001/deploy \
      -F 'name=greeter' \
      -F 'file=@main.ts'
    ```
