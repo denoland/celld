@@ -70,12 +70,12 @@ struct ProcessEntry {
   process_handle: Child, // To kill the process
 }
 
-// Use Arc<Mutex<...>> for shared mutable state across async tasks/requests
-type SharedProcessMap = Arc<Mutex<HashMap<String, ProcessEntry>>>;
+// Shared mutable state for process entries
 
+#[derive(Clone)]
 struct ProcessManager {
   data_dir: PathBuf,
-  processes: SharedProcessMap,
+  processes: Arc<Mutex<HashMap<String, ProcessEntry>>>,
 }
 
 impl ProcessManager {
@@ -201,7 +201,7 @@ impl ProcessManager {
   }
 
   #[instrument(skip(self))]
-  async fn start_reaper(self: Arc<Self>) {
+  async fn start_reaper(&self) {
     info!("Starting idle process reaper task");
     loop {
       sleep(REAPER_INTERVAL).await;
@@ -247,14 +247,22 @@ impl ProcessManager {
 
 #[derive(Clone)]
 struct ProxyService {
-  process_manager: Arc<ProcessManager>,
+  process_manager: ProcessManager,
+}
+
+impl Default for ProxyService {
+  fn default() -> Self {
+    Self {
+      process_manager: ProcessManager::new(DATA_DIR.clone()),
+    }
+  }
 }
 
 // impl Service<Request<Incoming>> for ProxyService {
 impl<B> Service<Request<B>> for ProxyService
 where
-    B: Body<Data = Bytes> + Send + 'static,
-    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+  B: Body<Data = Bytes> + Send + 'static,
+  B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
   type Response = Response<Full<Bytes>>; // Using Full for simplicity now
   type Error = ProxyError; // Use our custom error type
@@ -362,9 +370,9 @@ async fn main() -> Result<()> {
   // Initialize tracing for console logging
   tracing_subscriber::fmt::init();
 
-  let process_manager = Arc::new(ProcessManager::new(DATA_DIR.clone()));
+  let process_manager = ProcessManager::new(DATA_DIR.clone());
 
-  let reaper_manager = Arc::clone(&process_manager);
+  let reaper_manager = process_manager.clone();
   tokio::spawn(async move {
     reaper_manager.start_reaper().await;
   });
@@ -389,15 +397,11 @@ async fn main() -> Result<()> {
     // Wrap the raw TCP stream in Hyper's TokioIo adapter
     let io = TokioIo::new(stream);
 
-    // Clone the Arc for the service instance needed by this connection's task.
-    // This is cheap as it only bumps the reference count.
+    // Clone the process manager for this connection
     let process_manager_ = process_manager.clone();
 
-    // Spawn a Tokio task for each connection.
-    // The `move` keyword moves ownership of `io` and `manager_for_task` into the task.
+    // Spawn a Tokio task for each connection
     tokio::task::spawn(async move {
-      // Create an instance of our Service (`ProxyService`) for this connection.
-      // It captures the cloned Arc<ProcessManager>.
       let service = ProxyService {
         process_manager: process_manager_,
       };
@@ -430,31 +434,24 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use hyper::service::Service;
-  
+
   #[tokio::test]
   async fn test_proxy_service() {
-    // Create a mock request with host header
     let req = Request::builder()
       .uri("http://localhost:3000/foo")
       .header(HOST, "ry.local")
       .body(http_body_util::Empty::<Bytes>::new())
       .unwrap();
-      
-    // Create the service
-    let service = ProxyService {
-      process_manager: Arc::new(ProcessManager::new(DATA_DIR.clone())),
-    };
-    
-    // Call the service directly
+    let service = ProxyService::default();
     let response = service.call(req).await.unwrap();
     assert_eq!(response.status(), hyper::StatusCode::OK);
-    
-    // Check the response body
-    let full_body = response.into_body();
-    let collected = http_body_util::BodyExt::collect(full_body).await.unwrap();
-    let bytes = collected.to_bytes();
-    let body_str = String::from_utf8_lossy(&bytes);
-    assert_eq!(body_str, "hello from ry.local");
+    let response_body = http_body_util::BodyExt::collect(response.into_body())
+      .await
+      .unwrap()
+      .to_bytes();
+    assert_eq!(
+      String::from_utf8_lossy(&response_body),
+      "hello from ry.local"
+    );
   }
 }
