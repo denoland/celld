@@ -33,12 +33,12 @@ struct Proxy {
 
 impl Proxy {
   fn new(
-    process_manager: ProcessManager,
+    data_dir: PathBuf,
     idle_timeout: Duration,
     reaper_interval: Duration,
   ) -> Self {
     Proxy {
-      process_manager,
+      process_manager: ProcessManager::new(data_dir),
       idle_timeout,
       reaper_interval,
       listener: None,
@@ -58,7 +58,7 @@ impl Proxy {
   }
 
   /// Run the proxy server
-  async fn run(&mut self, addr: SocketAddr) -> Result<()> {
+  async fn run(&mut self, exit_on_error: bool) -> Result<()> {
     // Start the reaper task
     let process_manager_ = self.process_manager.clone();
     let idle_timeout = self.idle_timeout;
@@ -72,7 +72,8 @@ impl Proxy {
 
     // Set up the listener if not already done
     if self.listener.is_none() {
-      self.bind(addr).await?;
+      error!("Call proxy.bind() to set up the listener");
+      return Err(anyhow::anyhow!("Listener not set up").into());
     }
 
     let listener = self.listener.as_ref().unwrap();
@@ -85,7 +86,11 @@ impl Proxy {
         Ok(s) => s,
         Err(e) => {
           error!("Failed to accept connection: {:?}", e);
-          continue; // Keep listening
+          if exit_on_error {
+            break Err(e.into());
+          } else {
+            continue;
+          }
         }
       };
       trace!("Accepted connection from {}", remote_addr);
@@ -635,17 +640,16 @@ async fn main() -> Result<()> {
   // Initialize tracing for console logging
   tracing_subscriber::fmt::init();
 
-  let process_manager = ProcessManager::new(DATA_DIR.clone());
-
   // Create a proxy with default timeout values
   let mut proxy = Proxy::new(
-    process_manager,
+    DATA_DIR.clone(),
     DEFAULT_IDLE_TIMEOUT,
     DEFAULT_REAPER_INTERVAL,
   );
 
   let addr = SocketAddr::from(([0, 0, 0, 0], *DATA_PORT));
-  proxy.run(addr).await?;
+  proxy.bind(addr).await?;
+  proxy.run(false).await?;
 
   Ok(())
 }
@@ -692,12 +696,9 @@ mod tests {
 
   #[tokio::test]
   async fn test_proxy_with_ephemeral_port() {
-    // Create a process manager
-    let process_manager = ProcessManager::new(DATA_DIR.clone());
-
     // Create a proxy with custom timeouts
     let mut proxy = Proxy::new(
-      process_manager,
+      DATA_DIR.clone(),
       Duration::from_secs(60), // idle_timeout
       Duration::from_secs(10), // reaper_interval
     );
@@ -710,9 +711,9 @@ mod tests {
     let proxy_addr = proxy.local_addr().unwrap();
 
     // Start the proxy in the background
-    let proxy_handle = tokio::spawn(async move {
+    tokio::spawn(async move {
       // The listen step is already done, so just run the proxy
-      if let Err(e) = proxy.run(addr).await {
+      if let Err(e) = proxy.run(true).await {
         error!("Proxy error: {}", e);
       }
     });
@@ -734,8 +735,5 @@ mod tests {
       response.contains("hello from ry.local"),
       "Response didn't contain expected content"
     );
-
-    // Clean up
-    proxy_handle.abort();
   }
 }
