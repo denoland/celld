@@ -144,11 +144,18 @@ impl ProcessManager {
           let socket_path = entry.socket_path.clone();
           match UnixStream::connect(&socket_path).await {
             Ok(stream) => {
-              info!(socket = %socket_path.display(), "Connected to existing process socket");
+              info!(
+                socket = %socket_path.display(),
+                "Connected to existing process socket"
+              );
               return Ok((socket_path, stream));
             }
             Err(e) => {
-              error!(socket = %socket_path.display(), error = %e, "Failed to connect to existing process socket, will spawn new one");
+              error!(
+                socket = %socket_path.display(),
+                error = %e,
+                "Failed to connect to existing process socket, spawn new one"
+              );
               // Fall through to spawn a new process
             }
           }
@@ -186,7 +193,11 @@ impl ProcessManager {
     let socket_name = format!("{}.sock", Uuid::new_v4());
     let socket_path = sockets_dir.join(socket_name);
 
-    info!(script = %main_script.display(), socket = %socket_path.display(), "Spawning Deno process");
+    info!(
+      script = %main_script.display(),
+      socket = %socket_path.display(),
+      "Spawning Deno process"
+    );
 
     let mut process_handle = Command::new("deno")
       .env("DENO_SERVE_ADDRESS", socket_path.clone())
@@ -210,12 +221,16 @@ impl ProcessManager {
     let wait_timeout = Duration::from_secs(10); // Timeout for socket connection
 
     // Use minimal polling for fastest possible connection
-    let delay = Duration::from_micros(100); // Extremely small delay for minimal latency
+    let delay = Duration::from_micros(100);
 
     // Wait for the socket to be available and connect to it
     let stream = loop {
       if wait_start.elapsed() > wait_timeout {
-        error!(pid = pid, socket = %socket_.display(), "Timeout waiting for Deno process socket");
+        error!(
+          pid = pid,
+          socket = %socket_.display(),
+          "Timeout waiting for Deno process socket"
+        );
         // Attempt to kill the potentially zombie process
         let _ = process_handle.kill().await;
         // Also try cleaning up the socket file if it exists
@@ -227,7 +242,12 @@ impl ProcessManager {
 
       match UnixStream::connect(&socket_).await {
         Ok(stream) => {
-          info!(pid = pid, socket = %socket_.display(), duration = ?wait_start.elapsed(), "Socket connected!");
+          info!(
+            pid = pid,
+            socket = %socket_.display(),
+            duration = ?wait_start.elapsed(),
+            "Socket connected!"
+          );
           // We have a connected socket
           break stream; // Socket is ready and connected, return the stream
         }
@@ -239,7 +259,12 @@ impl ProcessManager {
           sleep(delay).await;
         }
         Err(e) => {
-          error!(pid = pid, socket = %socket_.display(), error = %e, "Error connecting to socket during startup");
+          error!(
+            pid = pid,
+            socket = %socket_.display(),
+            error = %e,
+            "Error connecting to socket during startup"
+          );
           let _ = process_handle.kill().await;
           let _ = tokio::fs::remove_file(&socket_).await; // Cleanup attempt
           return Err(
@@ -284,7 +309,12 @@ impl ProcessManager {
 
       for (host, entry) in processes.iter() {
         if now.duration_since(entry.last_used) > IDLE_TIMEOUT {
-          info!(host = %host, pid = entry.pid, idle_duration = ?now.duration_since(entry.last_used), "Process marked for reaping due to inactivity");
+          info!(
+            host = %host,
+            pid = entry.pid,
+            idle_duration = ?now.duration_since(entry.last_used),
+            "Process marked for reaping due to inactivity"
+          );
           hosts_to_reap.push(host.clone());
         }
       }
@@ -292,32 +322,47 @@ impl ProcessManager {
       // Separate loop for removal to avoid mutable borrow issues while iterating
       for host in hosts_to_reap {
         if let Some(mut entry) = processes.remove(&host) {
-          warn!(host = %host, pid = entry.pid, "Reaping idle process");
+          warn!(
+            host = %host,
+            pid = entry.pid,
+            "Reaping idle process"
+          );
 
           // Attempt to kill the process
           if let Err(e) = entry.process_handle.kill().await {
-            error!(host = %host, pid = entry.pid, error = %e, "Failed to kill process during reap");
+            error!(
+              host = %host,
+              pid = entry.pid,
+              error = %e,
+              "Failed to kill process during reap"
+            );
             // Decide if you want to keep the entry for retry or fully remove
           }
 
           // Attempt to clean up the socket file
-          let socket_path = entry.socket_path.clone(); // Clone before moving entry
-          if let Err(e) = tokio::fs::remove_file(&socket_path).await {
+          if let Err(e) = tokio::fs::remove_file(&entry.socket_path).await {
             // Log error but continue cleanup - file might already be gone
             if e.kind() != std::io::ErrorKind::NotFound {
-              error!(host = %host, pid = entry.pid, socket = %socket_path.display(), error = %e, "Failed to remove socket file during reap");
+              error!(
+                host = %host,
+                pid = entry.pid,
+                socket = %entry.socket_path.display(),
+                error = %e,
+                "Failed to remove socket file during reap"
+              );
             }
           }
-          info!(host = %host, pid = entry.pid, "Process reaped successfully");
+          info!(
+            host = %host,
+            pid = entry.pid,
+            "Process reaped successfully"
+          );
         }
       }
       trace!("Reaper check complete.");
     }
   }
 }
-
-// The ProxyService implementation has been removed
-// We now use direct TCP proxying with the ProcessManager instead
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -383,7 +428,11 @@ async fn main() -> Result<()> {
       let single_use = http_info.single_use;
       let headers_buf = http_info.header_buffer;
 
-      info!(host = %host, single_use = %single_use, "Request headers parsed in {:?}", read_start.elapsed());
+      info!(
+        host = %host,
+        single_use = %single_use,
+        "Request headers parsed in {:?}", read_start.elapsed()
+      );
 
       // Get or spawn the upstream process and get a connected socket
       let (socket_path, upstream_conn) = match process_manager_
@@ -404,7 +453,11 @@ async fn main() -> Result<()> {
         }
       };
 
-      info!(host = %host, socket = %socket_path.display(), "Connected to upstream");
+      info!(
+        host = %host,
+        socket = %socket_path.display(),
+        "Connected to upstream"
+      );
 
       // Create read/write streams for the upstream connection
       let (mut upstream_read, mut upstream_write) =
@@ -412,7 +465,11 @@ async fn main() -> Result<()> {
 
       // Forward the headers we've already read to the upstream
       if let Err(e) = upstream_write.write_all(&headers_buf).await {
-        error!(host = %host, error = %e, "Failed to forward headers to upstream");
+        error!(
+          host = %host,
+          error = %e,
+          "Failed to forward headers to upstream"
+        );
         return;
       }
 
@@ -470,7 +527,10 @@ async fn main() -> Result<()> {
       }
 
       // The connection is now complete
-      info!(host = %host, "Connection completed");
+      info!(
+        host = %host,
+        "Connection completed"
+      );
 
       // If this was a single-use isolate, clean it up
       if single_use {
@@ -481,7 +541,10 @@ async fn main() -> Result<()> {
           // Minimal wait for connection cleanup
           tokio::time::sleep(Duration::from_millis(10)).await;
 
-          info!(host = %host_clone, "Cleaning up single-use isolate");
+          info!(
+            host = %host_clone,
+            "Cleaning up single-use isolate"
+          );
           let mut processes = manager_clone.processes.lock().await;
 
           let keys_to_remove: Vec<String> = processes
@@ -497,7 +560,11 @@ async fn main() -> Result<()> {
 
           for key in keys_to_remove {
             if let Some(mut entry) = processes.remove(&key) {
-              info!(host = %host_clone, pid = entry.pid, "Terminating single-use isolate");
+              info!(
+                host = %host_clone,
+                pid = entry.pid,
+                "Terminating single-use isolate"
+              );
               let _ = entry.process_handle.kill().await;
               let _ = tokio::fs::remove_file(&entry.socket_path).await;
             }
@@ -508,8 +575,6 @@ async fn main() -> Result<()> {
       trace!("Connection task finished for {}", remote_addr);
     });
   }
-  // Note: This loop runs forever, so Ok(()) is never reached in practice.
-  // You might add signal handling (e.g., Ctrl+C) to break the loop for graceful shutdown.
 }
 
 #[cfg(test)]
@@ -526,7 +591,10 @@ mod tests {
       .get_or_spawn_process("ry.local", false)
       .await
       .unwrap();
-    info!(socket = %socket_path.display(), "Got socket path and stream");
+    info!(
+      socket = %socket_path.display(),
+      "Got socket path and stream"
+    );
 
     // Build a simple HTTP request
     let req_body = "GET / HTTP/1.1\r\nHost: ry.local\r\n\r\n";
