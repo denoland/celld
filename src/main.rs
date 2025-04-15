@@ -1,10 +1,4 @@
 use anyhow::{Context, Result};
-use http_body_util::Full;
-use hyper::body::{Body, Bytes};
-use hyper::header::HOST;
-use hyper::service::Service;
-use hyper::{Request, Response};
-use hyper_util::rt::TokioIo;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -51,18 +45,12 @@ static DATA_DIR: Lazy<PathBuf> = Lazy::new(|| {
 
 #[derive(Debug, thiserror::Error)]
 enum ProxyError {
-  #[error("Missing or invalid Host header")]
-  MissingHost,
   #[error("Invalid hostname format")]
   InvalidHost,
   #[error("Application not found for host: {0}")]
   AppNotFound(String),
   #[error("Internal Server Error: {0}")]
   InternalError(#[from] anyhow::Error),
-  #[error("Upstream application error: {0}")]
-  UpstreamError(String),
-  #[error("Upstream connection failed")]
-  UpstreamConnectionFailed,
 }
 
 struct ProcessEntry {
@@ -328,165 +316,8 @@ impl ProcessManager {
   }
 }
 
-#[derive(Clone)]
-struct ProxyService {
-  process_manager: ProcessManager,
-}
-
-impl Default for ProxyService {
-  fn default() -> Self {
-    Self {
-      process_manager: ProcessManager::new(DATA_DIR.clone()),
-    }
-  }
-}
-
-// impl Service<Request<Incoming>> for ProxyService {
-impl<B> Service<Request<B>> for ProxyService
-where
-  B: Body<Data = Bytes> + Send + 'static,
-  B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-{
-  type Response = Response<Full<Bytes>>; // Using Full for simplicity now
-  type Error = ProxyError; // Use our custom error type
-  type Future = std::pin::Pin<
-    Box<
-      dyn std::future::Future<Output = Result<Self::Response, Self::Error>>
-        + Send,
-    >,
-  >;
-
-  #[instrument(skip(self, req), fields(uri = %req.uri(), method = %req.method()))]
-  fn call(&self, req: Request<B>) -> Self::Future {
-    let manager = self.process_manager.clone();
-
-    Box::pin(async move {
-      // 1. Get Host header
-      let host_header = req.headers().get(HOST).and_then(|h| h.to_str().ok());
-      let host = match host_header {
-        Some(h) => h.split(':').next().unwrap_or(h).to_string(), // Remove port if present
-        None => return Err(ProxyError::MissingHost),
-      };
-
-      // Check for single-use isolate header
-      // TODO: This header should not be supported in production
-      let single_use = req.headers().get("x-single-use-isolate").is_some();
-      info!(host = %host, single_use = single_use, "Routing request");
-
-      // 2. Get or spawn process, get socket path and stream
-      let (socket_path, unix_stream) =
-        manager.get_or_spawn_process(&host, single_use).await?;
-      info!(socket=%socket_path.display(), "Got socket path and connected");
-
-      // 3. Wrap the Unix Stream for Hyper
-      let stream = TokioIo::new(unix_stream);
-      info!("Connected to Unix socket");
-
-      // 4. Use Hyper client handshake over the Unix Stream
-      let (mut sender, conn) = match hyper::client::conn::http1::handshake(
-        stream,
-      )
-      .await
-      {
-        Ok((s, c)) => (s, c),
-        Err(e) => {
-          error!(host=%host, socket=%socket_path.display(), error=%e, "Hyper handshake failed with upstream");
-          return Err(ProxyError::UpstreamError(format!(
-            "Handshake failed: {}",
-            e
-          )));
-        }
-      };
-      info!("Hyper handshake complete");
-
-      // 5. Spawn the connection task to poll the connection
-      // The connection task is responsible for driving the underlying IO.
-      // Clone values that will be moved into the async block
-      let host_ = host.clone();
-      let socket_path_ = socket_path.clone();
-      tokio::spawn(async move {
-        if let Err(e) = conn.await {
-          // Log connection errors (e.g., upstream closed unexpectedly)
-          warn!(host=%host_, socket=%socket_path_.display(), error = %e, "Upstream connection error during processing");
-        }
-        trace!("Upstream connection task finished");
-      });
-
-      // 6. Send the request to the upstream Deno process
-      info!("Sending request to upstream");
-      let upstream_resp = match sender.send_request(req).await {
-        Ok(resp) => resp,
-        Err(e) => {
-          error!(host=%host, socket=%socket_path.display(), error=%e, "Failed to send request upstream");
-          return Err(ProxyError::UpstreamError(format!(
-            "Send request failed: {}",
-            e
-          )));
-        }
-      };
-      info!(status = %upstream_resp.status(), "Received response from upstream");
-
-      // 7. Convert response body (assuming simple Full<Bytes> for now)
-      // For streaming, you'd use Body::wrap_stream or similar
-      let (parts, incoming_body) = upstream_resp.into_parts();
-      let body_bytes = http_body_util::BodyExt::collect(incoming_body)
-        .await
-        .map_err(|e| {
-          ProxyError::UpstreamError(format!(
-            "Failed to read upstream body: {}",
-            e
-          ))
-        })?
-        .to_bytes();
-
-      let response = Response::from_parts(parts, Full::new(body_bytes));
-
-      // If this was a single-use isolate request, terminate the process after sending response
-      if single_use {
-        // Use a separate task to avoid holding up the response
-        let host_ = host.clone();
-        let manager_ = manager.clone();
-
-        // Enhanced cleanup for single-use isolates
-        tokio::spawn(async move {
-          // Wait a shorter time - 200ms is typically enough to ensure the response is sent
-          tokio::time::sleep(Duration::from_millis(200)).await;
-
-          info!(host = %host_, "Cleaning up single-use isolate");
-
-          // Find and terminate the single-use process for this host
-          let mut processes = manager_.processes.lock().await;
-
-          // Remove all process entries that are marked as single-use for this host
-          let keys_to_remove: Vec<String> = processes
-            .iter()
-            .filter_map(|(k, v)| {
-              if k.starts_with(&host_) && v.single_use {
-                Some(k.clone())
-              } else {
-                None
-              }
-            })
-            .collect();
-
-          for key in keys_to_remove {
-            if let Some(mut entry) = processes.remove(&key) {
-              info!(host = %host_, pid = entry.pid, "Terminating single-use isolate");
-              // First kill the process, then remove the socket file
-              let _ = entry.process_handle.kill().await;
-
-              // Remove socket file immediately - the connection is already established
-              // and response is delivered, so we don't need to wait
-              let _ = tokio::fs::remove_file(&entry.socket_path).await;
-            }
-          }
-        });
-      }
-
-      Ok(response)
-    })
-  }
-}
+// The ProxyService implementation has been removed
+// We now use direct TCP proxying with the ProcessManager instead
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -686,22 +517,35 @@ mod tests {
   use super::*;
 
   #[tokio::test]
-  async fn test_proxy_service() {
-    let req = Request::builder()
-      .uri("http://localhost:3000/foo")
-      .header(HOST, "ry.local")
-      .body(http_body_util::Empty::<Bytes>::new())
-      .unwrap();
-    let service = ProxyService::default();
-    let response = service.call(req).await.unwrap();
-    assert_eq!(response.status(), hyper::StatusCode::OK);
-    let response_body = http_body_util::BodyExt::collect(response.into_body())
+  async fn test_process_manager_direct() {
+    // Create a process manager
+    let process_manager = ProcessManager::new(DATA_DIR.clone());
+
+    // Get socket and connected stream for "ry.local"
+    let (socket_path, unix_stream) = process_manager
+      .get_or_spawn_process("ry.local", false)
       .await
-      .unwrap()
-      .to_bytes();
-    assert_eq!(
-      String::from_utf8_lossy(&response_body),
-      "hello from ry.local\n"
+      .unwrap();
+    info!(socket = %socket_path.display(), "Got socket path and stream");
+
+    // Build a simple HTTP request
+    let req_body = "GET / HTTP/1.1\r\nHost: ry.local\r\n\r\n";
+
+    // Create read/write streams from the unix socket
+    let (mut reader, mut writer) = tokio::io::split(unix_stream);
+
+    // Send the request
+    writer.write_all(req_body.as_bytes()).await.unwrap();
+
+    // Read the response
+    let mut buf = vec![0; 4096];
+    let n = reader.read(&mut buf).await.unwrap();
+    let response = String::from_utf8_lossy(&buf[..n]);
+
+    // Verify the response contains the expected body
+    assert!(
+      response.contains("hello from ry.local"),
+      "Response didn't contain expected content"
     );
   }
 }
