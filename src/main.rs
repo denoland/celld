@@ -141,7 +141,7 @@ impl ProcessManager {
     &self,
     host: &str,
     single_use: bool,
-  ) -> Result<PathBuf, ProxyError> {
+  ) -> Result<(PathBuf, UnixStream), ProxyError> {
     let mut processes = self.processes.lock().await;
 
     // For single_use requests, always spawn a new process
@@ -152,7 +152,18 @@ impl ProcessManager {
         if !entry.single_use {
           entry.last_used = Instant::now();
           info!("Found running process for host");
-          return Ok(entry.socket_path.clone());
+          // Connect to the socket
+          let socket_path = entry.socket_path.clone();
+          match UnixStream::connect(&socket_path).await {
+            Ok(stream) => {
+              info!(socket = %socket_path.display(), "Connected to existing process socket");
+              return Ok((socket_path, stream));
+            }
+            Err(e) => {
+              error!(socket = %socket_path.display(), error = %e, "Failed to connect to existing process socket, will spawn new one");
+              // Fall through to spawn a new process
+            }
+          }
         }
       }
     }
@@ -213,7 +224,8 @@ impl ProcessManager {
     // Use minimal polling for fastest possible connection
     let delay = Duration::from_micros(100); // Extremely small delay for minimal latency
 
-    loop {
+    // Wait for the socket to be available and connect to it
+    let stream = loop {
       if wait_start.elapsed() > wait_timeout {
         error!(pid = pid, socket = %socket_.display(), "Timeout waiting for Deno process socket");
         // Attempt to kill the potentially zombie process
@@ -226,9 +238,10 @@ impl ProcessManager {
       }
 
       match UnixStream::connect(&socket_).await {
-        Ok(_) => {
+        Ok(stream) => {
           info!(pid = pid, socket = %socket_.display(), duration = ?wait_start.elapsed(), "Socket connected!");
-          break; // Socket is ready
+          // We have a connected socket
+          break stream; // Socket is ready and connected, return the stream
         }
         Err(ref e)
           if e.kind() == std::io::ErrorKind::ConnectionRefused
@@ -246,7 +259,7 @@ impl ProcessManager {
           );
         }
       }
-    }
+    };
 
     let entry = ProcessEntry {
       pid,
@@ -267,7 +280,7 @@ impl ProcessManager {
     processes.insert(process_key, entry);
     info!(single_use = single_use, "Process entry added to map");
 
-    Ok(socket_path)
+    Ok((socket_path, stream))
   }
 
   #[instrument(skip(self))]
@@ -360,19 +373,13 @@ where
       let single_use = req.headers().get("x-single-use-isolate").is_some();
       info!(host = %host, single_use = single_use, "Routing request");
 
-      // 2. Get or spawn process, get socket path
-      let socket_path = manager.get_or_spawn_process(&host, single_use).await?;
-      info!(socket=%socket_path.display(), "Got socket path");
+      // 2. Get or spawn process, get socket path and stream
+      let (socket_path, unix_stream) =
+        manager.get_or_spawn_process(&host, single_use).await?;
+      info!(socket=%socket_path.display(), "Got socket path and connected");
 
-      // 3. Connect to the Unix Socket
-      let stream = match UnixStream::connect(&socket_path).await {
-        Ok(s) => TokioIo::new(s), // Wrap in TokioIo for Hyper
-        Err(e) => {
-          error!(host=%host, socket=%socket_path.display(), error=%e, "Failed to connect to upstream socket");
-          // Potentially mark the process as dead/stale here? Or let reaper handle it.
-          return Err(ProxyError::UpstreamConnectionFailed);
-        }
-      };
+      // 3. Wrap the Unix Stream for Hyper
+      let stream = TokioIo::new(unix_stream);
       info!("Connected to Unix socket");
 
       // 4. Use Hyper client handshake over the Unix Stream
@@ -547,12 +554,12 @@ async fn main() -> Result<()> {
 
       info!(host = %host, single_use = %single_use, "Request headers parsed in {:?}", read_start.elapsed());
 
-      // Get or spawn the upstream process
-      let socket_path = match process_manager_
+      // Get or spawn the upstream process and get a connected socket
+      let (socket_path, upstream_conn) = match process_manager_
         .get_or_spawn_process(&host, single_use)
         .await
       {
-        Ok(path) => path,
+        Ok((path, stream)) => (path, stream),
         Err(e) => {
           error!(host = %host, error = %e, "Failed to get or spawn process");
           let status_line = match e {
@@ -561,17 +568,6 @@ async fn main() -> Result<()> {
             _ => "HTTP/1.1 500 Internal Server Error",
           };
           let resp = format!("{}\r\nContent-Length: 0\r\n\r\n", status_line);
-          let _ = client_write.write_all(resp.as_bytes()).await;
-          return;
-        }
-      };
-
-      // Connect to the Unix socket
-      let upstream_conn = match UnixStream::connect(&socket_path).await {
-        Ok(us) => us,
-        Err(e) => {
-          error!(host = %host, socket = %socket_path.display(), error = %e, "Failed to connect to upstream socket");
-          let resp = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n";
           let _ = client_write.write_all(resp.as_bytes()).await;
           return;
         }
