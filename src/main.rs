@@ -61,6 +61,85 @@ enum ProxyError {
   UpstreamError(String),
   #[error("Upstream connection failed")]
   UpstreamConnectionFailed,
+  #[error("HTTP header parsing error: {0}")]
+  HeaderParsingError(String),
+}
+
+/// Represents parsed HTTP headers with routing information
+#[derive(Debug)]
+struct HttpHeaderInfo {
+    /// The host name from the Host header
+    host: String,
+    /// Whether the request included the x-single-use-isolate header
+    single_use: bool,
+    /// The complete header buffer to forward to the upstream
+    header_buffer: Vec<u8>,
+}
+
+/// Parse HTTP headers from an AsyncRead source
+/// 
+/// This function reads from the provided stream until it finds the end of HTTP headers,
+/// extracts the relevant routing information, and returns the complete header buffer
+/// for forwarding to the upstream server.
+async fn parse_http_headers<R>(reader: &mut R) -> Result<HttpHeaderInfo, ProxyError>
+where 
+    R: AsyncReadExt + Unpin,
+{
+    let mut buf = vec![0; 4096];
+    let mut headers_buf = Vec::new();
+    let mut headers_complete = false;
+    let mut host = String::new();
+    let mut single_use = false;
+    
+    // Read until we find the end of headers or reach a limit
+    while !headers_complete {
+        // Read a chunk from the stream
+        let n = match reader.read(&mut buf).await {
+            Ok(0) => return Err(ProxyError::HeaderParsingError("Connection closed during header parsing".into())),
+            Ok(n) => n,
+            Err(e) => return Err(ProxyError::HeaderParsingError(format!("Error reading from socket: {}", e))),
+        };
+        
+        // Add the new data to our buffer
+        headers_buf.extend_from_slice(&buf[..n]);
+        
+        // Look for the end of headers marker (\r\n\r\n)
+        if let Some(pos) = headers_buf.windows(4).position(|window| window == b"\r\n\r\n") {
+            headers_complete = true;
+            
+            // Parse the headers to extract routing information
+            if let Ok(header_str) = std::str::from_utf8(&headers_buf[..pos + 4]) {
+                // Extract host header
+                for line in header_str.lines() {
+                    if line.to_lowercase().starts_with("host:") {
+                        let parts: Vec<&str> = line.splitn(2, ':').collect();
+                        if parts.len() > 1 {
+                            let host_value = parts[1].trim();
+                            host = host_value.split(':').next().unwrap_or(host_value).to_string();
+                        }
+                    } else if line.to_lowercase().starts_with("x-single-use-isolate:") {
+                        single_use = true;
+                    }
+                }
+            }
+        }
+        
+        // Prevent buffer from growing too large
+        if headers_buf.len() > 32768 { // 32 KB max header size
+            return Err(ProxyError::HeaderParsingError("HTTP headers too large".into()));
+        }
+    }
+    
+    // Validate that we have a host header
+    if host.is_empty() {
+        return Err(ProxyError::MissingHost);
+    }
+    
+    Ok(HttpHeaderInfo {
+        host,
+        single_use,
+        header_buffer: headers_buf,
+    })
 }
 
 struct ProcessEntry {
@@ -515,79 +594,39 @@ async fn main() -> Result<()> {
       // Create buffered readers/writers for the client connection
       let (mut client_read, mut client_write) = tokio::io::split(client_stream);
 
-      // Buffer to read HTTP headers
-      let mut buf = vec![0; 4096];
-      let mut headers_buf = Vec::new();
-      let mut headers_complete = false;
-      let mut host = String::new();
-      let mut single_use = false;
       let read_start = Instant::now();
-
-      // Read the HTTP headers to extract routing information
-      loop {
-        match client_read.read(&mut buf).await {
-          Ok(0) => {
-            warn!("Client closed connection before sending complete headers");
-            return;
-          }
-          Ok(n) => {
-            headers_buf.extend_from_slice(&buf[..n]);
-
-            // Look for the end of headers marker (\r\n\r\n)
-            if let Some(pos) = headers_buf
-              .windows(4)
-              .position(|window| window == b"\r\n\r\n")
-            {
-              headers_complete = true;
-
-              // Parse the headers to get host and check for single-use isolate
-              if let Ok(header_str) =
-                std::str::from_utf8(&headers_buf[..pos + 4])
-              {
-                // Extract host header
-                for line in header_str.lines() {
-                  if line.to_lowercase().starts_with("host:") {
-                    let parts: Vec<&str> = line.splitn(2, ':').collect();
-                    if parts.len() > 1 {
-                      let host_value = parts[1].trim();
-                      host = host_value
-                        .split(':')
-                        .next()
-                        .unwrap_or(host_value)
-                        .to_string();
-                    }
-                  } else if line
-                    .to_lowercase()
-                    .starts_with("x-single-use-isolate:")
-                  {
-                    single_use = true;
-                  }
-                }
-              }
-
-              break;
+      
+      // Use our header parser function to extract routing information
+      let http_info = match parse_http_headers(&mut client_read).await {
+        Ok(info) => info,
+        Err(e) => {
+          // Handle parsing errors
+          match e {
+            ProxyError::MissingHost => {
+              warn!("Invalid HTTP request: missing host header");
+              let resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+              let _ = client_write.write_all(resp.as_bytes()).await;
             }
-
-            // Check if we've read too much without finding headers end
-            if headers_buf.len() > 8192 {
-              warn!("Headers too large, terminating connection");
-              return;
+            ProxyError::HeaderParsingError(msg) => {
+              warn!("Error parsing HTTP headers: {}", msg);
+              let resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+              let _ = client_write.write_all(resp.as_bytes()).await;
+            }
+            _ => {
+              error!("Unexpected error parsing headers: {:?}", e);
+              let resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+              let _ = client_write.write_all(resp.as_bytes()).await;
             }
           }
-          Err(e) => {
-            error!("Error reading headers: {:?}", e);
-            return;
-          }
+          return;
         }
-      }
-
-      if !headers_complete || host.is_empty() {
-        warn!("Invalid HTTP request: missing host header");
-        let resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
-        let _ = client_write.write_all(resp.as_bytes()).await;
-        return;
-      }
-
+      };
+      
+      // Extract the information we need
+      let host = http_info.host;
+      let single_use = http_info.single_use;
+      let headers_buf = http_info.header_buffer;
+      
       info!(host = %host, single_use = %single_use, "Request headers parsed in {:?}", read_start.elapsed());
 
       // Get or spawn the upstream process
@@ -731,6 +770,116 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use tokio::io::AsyncRead;
+  use std::pin::Pin;
+  use std::task::{Context, Poll};
+
+  // Simple mock reader that returns predefined bytes
+  struct MockReader {
+    chunks: Vec<Vec<u8>>,
+    current_chunk: usize,
+    current_pos: usize,
+  }
+
+  impl MockReader {
+    fn new(chunks: Vec<Vec<u8>>) -> Self {
+      Self {
+        chunks,
+        current_chunk: 0,
+        current_pos: 0,
+      }
+    }
+  }
+
+  impl AsyncRead for MockReader {
+    fn poll_read(self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+      let this = self.get_mut();
+      
+      // Return EOF when we've read all chunks
+      if this.current_chunk >= this.chunks.len() {
+        return Poll::Ready(Ok(()));
+      }
+      
+      let chunk = &this.chunks[this.current_chunk];
+      let remaining = chunk.len() - this.current_pos;
+      
+      if remaining > 0 {
+        let to_copy = std::cmp::min(remaining, buf.remaining());
+        let start = this.current_pos;
+        buf.put_slice(&chunk[start..start + to_copy]);
+        this.current_pos += to_copy;
+      }
+      
+      if this.current_pos >= chunk.len() {
+        this.current_chunk += 1;
+        this.current_pos = 0;
+      }
+      
+      Poll::Ready(Ok(()))
+    }
+  }
+
+  #[tokio::test]
+  async fn test_parse_http_headers_simple() {
+    let headers = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    let mut reader = MockReader::new(vec![headers.as_bytes().to_vec()]);
+    
+    let result = parse_http_headers(&mut reader).await.unwrap();
+    
+    assert_eq!(result.host, "example.com");
+    assert_eq!(result.single_use, false);
+    assert_eq!(result.header_buffer, headers.as_bytes());
+  }
+  
+  #[tokio::test]
+  async fn test_parse_http_headers_with_single_use() {
+    let headers = "GET / HTTP/1.1\r\nHost: test.local\r\nX-Single-Use-Isolate: true\r\n\r\n";
+    let mut reader = MockReader::new(vec![headers.as_bytes().to_vec()]);
+    
+    let result = parse_http_headers(&mut reader).await.unwrap();
+    
+    assert_eq!(result.host, "test.local");
+    assert_eq!(result.single_use, true);
+  }
+  
+  #[tokio::test]
+  async fn test_parse_http_headers_multiple_chunks() {
+    let chunk1 = "GET / HTTP/1.1\r\nH".as_bytes().to_vec();
+    let chunk2 = "ost: multi.chunk\r\n".as_bytes().to_vec();
+    let chunk3 = "X-Single-Use-Isolate: true\r\n\r\n".as_bytes().to_vec();
+    
+    let mut reader = MockReader::new(vec![chunk1, chunk2, chunk3]);
+    
+    let result = parse_http_headers(&mut reader).await.unwrap();
+    
+    assert_eq!(result.host, "multi.chunk");
+    assert_eq!(result.single_use, true);
+    
+    // Verify complete header buffer was collected
+    let expected = "GET / HTTP/1.1\r\nHost: multi.chunk\r\nX-Single-Use-Isolate: true\r\n\r\n";
+    assert_eq!(String::from_utf8_lossy(&result.header_buffer), expected);
+  }
+  
+  #[tokio::test]
+  async fn test_parse_http_headers_missing_host() {
+    let headers = "GET / HTTP/1.1\r\nContent-Type: text/plain\r\n\r\n";
+    let mut reader = MockReader::new(vec![headers.as_bytes().to_vec()]);
+    
+    let result = parse_http_headers(&mut reader).await;
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), ProxyError::MissingHost));
+  }
+  
+  #[tokio::test]
+  async fn test_parse_http_headers_with_port() {
+    let headers = "GET / HTTP/1.1\r\nHost: example.com:8080\r\n\r\n";
+    let mut reader = MockReader::new(vec![headers.as_bytes().to_vec()]);
+    
+    let result = parse_http_headers(&mut reader).await.unwrap();
+    
+    // Should extract just the hostname without the port
+    assert_eq!(result.host, "example.com");
+  }
 
   #[tokio::test]
   async fn test_proxy_service() {
