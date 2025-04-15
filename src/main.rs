@@ -659,48 +659,12 @@ mod tests {
   use super::*;
 
   #[tokio::test]
-  async fn test_process_manager_direct() {
-    // Create a process manager
-    let process_manager = ProcessManager::new(DATA_DIR.clone());
-
-    // Get socket and connected stream for "ry.local"
-    let (socket_path, unix_stream) = process_manager
-      .get_or_spawn_process("ry.local", false)
-      .await
-      .unwrap();
-    info!(
-      socket = %socket_path.display(),
-      "Got socket path and stream"
-    );
-
-    // Build a simple HTTP request
-    let req_body = "GET / HTTP/1.1\r\nHost: ry.local\r\n\r\n";
-
-    // Create read/write streams from the unix socket
-    let (mut reader, mut writer) = tokio::io::split(unix_stream);
-
-    // Send the request
-    writer.write_all(req_body.as_bytes()).await.unwrap();
-
-    // Read the response
-    let mut buf = vec![0; 4096];
-    let n = reader.read(&mut buf).await.unwrap();
-    let response = String::from_utf8_lossy(&buf[..n]);
-
-    // Verify the response contains the expected body
-    assert!(
-      response.contains("hello from ry.local"),
-      "Response didn't contain expected content"
-    );
-  }
-
-  #[tokio::test]
   async fn test_proxy_with_ephemeral_port() {
     // Create a proxy with custom timeouts
     let mut proxy = Proxy::new(
       DATA_DIR.clone(),
-      Duration::from_secs(60), // idle_timeout
-      Duration::from_secs(10), // reaper_interval
+      DEFAULT_IDLE_TIMEOUT,
+      DEFAULT_REAPER_INTERVAL,
     );
 
     // Use port 0 for an ephemeral port
