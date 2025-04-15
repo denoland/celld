@@ -46,12 +46,10 @@ impl Proxy {
   }
 
   /// Listen on the specified address
-  async fn listen(&mut self, addr: SocketAddr) -> Result<SocketAddr> {
+  async fn bind(&mut self, addr: SocketAddr) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
-    let local_addr = listener.local_addr()?;
-    info!("Proxy listening on http://{}", local_addr);
     self.listener = Some(listener);
-    Ok(local_addr)
+    Ok(())
   }
 
   /// Get the local address of the listener
@@ -62,23 +60,26 @@ impl Proxy {
   /// Run the proxy server
   async fn run(&mut self, addr: SocketAddr) -> Result<()> {
     // Start the reaper task
-    let reaper_manager = self.process_manager.clone();
+    let process_manager_ = self.process_manager.clone();
     let idle_timeout = self.idle_timeout;
     let reaper_interval = self.reaper_interval;
+
     tokio::spawn(async move {
-      reaper_manager
+      process_manager_
         .start_reaper(idle_timeout, reaper_interval)
         .await;
     });
 
     // Set up the listener if not already done
     if self.listener.is_none() {
-      self.listen(addr).await?;
+      self.bind(addr).await?;
     }
 
     let listener = self.listener.as_ref().unwrap();
 
-    // Main accept loop
+    let local_addr = listener.local_addr()?;
+    info!("Proxy listening on http://{}", local_addr);
+
     loop {
       let (client_stream, remote_addr) = match listener.accept().await {
         Ok(s) => s,
@@ -89,16 +90,10 @@ impl Proxy {
       };
       trace!("Accepted connection from {}", remote_addr);
 
-      // Clone the process manager for this connection
       let process_manager_ = self.process_manager.clone();
 
-      // Clone what we need for the connection handler
-      let pm = process_manager_.clone();
-
-      // Spawn a Tokio task for direct TCP proxying
       tokio::task::spawn(async move {
-        // Use a standalone function instead of a self method
-        handle_connection(client_stream, remote_addr, pm).await;
+        handle_connection(client_stream, remote_addr, process_manager_).await;
       });
     }
   }
@@ -711,7 +706,8 @@ mod tests {
     let addr = SocketAddr::from(([127, 0, 0, 1], 0));
 
     // Just bind the listener but don't run the proxy yet
-    let actual_addr = proxy.listen(addr).await.unwrap();
+    proxy.bind(addr).await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
 
     // Start the proxy in the background
     let proxy_handle = tokio::spawn(async move {
@@ -724,20 +720,16 @@ mod tests {
     // Give it a moment to start up
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Connect to the proxy via TCP using the actual port
-    let tcp_stream = tokio::net::TcpStream::connect(actual_addr).await.unwrap();
-    let (mut reader, mut writer) = tokio::io::split(tcp_stream);
+    let response = reqwest::Client::new()
+      .get(format!("http://localhost:{}/", proxy_addr.port()))
+      .header("Host", "ry.local")
+      .send()
+      .await
+      .unwrap()
+      .text()
+      .await
+      .unwrap();
 
-    // Send HTTP request
-    let req_body = "GET / HTTP/1.1\r\nHost: ry.local\r\n\r\n";
-    writer.write_all(req_body.as_bytes()).await.unwrap();
-
-    // Read the response
-    let mut buf = vec![0; 4096];
-    let n = reader.read(&mut buf).await.unwrap();
-    let response = String::from_utf8_lossy(&buf[..n]);
-
-    // Verify the response contains the expected body
     assert!(
       response.contains("hello from ry.local"),
       "Response didn't contain expected content"
