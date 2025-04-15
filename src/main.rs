@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use http_body_util::Full;
 use hyper::body::{Body, Bytes};
 use hyper::header::HOST;
-use hyper::server::conn::http1;
 use hyper::service::Service;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
@@ -12,6 +11,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
@@ -208,9 +208,8 @@ impl ProcessManager {
     let wait_start = Instant::now();
     let wait_timeout = Duration::from_secs(10); // Timeout for socket connection
 
-    // Use exponential backoff for more efficient waiting
-    let mut delay = Duration::from_millis(1); // Start with very small delay
-    let max_delay = Duration::from_millis(10); // Max delay between attempts
+    // Use minimal polling for fastest possible connection
+    let delay = Duration::from_micros(100); // Extremely small delay for minimal latency
 
     loop {
       if wait_start.elapsed() > wait_timeout {
@@ -233,10 +232,8 @@ impl ProcessManager {
           if e.kind() == std::io::ErrorKind::ConnectionRefused
             || e.kind() == std::io::ErrorKind::NotFound =>
         {
-          // Socket not ready yet, wait and retry with exponential backoff
+          // Socket not ready yet, use minimal polling with a tiny delay
           sleep(delay).await;
-          // Increase delay for next attempt (with a maximum)
-          delay = std::cmp::min(delay * 2, max_delay);
         }
         Err(e) => {
           error!(pid = pid, socket = %socket_.display(), error = %e, "Error connecting to socket during startup");
@@ -499,48 +496,231 @@ async fn main() -> Result<()> {
   let listener = TcpListener::bind(addr).await?;
   info!("Listening on http://{}", addr);
 
-  // 6. The main accept loop
+  // 6. The main accept loop with direct TCP proxying
   loop {
-    let (stream, remote_addr) = match listener.accept().await {
+    let (client_stream, remote_addr) = match listener.accept().await {
       Ok(s) => s,
       Err(e) => {
-        // Log listener accept errors (less common)
         error!("Failed to accept connection: {:?}", e);
         continue; // Keep listening
       }
     };
     trace!("Accepted connection from {}", remote_addr);
 
-    // Wrap the raw TCP stream in Hyper's TokioIo adapter
-    let io = TokioIo::new(stream);
-
     // Clone the process manager for this connection
     let process_manager_ = process_manager.clone();
 
-    // Spawn a Tokio task for each connection
+    // Spawn a Tokio task for direct TCP proxying
     tokio::task::spawn(async move {
-      let service = ProxyService {
-        process_manager: process_manager_,
+      // Create buffered readers/writers for the client connection
+      let (mut client_read, mut client_write) = tokio::io::split(client_stream);
+
+      // Buffer to read HTTP headers
+      let mut buf = vec![0; 4096];
+      let mut headers_buf = Vec::new();
+      let mut headers_complete = false;
+      let mut host = String::new();
+      let mut single_use = false;
+      let read_start = Instant::now();
+
+      // Read the HTTP headers to extract routing information
+      loop {
+        match client_read.read(&mut buf).await {
+          Ok(0) => {
+            warn!("Client closed connection before sending complete headers");
+            return;
+          }
+          Ok(n) => {
+            headers_buf.extend_from_slice(&buf[..n]);
+
+            // Look for the end of headers marker (\r\n\r\n)
+            if let Some(pos) = headers_buf
+              .windows(4)
+              .position(|window| window == b"\r\n\r\n")
+            {
+              headers_complete = true;
+
+              // Parse the headers to get host and check for single-use isolate
+              if let Ok(header_str) =
+                std::str::from_utf8(&headers_buf[..pos + 4])
+              {
+                // Extract host header
+                for line in header_str.lines() {
+                  if line.to_lowercase().starts_with("host:") {
+                    let parts: Vec<&str> = line.splitn(2, ':').collect();
+                    if parts.len() > 1 {
+                      let host_value = parts[1].trim();
+                      host = host_value
+                        .split(':')
+                        .next()
+                        .unwrap_or(host_value)
+                        .to_string();
+                    }
+                  } else if line
+                    .to_lowercase()
+                    .starts_with("x-single-use-isolate:")
+                  {
+                    single_use = true;
+                  }
+                }
+              }
+
+              break;
+            }
+
+            // Check if we've read too much without finding headers end
+            if headers_buf.len() > 8192 {
+              warn!("Headers too large, terminating connection");
+              return;
+            }
+          }
+          Err(e) => {
+            error!("Error reading headers: {:?}", e);
+            return;
+          }
+        }
+      }
+
+      if !headers_complete || host.is_empty() {
+        warn!("Invalid HTTP request: missing host header");
+        let resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+        let _ = client_write.write_all(resp.as_bytes()).await;
+        return;
+      }
+
+      info!(host = %host, single_use = %single_use, "Request headers parsed in {:?}", read_start.elapsed());
+
+      // Get or spawn the upstream process
+      let socket_path = match process_manager_
+        .get_or_spawn_process(&host, single_use)
+        .await
+      {
+        Ok(path) => path,
+        Err(e) => {
+          error!(host = %host, error = %e, "Failed to get or spawn process");
+          let status_line = match e {
+            ProxyError::AppNotFound(_) => "HTTP/1.1 404 Not Found",
+            ProxyError::InvalidHost => "HTTP/1.1 400 Bad Request",
+            _ => "HTTP/1.1 500 Internal Server Error",
+          };
+          let resp = format!("{}\r\nContent-Length: 0\r\n\r\n", status_line);
+          let _ = client_write.write_all(resp.as_bytes()).await;
+          return;
+        }
       };
 
-      // Use hyper's connection builder to serve the connection.
-      // It will internally call `service.call` for each request on this connection.
-      let builder = http1::Builder::new();
+      // Connect to the Unix socket
+      let upstream_conn = match UnixStream::connect(&socket_path).await {
+        Ok(us) => us,
+        Err(e) => {
+          error!(host = %host, socket = %socket_path.display(), error = %e, "Failed to connect to upstream socket");
+          let resp = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n";
+          let _ = client_write.write_all(resp.as_bytes()).await;
+          return;
+        }
+      };
 
-      // Configure the executor (required by hyper-util builders)
-      let conn_builder = builder; // http1::Builder doesn't have executor in hyper 1.x
+      info!(host = %host, socket = %socket_path.display(), "Connected to upstream");
 
-      // Serve the connection.
-      // `serve_connection` drives the HTTP state machine for the connection.
-      if let Err(err) = conn_builder.serve_connection(io, service).await {
-        // Log errors specific to *this* connection (e.g., IO errors,
-        // malformed HTTP requests that Hyper rejects before your service sees them).
-        // Errors *returned* by your `service.call` (like ProxyError) should ideally
-        // be handled by your service logic to produce an appropriate HTTP error response,
-        // they typically won't cause `serve_connection` itself to return an Err here unless
-        // there's an issue writing the response back, etc.
-        warn!("Error serving connection from {}: {:?}", remote_addr, err);
+      // Create read/write streams for the upstream connection
+      let (mut upstream_read, mut upstream_write) =
+        tokio::io::split(upstream_conn);
+
+      // Forward the headers we've already read to the upstream
+      if let Err(e) = upstream_write.write_all(&headers_buf).await {
+        error!(host = %host, error = %e, "Failed to forward headers to upstream");
+        return;
       }
+
+      // Bidirectional copy between client and upstream
+      // We need two tasks: client -> upstream and upstream -> client
+      let client_to_upstream = tokio::spawn(async move {
+        let mut buffer = [0u8; 16384];
+        loop {
+          match client_read.read(&mut buffer).await {
+            Ok(0) => break, // EOF
+            Ok(n) => {
+              if let Err(e) = upstream_write.write_all(&buffer[..n]).await {
+                error!("Error writing to upstream: {:?}", e);
+                break;
+              }
+            }
+            Err(e) => {
+              error!("Error reading from client: {:?}", e);
+              break;
+            }
+          }
+        }
+      });
+
+      let upstream_to_client = tokio::spawn(async move {
+        let mut buffer = [0u8; 16384];
+        loop {
+          match upstream_read.read(&mut buffer).await {
+            Ok(0) => break, // EOF
+            Ok(n) => {
+              if let Err(e) = client_write.write_all(&buffer[..n]).await {
+                error!("Error writing to client: {:?}", e);
+                break;
+              }
+            }
+            Err(e) => {
+              error!("Error reading from upstream: {:?}", e);
+              break;
+            }
+          }
+        }
+      });
+
+      // Wait for both transfer directions to complete
+      let (client_result, upstream_result) =
+        tokio::join!(client_to_upstream, upstream_to_client);
+
+      // Handle any errors in the transfer tasks
+      if let Err(e) = client_result {
+        error!("Client to upstream transfer task failed: {:?}", e);
+      }
+
+      if let Err(e) = upstream_result {
+        error!("Upstream to client transfer task failed: {:?}", e);
+      }
+
+      // The connection is now complete
+      info!(host = %host, "Connection completed");
+
+      // If this was a single-use isolate, clean it up
+      if single_use {
+        let host_clone = host.clone();
+        let manager_clone = process_manager_.clone();
+
+        tokio::spawn(async move {
+          // Minimal wait for connection cleanup
+          tokio::time::sleep(Duration::from_millis(10)).await;
+
+          info!(host = %host_clone, "Cleaning up single-use isolate");
+          let mut processes = manager_clone.processes.lock().await;
+
+          let keys_to_remove: Vec<String> = processes
+            .iter()
+            .filter_map(|(k, v)| {
+              if k.starts_with(&host_clone) && v.single_use {
+                Some(k.clone())
+              } else {
+                None
+              }
+            })
+            .collect();
+
+          for key in keys_to_remove {
+            if let Some(mut entry) = processes.remove(&key) {
+              info!(host = %host_clone, pid = entry.pid, "Terminating single-use isolate");
+              let _ = entry.process_handle.kill().await;
+              let _ = tokio::fs::remove_file(&entry.socket_path).await;
+            }
+          }
+        });
+      }
+
       trace!("Connection task finished for {}", remote_addr);
     });
   }
