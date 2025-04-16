@@ -1,14 +1,32 @@
 use tokio::io::AsyncReadExt;
+use http::method::Method;
+use http::uri::Uri;
 
 /// Represents parsed HTTP headers with routing information
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct HttpHeaderInfo {
   /// The host name from the Host header
   pub host: Option<String>,
   /// Whether the request included the x-single-use-isolate header
   pub single_use: bool,
+  /// The HTTP method (GET, POST, etc.)
+  pub method: Method,
+  /// The request path
+  pub path: Uri,
   /// The complete header buffer to forward to the upstream
   pub header_buffer: Vec<u8>,
+}
+
+impl Default for HttpHeaderInfo {
+  fn default() -> Self {
+    Self {
+      host: None,
+      single_use: false,
+      method: Method::GET, // Default to GET method
+      path: Uri::from_static("/"), // Default to root path
+      header_buffer: Vec::new(),
+    }
+  }
 }
 
 /// Parse HTTP headers from an AsyncRead source
@@ -50,8 +68,27 @@ where
       if let Ok(header_str) =
         std::str::from_utf8(&info.header_buffer[..pos + 4])
       {
-        // Extract host header
-        for line in header_str.lines() {
+        // First line should contain method and path
+        let lines: Vec<&str> = header_str.lines().collect();
+        if !lines.is_empty() {
+          // Parse request line (e.g., "GET /path HTTP/1.1")
+          let request_line = lines[0];
+          let parts: Vec<&str> = request_line.split_whitespace().collect();
+          if parts.len() >= 2 {
+            // Parse method
+            if let Ok(method) = Method::from_bytes(parts[0].as_bytes()) {
+              info.method = method;
+            }
+            
+            // Parse path
+            if let Ok(uri) = Uri::try_from(parts[1]) {
+              info.path = uri;
+            }
+          }
+        }
+        
+        // Extract host header and other headers
+        for line in lines.iter().skip(1) {
           if line.to_lowercase().starts_with("host:") {
             let parts: Vec<&str> = line.splitn(2, ':').collect();
             if parts.len() > 1 {
@@ -93,6 +130,8 @@ mod tests {
     let result = parse_http_headers(&mut reader).await.unwrap();
     assert_eq!(result.host.unwrap(), "example.com");
     assert!(!result.single_use);
+    assert_eq!(result.method, Method::GET);
+    assert_eq!(result.path, Uri::from_static("/"));
     assert_eq!(result.header_buffer, headers);
   }
 
@@ -103,6 +142,8 @@ mod tests {
     let result = parse_http_headers(&mut reader).await.unwrap();
     assert_eq!(result.host.unwrap(), "test.local");
     assert!(result.single_use);
+    assert_eq!(result.method, Method::GET);
+    assert_eq!(result.path, Uri::from_static("/"));
     assert_eq!(result.header_buffer, headers);
   }
 
@@ -119,6 +160,8 @@ mod tests {
     let result = parse_http_headers(&mut reader).await.unwrap();
     assert_eq!(result.host.unwrap(), "multi.chunk");
     assert!(result.single_use);
+    assert_eq!(result.method, Method::GET);
+    assert_eq!(result.path, Uri::from_static("/"));
     let expected = b"GET / HTTP/1.1\r\nHost: multi.chunk\r\nX-Single-Use-Isolate: true\r\n\r\n";
     assert_eq!(result.header_buffer, expected);
   }
@@ -130,6 +173,8 @@ mod tests {
     let result = parse_http_headers(&mut reader).await.unwrap();
     assert!(result.host.is_none());
     assert!(!result.single_use);
+    assert_eq!(result.method, Method::GET);
+    assert_eq!(result.path, Uri::from_static("/"));
   }
 
   #[tokio::test]
@@ -139,5 +184,29 @@ mod tests {
     let result = parse_http_headers(&mut reader).await.unwrap();
     assert_eq!(result.host.unwrap(), "example.com");
     assert!(!result.single_use);
+    assert_eq!(result.method, Method::GET);
+    assert_eq!(result.path, Uri::from_static("/"));
+  }
+
+  #[tokio::test]
+  async fn test_parse_http_headers_static_file_path() {
+    let headers = b"GET /static/index.html HTTP/1.1\r\nHost: ry.local\r\n\r\n";
+    let mut reader = Builder::new().read(headers).build();
+    let result = parse_http_headers(&mut reader).await.unwrap();
+    assert_eq!(result.host.unwrap(), "ry.local");
+    assert!(!result.single_use);
+    assert_eq!(result.method, Method::GET);
+    assert_eq!(result.path, Uri::from_static("/static/index.html"));
+  }
+
+  #[tokio::test]
+  async fn test_parse_http_headers_post_method() {
+    let headers = b"POST /api/data HTTP/1.1\r\nHost: ry.local\r\nContent-Type: application/json\r\n\r\n";
+    let mut reader = Builder::new().read(headers).build();
+    let result = parse_http_headers(&mut reader).await.unwrap();
+    assert_eq!(result.host.unwrap(), "ry.local");
+    assert!(!result.single_use);
+    assert_eq!(result.method, Method::POST);
+    assert_eq!(result.path, Uri::from_static("/api/data"));
   }
 }
