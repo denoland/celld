@@ -28,12 +28,10 @@ pub struct ProcessManager {
 
 impl ProcessManager {
   pub fn new(data_dir: PathBuf) -> Self {
-    let pm = ProcessManager {
+    ProcessManager {
       data_dir: std::fs::canonicalize(data_dir.clone()).unwrap(),
       processes: Arc::new(Mutex::new(HashMap::new())),
-    };
-
-    pm
+    }
   }
 
   #[instrument(skip(self), fields(host = %host))]

@@ -60,7 +60,6 @@ struct DenoProxyApp {
 
 #[derive(Debug, Default)]
 pub struct MyCtx {
-  beta_user: bool,
   tenant: String,
 }
 
@@ -80,9 +79,9 @@ impl ProxyHttp for DenoProxyApp {
   ) -> Result<bool> {
     let req_header = session.req_header();
 
+    // Extract and validate host header
     let host =
       if let Some(header_value) = req_header.headers.get(http::header::HOST) {
-        // Assign to host_with_port if conversion succeeds, otherwise propagate error
         header_value.to_str().map_err(|_| {
           error!("Host header contains invalid characters");
           pingora::Error::explain(
@@ -91,7 +90,6 @@ impl ProxyHttp for DenoProxyApp {
           )
         })?
       } else {
-        // Header is missing, return error Result
         error!("Missing host header");
         return Err(pingora::Error::explain(
           ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
@@ -100,52 +98,81 @@ impl ProxyHttp for DenoProxyApp {
       };
     ctx.tenant = host.to_string();
 
+    // Only handle GET and HEAD requests
     if req_header.method != http::Method::GET
       && req_header.method != http::Method::HEAD
     {
-      // Continue upstream
       return Ok(false);
     }
 
-    let rel = req_header.uri.path().trim_start_matches('/');
-    let tenant_dir = self
-      .process_manager
-      .data_dir
-      .join(&ctx.tenant);
-    let static_dir = tenant_dir.join("static");
-    let file_path = static_dir.join(rel);
+    // Process the path and handle static files
+    let rel_path = req_header.uri.path().trim_start_matches('/');
 
+    // Create a String to store our modified path
+    let rel_path_ = if rel_path.is_empty() || rel_path.ends_with('/') {
+      format!("{}index.html", rel_path)
+    } else {
+      rel_path.to_string()
+    };
+
+    // Construct the file path
+    let tenant_dir = self.process_manager.data_dir.join(&ctx.tenant);
+    let static_dir = tenant_dir.join("static");
+    let file_path = static_dir.join(rel_path_);
+
+    // Try to read the file
     let file = match std::fs::read(&file_path) {
       Ok(file) => file,
       Err(_) => {
-        info!("file not found: {}", file_path.display());
+        info!("File not found: {}", file_path.display());
         return Ok(false);
       }
     };
 
+    // Determine content type based on file extension
+    let content_type = match rel_path.rsplit('.').next() {
+      Some("html") | Some("htm") => "text/html",
+      Some("css") => "text/css",
+      Some("js") => "application/javascript",
+      Some("json") => "application/json",
+      Some("png") => "image/png",
+      Some("jpg") | Some("jpeg") => "image/jpeg",
+      Some("gif") => "image/gif",
+      Some("svg") => "image/svg+xml",
+      Some("webp") => "image/webp",
+      Some("ico") => "image/x-icon",
+      Some("woff") => "font/woff",
+      Some("woff2") => "font/woff2",
+      Some("ttf") => "font/ttf",
+      Some("txt") => "text/plain",
+      Some("pdf") => "application/pdf",
+      Some("xml") => "application/xml",
+      _ => "application/octet-stream",
+    };
+
     let content_length = file.len();
 
+    // Build and send response
     let mut resp =
       pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
     resp
       .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
       .unwrap();
     resp
-      .insert_header(http::header::CONTENT_TYPE, "text/html")
+      .insert_header(http::header::CONTENT_TYPE, content_type)
       .unwrap();
 
-    let end_of_stream = false;
+    let end_of_stream = req_header.method == http::Method::HEAD;
     session
       .write_response_header(Box::new(resp), end_of_stream)
-      .await
-      .unwrap();
-    session.set_keepalive(None);
+      .await?;
 
-    session
-      .write_response_body(Some(file.into()), end_of_stream)
-      .await
-      .unwrap();
-    return Ok(true);
+    if !end_of_stream {
+      session.write_response_body(Some(file.into()), true).await?;
+    }
+
+    session.set_keepalive(None);
+    Ok(true)
   }
 
   // This method is called for each HTTP request to determine the upstream server
@@ -154,10 +181,6 @@ impl ProxyHttp for DenoProxyApp {
     session: &mut Session,
     ctx: &mut Self::CTX,
   ) -> pingora::Result<Box<HttpPeer>> {
-    let req_header = session.req_header();
-
-    let host = &ctx.tenant;
-
     // Check for the single-use header
     let single_use = session
       .req_header()
@@ -165,7 +188,7 @@ impl ProxyHttp for DenoProxyApp {
       .contains_key("x-single-use-isolate");
 
     info!(
-      host = %host,
+      host = %ctx.tenant,
       single_use = %single_use,
       "Processing request"
     );
@@ -174,7 +197,7 @@ impl ProxyHttp for DenoProxyApp {
     let socket_path: PathBuf = {
       match self
         .process_manager
-        .get_or_spawn_process(&host, single_use)
+        .get_or_spawn_process(&ctx.tenant, single_use)
         .await
       {
         Ok((path, _stream)) => {
@@ -189,7 +212,7 @@ impl ProxyHttp for DenoProxyApp {
           ));
         }
         Err(ProxyError::InvalidHost) => {
-          info!("Invalid hostname format: {}", host);
+          info!("Invalid hostname format: {}", ctx.tenant);
           return Err(pingora::Error::explain(
             ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
             "Invalid hostname format provided",
@@ -218,11 +241,11 @@ impl ProxyHttp for DenoProxyApp {
     };
 
     // Create a Backend using the Unix Domain Socket address
-    let sni = format!("{}.local", host); // Dummy SNI name, not actually used for UDS
+    let sni = ctx.tenant.clone();
     match HttpPeer::new_uds(&socket_path_str, false, sni) {
       Ok(peer) => {
         info!(
-          host = %host,
+          host = %ctx.tenant,
           socket = %socket_path.display(),
           "Selected upstream UDS peer"
         );
@@ -311,7 +334,7 @@ mod tests {
     init();
 
     let response = reqwest::Client::new()
-      .get("http://127.0.0.1:6146/")
+      .get("http://127.0.0.1:6146/foo")
       .header("Host", "ry.local")
       .send()
       .await
@@ -320,5 +343,24 @@ mod tests {
       .await
       .unwrap();
     assert_eq!("hello from ry.local\n", response);
+  }
+
+  #[tokio::test]
+  async fn test_static_file_serving() {
+    init();
+
+    // Test fetching the index.html file
+    for x in ["/", "/index.html"] {
+      let response = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:6146{}", x))
+        .header("Host", "ry.local")
+        .send()
+        .await
+        .unwrap();
+      assert_eq!(response.status(), 200);
+      //assert_eq!(response.headers().get("content-type").unwrap(), "text/html");
+      let content = response.text().await.unwrap();
+      assert_eq!(content, "<h1>Hello from ry.local</h1>\n");
+    }
   }
 }

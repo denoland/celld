@@ -27,7 +27,7 @@ hey -cpus 1 -n 100 -c 10 \
   http://127.0.0.1:3000/foo
 
 echo "Cleaning up..."
-kill $SERVER_PID
+kill -9 $SERVER_PID
 wait $SERVER_PID 2>/dev/null || true
 
 echo "Benchmark complete"
