@@ -1,3 +1,6 @@
+mod process_manager;
+mod process_reaper;
+
 use once_cell::sync::Lazy;
 use pingora::http::StatusCode;
 use pingora::prelude::*;
@@ -8,9 +11,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info};
-
-mod process_manager;
-mod process_reaper;
 
 use process_manager::ProcessManager;
 use process_reaper::ProcessReaper;
@@ -58,21 +58,26 @@ struct DenoProxyApp {
   process_manager: ProcessManager,
 }
 
+#[derive(Debug, Default)]
+pub struct MyCtx {
+  beta_user: bool,
+  tenant: String,
+}
+
 #[async_trait::async_trait]
 impl ProxyHttp for DenoProxyApp {
-  type CTX = ();
+  type CTX = MyCtx;
 
   // Required implementation of new_ctx
   fn new_ctx(&self) -> Self::CTX {
-    ()
+    MyCtx::default()
   }
 
-  // This method is called for each HTTP request to determine the upstream server
-  async fn upstream_peer(
+  async fn request_filter(
     &self,
     session: &mut Session,
-    _ctx: &mut Self::CTX,
-  ) -> pingora::Result<Box<HttpPeer>> {
+    ctx: &mut Self::CTX,
+  ) -> Result<bool> {
     let req_header = session.req_header();
 
     let host =
@@ -93,6 +98,65 @@ impl ProxyHttp for DenoProxyApp {
           "Missing Host header",
         ));
       };
+    ctx.tenant = host.to_string();
+
+    if req_header.method != http::Method::GET
+      && req_header.method != http::Method::HEAD
+    {
+      // Continue upstream
+      return Ok(false);
+    }
+
+    let rel = req_header.uri.path().trim_start_matches('/');
+    let tenant_dir = self
+      .process_manager
+      .data_dir
+      .join(&ctx.tenant);
+    let static_dir = tenant_dir.join("static");
+    let file_path = static_dir.join(rel);
+
+    let file = match std::fs::read(&file_path) {
+      Ok(file) => file,
+      Err(_) => {
+        info!("file not found: {}", file_path.display());
+        return Ok(false);
+      }
+    };
+
+    let content_length = file.len();
+
+    let mut resp =
+      pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
+    resp
+      .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
+      .unwrap();
+    resp
+      .insert_header(http::header::CONTENT_TYPE, "text/html")
+      .unwrap();
+
+    let end_of_stream = false;
+    session
+      .write_response_header(Box::new(resp), end_of_stream)
+      .await
+      .unwrap();
+    session.set_keepalive(None);
+
+    session
+      .write_response_body(Some(file.into()), end_of_stream)
+      .await
+      .unwrap();
+    return Ok(true);
+  }
+
+  // This method is called for each HTTP request to determine the upstream server
+  async fn upstream_peer(
+    &self,
+    session: &mut Session,
+    ctx: &mut Self::CTX,
+  ) -> pingora::Result<Box<HttpPeer>> {
+    let req_header = session.req_header();
+
+    let host = &ctx.tenant;
 
     // Check for the single-use header
     let single_use = session
@@ -186,7 +250,7 @@ fn start_server(data_dir: PathBuf, port: u16) -> Server {
   let mut server = Server::new(None).unwrap();
 
   // Create the process manager with default timeout values
-  let process_manager = ProcessManager::new(data_dir);
+  let process_manager = ProcessManager::new(data_dir.clone());
 
   // Create the proxy app that will handle routing
   let app = DenoProxyApp {

@@ -22,7 +22,7 @@ pub struct ProcessEntry {
 
 #[derive(Clone)]
 pub struct ProcessManager {
-  data_dir: PathBuf,
+  pub data_dir: PathBuf,
   pub processes: Arc<Mutex<HashMap<String, ProcessEntry>>>,
 }
 
