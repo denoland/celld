@@ -21,7 +21,7 @@ sleep 2
 echo "Running coldstart benchmark..."
 
 # Using a single cpu to make the benchmark more repeatable
-hey -cpus 1 -n 100000 -c 10 \
+hey -cpus 1 -n 100 -c 10 \
   -host ry.local \
   -H "x-single-use-isolate: true" \
   http://127.0.0.1:3000/foo

@@ -1,8 +1,8 @@
 use crate::process_manager::ProcessManager;
 use pingora::server::ShutdownWatch;
 use pingora::services::background::BackgroundService;
-use std::time::{Duration, Instant};
-use tracing::{error, info, instrument, trace, warn};
+use std::time::Duration;
+use tracing::{error, info, trace, warn};
 
 /// ProcessReaper service cleans up idle processes
 pub struct ProcessReaper {

@@ -1,4 +1,3 @@
-use anyhow::Result;
 use once_cell::sync::Lazy;
 use pingora::http::StatusCode;
 use pingora::prelude::*;
@@ -75,16 +74,25 @@ impl ProxyHttp for DenoProxyApp {
     _ctx: &mut Self::CTX,
   ) -> pingora::Result<Box<HttpPeer>> {
     let req_header = session.req_header();
-    let host_header: Option<&http::HeaderValue> =
-      req_header.headers.get(http::header::HOST);
-    if host_header.is_none() {
-      error!("Missing host header");
-      return Err(pingora::Error::explain(
-        ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
-        "Missing host header",
-      ));
-    }
-    let host = host_header.unwrap().to_str().unwrap();
+
+    let host =
+      if let Some(header_value) = req_header.headers.get(http::header::HOST) {
+        // Assign to host_with_port if conversion succeeds, otherwise propagate error
+        header_value.to_str().map_err(|_| {
+          error!("Host header contains invalid characters");
+          pingora::Error::explain(
+            ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
+            "Invalid Host header encoding",
+          )
+        })?
+      } else {
+        // Header is missing, return error Result
+        error!("Missing host header");
+        return Err(pingora::Error::explain(
+          ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
+          "Missing Host header",
+        ));
+      };
 
     // Check for the single-use header
     let single_use = session
