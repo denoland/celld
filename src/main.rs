@@ -176,10 +176,9 @@ impl ProxyHttp for DenoProxyApp {
   }
 }
 
-fn main() {
-  // Initialize tracing for console logging
-  tracing_subscriber::fmt::init();
-
+/// Starts the server with the given data directory and port
+/// Returns the server instance
+fn start_server(data_dir: PathBuf, port: u16) -> Server {
   // Create a server configuration
   let server_conf = Arc::new(ServerConf::new().unwrap());
 
@@ -187,7 +186,7 @@ fn main() {
   let mut server = Server::new(None).unwrap();
 
   // Create the process manager with default timeout values
-  let process_manager = ProcessManager::new(DATA_DIR.clone());
+  let process_manager = ProcessManager::new(data_dir);
 
   // Create the proxy app that will handle routing
   let app = DenoProxyApp {
@@ -198,7 +197,7 @@ fn main() {
   let mut proxy_service = http_proxy_service(&server_conf, app);
 
   // Configure the proxy service to listen on the specified port
-  let listen_addr = format!("0.0.0.0:{}", *DATA_PORT);
+  let listen_addr = format!("0.0.0.0:{}", port);
   proxy_service.add_tcp(&listen_addr);
 
   let reaper_service = background_service(
@@ -214,8 +213,13 @@ fn main() {
   // Add the proxy service to the server
   server.add_service(proxy_service);
 
-  // Start the server
-  info!("Starting Deno Deploy proxy server on port {}", *DATA_PORT);
+  info!("Starting Deno Deploy proxy server on port {}", port);
+  server
+}
+
+fn main() {
+  tracing_subscriber::fmt::init();
+  let server = start_server(DATA_DIR.clone(), *DATA_PORT);
   server.run_forever();
 }
 
@@ -223,12 +227,34 @@ fn main() {
 mod tests {
   use super::*;
 
-  // TODO: Update tests to work with Pingora
-  // For now, this is just a placeholder to preserve the test structure
+  // inspired by https://github.com/cloudflare/pingora/blob/caa6a0/pingora-core/tests/utils/mod.rs
+  pub static TEST_SERVER: Lazy<std::thread::JoinHandle<()>> = Lazy::new(|| {
+    let data_dir = PathBuf::from("./data");
+    let h = std::thread::spawn(|| {
+      let server = start_server(data_dir, 6146);
+      server.run_forever();
+    });
+    std::thread::sleep(Duration::from_secs(2));
+    h
+  });
+
+  pub fn init() {
+    let _ = *TEST_SERVER;
+  }
+
   #[tokio::test]
-  #[ignore = "Test needs to be updated for Pingora"]
   async fn test_proxy_with_ephemeral_port() {
-    // This test will need to be rewritten for Pingora
-    assert!(true);
+    init();
+
+    let response = reqwest::Client::new()
+      .get("http://127.0.0.1:6146/")
+      .header("Host", "ry.local")
+      .send()
+      .await
+      .unwrap()
+      .text()
+      .await
+      .unwrap();
+    assert_eq!("hello from ry.local\n", response);
   }
 }
