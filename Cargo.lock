@@ -1893,6 +1893,7 @@ name = "self-hosted-deno-deploy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bytes",
  "futures-util",
  "http 1.3.1",
