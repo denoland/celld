@@ -7,7 +7,6 @@ use pingora::upstreams::peer::HttpPeer;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
 use tracing::{error, info};
 
 mod process_manager;
@@ -54,7 +53,7 @@ pub enum ProxyError {
 
 /// DenoProxyApp implements the HTTP proxy service for Deno processes
 struct DenoProxyApp {
-  process_manager: Arc<Mutex<ProcessManager>>,
+  process_manager: ProcessManager,
 }
 
 #[async_trait::async_trait]
@@ -98,8 +97,8 @@ impl ProxyHttp for DenoProxyApp {
 
     // Get or spawn the process
     let socket_path: PathBuf = {
-      let process_manager = self.process_manager.lock().await;
-      match process_manager
+      match self
+        .process_manager
         .get_or_spawn_process(&host, single_use)
         .await
       {
@@ -190,13 +189,8 @@ async fn main() -> Result<()> {
       .await;
   });
 
-  // Wrap the process manager in Arc<Mutex<>> for thread-safe access
-  let shared_process_manager = Arc::new(Mutex::new(process_manager));
-
   // Create the proxy app that will handle routing
-  let app = DenoProxyApp {
-    process_manager: shared_process_manager,
-  };
+  let app = DenoProxyApp { process_manager };
 
   // Create an HTTP proxy service with our app
   let mut proxy_service = http_proxy_service(&server_conf, app);
