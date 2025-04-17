@@ -102,7 +102,11 @@ impl ProcessManager {
         )
       })?;
 
-    let socket_name = format!("{}.sock", Uuid::new_v4());
+    let socket_name = {
+      let uuid_string = Uuid::new_v4().to_string();
+      let first_segment: &str = &uuid_string[0..8];
+      format!("{}.sock", first_segment)
+    };
     let socket_path = sockets_dir.join(socket_name);
 
     info!(
