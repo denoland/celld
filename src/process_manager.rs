@@ -33,51 +33,6 @@ impl ProcessManager {
       processes: Arc::new(Mutex::new(HashMap::new())),
     };
 
-    // Spawn a task to clean up any stale socket files at startup
-    tokio::spawn(async move {
-      // Clean up any leftover socket files from previous runs
-      if let Ok(entries) = tokio::fs::read_dir(&data_dir).await {
-        let mut entries = entries;
-        while let Ok(Some(entry)) = entries.next_entry().await {
-          let host_dir = entry.path();
-          if !host_dir.is_dir() {
-            continue;
-          }
-
-          let sockets_dir = host_dir.join("sockets");
-          if !sockets_dir.exists() || !sockets_dir.is_dir() {
-            continue;
-          }
-
-          if let Ok(socket_entries) = tokio::fs::read_dir(&sockets_dir).await {
-            let mut socket_entries = socket_entries;
-            while let Ok(Some(socket_entry)) = socket_entries.next_entry().await
-            {
-              let socket_path = socket_entry.path();
-              if socket_path.extension().map_or(false, |ext| ext == "sock") {
-                // Try to remove the socket file
-                if let Err(e) = tokio::fs::remove_file(&socket_path).await {
-                  if e.kind() != std::io::ErrorKind::NotFound {
-                    // Ignore "not found" errors
-                    eprintln!(
-                      "Failed to remove stale socket file {}: {}",
-                      socket_path.display(),
-                      e
-                    );
-                  }
-                } else {
-                  eprintln!(
-                    "Removed stale socket file: {}",
-                    socket_path.display()
-                  );
-                }
-              }
-            }
-          }
-        }
-      }
-    });
-
     pm
   }
 

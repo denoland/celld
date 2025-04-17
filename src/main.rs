@@ -3,6 +3,7 @@ use once_cell::sync::Lazy;
 use pingora::http::StatusCode;
 use pingora::prelude::*;
 use pingora::server::configuration::ServerConf;
+use pingora::services::background::background_service;
 use pingora::upstreams::peer::HttpPeer;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,8 +11,10 @@ use std::time::Duration;
 use tracing::{error, info};
 
 mod process_manager;
+mod process_reaper;
 
 use process_manager::ProcessManager;
+use process_reaper::ProcessReaper;
 
 // Default values, can be overridden when creating ProcessManager
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -179,18 +182,10 @@ async fn main() -> Result<()> {
   // Create the process manager with default timeout values
   let process_manager = ProcessManager::new(DATA_DIR.clone());
 
-  // Clone the process manager for the reaper task
-  let process_manager_reaper = process_manager.clone();
-
-  // Start the reaper task
-  tokio::spawn(async move {
-    process_manager_reaper
-      .start_reaper(DEFAULT_IDLE_TIMEOUT, DEFAULT_REAPER_INTERVAL)
-      .await;
-  });
-
   // Create the proxy app that will handle routing
-  let app = DenoProxyApp { process_manager };
+  let app = DenoProxyApp {
+    process_manager: process_manager.clone(),
+  };
 
   // Create an HTTP proxy service with our app
   let mut proxy_service = http_proxy_service(&server_conf, app);
@@ -198,6 +193,16 @@ async fn main() -> Result<()> {
   // Configure the proxy service to listen on the specified port
   let listen_addr = format!("0.0.0.0:{}", *DATA_PORT);
   proxy_service.add_tcp(&listen_addr);
+
+  let reaper_service = background_service(
+    "process_reaper",
+    ProcessReaper::new(
+      process_manager.clone(),
+      DEFAULT_IDLE_TIMEOUT,
+      DEFAULT_REAPER_INTERVAL,
+    ),
+  );
+  server.add_service(reaper_service);
 
   // Add the proxy service to the server
   server.add_service(proxy_service);
