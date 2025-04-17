@@ -22,3 +22,5 @@
 ## Architecture Overview
 This is a Rust proxy for Deno processes that routes HTTP/WebSocket requests to isolated
 Deno subprocesses based on the Host header or path parameters.
+
+Look in ~/src/pingora for examples. Especially ~/src/pingora/*/examples
