@@ -16,6 +16,11 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 uuid = { version = "1", features = ["v4"] }
 
+pingora = { version = "0.4", features = ["proxy"] }
+
+[patch.crates-io]
+sfv = { path = "vendor/sfv" }
+
 [dev-dependencies]
 http-body-util = "0.1"
 hyper = { version = "1", features = ["full"] }
