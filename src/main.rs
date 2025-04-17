@@ -74,17 +74,17 @@ impl ProxyHttp for DenoProxyApp {
     session: &mut Session,
     _ctx: &mut Self::CTX,
   ) -> pingora::Result<Box<HttpPeer>> {
-    // Extract host header from the request using Pingora's helper
-    let host = match session.req_header().uri.host() {
-      Some(host_str) => host_str.to_string(),
-      None => {
-        error!("Missing host header");
-        return Err(pingora::Error::explain(
-          ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
-          "Missing host header",
-        ));
-      }
-    };
+    let req_header = session.req_header();
+    let host_header: Option<&http::HeaderValue> =
+      req_header.headers.get(http::header::HOST);
+    if host_header.is_none() {
+      error!("Missing host header");
+      return Err(pingora::Error::explain(
+        ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
+        "Missing host header",
+      ));
+    }
+    let host = host_header.unwrap().to_str().unwrap();
 
     // Check for the single-use header
     let single_use = session
@@ -168,8 +168,7 @@ impl ProxyHttp for DenoProxyApp {
   }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() {
   // Initialize tracing for console logging
   tracing_subscriber::fmt::init();
 
@@ -177,7 +176,7 @@ async fn main() -> Result<()> {
   let server_conf = Arc::new(ServerConf::new().unwrap());
 
   // Create a new Pingora server
-  let mut server = Server::new(None)?;
+  let mut server = Server::new(None).unwrap();
 
   // Create the process manager with default timeout values
   let process_manager = ProcessManager::new(DATA_DIR.clone());
@@ -210,10 +209,6 @@ async fn main() -> Result<()> {
   // Start the server
   info!("Starting Deno Deploy proxy server on port {}", *DATA_PORT);
   server.run_forever();
-
-  // This point is never reached due to run_forever()
-  #[allow(unreachable_code)]
-  Ok(())
 }
 
 #[cfg(test)]
