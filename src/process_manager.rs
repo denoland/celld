@@ -146,7 +146,16 @@ impl ProcessManager {
     };
     let socket_path = sockets_dir.join(socket_name);
 
+    // Path to bootstrap.ts script
+    let bootstrap_script = self
+      .data_dir
+      .parent()
+      .unwrap()
+      .join("src")
+      .join("bootstrap.ts");
+
     info!(
+      bootstrap = %bootstrap_script.display(),
       script = %main_script.display(),
       socket = %socket_path.display(),
       "Spawning Deno process"
@@ -154,12 +163,15 @@ impl ProcessManager {
 
     let mut process_handle = Command::new("deno")
       .env("DENO_SERVE_ADDRESS", socket_path.clone())
+      .env("X-Room-Id", host) // Pass host as room ID to bootstrap.ts
       .arg("run")
       .arg(format!("--allow-read={}", app_code_dir.display()))
       .arg(format!("--allow-read={}", socket_path.display()))
       .arg(format!("--allow-write={}", socket_path.display()))
       .arg("--allow-net")
-      .arg(&main_script)
+      .arg("--allow-env=X-Room-Id") // Permission to read env var
+      .arg(&bootstrap_script) // Use bootstrap.ts instead of main.ts directly
+      .arg(&main_script) // Pass main.ts as argument to bootstrap.ts
       .spawn()
       .with_context(|| format!("Failed to spawn Deno process for {}", host))?;
 

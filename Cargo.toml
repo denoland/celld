@@ -31,3 +31,4 @@ tokio-test = "0.4"
 tokio-tungstenite = "0.20"
 futures-util = "0.3"
 reqwest = "0.12" # Do not use reqwest in the main code, only in tests
+url = "2.5"

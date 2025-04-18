@@ -359,14 +359,14 @@ mod tests {
 
     let response = reqwest::Client::new()
       .get("http://127.0.0.1:6146/foo")
-      .header("Host", "ry.local")
+      .header("Host", "hello.localhost")
       .send()
       .await
       .unwrap()
       .text()
       .await
       .unwrap();
-    assert_eq!("hello from ry.local\n", response);
+    assert_eq!("hello from hello.localhost\n", response);
   }
 
   #[tokio::test]
@@ -377,14 +377,67 @@ mod tests {
     for x in ["/", "/index.html"] {
       let response = reqwest::Client::new()
         .get(format!("http://127.0.0.1:6146{}", x))
-        .header("Host", "ry.local")
+        .header("Host", "hello.localhost")
         .send()
         .await
         .unwrap();
       assert_eq!(response.status(), 200);
       //assert_eq!(response.headers().get("content-type").unwrap(), "text/html");
       let content = response.text().await.unwrap();
-      assert_eq!(content, "<h1>Hello from ry.local</h1>\n");
+      assert_eq!(content, "<h1>Hello from hello.localhost</h1>\n");
     }
+  }
+
+  #[tokio::test]
+  async fn test_websocket_echo() {
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::Value;
+    use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+    init();
+
+    // Connect to the WebSocket server with the host in the URL
+    let url = url::Url::parse("ws://ws-echo.localhost:6146/ws").unwrap();
+
+    let (ws_stream, _) = connect_async(url)
+      .await
+      .expect("Failed to connect to WebSocket server");
+
+    let (mut write, mut read) = ws_stream.split();
+
+    // We should receive a welcome message first
+    let welcome_msg = read
+      .next()
+      .await
+      .expect("Failed to receive welcome message")
+      .unwrap();
+    let welcome_data: Value =
+      serde_json::from_str(&welcome_msg.to_string()).unwrap();
+    assert_eq!(welcome_data["type"], "welcome");
+    assert_eq!(welcome_data["message"], "Welcome to ws-echo.local!");
+
+    // Send a test message
+    let test_message = "Hello WebSocket";
+    write
+      .send(Message::Text(test_message.to_string()))
+      .await
+      .unwrap();
+
+    // Receive the echo response
+    let echo_msg = read
+      .next()
+      .await
+      .expect("Failed to receive echo message")
+      .unwrap();
+    let echo_data: Value = serde_json::from_str(&echo_msg.to_string()).unwrap();
+
+    assert_eq!(echo_data["type"], "echo");
+    assert_eq!(echo_data["originalMessage"], test_message);
+    assert!(
+      echo_data.get("timestamp").is_some(),
+      "Echo response should contain a timestamp"
+    );
+
+    // Close the connection
+    write.send(Message::Close(None)).await.unwrap();
   }
 }
