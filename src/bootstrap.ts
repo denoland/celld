@@ -12,14 +12,16 @@ interface Context {
 }
 
 interface Server {
-  webSocketOpen?: (ws: WebSocket, ctx: Context) => Promise<void>;
-  webSocketMessage?: (
+  onConnect?: (ws: WebSocket, ctx: Context) => Promise<void> | void;
+  onMessage?: (
     ws: WebSocket,
     msg: string,
     ctx: Context,
-  ) => Promise<void>;
-  webSocketClose?: (ws: WebSocket, ctx: Context) => Promise<void>;
-  fetch?: (req: Request, ctx: { roomId: string }) => Promise<Response>;
+  ) => Promise<void> | void;
+  onClose?: (ws: WebSocket, ctx: Context) => Promise<void> | void;
+  onError?: (ws: WebSocket, error: Event, ctx: Context) => Promise<void> | void;
+  onRequest?: (req: Request, ctx: Context) => Promise<Response> | Response;
+  onStart?: (ctx: Context) => Promise<void> | void;
 }
 
 async function bootstrap(userModulePath: string) {
@@ -31,21 +33,50 @@ async function bootstrap(userModulePath: string) {
   const roomId = Deno.env.get("X-Room-Id") || "";
   console.log(`Bootstrap starting with roomId: ${roomId}`);
 
-  Deno.serve(async (req) => {
-    // Use the room ID from the environment variable for all requests
-    const ctx = { roomId };
+  // Create context object
+  const ctx = { roomId };
 
+  // Call onStart if it exists
+  if (userModule.onStart) {
+    await userModule.onStart(ctx);
+  }
+
+  Deno.serve(async (req) => {
+    // Handle WebSocket connections
     if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
       const { response, socket } = Deno.upgradeWebSocket(req);
-      socket.onopen = () => userModule.webSocketOpen?.(socket, ctx);
-      socket.onmessage = (e) =>
-        userModule.webSocketMessage?.(socket, e.data as string, ctx);
-      socket.onclose = () => userModule.webSocketClose?.(socket, ctx);
+
+      // Set up the WebSocket event handlers
+      socket.onopen = () => {
+        if (userModule.onConnect) {
+          userModule.onConnect(socket, ctx);
+        }
+      };
+
+      socket.onmessage = (e) => {
+        if (userModule.onMessage) {
+          userModule.onMessage(socket, e.data as string, ctx);
+        }
+      };
+
+      socket.onclose = () => {
+        if (userModule.onClose) {
+          userModule.onClose(socket, ctx);
+        }
+      };
+
+      socket.onerror = (error) => {
+        if (userModule.onError) {
+          userModule.onError(socket, error, ctx);
+        }
+      };
+
       return response;
     }
 
-    if (userModule.fetch) {
-      return userModule.fetch(req, ctx);
+    // Handle HTTP requests
+    if (userModule.onRequest) {
+      return userModule.onRequest(req, ctx);
     }
 
     return new Response("Not Found", { status: 404 });

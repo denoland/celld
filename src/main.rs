@@ -430,7 +430,7 @@ mod tests {
 
     let (mut write, mut read) = ws_stream.split();
 
-    // We should receive a welcome message first
+    // We should receive a welcome message from onConnect handler first
     let welcome_msg = read
       .next()
       .await
@@ -448,7 +448,7 @@ mod tests {
       .await
       .unwrap();
 
-    // Receive the echo response
+    // Receive the echo response from onMessage handler
     let echo_msg = read
       .next()
       .await
@@ -471,5 +471,6 @@ mod tests {
 
     // Close the connection
     write.send(Message::Close(None)).await.unwrap();
+    // onClose handler will be called automatically
   }
 }
