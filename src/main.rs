@@ -153,19 +153,22 @@ impl ProxyHttp for DenoProxyApp {
     // Construct the file path
     let tenant_dir = self.process_manager.data_dir.join(&ctx.tenant);
     let static_dir = tenant_dir.join("static");
-    let file_path = static_dir.join(rel_path_);
+    let file_path = static_dir.join(&rel_path_);
 
     // Try to read the file
     let file = match std::fs::read(&file_path) {
       Ok(file) => file,
       Err(_) => {
         info!("File not found: {}", file_path.display());
-        return Ok(false);
+        return Err(pingora::Error::explain(
+          ErrorType::HTTPStatus(StatusCode::NOT_FOUND.into()),
+          "Not found",
+        ));
       }
     };
 
     // Determine content type based on file extension
-    let content_type = match rel_path.rsplit('.').next() {
+    let content_type = match rel_path_.rsplit('.').next() {
       Some("html") | Some("htm") => "text/html",
       Some("css") => "text/css",
       Some("js") => "application/javascript",
@@ -383,7 +386,7 @@ mod tests {
     init();
 
     let response = reqwest::Client::new()
-      .get("http://127.0.0.1:6146/foo")
+      .get("http://127.0.0.1:6146/room/foo")
       .header("Host", "hello.localhost")
       .send()
       .await
@@ -407,7 +410,7 @@ mod tests {
         .await
         .unwrap();
       assert_eq!(response.status(), 200);
-      //assert_eq!(response.headers().get("content-type").unwrap(), "text/html");
+      assert_eq!(response.headers().get("content-type").unwrap(), "text/html");
       let content = response.text().await.unwrap();
       assert_eq!(content, "<h1>Hello from hello.localhost</h1>\n");
     }
