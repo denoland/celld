@@ -1,143 +1,152 @@
-# Architecture: Self-Hosted Deno Deploy (MVP)
+# Architecture: Self‑Hosted Deno Deploy (MVP)
 
-This document outlines the architecture of the MVP for Self-Hosted Deno Deploy,
-a containerized, multi-tenant runtime for securely running JavaScript and
-TypeScript applications using the Deno runtime.
+A containerized, multi‑tenant Deno runtime delivered via Docker. It combines
+**PartyKit‑style rooms**, **Erlang‑inspired mesh routing**, **real‑time
+WebSocket hooks**, and **sub‑50 ms cold starts**, with secure per‑tenant
+isolation and fast static asset serving.
 
-## Goals
+### 1. Quickstart Demo
 
-- Host multiple apps/plugins/scripts per instance
-- Run each app in an isolated Deno subprocess
-- Enforce per-app resource limits (CPU, memory) and permissions
-- Support three invocation modes: path-based, wildcard subdomain, and full
-  custom domain
-- Provide a simple push-based deploy mechanism
-- Expose structured logs and resource usage via OpenTelemetry (OTel)
+```bash
+# Boot two peer‑aware runtime nodes
+docker run \
+  -e KNOWN_PEERS="localhost:3000,localhost:4000" \
+  -e DATA_DIR="/data" \
+  -p 3000:3000 \
+  -ti denoland/deploy
 
-## System Overview
+docker run \
+  -e KNOWN_PEERS="localhost:3000,localhost:4000" \
+  -e DATA_DIR="/data" \
+  -p 4000:3000 \
+  -ti denoland/deploy
+```
 
-The system consists of a single, self-contained runtime container that manages
-multiple independent JavaScript/TypeScript applications:
+Open two browser tabs pointing at `http://tenant.local:3000/rooms/chat1`.\
+Type in one tab and see the message appear in the other—across containers.
 
-- Accepts code deployments via HTTP (`/deploy`)
-- Routes incoming requests (HTTP/WS) to the appropriate app
-- Manages isolated Deno subprocesses for each app, enforcing permissions and
-  resource constraints
-- Utilizes Linux cgroups for fine-grained resource isolation (CPU, memory)
-- Collects structured usage metrics, logs, and traces via OpenTelemetry (OTel)
-- Implements network metering via per-app counters using iptables and Linux
-  cgroup networking features
+### 2. High‑Level Goals
 
-## Components
+- **Room API**\
+  First‑class `/rooms/{roomId}` endpoint with hooks\
+  `onConnect`, `onMessage`, `onDisconnect`, and optional `onRequest`
+- **Peer Mesh**\
+  Containers read `KNOWN_PEERS`, form an Erlang‑style mesh, and shard rooms by
+  consistent hashing
+- **Ultra‑Fast Cold‑Start**\
+  TCP header peek + Deno subprocess reuse → first byte in < 50 ms
+- **Static Asset Offload**\
+  Proxy serves `/index.html`, `/client.js`, etc. directly from disk
+- **Strict Isolation**\
+  Each tenant runs in its own Deno subprocess (V8 sandbox + cgroup limits)
+- **Horizontal Scale‑Out**\
+  Add nodes to increase capacity; rooms auto‑route to their owner
 
-### Proxy Router (data-plane)
+### 3. Core Components
 
-- Listens on port 4000
-- Routes requests based on:
-  - Host header (for domain-based routing)
-  - Path (`/run?plugin=name` for path-based invocation)
-- Serves static files and upgrades WebSocket connections
-- Forwards requests to the corresponding Deno subprocess
+#### 3.1 Proxy Router (Port 3000)
 
-### Deployment API (control-plane)
+- **Technology**: Pingora (Rust) for HTTP/1.x, WebSocket, future TLS
+- **Pipeline**:
+  1. **TenantExtraction** – parse `Host:` → tenant context
+  2. **StaticFileModule** – serve `$DATA_DIR/<tenant>/static/*`
+  3. **RoomProxyService** – intercept `/rooms/{roomId}`, decide local vs remote
 
-- Listens on port 4001
-- Handles code uploads via `POST /deploy`
-  - Accepts plugin name or domain
-  - Stores code in local filesystem under `/apps/<name>`
-  - Optionally processes `config.json`
-- Initializes subprocess or marks app for lazy boot
+- **Routing Logic**:
+  - **Local** – connect to Unix socket at `/data/<tenant>/sockets/{roomId}.sock`
+  - **Remote** – forward connection to the owning peer (consistent‑hash on
+    `roomId`)
 
-### Subprocess Manager
+#### 3.2 Peer Mesh
 
-- Manages lifecycle of Deno subprocess per app:
-  - Uses real `deno` binary with version pinning
-  - Applies permissions from `config.json` (file, network, environment)
-  - Enforces resource limits using Linux cgroups v2:
-    - `cpu.max` for CPU constraints
-    - `memory.max` to cap memory usage, triggering an out-of-memory (OOM) kill
-      if exceeded
-    - Network bandwidth and usage metered using per-app network namespaces and
-      iptables counters
-- Monitors subprocesses and restarts them if they crash or upon re-deployment
-- Implements scale-to-zero via idle timeout and automatic shutdown
+- **Discovery** – read `KNOWN_PEERS` at startup
+- **Handshake** – establish TCP connections to peers, maintain live list
+- **Sharding** – hash `roomId` → peer index (ensures exactly one owner per room)
+- **Use‑cases** – cross‑container WS proxying, fail‑over, elastic scaling
 
-### App Storage
+#### 3.3 Subprocess Manager
 
-- Apps live on disk at `/apps/<id>/`
-  - `code/` contains source files
-  - `config.json` defines runtime behavior
-- App ID may be plugin name (`plugin-greeter`), wildcard domain
-  (`foo.localhost`), or full domain (`app.example.com`)
+- **Bootstrap Shim** – `/opt/bootstrap.ts` loads each tenant’s `user_code.ts`
+  via `Deno.serve`
+- **Permissions** – Deno CLI flags (`--allow-net`, `--allow-read`, etc.)
+- **Resource Limits** – Linux cgroups v2 for CPU & memory
+- **Lifecycle** – reuse warm processes, scale to zero on idle, spawn single‑use
+  isolates for cold‑start tests
 
-### Observability & Metering
+### 4. Developer API
 
-- Each Deno subprocess emits logs, distributed traces, and metrics
-- Runtime collects detailed resource usage data, including:
-  - CPU usage (time spent in user and kernel mode)
-  - Peak and average memory footprint
-  - Network bytes sent and received (tracked via iptables and cgroup networking)
-  - Request count and invocation timings
-- Exports structured metrics and logs via OpenTelemetry-compatible streams for
-  easy integration with existing monitoring and alerting systems
+Drop `data/<tenant>/code/user_code.ts` exporting:
 
-## Invocation Modes
+```ts
+export default {
+  async onConnect(ws: WebSocket, ctx: { roomId: string }) {
+    // called once when a client connects
+  },
 
-| Mode               | Example             | Use Case                | Security Strategy           |
-| ------------------ | ------------------- | ----------------------- | --------------------------- |
-| Path-based         | `/run/greeter`      | Plugin logic, webhooks  | JSON-only, no HTML response |
-| Wildcard subdomain | `greeter.localhost` | Internal apps, previews | Assumes local use           |
-| Custom domain      | `app.example.com`   | Full public apps        | Browser isolation, TLS      |
+  async onMessage(ws: WebSocket, message: string, ctx: { roomId: string }) {
+    // called on each message
+  },
 
-## Security Model
+  async onDisconnect(ws: WebSocket, ctx: { roomId: string }) {
+    // called when the connection closes
+  },
 
-- Each application runs as a fully isolated subprocess
-- Permissions strictly enforced through Deno CLI flags (`--allow-net`,
-  `--allow-read`, etc.)
-- Resource boundaries enforced via Linux cgroups for CPU, memory, and network
-  usage
-- Path-based invocations explicitly restricted to JSON or plain text responses
-  to prevent cross-site scripting
-- Network egress is carefully controlled and metered at the per-app level
-- Logs, traces, and metrics are scoped and isolated per applicationlied using
-  Linux cgroups
-- Path-based apps restricted to non-HTML responses
-- Logs and network access scoped per app
+  // Optional HTTP handler for non‑WebSocket requests to /rooms/{roomId}
+  async onRequest(req: Request, ctx: { roomId: string }): Promise<Response> {
+    return new Response(`Room ${ctx.roomId} got ${req.method}`, {
+      status: 200,
+    });
+  },
+};
+```
 
-## Example Flow
+- **No manual `Deno.serve`** – shim takes care of HTTP & WS
+- Hooks named for PartyKit familiarity
+- All dynamic behavior lives under `/rooms/{roomId}`
 
-1. User deploys a plugin:
-   ```
-   curl -X POST http://localhost:4001/deploy \
-     -F 'name=greeter' \
-     -F 'file=@main.ts'
-   ```
-2. Runtime saves code to `/apps/greeter/code/main.ts`
-3. Proxy receives:
-   ```
-   POST /run/greeter
-   ```
-4. Subprocess manager starts (or reuses) Deno subprocess for `greeter`
-5. Request is passed to subprocess and response returned
+### 5. Storage & Layout
 
-## Not in MVP (Future Work)
+```
+/data/
+└── <tenant>/
+    ├── static/        # index.html, client.js, assets
+    ├── code/          # user_code.ts only
+    └── sockets/       # {roomId}.sock per active room
+```
 
-- Pull-based deployments
-- Automatic TLS provisioning and certificate management
-- Durable event queues and task retries
-- Centralized domain-to-app mapping database
-- Multi-instance coordination via a remote control plane
-- Advanced resource quotas and dynamic scaling policies
+### 6. Observability
 
-- Pull-based deployments
-- TLS provisioning and certificate management
-- Durable background tasks and retry queues
-- Full domain <-> app ID registry (via database)
-- Control plane for multi-instance coordination
-- Metering
+- **Proxy Logs** – routing decisions, peer health, cold‑start timings
+- **Subprocess Logs** – `console.*` from JS code
+- **Future** – OpenTelemetry, per-room metrics, dashboards
 
-## Summary
+### 7. Inspirations & Aspirations
 
-The MVP delivers a lightweight, powerful system for running secure JavaScript
-apps in a multi-tenant runtime. It provides isolation, observability, and
-deployment tooling out of the box—ready to be embedded, extended, or scaled.
+- **Erlang VM Mesh** – dynamic, fault‑tolerant distributed nodes
+- **Cloudflare Durable Objects** – location‑transparent, stateful APIs
+- **PartyKit** – seamless real‑time front-end ↔ back-end hooks
+
+### 8. Future Enhancements
+
+- **Central Control Plane** (`app.deno.com`) for orchestration & config
+- **Automated TLS** – certificate management via Let’s Encrypt
+- **Metering & Billing** – per-tenant usage tracking (CPU, memory, bandwidth)
+- **Background Jobs & Cron** – scheduled tasks
+- **Multi‑Region & Geo‑Routing** – global distribution
+- **CLI & Dashboard** – user-friendly deploys, logs, and metrics
+
+## What’s Missing?
+
+1. **Authentication & ACLs** – secure per-tenant access control (JWT, API keys)
+2. **Backpressure & Error Handling** – graceful degradation under load
+3. **Durable Storage** – integrated KV or database for persisted state
+4. **Testing Strategy** – unit/integration tests for proxy, mesh, and shim
+5. **Shard Rebalancing** – migrating rooms when peers change
+6. **Developer UX** – CLI design and dashboard mockups
+
+- Details on how rooms persist state or recover after failure (e.g., cold‑start
+  rehydration)
+- Examples of real-world workflows (e.g., multiplayer games, collaborative
+  editing)
+- Security considerations around WebSocket origin checks and CORS
+- Performance benchmarks (throughput, latency under load)
