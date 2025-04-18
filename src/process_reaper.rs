@@ -34,7 +34,9 @@ impl ProcessReaper {
       let processes = self.process_manager.processes.lock().await;
 
       for (host, entry) in processes.iter() {
-        if now.duration_since(entry.last_used) > self.idle_timeout {
+        if now.duration_since(entry.last_used) > self.idle_timeout
+          && entry.active_connections == 0
+        {
           info!(
             host = %host,
             pid = entry.pid,
@@ -42,6 +44,13 @@ impl ProcessReaper {
             "Process marked for reaping due to inactivity"
           );
           hosts_to_reap.push(host.clone());
+        } else if entry.active_connections > 0 {
+          trace!(
+            host = %host,
+            pid = entry.pid,
+            active_connections = entry.active_connections,
+            "Skipping reap for process with active connections"
+          );
         }
       }
     }

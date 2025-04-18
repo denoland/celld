@@ -7,6 +7,7 @@ use pingora::prelude::*;
 use pingora::server::configuration::ServerConf;
 use pingora::services::background::background_service;
 use pingora::upstreams::peer::HttpPeer;
+use pingora::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,6 +73,21 @@ impl ProxyHttp for DenoProxyApp {
     MyCtx::default()
   }
 
+  // Called when the entire response is sent to the downstream, or when there is a fatal error
+  async fn logging(
+    &self,
+    _session: &mut Session,
+    _e: Option<&Error>,
+    ctx: &mut Self::CTX,
+  ) {
+    if !ctx.tenant.is_empty() {
+      let _ = self
+        .process_manager
+        .decrement_connection_count(&ctx.tenant)
+        .await;
+    }
+  }
+
   async fn request_filter(
     &self,
     session: &mut Session,
@@ -96,7 +112,10 @@ impl ProxyHttp for DenoProxyApp {
           "Missing Host header",
         ));
       };
-    ctx.tenant = host.to_string();
+
+    // Extract hostname without port
+    let hostname = host.split(':').next().unwrap_or(host);
+    ctx.tenant = hostname.to_string();
 
     // Only handle GET and HEAD requests
     if req_header.method != http::Method::GET
@@ -202,6 +221,11 @@ impl ProxyHttp for DenoProxyApp {
       {
         Ok((path, _stream)) => {
           // We only need the path, Pingora will handle the connection
+          // Increment active connection count
+          self
+            .process_manager
+            .increment_connection_count(&ctx.tenant)
+            .await;
           path
         }
         Err(ProxyError::AppNotFound(host_not_found)) => {

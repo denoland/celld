@@ -16,8 +16,9 @@ pub struct ProcessEntry {
   pub pid: u32,
   pub socket_path: PathBuf,
   pub last_used: Instant,
-  pub process_handle: Child, // To kill the process
-  pub single_use: bool,      // Flag for single-use isolates
+  pub process_handle: Child,   // To kill the process
+  pub single_use: bool,        // Flag for single-use isolates
+  pub active_connections: u32, // Counter for active connections (including WebSockets)
 }
 
 #[derive(Clone)]
@@ -31,6 +32,44 @@ impl ProcessManager {
     ProcessManager {
       data_dir: std::fs::canonicalize(data_dir.clone()).unwrap(),
       processes: Arc::new(Mutex::new(HashMap::new())),
+    }
+  }
+
+  /// Track a new connection to the process
+  pub async fn increment_connection_count(&self, host: &str) -> bool {
+    let mut processes = self.processes.lock().await;
+    if let Some(entry) = processes.get_mut(host) {
+      entry.active_connections += 1;
+      entry.last_used = Instant::now();
+      info!(
+        host = %host,
+        pid = entry.pid,
+        active_connections = entry.active_connections,
+        "Incremented active connection count"
+      );
+      true
+    } else {
+      false
+    }
+  }
+
+  /// Track a closed connection to the process
+  pub async fn decrement_connection_count(&self, host: &str) -> bool {
+    let mut processes = self.processes.lock().await;
+    if let Some(entry) = processes.get_mut(host) {
+      if entry.active_connections > 0 {
+        entry.active_connections -= 1;
+      }
+      entry.last_used = Instant::now();
+      info!(
+        host = %host,
+        pid = entry.pid,
+        active_connections = entry.active_connections,
+        "Decremented active connection count"
+      );
+      true
+    } else {
+      false
     }
   }
 
@@ -194,6 +233,7 @@ impl ProcessManager {
       last_used: Instant::now(),
       process_handle, // Move handle into entry
       single_use,
+      active_connections: 0, // Initialize with zero connections
     };
 
     // For single-use isolates, use a unique key with a UUID suffix

@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Echo Test</title>
+    <style>
+      body {
+        font-family:
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          Roboto,
+          Oxygen,
+          Ubuntu,
+          Cantarell,
+          "Open Sans",
+          "Helvetica Neue",
+          sans-serif;
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      h1 {
+        margin-bottom: 20px;
+      }
+      #connection-status {
+        margin-bottom: 15px;
+        font-weight: bold;
+      }
+      .connected {
+        color: green;
+      }
+      .disconnected {
+        color: red;
+      }
+      .controls {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 15px;
+      }
+      input[type="text"] {
+        flex: 1;
+        padding: 8px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+      }
+      button {
+        padding: 8px 15px;
+        background-color: #4285f4;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      button:hover {
+        background-color: #3367d6;
+      }
+      button:disabled {
+        background-color: #cccccc;
+        cursor: not-allowed;
+      }
+      #log {
+        border: 1px solid #ccc;
+        padding: 10px;
+        height: 300px;
+        overflow-y: auto;
+        background-color: #f9f9f9;
+        border-radius: 4px;
+        margin-bottom: 15px;
+      }
+      .sent {
+        color: blue;
+      }
+      .received {
+        color: green;
+      }
+      .error {
+        color: red;
+      }
+      .system {
+        color: #666;
+        font-style: italic;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>WebSocket Echo Test</h1>
+
+    <div id="connection-status" class="disconnected">Disconnected</div>
+
+    <div class="controls">
+      <input
+        type="text"
+        id="url"
+        value="ws://ws-echo.localhost:3000/ws"
+        placeholder="WebSocket URL"
+      >
+      <button id="connect-btn">Connect</button>
+      <button id="disconnect-btn" disabled>Disconnect</button>
+    </div>
+
+    <div class="controls">
+      <input
+        type="text"
+        id="message"
+        placeholder="Enter message to send"
+        disabled
+      >
+      <button id="send-btn" disabled>Send</button>
+    </div>
+
+    <div id="log"></div>
+
+    <script>
+      const connectBtn = document.getElementById("connect-btn");
+      const disconnectBtn = document.getElementById("disconnect-btn");
+      const sendBtn = document.getElementById("send-btn");
+      const urlInput = document.getElementById("url");
+      const messageInput = document.getElementById("message");
+      const statusDiv = document.getElementById("connection-status");
+      const logDiv = document.getElementById("log");
+
+      let socket = null;
+
+      function addToLog(message, type) {
+        const div = document.createElement("div");
+        div.textContent = `${
+          new Date().toLocaleTimeString()
+        }: ${message}`;
+        div.className = type;
+        logDiv.appendChild(div);
+        logDiv.scrollTop = logDiv.scrollHeight;
+      }
+
+      function connect() {
+        if (socket) {
+          socket.close();
+        }
+
+        const url = urlInput.value.trim();
+        if (!url) {
+          addToLog("Please enter a valid WebSocket URL", "error");
+          return;
+        }
+
+        try {
+          socket = new WebSocket(url);
+
+          socket.onopen = () => {
+            statusDiv.textContent = "Connected";
+            statusDiv.className = "connected";
+            connectBtn.disabled = true;
+            disconnectBtn.disabled = false;
+            messageInput.disabled = false;
+            sendBtn.disabled = false;
+            addToLog(`Connected to ${url}`, "system");
+
+            // Send a ping message to test the connection
+            setTimeout(() => {
+              if (socket && socket.readyState === WebSocket.OPEN) {
+                addToLog("Sending initial ping message...", "system");
+                socket.send("ping");
+              }
+            }, 500);
+          };
+
+          socket.onmessage = (event) => {
+            try {
+              // Try to parse as JSON
+              const data = JSON.parse(event.data);
+              if (data.type === "welcome") {
+                addToLog(`Server: ${data.message}`, "received");
+              } else if (data.type === "echo") {
+                addToLog(
+                  `Echo: ${data.originalMessage} (at ${
+                    new Date(data.timestamp).toLocaleTimeString()
+                  })`,
+                  "received",
+                );
+              } else {
+                addToLog(`Received: ${event.data}`, "received");
+              }
+            } catch (e) {
+              // Not JSON, just show as plain text
+              addToLog(`Received: ${event.data}`, "received");
+            }
+          };
+
+          socket.onerror = (error) => {
+            addToLog("WebSocket error", "error");
+            console.error("WebSocket error:", error);
+          };
+
+          socket.onclose = (event) => {
+            statusDiv.textContent = "Disconnected";
+            statusDiv.className = "disconnected";
+            connectBtn.disabled = false;
+            disconnectBtn.disabled = true;
+            messageInput.disabled = true;
+            sendBtn.disabled = true;
+            addToLog(
+              `Disconnected (code: ${event.code}${
+                event.reason ? ", reason: " + event.reason : ""
+              })`,
+              "system",
+            );
+          };
+        } catch (error) {
+          addToLog(`Failed to connect: ${error.message}`, "error");
+        }
+      }
+
+      function disconnect() {
+        if (socket) {
+          socket.close();
+          socket = null;
+        }
+      }
+
+      function sendMessage() {
+        const message = messageInput.value.trim();
+        if (!message) return;
+
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(message);
+          addToLog(`Sent: ${message}`, "sent");
+          messageInput.value = "";
+        } else {
+          addToLog("Not connected to a WebSocket server", "error");
+        }
+      }
+
+      connectBtn.addEventListener("click", connect);
+      disconnectBtn.addEventListener("click", disconnect);
+      sendBtn.addEventListener("click", sendMessage);
+
+      messageInput.addEventListener("keypress", (event) => {
+        if (event.key === "Enter") {
+          sendMessage();
+        }
+      });
+    </script>
+  </body>
+</html>
