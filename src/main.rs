@@ -62,6 +62,7 @@ struct DenoProxyApp {
 #[derive(Debug, Default)]
 pub struct MyCtx {
   tenant: String,
+  room_id: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -124,8 +125,23 @@ impl ProxyHttp for DenoProxyApp {
       return Ok(false);
     }
 
-    // Process the path and handle static files
-    let rel_path = req_header.uri.path().trim_start_matches('/');
+    // Get the path
+    let path = req_header.uri.path();
+
+    // Check if this is a /room/* path - if so, let the default proxy path handle it
+    if let Some(room_path) = path.strip_prefix("/room/") {
+      if !room_path.is_empty() {
+        // Store the room ID as the first path segment
+        let room_id = room_path.split('/').next().unwrap_or(room_path);
+        // Store the room ID in the context for later use
+        ctx.room_id = Some(room_id.to_string());
+        info!(room_id = %room_id, "Proxying request to room");
+        return Ok(false); // Let it be handled by the upstream_peer method
+      }
+    }
+
+    // Process the path and handle static files for non-room paths
+    let rel_path = path.trim_start_matches('/');
 
     // Create a String to store our modified path
     let rel_path_ = if rel_path.is_empty() || rel_path.ends_with('/') {
@@ -206,17 +222,26 @@ impl ProxyHttp for DenoProxyApp {
       .headers
       .contains_key("x-single-use-isolate");
 
+    // Room ID is now passed to the process directly via environment variable
+
     info!(
       host = %ctx.tenant,
+      room_id = ?ctx.room_id,
       single_use = %single_use,
       "Processing request"
     );
 
     // Get or spawn the process
+    // Get the room_id from the context, or use a default value
+    let room_id = match &ctx.room_id {
+      Some(id) => id.as_str(),
+      None => "default-room", // Default room ID if none specified
+    };
+
     let socket_path: PathBuf = {
       match self
         .process_manager
-        .get_or_spawn_process(&ctx.tenant, single_use)
+        .get_or_spawn_process(&ctx.tenant, room_id, single_use)
         .await
       {
         Ok((path, _stream)) => {
@@ -395,8 +420,9 @@ mod tests {
     use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
     init();
 
-    // Connect to the WebSocket server with the host in the URL
-    let url = url::Url::parse("ws://ws-echo.localhost:6146/ws").unwrap();
+    // Connect to the WebSocket server with the host in the URL - now using /room/test-room path
+    let url =
+      url::Url::parse("ws://ws-echo.localhost:6146/room/test-room").unwrap();
 
     let (ws_stream, _) = connect_async(url)
       .await
@@ -435,6 +461,12 @@ mod tests {
     assert!(
       echo_data.get("timestamp").is_some(),
       "Echo response should contain a timestamp"
+    );
+
+    // Verify the roomId is set correctly from path
+    assert_eq!(
+      echo_data["roomId"], "test-room",
+      "Echo response should contain the room ID"
     );
 
     // Close the connection

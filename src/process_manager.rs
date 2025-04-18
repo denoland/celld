@@ -73,10 +73,11 @@ impl ProcessManager {
     }
   }
 
-  #[instrument(skip(self), fields(host = %host))]
+  #[instrument(skip(self), fields(host = %host, room_id = %room_id))]
   pub async fn get_or_spawn_process(
     &self,
     host: &str,
+    room_id: &str,
     single_use: bool,
   ) -> Result<(PathBuf, UnixStream), ProxyError> {
     let mut processes = self.processes.lock().await;
@@ -163,7 +164,7 @@ impl ProcessManager {
 
     let mut process_handle = Command::new("deno")
       .env("DENO_SERVE_ADDRESS", socket_path.clone())
-      .env("X-Room-Id", host) // Pass host as room ID to bootstrap.ts
+      .env("X-Room-Id", room_id) // Pass room ID to bootstrap.ts
       .arg("run")
       .arg(format!("--allow-read={}", app_code_dir.display()))
       .arg(format!("--allow-read={}", socket_path.display()))

@@ -13,7 +13,11 @@ interface Context {
 
 interface Server {
   webSocketOpen?: (ws: WebSocket, ctx: Context) => Promise<void>;
-  webSocketMessage?: (ws: WebSocket, msg: string, ctx: Context) => Promise<void>;
+  webSocketMessage?: (
+    ws: WebSocket,
+    msg: string,
+    ctx: Context,
+  ) => Promise<void>;
   webSocketClose?: (ws: WebSocket, ctx: Context) => Promise<void>;
   fetch?: (req: Request, ctx: { roomId: string }) => Promise<Response>;
 }
@@ -23,9 +27,12 @@ async function bootstrap(userModulePath: string) {
   // Support export default pattern
   const userModule: Server = module.default || module;
 
-  const roomId = Deno.env.get("X-Room-Id")!;
+  // Get the room ID from environment variable once, when the process starts
+  const roomId = Deno.env.get("X-Room-Id") || "";
+  console.log(`Bootstrap starting with roomId: ${roomId}`);
 
   Deno.serve(async (req) => {
+    // Use the room ID from the environment variable for all requests
     const ctx = { roomId };
 
     if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {

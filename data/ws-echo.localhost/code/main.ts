@@ -17,6 +17,7 @@ export default {
       type: "echo",
       originalMessage: data,
       timestamp,
+      roomId: ctx.roomId,
     }));
   },
 
