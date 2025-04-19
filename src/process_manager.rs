@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tempfile::TempDir;
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
@@ -19,6 +20,7 @@ pub struct ProcessEntry {
   pub parent_exit_guard: ChildOnParentExit, // Guard for automatic termination on parent exit
   pub single_use: bool,                     // Flag for single-use isolates
   pub active_connections: u32, // Counter for active connections (including WebSockets)
+  pub _socket_tempdir: TempDir, // Keep tempdir alive as long as process exists
 }
 
 #[derive(Clone)]
@@ -123,29 +125,23 @@ impl ProcessManager {
 
     let app_code_dir = self.data_dir.join(host).join("code");
     let main_script = app_code_dir.join("main.ts");
-    let sockets_dir = self.data_dir.join(host).join("sockets");
 
     if !main_script.exists() {
       warn!("Application code not found at {}", main_script.display());
       return Err(ProxyError::AppNotFound(host.to_string()));
     }
 
-    // Create sockets dir if it doesn't exist
-    tokio::fs::create_dir_all(&sockets_dir)
-      .await
-      .with_context(|| {
-        format!(
-          "Failed to create sockets directory: {}",
-          sockets_dir.display()
-        )
-      })?;
+    // Create a temporary directory for the socket
+    // This will be automatically cleaned up when dropped
+    let socket_tempdir = tempfile::tempdir()
+      .with_context(|| "Failed to create temporary directory for socket")?;
 
     let socket_name = {
       let uuid_string = Uuid::new_v4().to_string();
       let first_segment: &str = &uuid_string[0..8];
       format!("{}.sock", first_segment)
     };
-    let socket_path = sockets_dir.join(socket_name);
+    let socket_path = socket_tempdir.path().join(socket_name);
 
     // Path to bootstrap.ts script
     let bootstrap_script = self
@@ -207,8 +203,7 @@ impl ProcessManager {
         );
         // Kill the process using ChildOnParentExit
         child_guard.kill();
-        // Also try cleaning up the socket file if it exists
-        let _ = tokio::fs::remove_file(&socket_).await;
+        // The tempdir will be dropped at the end of this scope, cleaning up the socket file
         return Err(
           anyhow::anyhow!("Timeout waiting for process socket").into(),
         );
@@ -241,7 +236,7 @@ impl ProcessManager {
           );
           // Kill the process using ChildOnParentExit
           child_guard.kill();
-          let _ = tokio::fs::remove_file(&socket_).await; // Cleanup attempt
+          // The tempdir will be dropped at the end of this scope, cleaning up the socket file
           return Err(
             anyhow::anyhow!("Error connecting to process socket: {}", e).into(),
           );
@@ -256,6 +251,7 @@ impl ProcessManager {
       parent_exit_guard: child_guard, // Store the parent exit guard
       single_use,
       active_connections: 0, // Initialize with zero connections
+      _socket_tempdir: socket_tempdir, // Keep tempdir alive as long as process exists
     };
 
     // For single-use isolates, use a unique key with a UUID suffix
@@ -311,25 +307,12 @@ impl ProcessManager {
           // Kill process using the parent_exit_guard
           entry.parent_exit_guard.kill();
           // The Drop implementation of ChildOnParentExit will finish the process cleanup
+          // The TempDir will be dropped when entry is dropped, cleaning up the socket file
           info!(
             host = %host,
             pid = entry.pid,
             "Killed process using parent-exit guard"
           );
-
-          // Attempt to clean up the socket file
-          if let Err(e) = tokio::fs::remove_file(&entry.socket_path).await {
-            // Log error but continue cleanup - file might already be gone
-            if e.kind() != std::io::ErrorKind::NotFound {
-              error!(
-                host = %host,
-                pid = entry.pid,
-                socket = %entry.socket_path.display(),
-                error = %e,
-                "Failed to remove socket file during reap"
-              );
-            }
-          }
           info!(
             host = %host,
             pid = entry.pid,

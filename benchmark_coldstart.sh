@@ -8,9 +8,6 @@ echo "Cleaning up any existing processes..."
 pkill -f "deno run" || true
 sleep 1
 
-echo "Removing any stale socket files..."
-find ./data -name "*.sock" -type s -delete 2>/dev/null || true
-
 echo "Starting server with tracing disabled..."
 RUST_LOG=error ./target/release/self-hosted-deno-deploy &
 SERVER_PID=$!
