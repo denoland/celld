@@ -60,22 +60,21 @@ impl ProcessReaper {
       let mut processes = self.process_manager.processes.lock().await;
 
       for host in hosts_to_reap {
-        if let Some(mut entry) = processes.remove(&host) {
+        if let Some(entry) = processes.remove(&host) {
           warn!(
             host = %host,
             pid = entry.pid,
             "Reaping idle process"
           );
 
-          // Attempt to kill the process
-          if let Err(e) = entry.process_handle.kill().await {
-            error!(
-              host = %host,
-              pid = entry.pid,
-              error = %e,
-              "Failed to kill process during reap"
-            );
-          }
+          // Kill process using the parent_exit_guard
+          entry.parent_exit_guard.kill();
+          // The Drop implementation of ChildOnParentExit will finish the process cleanup
+          info!(
+            host = %host,
+            pid = entry.pid,
+            "Killed process using parent-exit guard"
+          );
 
           // Attempt to clean up the socket file
           if let Err(e) = tokio::fs::remove_file(&entry.socket_path).await {

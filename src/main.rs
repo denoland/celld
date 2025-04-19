@@ -1,3 +1,4 @@
+mod child_on_parent_exit;
 mod process_manager;
 mod process_reaper;
 

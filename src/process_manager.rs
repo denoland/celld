@@ -4,20 +4,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UnixStream;
-use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{error, info, instrument, trace, warn};
 use uuid::Uuid;
 
+use crate::child_on_parent_exit::ChildOnParentExit;
 use crate::ProxyError;
 
 pub struct ProcessEntry {
   pub pid: u32,
   pub socket_path: PathBuf,
   pub last_used: Instant,
-  pub process_handle: Child,   // To kill the process
-  pub single_use: bool,        // Flag for single-use isolates
+  pub parent_exit_guard: ChildOnParentExit, // Guard for automatic termination on parent exit
+  pub single_use: bool,                     // Flag for single-use isolates
   pub active_connections: u32, // Counter for active connections (including WebSockets)
 }
 
@@ -162,7 +162,9 @@ impl ProcessManager {
       "Spawning Deno process"
     );
 
-    let mut process_handle = Command::new("deno")
+    // Create Command but don't spawn it yet - we'll use ChildOnParentExit
+    let mut cmd = std::process::Command::new("deno");
+    cmd
       .env("DENO_SERVE_ADDRESS", socket_path.clone())
       .env("X-Room-Id", room_id) // Pass room ID to bootstrap.ts
       .arg("run")
@@ -172,14 +174,20 @@ impl ProcessManager {
       .arg("--allow-net")
       .arg("--allow-env=X-Room-Id") // Permission to read env var
       .arg(&bootstrap_script) // Use bootstrap.ts instead of main.ts directly
-      .arg(&main_script) // Pass main.ts as argument to bootstrap.ts
-      .spawn()
-      .with_context(|| format!("Failed to spawn Deno process for {}", host))?;
+      .arg(&main_script); // Pass main.ts as argument to bootstrap.ts
 
-    let pid = process_handle.id().ok_or_else(|| {
-      anyhow::anyhow!("Failed to get PID for spawned process")
+    // Spawn with ChildOnParentExit for automatic termination when parent exits
+    let child_guard = ChildOnParentExit::spawn(cmd).with_context(|| {
+      format!(
+        "Failed to spawn Deno process for {} with parent-exit guard",
+        host
+      )
     })?;
-    info!(pid = pid, "Deno process spawned");
+
+    // Convert to tokio::process::Child using the PID
+    let pid = child_guard.pid().unwrap() as u32;
+
+    info!(pid = pid, "Deno process spawned with parent-exit guard");
 
     // --- Wait for the socket to become available (crucial for cold start) ---
     let socket_ = socket_path.clone();
@@ -197,8 +205,8 @@ impl ProcessManager {
           socket = %socket_.display(),
           "Timeout waiting for Deno process socket"
         );
-        // Attempt to kill the potentially zombie process
-        let _ = process_handle.kill().await;
+        // Kill the process using ChildOnParentExit
+        child_guard.kill();
         // Also try cleaning up the socket file if it exists
         let _ = tokio::fs::remove_file(&socket_).await;
         return Err(
@@ -231,7 +239,8 @@ impl ProcessManager {
             error = %e,
             "Error connecting to socket during startup"
           );
-          let _ = process_handle.kill().await;
+          // Kill the process using ChildOnParentExit
+          child_guard.kill();
           let _ = tokio::fs::remove_file(&socket_).await; // Cleanup attempt
           return Err(
             anyhow::anyhow!("Error connecting to process socket: {}", e).into(),
@@ -244,7 +253,7 @@ impl ProcessManager {
       pid,
       socket_path: socket_path.clone(),
       last_used: Instant::now(),
-      process_handle, // Move handle into entry
+      parent_exit_guard: child_guard, // Store the parent exit guard
       single_use,
       active_connections: 0, // Initialize with zero connections
     };
@@ -292,23 +301,21 @@ impl ProcessManager {
 
       // Separate loop for removal to avoid mutable borrow issues while iterating
       for host in hosts_to_reap {
-        if let Some(mut entry) = processes.remove(&host) {
+        if let Some(entry) = processes.remove(&host) {
           warn!(
             host = %host,
             pid = entry.pid,
             "Reaping idle process"
           );
 
-          // Attempt to kill the process
-          if let Err(e) = entry.process_handle.kill().await {
-            error!(
-              host = %host,
-              pid = entry.pid,
-              error = %e,
-              "Failed to kill process during reap"
-            );
-            // Decide if you want to keep the entry for retry or fully remove
-          }
+          // Kill process using the parent_exit_guard
+          entry.parent_exit_guard.kill();
+          // The Drop implementation of ChildOnParentExit will finish the process cleanup
+          info!(
+            host = %host,
+            pid = entry.pid,
+            "Killed process using parent-exit guard"
+          );
 
           // Attempt to clean up the socket file
           if let Err(e) = tokio::fs::remove_file(&entry.socket_path).await {
