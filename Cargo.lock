@@ -646,6 +646,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashring"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43bfd649ac5e0f82ae98d547450f1d31af49742be255b5380c61fc8513b9df11"
+dependencies = [
+ "siphasher",
+]
+
+[[package]]
 name = "heck"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1762,6 +1771,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "roomd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "hashring",
+ "http 1.3.1",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "nix 0.29.0",
+ "once_cell",
+ "pingora",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.12",
+ "tokio",
+ "tokio-test",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "rust_decimal"
 version = "1.37.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1907,35 +1946,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "self-hosted-deno-deploy"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "futures-util",
- "http 1.3.1",
- "http-body-util",
- "hyper",
- "hyper-util",
- "nix 0.29.0",
- "once_cell",
- "pingora",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.12",
- "tokio",
- "tokio-test",
- "tokio-tungstenite",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "serde"
 version = "1.0.219"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2034,6 +2044,12 @@ checksum = "a9e9e0b4211b72e7b8b6e85c807d36c212bdb33ea8587f7569562a84df5465b1"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "siphasher"
+version = "0.3.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38b58827f4464d87d377d175e90bf58eb00fd8716ff0a62f80356b5e61555d0d"
 
 [[package]]
 name = "slab"

@@ -1,5 +1,5 @@
 [package]
-name = "self-hosted-deno-deploy"
+name = "roomd"
 version = "0.1.0"
 edition = "2021"
 
@@ -20,6 +20,7 @@ nix = { version = "0.29", features = ["process", "signal", "fs"] }
 
 pingora = { version = "0.4", features = ["proxy"] }
 tempfile = "3.19.1"
+hashring = "0.3.6"
 #pingora-error = "0.4"
 
 [patch.crates-io]

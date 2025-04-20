@@ -1,4 +1,5 @@
 mod child_on_parent_exit;
+mod peer_manager;
 mod process_manager;
 mod process_reaper;
 
@@ -14,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info};
 
+use peer_manager::PeerManager;
 use process_manager::ProcessManager;
 use process_reaper::ProcessReaper;
 
@@ -58,6 +60,7 @@ pub enum ProxyError {
 /// DenoProxyApp implements the HTTP proxy service for Deno processes
 struct DenoProxyApp {
   process_manager: ProcessManager,
+  peer_manager: PeerManager,
 }
 
 #[derive(Debug, Default)]
@@ -130,6 +133,90 @@ impl ProxyHttp for DenoProxyApp {
 
     // Get the path
     let path = req_header.uri.path();
+
+    // Special endpoints for mesh network debugging
+
+    // Endpoint to list all peers in the mesh
+    // TODO this shouldn't be on data_port but instead on control_port
+    if path == "/_mesh/peers" {
+      let peers = self.peer_manager.get_all_peers();
+      let local_peer = self.peer_manager.get_local_peer();
+
+      // Build a JSON array of peers
+      let mut peer_json = String::from("[");
+      for (i, peer) in peers.iter().enumerate() {
+        if i > 0 {
+          peer_json.push(',');
+        }
+        peer_json.push_str(&format!(
+          "{{\"address\":\"{}\",\"is_local\":{}}}",
+          peer,
+          peer == local_peer
+        ));
+      }
+      peer_json.push(']');
+
+      // Return a JSON response with all peers
+      let response = format!(
+        "{{\"peers\":{},\"count\":{},\"local\":\"{}\"}}",
+        peer_json,
+        peers.len(),
+        local_peer
+      );
+
+      let content_length = response.len();
+      let mut resp =
+        pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
+      resp
+        .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
+        .unwrap();
+      resp
+        .insert_header(http::header::CONTENT_TYPE, "application/json")
+        .unwrap();
+
+      session.write_response_header(Box::new(resp), false).await?;
+      session
+        .write_response_body(Some(response.into()), true)
+        .await?;
+      session.set_keepalive(None);
+      return Ok(true);
+    }
+
+    // Endpoint to check which peer is responsible for a room
+    // TODO this shouldn't be on data_port but instead on control_port
+    if let Some(room_id) = path.strip_prefix("/_mesh/owner/") {
+      if !room_id.is_empty() {
+        let owner = self.peer_manager.get_owner_peer(room_id);
+        let is_local = self.peer_manager.is_local_owner(room_id);
+
+        // Return a simple JSON response with owner information
+        let response = format!(
+          "{{\"room_id\":\"{}\",\"owner\":\"{}\",\"is_local\":{}}}",
+          room_id, owner, is_local
+        );
+
+        let content_length = response.len();
+        let mut resp =
+          pingora::http::ResponseHeader::build(StatusCode::OK, Some(2))
+            .unwrap();
+        resp
+          .insert_header(
+            http::header::CONTENT_LENGTH,
+            content_length.to_string(),
+          )
+          .unwrap();
+        resp
+          .insert_header(http::header::CONTENT_TYPE, "application/json")
+          .unwrap();
+
+        session.write_response_header(Box::new(resp), false).await?;
+        session
+          .write_response_body(Some(response.into()), true)
+          .await?;
+        session.set_keepalive(None);
+        return Ok(true);
+      }
+    }
 
     // Check if this is a /room/* path - if so, let the default proxy path handle it
     if let Some(room_path) = path.strip_prefix("/room/") {
@@ -228,21 +315,52 @@ impl ProxyHttp for DenoProxyApp {
       .headers
       .contains_key("x-single-use-isolate");
 
-    // Room ID is now passed to the process directly via environment variable
-
-    info!(
-      host = %ctx.tenant,
-      room_id = ?ctx.room_id,
-      single_use = %single_use,
-      "Processing request"
-    );
-
-    // Get or spawn the process
     // Get the room_id from the context, or use a default value
     let room_id = match &ctx.room_id {
       Some(id) => id.as_str(),
       None => "default-room", // Default room ID if none specified
     };
+
+    info!(
+      host = %ctx.tenant,
+      room_id = %room_id,
+      single_use = %single_use,
+      "Processing request"
+    );
+
+    // Check if this instance is responsible for this room
+    if !self.peer_manager.is_local_owner(room_id) {
+      // We need to forward this request to the responsible peer
+      let upstream_addr = self.peer_manager.get_owner_peer(room_id);
+
+      info!(
+        host = %ctx.tenant,
+        room_id = %room_id,
+        responsible_peer = %upstream_addr,
+        "Forwarding request to responsible peer"
+      );
+
+      // Create a Backend using the responsible peer's socket address
+      let sni = ctx.tenant.clone();
+
+      // Create HTTP peer for the remote peer
+      let peer = HttpPeer::new(upstream_addr, false, sni);
+
+      info!(
+        host = %ctx.tenant,
+        room_id = %room_id,
+        upstream = %upstream_addr,
+        "Selected remote peer"
+      );
+      return Ok(Box::new(peer));
+    }
+
+    // We are the responsible peer, so handle the request locally
+    info!(
+      host = %ctx.tenant,
+      room_id = %room_id,
+      "This instance is responsible for handling the request"
+    );
 
     let socket_path: PathBuf = {
       match self
@@ -322,12 +440,20 @@ impl ProxyHttp for DenoProxyApp {
 
 /// Starts the server with the given data directory and port
 /// Returns the server instance
-fn start_server(data_dir: PathBuf, port: u16) -> Server {
+fn start_server(
+  data_dir: PathBuf,
+  data_port: u16,
+  known_peers: Vec<String>,
+  self_addr: Option<String>,
+) -> Server {
   // Create a server configuration
   let server_conf = Arc::new(ServerConf::new().unwrap());
 
   // Create a new Pingora server
   let mut server = Server::new(None).unwrap();
+
+  let self_addr =
+    self_addr.unwrap_or_else(|| format!("127.0.0.1:{}", data_port));
 
   // Create the process manager with default timeout values
   let process_manager = ProcessManager::new(data_dir.clone());
@@ -335,14 +461,21 @@ fn start_server(data_dir: PathBuf, port: u16) -> Server {
   // Create the proxy app that will handle routing
   let app = DenoProxyApp {
     process_manager: process_manager.clone(),
+    peer_manager: {
+      let peer_manager = PeerManager::new(known_peers, self_addr.clone());
+      info!(
+        "Peer manager initialized with {} peers",
+        peer_manager.num_peers()
+      );
+      peer_manager
+    },
   };
 
   // Create an HTTP proxy service with our app
   let mut proxy_service = http_proxy_service(&server_conf, app);
 
   // Configure the proxy service to listen on the specified port
-  let listen_addr = format!("0.0.0.0:{}", port);
-  proxy_service.add_tcp(&listen_addr);
+  proxy_service.add_tcp(&self_addr);
 
   let reaper_service = background_service(
     "process_reaper",
@@ -357,13 +490,26 @@ fn start_server(data_dir: PathBuf, port: u16) -> Server {
   // Add the proxy service to the server
   server.add_service(proxy_service);
 
-  info!("Starting Deno Deploy proxy server on port {}", port);
+  info!("Starting Deno Deploy proxy server on port {}", data_port);
   server
 }
 
 fn main() {
   tracing_subscriber::fmt::init();
-  let server = start_server(DATA_DIR.clone(), *DATA_PORT);
+
+  let self_addr = std::env::var("SELF_ADDR")
+    .ok()
+    .map(|s| s.trim().to_string());
+  let known_peers = std::env::var("KNOWN_PEERS")
+    .unwrap_or_default()
+    .split(',')
+    .map(str::trim)
+    .filter(|s| !s.is_empty())
+    .map(String::from)
+    .collect::<Vec<_>>();
+
+  let server =
+    start_server(DATA_DIR.clone(), *DATA_PORT, known_peers, self_addr);
   server.run_forever();
 }
 
@@ -378,11 +524,18 @@ mod tests {
   // inspired by https://github.com/cloudflare/pingora/blob/caa6a0/pingora-core/tests/utils/mod.rs
   pub static TEST_SERVER: Lazy<std::thread::JoinHandle<()>> = Lazy::new(|| {
     let data_dir = PathBuf::from("./data");
+    // Ensure we're using a clean environment for the test server
+    std::env::set_var("KNOWN_PEERS", ""); // Empty string forces standalone mode
+    std::env::set_var("DATA_PORT", "6146"); // Explicitly set port for test server
+    assert_eq!(*DATA_PORT, 6146);
+
     let h = std::thread::spawn(|| {
-      let server = start_server(data_dir, 6146);
+      let server = start_server(data_dir, 6146, vec![], None);
       server.run_forever();
     });
-    std::thread::sleep(Duration::from_secs(2));
+
+    // Give more time for the server to initialize completely
+    std::thread::sleep(Duration::from_secs(3));
     h
   });
 
@@ -394,9 +547,13 @@ mod tests {
   async fn test_proxy_with_ephemeral_port() {
     init();
 
+    // Give the server a moment to fully initialize
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     let response = reqwest::Client::new()
       .get("http://127.0.0.1:6146/room/foo")
       .header("Host", "hello.localhost")
+      .timeout(Duration::from_secs(5)) // Add a timeout to prevent hanging
       .send()
       .await
       .unwrap()
@@ -434,10 +591,13 @@ mod tests {
     >,
     String, // username
   ) {
-    let url =
-      url::Url::parse(&format!("ws://ws-echo.localhost:6146/room/{}", room_id))
-        .unwrap();
-    let (mut ws_stream, _) = tokio_tungstenite::connect_async(url)
+    // Create URL with proper host header in the URL
+    let url = format!("ws://ws-echo.localhost:6146/room/{}", room_id);
+
+    // Add a small delay before connecting to ensure the server is ready
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (mut ws_stream, _) = tokio_tungstenite::connect_async(&url)
       .await
       .expect(&format!("Failed to connect to room {}", room_id));
 
