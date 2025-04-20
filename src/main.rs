@@ -83,9 +83,11 @@ impl ProxyHttp for DenoProxyApp {
     ctx: &mut Self::CTX,
   ) {
     if !ctx.tenant.is_empty() {
+      let default_room = "default-room".to_string();
+      let room_id = ctx.room_id.as_ref().unwrap_or(&default_room);
       let _ = self
         .process_manager
-        .decrement_connection_count(&ctx.tenant)
+        .decrement_connection_count(&ctx.tenant, room_id)
         .await;
     }
   }
@@ -251,9 +253,11 @@ impl ProxyHttp for DenoProxyApp {
         Ok((path, _stream)) => {
           // We only need the path, Pingora will handle the connection
           // Increment active connection count
+          let default_room = "default-room".to_string();
+          let room_id = ctx.room_id.as_ref().unwrap_or(&default_room);
           self
             .process_manager
-            .increment_connection_count(&ctx.tenant)
+            .increment_connection_count(&ctx.tenant, room_id)
             .await;
           path
         }
@@ -443,7 +447,21 @@ mod tests {
     let welcome_data: Value =
       serde_json::from_str(&welcome_msg.to_string()).unwrap();
     assert_eq!(welcome_data["type"], "welcome");
-    assert_eq!(welcome_data["message"], "Welcome to ws-echo.local!");
+    // The message format has changed to include a username
+    // Check that it contains "Welcome to the chat room" instead of exact match
+    assert!(
+      welcome_data["message"]
+        .as_str()
+        .unwrap()
+        .contains("Welcome to the chat room"),
+      "Welcome message should contain 'Welcome to the chat room'"
+    );
+
+    // Read and process the userlist message
+    let userlist_msg = read.next().await.unwrap().unwrap();
+    let userlist_data: Value =
+      serde_json::from_str(&userlist_msg.to_string()).unwrap();
+    assert_eq!(userlist_data["type"], "userlist");
 
     // Send a test message
     let test_message = "Hello WebSocket";
@@ -452,26 +470,24 @@ mod tests {
       .await
       .unwrap();
 
-    // Receive the echo response from onMessage handler
-    let echo_msg = read
+    // Receive the chat message response
+    let chat_msg = read
       .next()
       .await
-      .expect("Failed to receive echo message")
+      .expect("Failed to receive chat message")
       .unwrap();
-    let echo_data: Value = serde_json::from_str(&echo_msg.to_string()).unwrap();
+    let chat_data: Value = serde_json::from_str(&chat_msg.to_string()).unwrap();
 
-    assert_eq!(echo_data["type"], "echo");
-    assert_eq!(echo_data["originalMessage"], test_message);
+    assert_eq!(chat_data["type"], "chat");
+    assert_eq!(chat_data["message"], test_message);
+    // Username should be present
     assert!(
-      echo_data.get("timestamp").is_some(),
-      "Echo response should contain a timestamp"
+      chat_data.get("username").is_some(),
+      "Chat message should include username"
     );
 
-    // Verify the roomId is set correctly from path
-    assert_eq!(
-      echo_data["roomId"], "test-room",
-      "Echo response should contain the room ID"
-    );
+    // The room ID is now handled in the process rather than in each message
+    // We can check that our message was properly routed to the right process
 
     // Close the connection
     write.send(Message::Close(None)).await.unwrap();
@@ -624,6 +640,108 @@ mod tests {
     assert!(username_found, "User list should contain the new nickname");
 
     // Close both connections
+    write1.send(Message::Close(None)).await.unwrap();
+    write2.send(Message::Close(None)).await.unwrap();
+
+    // Give the server time to process the closures
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
+
+  #[tokio::test]
+  async fn test_separate_isolates_per_room() {
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::Value;
+    use std::time::Duration;
+    use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+    init();
+
+    // Connect to room-1
+    let url_room1 =
+      url::Url::parse("ws://ws-echo.localhost:6146/room/room-1").unwrap();
+    let (ws_stream1, _) = connect_async(url_room1)
+      .await
+      .expect("Failed to connect to room-1");
+    let (mut write1, mut read1) = ws_stream1.split();
+
+    // Read welcome message for room-1
+    let welcome_msg1 = read1.next().await.unwrap().unwrap();
+    let welcome_data1: Value =
+      serde_json::from_str(&welcome_msg1.to_string()).unwrap();
+    assert_eq!(welcome_data1["type"], "welcome");
+    let username1 = welcome_data1["username"].as_str().unwrap();
+
+    // Process the userlist message for room-1
+    let userlist_msg1 = read1.next().await.unwrap().unwrap();
+    let userlist_data1: Value =
+      serde_json::from_str(&userlist_msg1.to_string()).unwrap();
+    assert_eq!(userlist_data1["type"], "userlist");
+
+    // Connect to room-2
+    let url_room2 =
+      url::Url::parse("ws://ws-echo.localhost:6146/room/room-2").unwrap();
+    let (ws_stream2, _) = connect_async(url_room2)
+      .await
+      .expect("Failed to connect to room-2");
+    let (mut write2, mut read2) = ws_stream2.split();
+
+    // Read welcome message for room-2
+    let welcome_msg2 = read2.next().await.unwrap().unwrap();
+    let welcome_data2: Value =
+      serde_json::from_str(&welcome_msg2.to_string()).unwrap();
+    assert_eq!(welcome_data2["type"], "welcome");
+    let username2 = welcome_data2["username"].as_str().unwrap();
+
+    // Process the userlist message for room-2
+    let userlist_msg2 = read2.next().await.unwrap().unwrap();
+    let userlist_data2: Value =
+      serde_json::from_str(&userlist_msg2.to_string()).unwrap();
+    assert_eq!(userlist_data2["type"], "userlist");
+
+    // Now we have two connections to different rooms
+    // Send a message in room-1
+    let message_room1 = "This message should only be in room-1";
+    write1
+      .send(Message::Text(message_room1.to_string()))
+      .await
+      .unwrap();
+
+    // Client in room-1 should receive the message
+    let msg_received1 = read1.next().await.unwrap().unwrap();
+    let msg_data1: Value =
+      serde_json::from_str(&msg_received1.to_string()).unwrap();
+    assert_eq!(msg_data1["type"], "chat");
+    assert_eq!(msg_data1["message"], message_room1);
+    assert_eq!(msg_data1["username"], username1);
+
+    // Now send a message in room-2
+    let message_room2 = "This message should only be in room-2";
+    write2
+      .send(Message::Text(message_room2.to_string()))
+      .await
+      .unwrap();
+
+    // Client in room-2 should receive the message
+    let msg_received2 = read2.next().await.unwrap().unwrap();
+    let msg_data2: Value =
+      serde_json::from_str(&msg_received2.to_string()).unwrap();
+    assert_eq!(msg_data2["type"], "chat");
+    assert_eq!(msg_data2["message"], message_room2);
+    assert_eq!(msg_data2["username"], username2);
+
+    // Set a timeout for reading from room-1 to confirm isolation
+    let timeout_duration = Duration::from_millis(500);
+    tokio::select! {
+      maybe_msg = tokio::time::timeout(timeout_duration, read1.next()) => {
+        if let Ok(Some(Ok(_))) = maybe_msg {
+          panic!("Room 1 received a message when it shouldn't have - rooms are not properly isolated!");
+        }
+      }
+      _ = tokio::time::sleep(timeout_duration) => {
+        // This is the expected case - we should time out without receiving anything
+      }
+    }
+
+    // Clean up
     write1.send(Message::Close(None)).await.unwrap();
     write2.send(Message::Close(None)).await.unwrap();
 

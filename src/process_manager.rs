@@ -38,13 +38,19 @@ impl ProcessManager {
   }
 
   /// Track a new connection to the process
-  pub async fn increment_connection_count(&self, host: &str) -> bool {
+  pub async fn increment_connection_count(
+    &self,
+    host: &str,
+    room_id: &str,
+  ) -> bool {
+    let process_key = format!("{}:{}", host, room_id);
     let mut processes = self.processes.lock().await;
-    if let Some(entry) = processes.get_mut(host) {
+    if let Some(entry) = processes.get_mut(&process_key) {
       entry.active_connections += 1;
       entry.last_used = Instant::now();
       info!(
         host = %host,
+        room_id = %room_id,
         pid = entry.pid,
         active_connections = entry.active_connections,
         "Incremented active connection count"
@@ -56,15 +62,21 @@ impl ProcessManager {
   }
 
   /// Track a closed connection to the process
-  pub async fn decrement_connection_count(&self, host: &str) -> bool {
+  pub async fn decrement_connection_count(
+    &self,
+    host: &str,
+    room_id: &str,
+  ) -> bool {
+    let process_key = format!("{}:{}", host, room_id);
     let mut processes = self.processes.lock().await;
-    if let Some(entry) = processes.get_mut(host) {
+    if let Some(entry) = processes.get_mut(&process_key) {
       if entry.active_connections > 0 {
         entry.active_connections -= 1;
       }
       entry.last_used = Instant::now();
       info!(
         host = %host,
+        room_id = %room_id,
         pid = entry.pid,
         active_connections = entry.active_connections,
         "Decremented active connection count"
@@ -84,14 +96,17 @@ impl ProcessManager {
   ) -> Result<(PathBuf, UnixStream), ProxyError> {
     let mut processes = self.processes.lock().await;
 
+    // Create a combined key for host and room to ensure one isolate per room
+    let process_key = format!("{}:{}", host, room_id);
+
     // For single_use requests, always spawn a new process
     // TODO: This should not be supported in production
     if !single_use {
-      if let Some(entry) = processes.get_mut(host) {
+      if let Some(entry) = processes.get_mut(&process_key) {
         // Skip single-use entries when looking for a regular process
         if !entry.single_use {
           entry.last_used = Instant::now();
-          info!("Found running process for host");
+          info!("Found running process for host and room");
           // Connect to the socket
           let socket_path = entry.socket_path.clone();
           match UnixStream::connect(&socket_path).await {
@@ -255,15 +270,21 @@ impl ProcessManager {
     };
 
     // For single-use isolates, use a unique key with a UUID suffix
-    // This allows multiple single-use isolates for the same host
-    let process_key = if single_use {
-      format!("{}-{}", host, Uuid::new_v4())
+    // This allows multiple single-use isolates for the same host+room combination
+    let final_key = if single_use {
+      format!("{}:{}-{}", host, room_id, Uuid::new_v4())
     } else {
-      host.to_string()
+      // Use the combined host:room_id key
+      process_key
     };
 
-    processes.insert(process_key, entry);
-    info!(single_use = single_use, "Process entry added to map");
+    processes.insert(final_key, entry);
+    info!(
+      single_use = single_use,
+      host = %host,
+      room_id = %room_id,
+      "Process entry added to map"
+    );
 
     Ok((socket_path, stream))
   }
