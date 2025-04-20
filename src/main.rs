@@ -477,4 +477,157 @@ mod tests {
     write.send(Message::Close(None)).await.unwrap();
     // onClose handler will be called automatically
   }
+
+  #[tokio::test]
+  async fn test_websocket_broadcast() {
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::Value;
+    use std::time::Duration;
+    use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+    init();
+
+    // Connect with the first client
+    let url1 =
+      url::Url::parse("ws://ws-echo.localhost:6146/room/broadcast-test")
+        .unwrap();
+    let (ws_stream1, _) = connect_async(url1)
+      .await
+      .expect("Failed to connect first client");
+    let (mut write1, mut read1) = ws_stream1.split();
+
+    // Read the welcome message from client 1
+    let welcome_msg1 = read1.next().await.unwrap().unwrap();
+    let welcome_data1: Value =
+      serde_json::from_str(&welcome_msg1.to_string()).unwrap();
+    assert_eq!(welcome_data1["type"], "welcome");
+
+    // Extract the username client 1 was assigned
+    let username1 = welcome_data1["username"].as_str().unwrap();
+    println!("Client 1 username: {}", username1);
+
+    // Process the userlist message
+    let userlist_msg = read1.next().await.unwrap().unwrap();
+    let userlist_data: Value =
+      serde_json::from_str(&userlist_msg.to_string()).unwrap();
+    assert_eq!(userlist_data["type"], "userlist");
+
+    // Connect with a second client
+    let url2 =
+      url::Url::parse("ws://ws-echo.localhost:6146/room/broadcast-test")
+        .unwrap();
+    let (ws_stream2, _) = connect_async(url2)
+      .await
+      .expect("Failed to connect second client");
+    let (mut write2, mut read2) = ws_stream2.split();
+
+    // Read the welcome message from client 2
+    let welcome_msg2 = read2.next().await.unwrap().unwrap();
+    let welcome_data2: Value =
+      serde_json::from_str(&welcome_msg2.to_string()).unwrap();
+    assert_eq!(welcome_data2["type"], "welcome");
+
+    // Extract the username client 2 was assigned
+    let username2 = welcome_data2["username"].as_str().unwrap();
+    println!("Client 2 username: {}", username2);
+
+    // Client 1 should receive a system message about client 2 joining
+    let join_msg = read1.next().await.unwrap().unwrap();
+    let join_data: Value = serde_json::from_str(&join_msg.to_string()).unwrap();
+    assert_eq!(join_data["type"], "system");
+    assert!(join_data["message"]
+      .as_str()
+      .unwrap()
+      .contains("has joined the room"));
+
+    // Both clients should receive an updated user list
+    let userlist_msg1 = read1.next().await.unwrap().unwrap();
+    let userlist_data1: Value =
+      serde_json::from_str(&userlist_msg1.to_string()).unwrap();
+    assert_eq!(userlist_data1["type"], "userlist");
+
+    // Make sure client 2 receives the user list message
+    let userlist_msg2 = read2.next().await.unwrap().unwrap();
+    let userlist_data2: Value =
+      serde_json::from_str(&userlist_msg2.to_string()).unwrap();
+    assert_eq!(userlist_data2["type"], "userlist");
+
+    // Verify that both clients appear in the user list
+    let users = userlist_data2["users"].as_array().unwrap();
+    assert_eq!(users.len(), 2, "Should have 2 users in the room");
+
+    // Send a chat message from client 1
+    let chat_message = "Hello everyone!";
+    write1
+      .send(Message::Text(chat_message.to_string()))
+      .await
+      .unwrap();
+
+    // Client 1 should get the message back (broadcast includes sender)
+    let client1_received = read1.next().await.unwrap().unwrap();
+    let client1_msg_data: Value =
+      serde_json::from_str(&client1_received.to_string()).unwrap();
+    assert_eq!(client1_msg_data["type"], "chat");
+    assert_eq!(client1_msg_data["message"], chat_message);
+    assert_eq!(client1_msg_data["username"], username1);
+
+    // Client 2 should also receive the broadcasted message
+    let client2_received = read2.next().await.unwrap().unwrap();
+    let client2_msg_data: Value =
+      serde_json::from_str(&client2_received.to_string()).unwrap();
+    assert_eq!(client2_msg_data["type"], "chat");
+    assert_eq!(client2_msg_data["message"], chat_message);
+    assert_eq!(client2_msg_data["username"], username1);
+
+    // Test a nickname change
+    let new_nickname = "SuperUser";
+    let nickname_cmd = format!(
+      "{{\"type\":\"nickname\",\"username\":\"{}\"}}",
+      new_nickname
+    );
+    write1.send(Message::Text(nickname_cmd)).await.unwrap();
+
+    // Both clients should receive a system message about the nickname change
+    let name_change_msg1 = read1.next().await.unwrap().unwrap();
+    let name_change_data1: Value =
+      serde_json::from_str(&name_change_msg1.to_string()).unwrap();
+    assert_eq!(name_change_data1["type"], "system");
+    assert!(name_change_data1["message"]
+      .as_str()
+      .unwrap()
+      .contains("is now known as"));
+
+    let name_change_msg2 = read2.next().await.unwrap().unwrap();
+    let name_change_data2: Value =
+      serde_json::from_str(&name_change_msg2.to_string()).unwrap();
+    assert_eq!(name_change_data2["type"], "system");
+    assert!(name_change_data2["message"]
+      .as_str()
+      .unwrap()
+      .contains("is now known as"));
+
+    // Both clients should receive an updated user list
+    let updated_list_msg1 = read1.next().await.unwrap().unwrap();
+    let updated_list_data1: Value =
+      serde_json::from_str(&updated_list_msg1.to_string()).unwrap();
+    assert_eq!(updated_list_data1["type"], "userlist");
+
+    let updated_list_msg2 = read2.next().await.unwrap().unwrap();
+    let updated_list_data2: Value =
+      serde_json::from_str(&updated_list_msg2.to_string()).unwrap();
+    assert_eq!(updated_list_data2["type"], "userlist");
+
+    // Verify the nickname was changed in the user list
+    let updated_users = updated_list_data2["users"].as_array().unwrap();
+    let username_found = updated_users
+      .iter()
+      .any(|user| user["username"].as_str().unwrap() == new_nickname);
+    assert!(username_found, "User list should contain the new nickname");
+
+    // Close both connections
+    write1.send(Message::Close(None)).await.unwrap();
+    write2.send(Message::Close(None)).await.unwrap();
+
+    // Give the server time to process the closures
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
 }
