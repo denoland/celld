@@ -7,21 +7,60 @@ if (import.meta.main) {
   await bootstrap(userModulePath);
 }
 
+// Extended WebSocket interface that includes state and id
+export interface Connection extends WebSocket {
+  id: string;
+  state: Record<string, unknown> | null;
+  setState(state: Record<string, unknown> | null): void;
+}
+
+// Room context similar to PartyKit
+export interface Room {
+  id: string;
+  name: string;
+  connections: Map<string, Connection>;
+  broadcast(
+    msg: string | ArrayBuffer | ArrayBufferView,
+    without?: string[],
+  ): void;
+  getConnection(id: string): Connection | undefined;
+  getConnections(): Iterable<Connection>;
+}
+
 interface Context {
   roomId: string;
+  room: Room;
 }
 
 interface Server {
-  onConnect?: (ws: WebSocket, ctx: Context) => Promise<void> | void;
+  onConnect?: (connection: Connection, ctx: Context) => Promise<void> | void;
   onMessage?: (
-    ws: WebSocket,
-    msg: string,
+    message: string | ArrayBuffer,
+    sender: Connection,
     ctx: Context,
   ) => Promise<void> | void;
-  onClose?: (ws: WebSocket, ctx: Context) => Promise<void> | void;
-  onError?: (ws: WebSocket, error: Event, ctx: Context) => Promise<void> | void;
+  onClose?: (connection: Connection, ctx: Context) => Promise<void> | void;
+  onError?: (
+    connection: Connection,
+    error: Event,
+    ctx: Context,
+  ) => Promise<void> | void;
   onRequest?: (req: Request, ctx: Context) => Promise<Response> | Response;
   onStart?: (ctx: Context) => Promise<void> | void;
+}
+
+// Extends WebSocket to implement the Connection interface
+function extendWebSocket(socket: WebSocket, id: string): Connection {
+  const connection = socket as Connection;
+  connection.id = id;
+  connection.state = null;
+
+  connection.setState = function (newState: Record<string, unknown> | null) {
+    this.state = newState;
+    return this.state;
+  };
+
+  return connection;
 }
 
 async function bootstrap(userModulePath: string) {
@@ -33,8 +72,37 @@ async function bootstrap(userModulePath: string) {
   const roomId = Deno.env.get("X-Room-Id") || "";
   console.log(`Bootstrap starting with roomId: ${roomId}`);
 
+  // Create a Room object to track connections and provide broadcast functionality
+  const connections = new Map<string, Connection>();
+
+  const room: Room = {
+    id: roomId,
+    name: userModulePath.split("/").pop()?.replace(/\.ts$/, "") || "unknown",
+    connections,
+
+    broadcast(
+      message: string | ArrayBuffer | ArrayBufferView,
+      without: string[] = [],
+    ) {
+      const msg = typeof message === "string" ? message : message;
+      for (const [id, conn] of connections.entries()) {
+        if (!without.includes(id) && conn.readyState === WebSocket.OPEN) {
+          conn.send(msg);
+        }
+      }
+    },
+
+    getConnection(id: string): Connection | undefined {
+      return connections.get(id);
+    },
+
+    getConnections(): Iterable<Connection> {
+      return connections.values();
+    },
+  };
+
   // Create context object
-  const ctx = { roomId };
+  const ctx = { roomId, room };
 
   // Call onStart if it exists
   if (userModule.onStart) {
@@ -46,28 +114,40 @@ async function bootstrap(userModulePath: string) {
     if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
       const { response, socket } = Deno.upgradeWebSocket(req);
 
+      // Create a unique ID for this connection
+      const connectionId = crypto.randomUUID();
+
+      // Extend the WebSocket with our Connection interface
+      const connection = extendWebSocket(socket, connectionId);
+
+      // Track the connection
+      connections.set(connectionId, connection);
+
       // Set up the WebSocket event handlers
       socket.onopen = () => {
         if (userModule.onConnect) {
-          userModule.onConnect(socket, ctx);
+          userModule.onConnect(connection, ctx);
         }
       };
 
       socket.onmessage = (e) => {
         if (userModule.onMessage) {
-          userModule.onMessage(socket, e.data as string, ctx);
+          userModule.onMessage(e.data, connection, ctx);
         }
       };
 
       socket.onclose = () => {
+        // Remove the connection from our tracking map
+        connections.delete(connectionId);
+
         if (userModule.onClose) {
-          userModule.onClose(socket, ctx);
+          userModule.onClose(connection, ctx);
         }
       };
 
       socket.onerror = (error) => {
         if (userModule.onError) {
-          userModule.onError(socket, error, ctx);
+          userModule.onError(connection, error, ctx);
         }
       };
 

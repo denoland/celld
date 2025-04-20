@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WebSocket Echo Test</title>
+    <title>IRC-Style Chat Room</title>
     <style>
       body {
         font-family:
@@ -17,16 +17,23 @@
           "Open Sans",
           "Helvetica Neue",
           sans-serif;
-        max-width: 800px;
+        max-width: 1000px;
         margin: 0 auto;
         padding: 20px;
+        display: grid;
+        grid-template-columns: 3fr 1fr;
+        grid-template-rows: auto auto auto 1fr auto;
+        grid-gap: 10px;
+        height: 95vh;
       }
       h1 {
-        margin-bottom: 20px;
+        margin-bottom: 10px;
+        grid-column: 1 / span 2;
       }
       #connection-status {
-        margin-bottom: 15px;
+        margin-bottom: 10px;
         font-weight: bold;
+        grid-column: 1 / span 2;
       }
       .connected {
         color: green;
@@ -34,10 +41,23 @@
       .disconnected {
         color: red;
       }
-      .controls {
+      .connection-controls {
         display: flex;
         gap: 10px;
-        margin-bottom: 15px;
+        margin-bottom: 10px;
+        grid-column: 1 / span 2;
+      }
+      .chat-container {
+        display: grid;
+        grid-template-rows: 1fr auto;
+        grid-gap: 10px;
+        grid-column: 1;
+      }
+      .user-list-container {
+        display: flex;
+        flex-direction: column;
+        grid-column: 2;
+        grid-row: 4;
       }
       input[type="text"] {
         flex: 1;
@@ -60,20 +80,66 @@
         background-color: #cccccc;
         cursor: not-allowed;
       }
-      #log {
+      #chat-log {
         border: 1px solid #ccc;
         padding: 10px;
-        height: 300px;
         overflow-y: auto;
         background-color: #f9f9f9;
         border-radius: 4px;
-        margin-bottom: 15px;
+        grid-row: 1;
+        height: 100%;
+      }
+      #user-list {
+        border: 1px solid #ccc;
+        padding: 10px;
+        height: 100%;
+        overflow-y: auto;
+        background-color: #f9f9f9;
+        border-radius: 4px;
+      }
+      .user-list-title {
+        font-weight: bold;
+        margin-bottom: 5px;
+        border-bottom: 1px solid #ccc;
+        padding-bottom: 5px;
+      }
+      .user-item {
+        padding: 5px 0;
+        cursor: pointer;
+      }
+      .user-item:hover {
+        background-color: #eaeaea;
+      }
+      .user-item.typing::after {
+        content: " (typing...)";
+        font-style: italic;
+        color: #666;
+      }
+      .message-form {
+        display: flex;
+        gap: 10px;
+        grid-row: 2;
+      }
+      .controls {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 10px;
+        grid-column: 1 / span 2;
       }
       .sent {
         color: blue;
       }
       .received {
-        color: green;
+        color: #333;
+      }
+      .message-username {
+        font-weight: bold;
+        color: #0066cc;
+        margin-right: 5px;
+      }
+      .private {
+        color: purple;
+        font-style: italic;
       }
       .error {
         color: red;
@@ -82,55 +148,156 @@
         color: #666;
         font-style: italic;
       }
+      .chat-commands {
+        grid-column: 1 / span 2;
+        padding: 10px;
+        background-color: #f0f0f0;
+        border-radius: 4px;
+        margin-top: 10px;
+      }
+      .chat-commands h3 {
+        margin-top: 0;
+      }
+      .chat-commands code {
+        background-color: #e0e0e0;
+        padding: 2px 4px;
+        border-radius: 2px;
+      }
     </style>
   </head>
   <body>
-    <h1>WebSocket Echo Test</h1>
+    <h1>IRC-Style Chat Room</h1>
 
     <div id="connection-status" class="disconnected">Disconnected</div>
 
-    <div class="controls">
+    <div class="connection-controls">
       <input
         type="text"
         id="url"
         value="ws://ws-echo.localhost:3000/room/test"
         placeholder="WebSocket URL"
       >
+      <input
+        type="text"
+        id="nickname"
+        placeholder="Nickname (optional)"
+      >
       <button id="connect-btn">Connect</button>
       <button id="disconnect-btn" disabled>Disconnect</button>
     </div>
 
-    <div class="controls">
-      <input
-        type="text"
-        id="message"
-        placeholder="Enter message to send"
-        disabled
-      >
-      <button id="send-btn" disabled>Send</button>
+    <div class="chat-container">
+      <div id="chat-log"></div>
+
+      <div class="message-form">
+        <input
+          type="text"
+          id="message"
+          placeholder="Type a message and press Enter"
+          disabled
+        >
+        <button id="send-btn" disabled>Send</button>
+      </div>
     </div>
 
-    <div id="log"></div>
+    <div class="user-list-container">
+      <div class="user-list-title">Users in Room</div>
+      <div id="user-list"></div>
+    </div>
+
+    <div class="chat-commands">
+      <h3>Chat Commands</h3>
+      <p>Regular text will be sent as a chat message to everyone.</p>
+      <p>You can also use these JSON commands:</p>
+      <ul>
+        <li>
+          <code>{"type":"nickname","username":"YourNewName"}</code> - Change
+          your nickname
+        </li>
+        <li>
+          <code>{"type":"private","to":"Username","content":"Secret
+            message"}</code> - Send a private message
+        </li>
+        <li>
+          <code>{"type":"typing","isTyping":true}</code> - Show you are typing
+          (set to false when done)
+        </li>
+      </ul>
+    </div>
 
     <script>
       const connectBtn = document.getElementById("connect-btn");
       const disconnectBtn = document.getElementById("disconnect-btn");
       const sendBtn = document.getElementById("send-btn");
       const urlInput = document.getElementById("url");
+      const nicknameInput = document.getElementById("nickname");
       const messageInput = document.getElementById("message");
       const statusDiv = document.getElementById("connection-status");
-      const logDiv = document.getElementById("log");
+      const chatLogDiv = document.getElementById("chat-log");
+      const userListDiv = document.getElementById("user-list");
 
       let socket = null;
+      let myUsername = null;
+      let users = [];
+      let typingTimeout = null;
 
-      function addToLog(message, type) {
+      function addToChatLog(message, type, username = null) {
         const div = document.createElement("div");
-        div.textContent = `${
-          new Date().toLocaleTimeString()
-        }: ${message}`;
         div.className = type;
-        logDiv.appendChild(div);
-        logDiv.scrollTop = logDiv.scrollHeight;
+
+        const timeSpan = document.createElement("span");
+        timeSpan.textContent = `${new Date().toLocaleTimeString()} `;
+        timeSpan.style.color = "#999";
+        timeSpan.style.fontSize = "0.8em";
+
+        div.appendChild(timeSpan);
+
+        if (username && type === "received") {
+          const usernameSpan = document.createElement("span");
+          usernameSpan.textContent = `${username}: `;
+          usernameSpan.className = "message-username";
+          div.appendChild(usernameSpan);
+
+          const messageSpan = document.createElement("span");
+          messageSpan.textContent = message;
+          div.appendChild(messageSpan);
+        } else if (type === "private") {
+          div.innerHTML += `<i>${message}</i>`;
+        } else {
+          div.innerHTML += message;
+        }
+
+        chatLogDiv.appendChild(div);
+        chatLogDiv.scrollTop = chatLogDiv.scrollHeight;
+      }
+
+      function updateUserList() {
+        userListDiv.innerHTML = "";
+        users.forEach((user) => {
+          const userDiv = document.createElement("div");
+          userDiv.className = "user-item";
+          if (user.isTyping) userDiv.classList.add("typing");
+          userDiv.textContent = user.username;
+          userDiv.setAttribute("data-username", user.username);
+
+          // When clicking on a user, prepare a private message
+          userDiv.addEventListener("click", () => {
+            if (user.username === myUsername) return;
+
+            messageInput.value = JSON.stringify({
+              type: "private",
+              to: user.username,
+              content: "",
+            });
+            messageInput.focus();
+
+            // Position cursor in the content field
+            const cursorPos = messageInput.value.length - 2;
+            messageInput.setSelectionRange(cursorPos, cursorPos);
+          });
+
+          userListDiv.appendChild(userDiv);
+        });
       }
 
       function connect() {
@@ -140,7 +307,7 @@
 
         const url = urlInput.value.trim();
         if (!url) {
-          addToLog("Please enter a valid WebSocket URL", "error");
+          addToChatLog("Please enter a valid WebSocket URL", "error");
           return;
         }
 
@@ -154,41 +321,105 @@
             disconnectBtn.disabled = false;
             messageInput.disabled = false;
             sendBtn.disabled = false;
-            addToLog(`Connected to ${url}`, "system");
 
-            // Send a ping message to test the connection
-            setTimeout(() => {
-              if (socket && socket.readyState === WebSocket.OPEN) {
-                addToLog("Sending initial ping message...", "system");
-                socket.send("ping");
-              }
-            }, 500);
+            addToChatLog(`Connected to the chat room`, "system");
+
+            // If user provided a nickname, send it and store it locally
+            const nickname = nicknameInput.value.trim();
+            if (nickname) {
+              myUsername = nickname; // Remember our username
+              socket.send(JSON.stringify({
+                type: "nickname",
+                username: nickname,
+              }));
+            }
           };
 
           socket.onmessage = (event) => {
             try {
               // Try to parse as JSON
               const data = JSON.parse(event.data);
-              if (data.type === "welcome") {
-                addToLog(`Server: ${data.message}`, "received");
-              } else if (data.type === "echo") {
-                addToLog(
-                  `Echo: ${data.originalMessage} (at ${
-                    new Date(data.timestamp).toLocaleTimeString()
-                  })`,
-                  "received",
-                );
-              } else {
-                addToLog(`Received: ${event.data}`, "received");
+
+              switch (data.type) {
+                case "welcome":
+                  addToChatLog(data.message, "system");
+                  // If we receive our username from the server, store it
+                  if (data.username && !myUsername) {
+                    myUsername = data.username;
+                  }
+                  break;
+
+                case "system":
+                  addToChatLog(data.message, "system");
+                  break;
+
+                case "chat":
+                  // If it's our own message, show it differently
+                  if (data.username === myUsername) {
+                    addToChatLog(data.message, "sent");
+                  } else {
+                    addToChatLog(
+                      data.message,
+                      "received",
+                      data.username,
+                    );
+                  }
+                  break;
+
+                case "private":
+                  if (data.to) {
+                    // Outgoing private message
+                    addToChatLog(
+                      `[PM to ${data.to}] ${data.message}`,
+                      "private",
+                    );
+                  } else {
+                    // Incoming private message
+                    addToChatLog(
+                      `[PM from ${data.username}] ${data.message}`,
+                      "private",
+                    );
+                  }
+                  break;
+
+                case "userlist":
+                  users = data.users || [];
+                  updateUserList();
+                  break;
+
+                case "typing":
+                  // Find user in the list and update typing status
+                  const userIndex = users.findIndex((u) =>
+                    u.username === data.username
+                  );
+                  if (userIndex >= 0) {
+                    users[userIndex].isTyping = data.isTyping;
+                    updateUserList();
+                  }
+                  break;
+
+                case "echo":
+                  addToChatLog(
+                    `Echo: ${data.originalMessage}`,
+                    "received",
+                  );
+                  break;
+
+                case "error":
+                  addToChatLog(`Error: ${data.message}`, "error");
+                  break;
+
+                default:
+                  addToChatLog(`Received: ${event.data}`, "received");
               }
             } catch (e) {
               // Not JSON, just show as plain text
-              addToLog(`Received: ${event.data}`, "received");
+              addToChatLog(`Received: ${event.data}`, "received");
             }
           };
 
           socket.onerror = (error) => {
-            addToLog("WebSocket error", "error");
+            addToChatLog("WebSocket error", "error");
             console.error("WebSocket error:", error);
           };
 
@@ -199,7 +430,12 @@
             disconnectBtn.disabled = true;
             messageInput.disabled = true;
             sendBtn.disabled = true;
-            addToLog(
+
+            // Clear user list
+            users = [];
+            updateUserList();
+
+            addToChatLog(
               `Disconnected (code: ${event.code}${
                 event.reason ? ", reason: " + event.reason : ""
               })`,
@@ -207,7 +443,7 @@
             );
           };
         } catch (error) {
-          addToLog(`Failed to connect: ${error.message}`, "error");
+          addToChatLog(`Failed to connect: ${error.message}`, "error");
         }
       }
 
@@ -218,16 +454,41 @@
         }
       }
 
+      function sendTypingStatus(isTyping) {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({
+            type: "typing",
+            isTyping: isTyping,
+          }));
+        }
+      }
+
       function sendMessage() {
         const message = messageInput.value.trim();
         if (!message) return;
 
         if (socket && socket.readyState === WebSocket.OPEN) {
+          // Send the message
           socket.send(message);
-          addToLog(`Sent: ${message}`, "sent");
+
+          // Clear typing status
+          sendTypingStatus(false);
+
+          // Check if this is a nickname command to update our local username
+          try {
+            const jsonMsg = JSON.parse(message);
+            if (jsonMsg.type === "nickname" && jsonMsg.username) {
+              myUsername = jsonMsg.username;
+            }
+            // Other messages will be echoed back from the server
+          } catch (e) {
+            // Not JSON, so it's a regular chat message
+            // We'll get the formatted message back from the server
+          }
+
           messageInput.value = "";
         } else {
-          addToLog("Not connected to a WebSocket server", "error");
+          addToChatLog("Not connected to the chat server", "error");
         }
       }
 
@@ -238,6 +499,15 @@
       messageInput.addEventListener("keypress", (event) => {
         if (event.key === "Enter") {
           sendMessage();
+        } else {
+          // Send typing status with debounce
+          if (typingTimeout) clearTimeout(typingTimeout);
+
+          sendTypingStatus(true);
+
+          typingTimeout = setTimeout(() => {
+            sendTypingStatus(false);
+          }, 2000);
         }
       });
     </script>
