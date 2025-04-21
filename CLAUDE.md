@@ -13,11 +13,9 @@
 
 ## Code Style Guidelines
 
-- **Imports**: Organize in blocks - std, external crates, internal modules
-- **Naming**: Use snake_case for variables/functions, CamelCase for
-  types/structs
-- **Error Handling**: Use `Result<T, E>` with descriptive error messages, prefer
-  `?` operator
+- one line per imported symbol in rust
+- don't try to be exaustive in corner cases, use unwrap() or panic!() as
+  necessary
 - **Documentation**: Document public API with triple-slash comments (`///`)
 - **Types**: Use strong typing, avoid `unwrap()` in production code
 - **Formatting**: Use 2-space indentation
