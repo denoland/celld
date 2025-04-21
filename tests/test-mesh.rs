@@ -13,8 +13,7 @@ async fn test_mesh_room_connection() {
   let ports = [6001, 6002, 6003];
   let _test_env = MeshTest::new(&ports);
 
-  // Wait for servers to fully initialize and share peer information
-  sleep(Duration::from_secs(1)).await;
+  // Servers are already initialized with the TCP health checks
 
   // Create a room ID that should be consistently owned by one node
   let room_id = "test-mesh-room";
@@ -66,16 +65,15 @@ async fn test_mesh_message_broadcast() {
   let ports = [6011, 6012, 6013];
   let _test_env = MeshTest::new(&ports);
 
-  // Wait for servers to fully initialize and share peer information
-  sleep(Duration::from_secs(1)).await;
+  // Servers are already initialized with the TCP health checks
 
   // Create a room ID
   let room_id = "broadcast-mesh-test";
 
   // Connect two clients to the room through different servers
   let (mut client1, username1) = connect_to_room(ports[0], room_id).await;
-  sleep(Duration::from_millis(100)).await; // Small delay to ensure first client is registered
 
+  // The second client connection will now wait until it gets proper welcome messages
   let (mut client2, _) = connect_to_room(ports[1], room_id).await;
 
   // Client 1 should receive system message about client 2 joining
@@ -118,8 +116,7 @@ async fn test_mesh_room_isolation() {
   let ports = [6021, 6022, 6023];
   let _test_env = MeshTest::new(&ports);
 
-  // Wait for servers to fully initialize and share peer information
-  sleep(Duration::from_secs(1)).await;
+  // Servers are already initialized with the TCP health checks
 
   // Connect to two different rooms through different servers
   let (mut client1, username1) = connect_to_room(ports[0], "room-a").await;
@@ -173,6 +170,23 @@ struct MeshTest {
 }
 
 impl MeshTest {
+  // Wait for a server to be ready by probing its TCP port
+  fn wait_for_server_ready(port: u16) {
+    const MAX_ATTEMPTS: usize = 5;
+    const RETRY_DELAY_MS: u64 = 100;
+    for _attempt in 1..=MAX_ATTEMPTS {
+      match std::net::TcpStream::connect(format!("127.0.0.1:{}", port)) {
+        Ok(_) => {
+          return;
+        }
+        Err(_) => {
+          std::thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
+        }
+      }
+    }
+    panic!("Server on port {} failed to start", port);
+  }
+
   // Start mesh nodes with the provided ports
   fn new(ports: &[u16]) -> Self {
     let mut servers = Vec::new();
@@ -213,10 +227,15 @@ impl MeshTest {
       );
     }
 
-    // Give servers time to start and initialize
+    // Wait for servers to be ready by probing TCP connections
     println!("Waiting for servers to initialize...");
-    std::thread::sleep(Duration::from_secs(5));
-    println!("Servers should be ready now");
+    for &port in ports {
+      Self::wait_for_server_ready(port);
+    }
+
+    // Brief delay for peer exchange after TCP connections are ready
+    std::thread::sleep(Duration::from_millis(500));
+    println!("All servers are ready now");
 
     MeshTest {
       servers,

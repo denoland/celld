@@ -5,8 +5,8 @@
 - **Build**: `cargo build`
 - **Run**: `cargo run`
 - **Test All**: `cargo test`
-- **Test Single**: `cargo test test_name` (e.g.
-  `cargo test test_parse_http_headers_simple`)
+- **Test Single**: `cargo test test_name` (e.g.  `cargo test test_parse_http_headers_simple`)
+- test debug: cargo test -- --test-threads=1 --nocapture
 - **Lint**: `cargo clippy`
 - **Format Check**: `cargo fmt --check`
 - **Format Fix**: `cargo fmt`
