@@ -2,6 +2,7 @@ mod child_on_parent_exit;
 mod peer_manager;
 mod process_manager;
 mod process_reaper;
+mod sqlite_replica;
 
 use once_cell::sync::Lazy;
 use pingora::http::StatusCode;

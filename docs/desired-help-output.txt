@@ -1,0 +1,52 @@
+roomd 0.1.0
+Self-hosted real-time runtime for isolated JavaScript rooms.
+
+USAGE:
+    roomd [OPTIONS]
+
+OPTIONS:
+    -p, --port <PORT>           Port to bind the HTTP/WebSocket server [default: 3000]
+    -d, --data-dir <DIR>        Root data directory [default: ./data]
+    -n, --known-peers <PEERS>   Comma-separated list of peer addresses (host:port)
+    -h, --help                  Print help information
+    --version                   Print version info
+
+DESCRIPTION:
+    Roomd is a lightweight runtime inspired by Durable Objects and Deno Deploy.
+    It runs tenant-isolated JavaScript logic in per-room Deno subprocesses,
+    supports real-time WebSocket connections, and serves static files per tenant.
+
+    Routing is based on the request Host and room ID:
+
+        http://myapp.localhost:3000/rooms/chat1
+                └────────┬────────┘ └───────┬──────┘
+                   tenant domain          room ID
+
+    Each room runs in an isolated subprocess with its own state and lifecycle.
+
+DATA LAYOUT:
+    The data directory contains one folder per tenant domain:
+
+        <data-dir>/
+        └── myapp.localhost/
+            ├── static/          # Served at /
+            │   └── index.html, client.js, etc.
+            ├── code/            # Room logic
+            │   └── main.ts      # Exports onConnect, onMessage, etc.
+            └── sockets/         # Internal room sockets (created at runtime)
+
+EXAMPLE:
+    Run roomd with two peers:
+        roomd --port 3000 --data-dir ./data --known-peers localhost:3000,localhost:4000
+
+    Open:
+        http://myapp.localhost:3000/rooms/chat1
+
+MORE:
+    - /rooms/{roomId} connections are upgraded to WebSockets
+    - Each tenant's code is hot-reloaded when the room starts
+    - Durable state and cold-start recovery can be added with SQLite + S3
+
+PROJECT:
+    https://github.com/your-org/roomd
+

@@ -8,15 +8,18 @@ anyhow = "1"
 async-trait = "0.1"
 bytes = "1"
 http = "1"
+lazy_static = "1.4"
 once_cell = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 uuid = { version = "1", features = ["v4"] }
 nix = { version = "0.29", features = ["process", "signal", "fs"] }
+wait-timeout = "0.2"
 
 pingora = { version = "0.4", features = ["proxy"] }
 tempfile = "3.19.1"

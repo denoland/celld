@@ -1,0 +1,111 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp
+  labels:
+    app: myapp
+spec:
+  ports:
+    - port: 8080
+      name: http
+    - port: 9090
+      name: metrics
+  selector:
+    app: myapp
+
+# It is recommended to use a StatefulSet as they restrict the number of pods.
+# Applications using Litestream can only be run on a single node at a time.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: myapp
+spec:
+  selector:
+    matchLabels:
+      app: myapp
+  serviceName: myapp
+
+  # Litestream only supports a single node so this must always be "1".
+  replicas: 1
+
+  # Persistent volume is recommended for better durability guarantees between restarts.
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 100Mi
+
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+
+      # The config map is used to pass in our Litestream configuration file.
+      volumes:
+      - name: configmap
+        configMap:
+          name: litestream
+
+      # Initialize using Litestream to restore data automatically
+      # before starting the application.
+      initContainers:
+      - name: init-litestream
+        image: litestream/litestream:0.3
+        args: ['restore', '-if-db-not-exists', '-if-replica-exists', '/var/lib/myapp/db']
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/myapp
+        - name: configmap
+          mountPath: /etc/litestream.yml
+          subPath: litestream.yml
+        env:
+        - name: LITESTREAM_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: litestream
+              key: LITESTREAM_ACCESS_KEY_ID
+        - name: LITESTREAM_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: litestream
+              key: LITESTREAM_SECRET_ACCESS_KEY
+
+      # Start your application & Litestream to share a PVC data directory.
+      containers:
+      - name: myapp
+        image: benbjohnson/myapp:latest
+        ports:
+        - name: http
+          containerPort: 8080
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/myapp
+
+      - name: litestream
+        image: litestream/litestream:0.3
+        args: ['replicate']
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/myapp
+        - name: configmap
+          mountPath: /etc/litestream.yml
+          subPath: litestream.yml
+        env:
+        - name: LITESTREAM_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: litestream
+              key: LITESTREAM_ACCESS_KEY_ID
+        - name: LITESTREAM_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: litestream
+              key: LITESTREAM_SECRET_ACCESS_KEY
+        ports:
+        - name: metrics
+          containerPort: 9090
+

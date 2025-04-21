@@ -1,5 +1,7 @@
 # Self-Hosted Deno Deploy Development Guide
 
+You can find documentation for litestream in the docs/litestream directory
+
 ## Build, Run & Test Commands
 
 - **Build**: `cargo build`
