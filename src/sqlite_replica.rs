@@ -367,76 +367,83 @@ mod tests {
   use super::*;
   use crate::child_on_parent_exit::ChildOnParentExit;
   use once_cell::sync::Lazy;
+  use std::net::SocketAddr;
   use std::process::Command;
   use std::time::Duration;
   use tempfile;
-
-  // Static MinIO test server that will be shared across all tests
-  pub static MINIO_SERVER: Lazy<MinioTestServer> =
-    Lazy::new(|| MinioTestServer::start());
 
   // Simple wrapper to manage the MinIO test server
   pub struct MinioTestServer {
     pub access_key: String,
     pub secret_key: String,
+    pub port: u16,
     pub endpoint: String,
-    child: ChildOnParentExit,
+    pub docker_name: String,
   }
 
   impl MinioTestServer {
-    pub fn start() -> Self {
+    pub fn start(port: u16) -> Self {
       let access_key = "adminadmin";
       let secret_key = "adminadmin";
-      let mut cmd = Command::new("docker");
-      cmd.args([
-        "run",
-        "--rm",
-        "-p",
-        "9000:9000",
-        "-e",
-        &format!("MINIO_ROOT_USER={}", access_key),
-        "-e",
-        &format!("MINIO_ROOT_PASSWORD={}", secret_key),
-        "-e",
-        "MINIO_REGION_NAME=us-east-1",
-        "minio/minio",
-        "server",
-        "/data",
-      ]);
-      let child = ChildOnParentExit::spawn(cmd).unwrap();
+      let docker_name = format!("minio-test-server-{}", uuid::Uuid::new_v4());
+      let status = std::process::Command::new("docker")
+        .args([
+          "run",
+          "--rm",
+          "-p",
+          format!("{}:9000", port).as_str(),
+          "-detatch",
+          "--name",
+          docker_name.as_str(),
+          "-e",
+          &format!("MINIO_ROOT_USER={}", access_key),
+          "-e",
+          &format!("MINIO_ROOT_PASSWORD={}", secret_key),
+          "-e",
+          "MINIO_REGION_NAME=us-east-1",
+          "minio/minio",
+          "server",
+          "/data",
+        ])
+        .spawn()
+        .unwrap()
+        .wait()
+        .unwrap();
+      assert!(status.success(), "MinIO server failed to start");
+
+      // Give MinIO some time to start
+      std::thread::sleep(Duration::from_secs(3));
 
       MinioTestServer {
-        child,
         access_key: access_key.to_string(),
         secret_key: secret_key.to_string(),
-        endpoint: "http://localhost:9000".to_string(),
+        docker_name,
+        port,
+        endpoint: format!("http://localhost:{}", port),
       }
     }
 
     pub fn create_bucket(&self, bucket_name: &str) -> Result<()> {
-      let output = Command::new("docker")
+      let status = Command::new("docker")
         .args([
           "run",
           "--network=host",
           "--rm",
           "-e",
           &format!(
-            "MC_HOST_minio=http://{}:{}@localhost:9000",
-            self.access_key, self.secret_key
+            "MC_HOST_minio=http://{}:{}@localhost:{}",
+            self.access_key, self.secret_key, self.port,
           ),
           "minio/mc",
           "mb",
           &format!("minio/{}", bucket_name),
         ])
-        .output()
-        .context("Failed to create MinIO bucket")?;
-
-      if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // If the bucket already exists, that's fine
-        if !stderr.contains("already exists") {
-          return Err(anyhow!("Failed to create bucket: {}", stderr));
-        }
+        .spawn()
+        .unwrap()
+        .wait()
+        .unwrap();
+      if !status.success() {
+        return Err(anyhow!("Failed to create bucket"));
       }
 
       Ok(())
@@ -445,14 +452,21 @@ mod tests {
 
   impl Drop for MinioTestServer {
     fn drop(&mut self) {
-      self.child.kill();
-      std::thread::sleep(Duration::from_secs(1));
+      let status = std::process::Command::new("docker")
+        .args(["kill", self.docker_name.as_str()])
+        .spawn()
+        .unwrap()
+        .wait()
+        .unwrap();
+      assert!(status.success(), "MinIO server failed to stop");
     }
   }
 
   // Helper to create test S3Config
-  fn create_test_s3_config(test_name: &str) -> S3Config {
-    let minio = &*MINIO_SERVER;
+  fn create_test_s3_config(
+    test_name: &str,
+    minio: &MinioTestServer,
+  ) -> S3Config {
     minio.create_bucket(test_name).unwrap();
     S3Config {
       endpoint: minio.endpoint.clone(),
@@ -465,8 +479,10 @@ mod tests {
   }
 
   // Helper to check if MinIO bucket has any data for our room
-  async fn minio_bucket_has_room_data(room_id: &str) -> Result<bool> {
-    let minio = &*MINIO_SERVER;
+  async fn minio_bucket_has_room_data(
+    room_id: &str,
+    minio: &MinioTestServer,
+  ) -> Result<bool> {
     let output = Command::new("docker")
       .args([
         "run",
@@ -474,8 +490,8 @@ mod tests {
         "--rm",
         "-e",
         &format!(
-          "MC_HOST_minio=http://{}:{}@localhost:9000",
-          minio.access_key, minio.secret_key
+          "MC_HOST_minio=http://{}:{}@localhost:{}",
+          minio.access_key, minio.secret_key, minio.port
         ),
         "minio/mc",
         "ls",
@@ -496,13 +512,15 @@ mod tests {
   async fn basic_replica_lifecycle() {
     tracing_subscriber::fmt::init();
 
+    // Initialize MinIO per-test instance
+    let minio_guard = MinioTestServer::start(9001);
+
     // Use a temporary directory for the test
     let temp_dir = tempfile::TempDir::new().unwrap();
     let data_dir = temp_dir.path();
 
-    // Use a simple, predictable room ID
-    let room_id = "basic-test-room";
-    let s3_config = create_test_s3_config(room_id);
+    let room_id = "basic-replica-lifecycle";
+    let s3_config = create_test_s3_config(room_id, &minio_guard);
     let replica =
       SqliteReplica::new(data_dir, "test-tenant", room_id, s3_config);
 
@@ -553,9 +571,10 @@ mod tests {
     // Stop replication cleanly
     replica.shutdown().await.unwrap();
 
-    // Optionally: verify something was uploaded to MinIO
     assert!(
-      minio_bucket_has_room_data(&room_id).await.unwrap(),
+      minio_bucket_has_room_data(&room_id, &minio_guard)
+        .await
+        .unwrap(),
       "Expected replica data"
     );
   }
