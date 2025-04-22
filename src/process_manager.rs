@@ -176,7 +176,10 @@ impl ProcessManager {
     // Create Command but don't spawn it yet - we'll use ChildOnParentExit
     let mut cmd = std::process::Command::new("deno");
     cmd
-      .env("DENO_SERVE_ADDRESS", socket_path.clone())
+      .env(
+        "DENO_SERVE_ADDRESS",
+        format!("unix:{}", socket_path.display()),
+      )
       .env("X-Room-Id", room_id) // Pass room ID to bootstrap.ts
       .arg("run")
       .arg(format!("--allow-read={}", app_code_dir.display()))
