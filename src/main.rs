@@ -583,6 +583,73 @@ mod tests {
     }
   }
 
+  #[tokio::test]
+  async fn basic_db() {
+    init();
+
+    // Use a unique room name for this test
+    let room_name = format!(
+      "test-db-{}",
+      std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+    );
+
+    // Make first request to room
+    let first_response = reqwest::Client::new()
+      .get(format!("http://127.0.0.1:6146/room/{}", room_name))
+      .header("Host", "basic-db.localhost")
+      .send()
+      .await
+      .unwrap()
+      .text()
+      .await
+      .unwrap();
+    assert_eq!(first_response.trim(), "1");
+
+    // Verify SQLite database exists and has correct record count
+    let db_path = format!("data/basic-db.localhost/sqlite/{}.db", room_name);
+    assert!(std::path::Path::new(&db_path).exists());
+
+    let output = std::process::Command::new("sqlite3")
+      .arg(&db_path)
+      .arg("SELECT COUNT(*) FROM requests;")
+      .output()
+      .expect("Failed to execute sqlite3 command");
+    let count_str = String::from_utf8_lossy(&output.stdout).to_string();
+    let count = count_str.trim();
+    assert_eq!(
+      count, "1",
+      "Database should have 1 record after first request"
+    );
+
+    // Make second request to same room
+    let second_response = reqwest::Client::new()
+      .get(format!("http://127.0.0.1:6146/room/{}", room_name))
+      .header("Host", "basic-db.localhost")
+      .send()
+      .await
+      .unwrap()
+      .text()
+      .await
+      .unwrap();
+    assert_eq!(second_response.trim(), "2");
+
+    // Database should reflect updated count
+    let output = std::process::Command::new("sqlite3")
+      .arg(&db_path)
+      .arg("SELECT COUNT(*) FROM requests;")
+      .output()
+      .expect("Failed to execute sqlite3 command");
+    let count_str = String::from_utf8_lossy(&output.stdout).to_string();
+    let count = count_str.trim();
+    assert_eq!(
+      count, "2",
+      "Database should have 2 records after second request"
+    );
+  }
+
   /// Helper function to connect to a WebSocket room and handle initial messages
   async fn connect_to_room(
     room_id: &str,

@@ -138,7 +138,8 @@ impl ProcessManager {
       return Err(ProxyError::InvalidHost);
     }
 
-    let app_code_dir = self.data_dir.join(host).join("code");
+    let tenant_dir = self.data_dir.join(host);
+    let app_code_dir = tenant_dir.join("code");
     let main_script = app_code_dir.join("main.ts");
 
     if !main_script.exists() {
@@ -158,6 +159,11 @@ impl ProcessManager {
     };
     let socket_path = socket_tempdir.path().join(socket_name);
 
+    // TODO: this should probably be colocated with SqliteReplica code?
+    std::fs::create_dir_all(tenant_dir.join("sqlite")).unwrap_or_else(|e| {
+      warn!("Failed to create sqlite directory: {}", e);
+    });
+
     // Path to bootstrap.ts script
     let bootstrap_script = self
       .data_dir
@@ -173,16 +179,18 @@ impl ProcessManager {
       "Spawning Deno process"
     );
 
-    // Create Command but don't spawn it yet - we'll use ChildOnParentExit
     let mut cmd = std::process::Command::new("deno");
     cmd
+      .current_dir(&tenant_dir)
       .env(
         "DENO_SERVE_ADDRESS",
         format!("unix:{}", socket_path.display()),
       )
       .env("X-Room-Id", room_id) // Pass room ID to bootstrap.ts
       .arg("run")
-      .arg(format!("--allow-read={}", app_code_dir.display()))
+      .arg("--no-prompt")
+      .arg(format!("--allow-read={}", tenant_dir.display()))
+      .arg(format!("--allow-write={}", tenant_dir.display()))
       .arg(format!("--allow-read={}", socket_path.display()))
       .arg(format!("--allow-write={}", socket_path.display()))
       .arg("--allow-net")

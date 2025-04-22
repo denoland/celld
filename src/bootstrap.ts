@@ -1,3 +1,5 @@
+import { DatabaseSync } from "node:sqlite";
+
 if (import.meta.main) {
   if (Deno.args.length !== 1) {
     console.error("Usage: bootstrap.ts <path-to-user-module>");
@@ -28,8 +30,9 @@ export interface Room {
 }
 
 interface Context {
-  roomId: string;
+  roomId: string; // superfluous - remove in favor of room.id
   room: Room;
+  db: DatabaseSync; // should this be in Room interface?
 }
 
 interface Server {
@@ -103,7 +106,18 @@ async function bootstrap(userModulePath: string) {
   // Create context object
   const ctx = { roomId, room };
 
-  // Call onStart if it exists
+  let dbInstance: DatabaseSync | null = null;
+  Object.defineProperty(ctx, "db", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      if (!dbInstance) {
+        dbInstance = new DatabaseSync(`./sqlite/${roomId}.db`);
+      }
+      return dbInstance;
+    },
+  });
+
   if (userModule.onStart) {
     await userModule.onStart(ctx);
   }
