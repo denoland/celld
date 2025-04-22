@@ -11,7 +11,7 @@ use tracing::{error, info, instrument, trace, warn};
 use uuid::Uuid;
 
 use crate::child_on_parent_exit::ChildOnParentExit;
-use crate::sqlite_replica::create_empty_database;
+use crate::sqlite_replica::{create_empty_database, SqliteReplica};
 use crate::ProxyError;
 
 pub struct ProcessEntry {
@@ -22,6 +22,7 @@ pub struct ProcessEntry {
   pub single_use: bool,                     // Flag for single-use isolates
   pub active_connections: u32, // Counter for active connections (including WebSockets)
   pub _socket_tempdir: TempDir, // Keep tempdir alive as long as process exists
+  pub replica: Option<SqliteReplica>, // SQLite replication to S3/MinIO
 }
 
 #[derive(Clone)]
@@ -32,6 +33,12 @@ pub struct ProcessManager {
 
 impl ProcessManager {
   pub fn new(data_dir: PathBuf) -> Self {
+    // TODO: Implement a cleanup mechanism for old empty database files
+    // This could be done by:
+    // 1. Tracking database access times
+    // 2. Running a periodic cleanup job that removes databases that haven't been
+    //    accessed for a long time (e.g., weeks or months)
+    // 3. Only removing databases that are successfully backed up to S3/MinIO
     ProcessManager {
       data_dir: std::fs::canonicalize(data_dir.clone()).unwrap(),
       processes: Arc::new(Mutex::new(HashMap::new())),
@@ -166,12 +173,80 @@ impl ProcessManager {
       warn!("Failed to create sqlite directory: {}", e);
     });
 
-    // Ensure an empty SQLite database file exists for this room
+    // Configure SQLite replication if S3 is configured
+    let mut replica = None;
     let db_path = sqlite_dir.join(format!("{}.db", room_id));
-    if !db_path.exists() {
-      create_empty_database(&db_path).unwrap_or_else(|e| {
-        warn!("Failed to create empty database file: {}", e);
-      });
+
+    if let Some(s3_config) = crate::sqlite_replica::get_s3_cfg_for_tenant(host)
+    {
+      info!(
+        tenant = %host,
+        room_id = %room_id,
+        "S3 replication enabled for room"
+      );
+
+      let replica_instance =
+        SqliteReplica::new(&self.data_dir, host, room_id, s3_config);
+
+      // Restore the database if needed
+      match replica_instance.restore_if_needed().await {
+        Ok(restored) => {
+          info!(
+            tenant = %host,
+            room_id = %room_id,
+            restored = restored,
+            "Database restore completed successfully"
+          );
+        }
+        Err(e) => {
+          warn!(
+            tenant = %host,
+            room_id = %room_id,
+            error = %e,
+            "Failed to restore database, falling back to empty database"
+          );
+
+          // Create empty database file if restore failed and file doesn't exist
+          if !db_path.exists() {
+            create_empty_database(&db_path).unwrap_or_else(|e| {
+              warn!("Failed to create empty database file: {}", e);
+            });
+          }
+        }
+      }
+
+      // Start replication
+      match replica_instance.start_replication().await {
+        Ok(_) => {
+          info!(
+            tenant = %host,
+            room_id = %room_id,
+            "Started SQLite replication"
+          );
+          replica = Some(replica_instance);
+        }
+        Err(e) => {
+          warn!(
+            tenant = %host,
+            room_id = %room_id,
+            error = %e,
+            "Failed to start replication"
+          );
+        }
+      }
+    } else {
+      // No S3 config available, create empty database file
+      if !db_path.exists() {
+        create_empty_database(&db_path).unwrap_or_else(|e| {
+          warn!("Failed to create empty database file: {}", e);
+        });
+      }
+
+      info!(
+        tenant = %host,
+        room_id = %room_id,
+        "S3 replication disabled (no configuration found)"
+      );
     }
 
     // Path to bootstrap.ts script
@@ -288,6 +363,7 @@ impl ProcessManager {
       single_use,
       active_connections: 0, // Initialize with zero connections
       _socket_tempdir: socket_tempdir, // Keep tempdir alive as long as process exists
+      replica, // Store the SQLite replica (None if not enabled)
     };
 
     // For single-use isolates, use a unique key with a UUID suffix
@@ -346,7 +422,31 @@ impl ProcessManager {
             "Reaping idle process"
           );
 
-          // Kill process using the parent_exit_guard
+          // Shutdown SQLite replica if it exists
+          if let Some(replica) = &entry.replica {
+            info!(
+              host = %host,
+              pid = entry.pid,
+              "Flushing and shutting down SQLite replica before killing process"
+            );
+
+            // Wait for flush with a timeout of 2 seconds
+            match replica
+              .wait_for_flush(std::time::Duration::from_secs(2))
+              .await
+            {
+              Ok(_) => info!("SQLite replica flush successful"),
+              Err(e) => warn!("Error flushing SQLite replica: {}", e),
+            }
+
+            // Now shutdown the replica
+            match replica.shutdown().await {
+              Ok(_) => info!("SQLite replica shutdown successful"),
+              Err(e) => warn!("Error shutting down SQLite replica: {}", e),
+            }
+          }
+
+          // Now kill the Deno process using the parent_exit_guard
           entry.parent_exit_guard.kill();
           // The Drop implementation of ChildOnParentExit will finish the process cleanup
           // The TempDir will be dropped when entry is dropped, cleaning up the socket file

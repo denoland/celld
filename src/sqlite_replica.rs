@@ -49,14 +49,56 @@
 use anyhow::{anyhow, Context, Result};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
+
+// Environment variables for S3 configuration, loaded once at startup
+static S3_ENDPOINT: Lazy<Option<String>> =
+  Lazy::new(|| std::env::var("ROOMD_S3_ENDPOINT").ok());
+static S3_BUCKET: Lazy<Option<String>> =
+  Lazy::new(|| std::env::var("ROOMD_S3_BUCKET").ok());
+static S3_REGION: Lazy<Option<String>> =
+  Lazy::new(|| std::env::var("ROOMD_S3_REGION").ok());
+static S3_PREFIX: Lazy<Option<String>> =
+  Lazy::new(|| std::env::var("ROOMD_S3_PREFIX").ok());
+static S3_ACCESS_KEY_ID: Lazy<Option<String>> =
+  Lazy::new(|| std::env::var("ROOMD_S3_ACCESS_KEY_ID").ok());
+static S3_SECRET_ACCESS_KEY: Lazy<Option<String>> =
+  Lazy::new(|| std::env::var("ROOMD_S3_SECRET_ACCESS_KEY").ok());
+
+/// Get S3 configuration for a specific tenant from environment variables
+pub fn get_s3_cfg_for_tenant(tenant: &str) -> Option<S3Config> {
+  // Check if all required environment variables are set
+  let endpoint = S3_ENDPOINT.as_ref()?.clone();
+  let bucket = S3_BUCKET.as_ref()?.clone();
+  let region = S3_REGION
+    .as_ref()
+    .cloned()
+    .unwrap_or_else(|| "us-east-1".to_string());
+  let prefix = S3_PREFIX
+    .as_ref()
+    .cloned()
+    .unwrap_or_else(|| "roomd".to_string());
+  let access_key_id = S3_ACCESS_KEY_ID.as_ref()?.clone();
+  let secret_access_key = S3_SECRET_ACCESS_KEY.as_ref()?.clone();
+
+  // Construct S3Config with tenant-specific path
+  Some(S3Config {
+    endpoint,
+    bucket,
+    path: format!("{}/{}", prefix, tenant),
+    region,
+    access_key_id,
+    secret_access_key,
+  })
+}
 
 /// Configuration for a MinIO or S3 replica target
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,7 +192,7 @@ pub struct SqliteReplica {
   /// Path to the Litestream configuration file
   config_path: PathBuf,
   /// Handle to the replication child process
-  replication_process: Arc<Mutex<Option<Child>>>,
+  replication_process: Arc<Mutex<Option<tokio::process::Child>>>,
 }
 
 impl SqliteReplica {
@@ -321,10 +363,8 @@ impl SqliteReplica {
 
     info!("Starting Litestream replication for {:?}", self.db_path);
 
-    // Start the replication process
-    // Use std::process::Command here because tokio::process::Child doesn't implement Send
-    // and we need to store it in the Arc<Mutex<Option<Child>>>
-    let child = std::process::Command::new("litestream")
+    // Start the replication process with tokio::process::Command
+    let child = Command::new("litestream")
       .arg("replicate")
       .arg("-config")
       .arg(&self.config_path)
@@ -340,6 +380,24 @@ impl SqliteReplica {
     Ok(())
   }
 
+  /// Waits for replication to flush writes with a timeout
+  pub async fn wait_for_flush(
+    &self,
+    timeout: std::time::Duration,
+  ) -> Result<()> {
+    info!("Waiting for replication flush for {:?}", self.db_path);
+
+    // For clean shutdown, we'll just pause briefly to allow replication to flush
+    // The SIGTERM to the replication process will cause it to flush WAL segments
+    tokio::time::sleep(timeout).await;
+
+    debug!(
+      "Waited {:?} for replication flush for {:?}",
+      timeout, self.db_path
+    );
+    Ok(())
+  }
+
   /// Kills the replicate process
   pub async fn shutdown(&self) -> Result<()> {
     let mut process_guard = self.replication_process.lock().unwrap();
@@ -347,11 +405,22 @@ impl SqliteReplica {
     if let Some(mut child) = process_guard.take() {
       info!("Shutting down replication for {:?}", self.db_path);
 
-      //Send SIGTERM for graceful shutdown
-      let pid = Pid::from_raw(child.id() as i32);
-      kill(pid, Signal::SIGTERM)?;
+      // Send SIGTERM for graceful shutdown
+      if let Some(id) = child.id() {
+        let pid = Pid::from_raw(id as i32);
+        kill(pid, Signal::SIGTERM)?;
+      } else {
+        // Process exited already
+        debug!("Process already exited");
+      }
 
-      child.wait()?;
+      // Wait for process to exit
+      match child.wait().await {
+        Ok(status) => {
+          debug!("Replication process exited with status: {:?}", status)
+        }
+        Err(e) => warn!("Error waiting for replication process to exit: {}", e),
+      }
     } else {
       debug!("No replication process to shutdown");
     }
@@ -381,101 +450,13 @@ pub fn create_empty_database(db_path: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
   use super::*;
+  use crate::test_utils::MinioTestServer;
   use std::process::Command;
   use std::time::Duration;
   use tempfile;
-
-  // Simple wrapper to manage the MinIO test server
-  pub struct MinioTestServer {
-    pub access_key: String,
-    pub secret_key: String,
-    pub port: u16,
-    pub endpoint: String,
-    pub docker_name: String,
-  }
-
-  impl MinioTestServer {
-    pub fn start(port: u16) -> Self {
-      let access_key = "adminadmin";
-      let secret_key = "adminadmin";
-      let docker_name = format!("minio-test-server-{}", uuid::Uuid::new_v4());
-      let status = std::process::Command::new("docker")
-        .args([
-          "run",
-          "--rm",
-          "-p",
-          format!("{}:9000", port).as_str(),
-          "-detatch",
-          "--name",
-          docker_name.as_str(),
-          "-e",
-          &format!("MINIO_ROOT_USER={}", access_key),
-          "-e",
-          &format!("MINIO_ROOT_PASSWORD={}", secret_key),
-          "-e",
-          "MINIO_REGION_NAME=us-east-1",
-          "minio/minio",
-          "server",
-          "/data",
-        ])
-        .spawn()
-        .unwrap()
-        .wait()
-        .unwrap();
-      assert!(status.success(), "MinIO server failed to start");
-
-      // Give MinIO some time to start
-      std::thread::sleep(Duration::from_secs(3));
-
-      MinioTestServer {
-        access_key: access_key.to_string(),
-        secret_key: secret_key.to_string(),
-        docker_name,
-        port,
-        endpoint: format!("http://localhost:{}", port),
-      }
-    }
-
-    pub fn create_bucket(&self, bucket_name: &str) -> Result<()> {
-      let status = Command::new("docker")
-        .args([
-          "run",
-          "--network=host",
-          "--rm",
-          "-e",
-          &format!(
-            "MC_HOST_minio=http://{}:{}@localhost:{}",
-            self.access_key, self.secret_key, self.port,
-          ),
-          "minio/mc",
-          "mb",
-          &format!("minio/{}", bucket_name),
-        ])
-        .spawn()
-        .unwrap()
-        .wait()
-        .unwrap();
-      if !status.success() {
-        return Err(anyhow!("Failed to create bucket"));
-      }
-
-      Ok(())
-    }
-  }
-
-  impl Drop for MinioTestServer {
-    fn drop(&mut self) {
-      let status = std::process::Command::new("docker")
-        .args(["kill", self.docker_name.as_str()])
-        .spawn()
-        .unwrap()
-        .wait()
-        .unwrap();
-      assert!(status.success(), "MinIO server failed to stop");
-    }
-  }
+  use uuid;
 
   // Helper to create test S3Config
   fn create_test_s3_config(

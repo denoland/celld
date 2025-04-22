@@ -1,10 +1,18 @@
+#[path = "../src/test_utils.rs"]
+mod test_utils;
+
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
+use std::fs;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
+use test_utils::MinioTestServer;
 use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use url::Url;
+use uuid::Uuid;
 
 /// Tests that we can connect to a room through any node in the mesh
 #[tokio::test]
@@ -107,6 +115,164 @@ async fn test_mesh_message_broadcast() {
   // Clean up connections
   client1.close(None).await.unwrap();
   client2.close(None).await.unwrap();
+}
+
+/// Tests SQLite replication to S3/MinIO in the mesh
+#[tokio::test]
+async fn test_sqlite_replication() {
+  // Start MinIO server for testing
+  let minio_port = 9009;
+  let bucket_name = "roomd-sqlreplica-test";
+  let minio_server = MinioTestServer::start(minio_port);
+  minio_server.create_bucket(bucket_name).unwrap();
+
+  // Generate a unique room ID
+  let room_id = format!("repl-test-{}", Uuid::new_v4().simple().to_string());
+
+  // Start a mesh with S3 replication enabled
+  let ports = [6031, 6032];
+  let mut servers = Vec::new();
+  let test_prefix = format!("test-{}", Uuid::new_v4().simple().to_string());
+
+  println!("Starting servers with S3 replication enabled");
+  for (i, &port) in ports.iter().enumerate() {
+    // Create a comma-separated string of peers
+    let peers: Vec<String> = ports
+      .iter()
+      .enumerate()
+      .filter(|(j, _)| *j != i) // Skip self
+      .map(|(_, p)| format!("127.0.0.1:{}", p))
+      .collect();
+
+    let known_peers = peers.join(",");
+    let self_addr = format!("127.0.0.1:{}", port);
+
+    // Start server with S3 replication environment variables
+    let server = Command::new(env!("CARGO_BIN_EXE_roomd"))
+      .env("DATA_PORT", port.to_string())
+      .env("SELF_ADDR", self_addr.clone())
+      .env("KNOWN_PEERS", known_peers.clone())
+      .env("DATA", "./data") // Point to the data directory
+      .env("RUST_LOG", "debug") // More detailed logging
+      // S3/MinIO configuration for replication
+      .env(
+        "ROOMD_S3_ENDPOINT",
+        format!("http://localhost:{}", minio_port),
+      )
+      .env("ROOMD_S3_BUCKET", bucket_name)
+      .env("ROOMD_S3_REGION", "us-east-1")
+      .env("ROOMD_S3_PREFIX", &test_prefix)
+      .env("ROOMD_S3_ACCESS_KEY_ID", &minio_server.access_key)
+      .env("ROOMD_S3_SECRET_ACCESS_KEY", &minio_server.secret_key)
+      .stdout(Stdio::inherit()) // Show output for debugging
+      .stderr(Stdio::inherit())
+      .spawn()
+      .expect(&format!("Failed to start server on port {}", port));
+
+    servers.push(server);
+    println!(
+      "Started server on port {} with S3 replication enabled",
+      port
+    );
+  }
+
+  // Wait for servers to be ready
+  println!("Waiting for servers to initialize...");
+  for &port in &ports {
+    MeshTest::wait_for_server_ready(port);
+  }
+  std::thread::sleep(Duration::from_millis(500));
+
+  // Connect to the room on the first server and make a database write
+  let tenant = "basic-db.localhost";
+  let url = format!("http://{}:{}/room/{}", tenant, ports[0], room_id);
+  println!("Making first request to create DB: {}", url);
+
+  // First request to initialize the database and increment counter to 1
+  let first_response = reqwest::Client::new()
+    .get(&url)
+    .header("Host", tenant)
+    .send()
+    .await
+    .expect("Failed to send first request")
+    .text()
+    .await
+    .expect("Failed to get first response text");
+
+  assert_eq!(
+    first_response.trim(),
+    "1",
+    "First request should return count = 1"
+  );
+
+  // Allow time for replication to occur
+  println!("Waiting for replication to S3...");
+  tokio::time::sleep(Duration::from_secs(5)).await;
+
+  // Check that files exist in MinIO
+  println!("Checking if files are in MinIO...");
+  let output = std::process::Command::new("docker")
+    .args([
+      "run",
+      "--network=host",
+      "--rm",
+      "-e",
+      &format!(
+        "MC_HOST_minio=http://{}:{}@localhost:{}",
+        minio_server.access_key, minio_server.secret_key, minio_port
+      ),
+      "minio/mc",
+      "ls",
+      "--recursive",
+      &format!("minio/{}", bucket_name),
+    ])
+    .output()
+    .expect("Failed to run MinIO ls command");
+
+  let minio_listing = String::from_utf8_lossy(&output.stdout);
+  println!("MinIO bucket contents:\n{}", minio_listing);
+
+  // Verify that the room ID appears in the MinIO listing
+  assert!(
+    minio_listing.contains(&room_id),
+    "Room database should be replicated to MinIO"
+  );
+
+  // Kill server 1 and only use server 2 from now on
+  println!("Killing first server to simulate failure...");
+  servers[0].kill().expect("Failed to kill first server");
+  
+  // Wait for peer manager to detect the failure and update routing
+  println!("Waiting for peer manager to update...");
+  tokio::time::sleep(Duration::from_secs(2)).await;
+  
+  // Make a request to the second server (should restore DB from S3)
+  let second_url = format!("http://{}:{}/room/{}", tenant, ports[1], room_id);
+  println!("Making request to second server: {}", second_url);
+
+  let second_response = reqwest::Client::new()
+    .get(&second_url)
+    .header("Host", tenant)
+    .send()
+    .await
+    .expect("Failed to send second request")
+    .text()
+    .await
+    .expect("Failed to get second response text");
+
+  // The counter should be incremented to 2 since the previous state was restored
+  assert_eq!(
+    second_response.trim(),
+    "2",
+    "Second request should restore DB and return count = 2"
+  );
+
+  // Clean up the servers
+  for mut server in servers {
+    if let Err(e) = server.kill() {
+      eprintln!("Failed to kill server: {}", e);
+    }
+  }
 }
 
 /// Tests that room isolation works properly in the mesh
@@ -224,6 +390,68 @@ impl MeshTest {
       println!(
         "Started server on port {} with SELF_ADDR={} and KNOWN_PEERS={}",
         port, self_addr, known_peers
+      );
+    }
+
+    // Wait for servers to be ready by probing TCP connections
+    println!("Waiting for servers to initialize...");
+    for &port in ports {
+      Self::wait_for_server_ready(port);
+    }
+
+    // Brief delay for peer exchange after TCP connections are ready
+    std::thread::sleep(Duration::from_millis(500));
+    println!("All servers are ready now");
+
+    MeshTest {
+      servers,
+      ports: ports.to_vec(),
+    }
+  }
+
+  // Start mesh nodes with S3/MinIO replication enabled
+  fn new_with_s3(ports: &[u16], minio_port: u16, bucket: &str) -> Self {
+    let mut servers = Vec::new();
+    let test_id = Uuid::new_v4().simple().to_string();
+
+    for (i, &port) in ports.iter().enumerate() {
+      // Create a comma-separated string of peers for KNOWN_PEERS env var
+      let peers: Vec<String> = ports
+        .iter()
+        .enumerate()
+        .filter(|(j, _)| *j != i) // Skip self
+        .map(|(_, p)| format!("127.0.0.1:{}", p))
+        .collect();
+
+      let known_peers = peers.join(",");
+      let self_addr = format!("127.0.0.1:{}", port);
+
+      // Start server with S3 replication environment variables
+      let server = Command::new(env!("CARGO_BIN_EXE_roomd"))
+        .env("DATA_PORT", port.to_string())
+        .env("SELF_ADDR", self_addr.clone())
+        .env("KNOWN_PEERS", known_peers.clone())
+        .env("DATA", "./data") // Point to the data directory
+        .env("RUST_LOG", "debug") // More detailed logging
+        // S3/MinIO configuration
+        .env(
+          "ROOMD_S3_ENDPOINT",
+          format!("http://localhost:{}", minio_port),
+        )
+        .env("ROOMD_S3_BUCKET", bucket)
+        .env("ROOMD_S3_REGION", "us-east-1")
+        .env("ROOMD_S3_PREFIX", format!("roomd-test-{}", test_id))
+        .env("ROOMD_S3_ACCESS_KEY_ID", "minioadmin")
+        .env("ROOMD_S3_SECRET_ACCESS_KEY", "minioadmin")
+        .stdout(Stdio::inherit()) // Show output for debugging
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect(&format!("Failed to start server on port {}", port));
+
+      servers.push(server);
+      println!(
+        "Started server on port {} with S3 replication enabled",
+        port
       );
     }
 

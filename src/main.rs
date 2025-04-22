@@ -3,6 +3,8 @@ mod peer_manager;
 mod process_manager;
 mod process_reaper;
 mod sqlite_replica;
+#[cfg(test)]
+pub mod test_utils;
 
 use once_cell::sync::Lazy;
 use pingora::http::StatusCode;
