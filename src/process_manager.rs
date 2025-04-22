@@ -11,6 +11,7 @@ use tracing::{error, info, instrument, trace, warn};
 use uuid::Uuid;
 
 use crate::child_on_parent_exit::ChildOnParentExit;
+use crate::sqlite_replica::create_empty_database;
 use crate::ProxyError;
 
 pub struct ProcessEntry {
@@ -159,10 +160,19 @@ impl ProcessManager {
     };
     let socket_path = socket_tempdir.path().join(socket_name);
 
-    // TODO: this should probably be colocated with SqliteReplica code?
-    std::fs::create_dir_all(tenant_dir.join("sqlite")).unwrap_or_else(|e| {
+    // Create SQLite directory
+    let sqlite_dir = tenant_dir.join("sqlite");
+    std::fs::create_dir_all(&sqlite_dir).unwrap_or_else(|e| {
       warn!("Failed to create sqlite directory: {}", e);
     });
+
+    // Ensure an empty SQLite database file exists for this room
+    let db_path = sqlite_dir.join(format!("{}.db", room_id));
+    if !db_path.exists() {
+      create_empty_database(&db_path).unwrap_or_else(|e| {
+        warn!("Failed to create empty database file: {}", e);
+      });
+    }
 
     // Path to bootstrap.ts script
     let bootstrap_script = self

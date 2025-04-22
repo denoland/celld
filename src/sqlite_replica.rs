@@ -360,6 +360,26 @@ impl SqliteReplica {
   }
 }
 
+/// Creates an empty but valid SQLite database file
+pub fn create_empty_database(db_path: &Path) -> Result<()> {
+  debug!(path = %db_path.display(), "Creating empty SQLite database file");
+  let status = std::process::Command::new("sqlite3")
+    .arg(db_path)
+    .arg("") // No SQL commands, just open and close to create empty file
+    .status()
+    .with_context(|| {
+      format!(
+        "Failed to execute sqlite3 command for {}",
+        db_path.display()
+      )
+    })?;
+  if !status.success() {
+    return Err(anyhow!("sqlite3 command failed with status: {}", status));
+  }
+  debug!(path = %db_path.display(), "Empty SQLite database file created successfully");
+  Ok(())
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -501,6 +521,21 @@ mod tests {
 
     // If we got any output, there's data
     Ok(!stdout.trim().is_empty())
+  }
+
+  #[test]
+  fn test_create_empty_database_file() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.db");
+    let result = create_empty_database(&db_path);
+    assert!(result.is_ok());
+    assert!(db_path.exists(), "Database file should exist");
+    let output = std::process::Command::new("sqlite3")
+      .arg(&db_path)
+      .arg(".tables") // List tables (should return empty but succeed)
+      .output()
+      .expect("Failed to execute sqlite3 command");
+    assert!(output.status.success());
   }
 
   #[tokio::test]
