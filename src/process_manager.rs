@@ -474,4 +474,11 @@ impl ProcessManager {
       trace!("Reaper check complete.");
     }
   }
+
+  pub async fn kill_all(&self) {
+    let mut processes = self.processes.lock().await;
+    for (host, entry) in processes.drain() {
+      entry.parent_exit_guard.kill();
+    }
+  }
 }

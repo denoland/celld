@@ -537,10 +537,9 @@ fn main() {
     // Create a tokio runtime for the benchmark
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-      match deno_benchmark::benchmark_deno_coldstart(iterations).await {
-        Ok(_) => println!("Benchmark completed successfully"),
-        Err(e) => eprintln!("Benchmark failed: {:?}", e),
-      }
+      deno_benchmark::benchmark_deno_coldstart(iterations)
+        .await
+        .unwrap();
     });
     return;
   }

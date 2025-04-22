@@ -7,9 +7,7 @@ use tokio::sync::Mutex;
 use crate::process_manager::ProcessManager;
 
 /// Benchmark function to measure Deno process coldstart performance
-pub async fn benchmark_deno_coldstart(
-  iterations: usize,
-) -> Result<Vec<Duration>> {
+pub async fn benchmark_deno_coldstart(iterations: usize) -> Result<()> {
   // Get current working directory
   let current_dir = std::env::current_dir()?;
 
@@ -82,5 +80,7 @@ pub async fn benchmark_deno_coldstart(
     println!("p99: {} ms", p99.as_millis());
   }
 
-  Ok(results)
+  process_manager.kill_all().await;
+
+  Ok(())
 }
