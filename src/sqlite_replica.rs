@@ -47,16 +47,16 @@
 //! - ensure backups complete before cleanup.
 
 use anyhow::{anyhow, Context, Result};
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::process::Command;
-use tracing::{debug, error, info, warn};
-use wait_timeout::ChildExt;
+use tracing::{debug, info, warn};
 
 /// Configuration for a MinIO or S3 replica target
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,7 +314,7 @@ impl SqliteReplica {
 
     // Check if replication is already running
     let mut process_guard = self.replication_process.lock().unwrap();
-    if let Some(child) = &mut *process_guard {
+    if let Some(_child) = &mut *process_guard {
       debug!("Replication already running");
       return Err(anyhow!("Replication already running"));
     }
@@ -348,8 +348,6 @@ impl SqliteReplica {
       info!("Shutting down replication for {:?}", self.db_path);
 
       //Send SIGTERM for graceful shutdown
-      use nix::sys::signal::{kill, Signal};
-      use nix::unistd::Pid;
       let pid = Pid::from_raw(child.id() as i32);
       kill(pid, Signal::SIGTERM)?;
 
@@ -365,9 +363,6 @@ impl SqliteReplica {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::child_on_parent_exit::ChildOnParentExit;
-  use once_cell::sync::Lazy;
-  use std::net::SocketAddr;
   use std::process::Command;
   use std::time::Duration;
   use tempfile;
