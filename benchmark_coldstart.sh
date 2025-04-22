@@ -9,7 +9,7 @@ pkill -f "deno run" || true
 sleep 1
 
 echo "Starting server with tracing disabled..."
-RUST_LOG=error ./target/release/self-hosted-deno-deploy &
+RUST_LOG=error ./target/release/roomd &
 SERVER_PID=$!
 
 # Give server time to start

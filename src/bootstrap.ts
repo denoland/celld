@@ -70,7 +70,6 @@ async function bootstrap(userModulePath: string) {
 
   // Get the room ID from environment variable once, when the process starts
   const roomId = Deno.env.get("X-Room-Id") || "";
-  console.log(`Bootstrap starting with roomId: ${roomId}`);
 
   // Create a Room object to track connections and provide broadcast functionality
   const connections = new Map<string, Connection>();

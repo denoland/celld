@@ -34,7 +34,7 @@ async fn test_mesh_room_connection() {
   // Send a message from the first connection
   let test_message = "Hello from the mesh test!";
   connections[0]
-    .send(Message::Text(test_message.to_string()))
+    .send(Message::Text(test_message.to_string().into()))
     .await
     .unwrap();
 
@@ -92,7 +92,7 @@ async fn test_mesh_message_broadcast() {
   // Send a chat message from client 1
   let chat_message = "Hello from the mesh test!";
   client1
-    .send(Message::Text(chat_message.to_string()))
+    .send(Message::Text(chat_message.to_string().into()))
     .await
     .unwrap();
 
@@ -125,7 +125,7 @@ async fn test_mesh_room_isolation() {
   // Send a message in room-a
   let message_room1 = "This message should only be in room-a";
   client1
-    .send(Message::Text(message_room1.to_string()))
+    .send(Message::Text(message_room1.to_string().into()))
     .await
     .unwrap();
 
@@ -137,7 +137,7 @@ async fn test_mesh_room_isolation() {
   // Send a message in room-b
   let message_room2 = "This message should only be in room-b";
   client2
-    .send(Message::Text(message_room2.to_string()))
+    .send(Message::Text(message_room2.to_string().into()))
     .await
     .unwrap();
 
@@ -310,9 +310,12 @@ async fn connect_to_room(
 
   println!("Connecting to WebSocket at {}", url);
 
-  let (mut ws_stream, _) = tokio_tungstenite::connect_async(url).await.expect(
-    &format!("Failed to connect to room {} on port {}", room_id, port),
-  );
+  let (mut ws_stream, _) = tokio_tungstenite::connect_async(url.to_string())
+    .await
+    .expect(&format!(
+      "Failed to connect to room {} on port {}",
+      room_id, port
+    ));
 
   // Read welcome message
   println!("Connected, waiting for welcome message");

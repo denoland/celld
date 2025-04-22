@@ -598,7 +598,7 @@ mod tests {
     // Add a small delay before connecting to ensure the server is ready
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (mut ws_stream, _) = tokio_tungstenite::connect_async(&url)
+    let (mut ws_stream, _) = tokio_tungstenite::connect_async(url)
       .await
       .expect(&format!("Failed to connect to room {}", room_id));
 
@@ -628,7 +628,7 @@ mod tests {
     // Send a test message
     let test_message = "Hello WebSocket";
     ws_stream
-      .send(Message::Text(test_message.to_string()))
+      .send(Message::Text(test_message.to_string().into()))
       .await
       .unwrap();
 
@@ -681,7 +681,7 @@ mod tests {
     // Send a chat message from client 1
     let chat_message = "Hello everyone!";
     client1
-      .send(Message::Text(chat_message.to_string()))
+      .send(Message::Text(chat_message.to_string().into()))
       .await
       .unwrap();
 
@@ -712,7 +712,7 @@ mod tests {
     // Send a message in room-1
     let message_room1 = "This message should only be in room-1";
     client1
-      .send(Message::Text(message_room1.to_string()))
+      .send(Message::Text(message_room1.to_string().into()))
       .await
       .unwrap();
 
@@ -726,7 +726,7 @@ mod tests {
     // Send a message in room-2
     let message_room2 = "This message should only be in room-2";
     client2
-      .send(Message::Text(message_room2.to_string()))
+      .send(Message::Text(message_room2.to_string().into()))
       .await
       .unwrap();
 
