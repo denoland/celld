@@ -8,8 +8,8 @@ echo "Cleaning up any existing processes..."
 pkill -f "deno run" || true
 sleep 1
 
-echo "Starting server with tracing disabled..."
-RUST_LOG=error ./target/release/roomd &
+echo "Starting server with timing info enabled..."
+RUST_LOG=info ./target/release/roomd &
 SERVER_PID=$!
 
 # Give server time to start

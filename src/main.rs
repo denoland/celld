@@ -1,4 +1,5 @@
 mod child_on_parent_exit;
+mod deno_benchmark;
 mod peer_manager;
 mod process_manager;
 mod process_reaper;
@@ -91,6 +92,7 @@ impl ProxyHttp for DenoProxyApp {
     if !ctx.tenant.is_empty() {
       let default_room = "default-room".to_string();
       let room_id = ctx.room_id.as_ref().unwrap_or(&default_room);
+
       let _ = self
         .process_manager
         .decrement_connection_count(&ctx.tenant, room_id)
@@ -103,6 +105,8 @@ impl ProxyHttp for DenoProxyApp {
     session: &mut Session,
     ctx: &mut Self::CTX,
   ) -> Result<bool> {
+    // Track request start time
+    let filter_start = std::time::Instant::now();
     let req_header = session.req_header();
 
     // Extract and validate host header
@@ -228,7 +232,11 @@ impl ProxyHttp for DenoProxyApp {
         let room_id = room_path.split('/').next().unwrap_or(room_path);
         // Store the room ID in the context for later use
         ctx.room_id = Some(room_id.to_string());
-        info!(room_id = %room_id, "Proxying request to room");
+        info!(
+          room_id = %room_id,
+          request_filter_time = ?filter_start.elapsed(),
+          "Proxying request to room"
+        );
         return Ok(false); // Let it be handled by the upstream_peer method
       }
     }
@@ -312,6 +320,9 @@ impl ProxyHttp for DenoProxyApp {
     session: &mut Session,
     ctx: &mut Self::CTX,
   ) -> pingora::Result<Box<HttpPeer>> {
+    // Start timing the request path
+    let request_start = std::time::Instant::now();
+
     // Check for the single-use header
     let single_use = session
       .req_header()
@@ -328,6 +339,7 @@ impl ProxyHttp for DenoProxyApp {
       host = %ctx.tenant,
       room_id = %room_id,
       single_use = %single_use,
+      request_init_time = ?request_start.elapsed(),
       "Processing request"
     );
 
@@ -407,6 +419,11 @@ impl ProxyHttp for DenoProxyApp {
     }; // Mutex guard dropped here
 
     // Configure backend using the Unix Domain Socket
+    info!(
+      process_manager_time = ?request_start.elapsed(),
+      "Process manager get_or_spawn_process completed"
+    );
+
     let socket_path_str = match socket_path.to_str() {
       Some(s) => s.to_string(),
       None => {
@@ -419,14 +436,18 @@ impl ProxyHttp for DenoProxyApp {
     };
 
     // Create a Backend using the Unix Domain Socket address
+    let peer_start = std::time::Instant::now();
     let sni = ctx.tenant.clone();
     match HttpPeer::new_uds(&socket_path_str, false, sni) {
       Ok(peer) => {
         info!(
           host = %ctx.tenant,
           socket = %socket_path.display(),
+          uds_peer_creation_time = ?peer_start.elapsed(),
+          total_time_so_far = ?request_start.elapsed(),
           "Selected upstream UDS peer"
         );
+        // Assume anything after this point is handled by Pingora proxy machinery
         Ok(Box::new(peer))
       }
       Err(e) => {
@@ -500,6 +521,31 @@ fn start_server(
 fn main() {
   tracing_subscriber::fmt::init();
 
+  // Check if we should run the benchmark
+  if std::env::var("DENO_BENCH").unwrap_or_default() == "1" {
+    // Get iteration count from environment variable
+    let iterations = std::env::var("BENCH_ITERATIONS")
+      .unwrap_or_else(|_| "100".to_string())
+      .parse::<usize>()
+      .unwrap_or(100);
+
+    println!(
+      "Running Deno coldstart benchmark (iterations: {})...",
+      iterations
+    );
+
+    // Create a tokio runtime for the benchmark
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+      match deno_benchmark::benchmark_deno_coldstart(iterations).await {
+        Ok(_) => println!("Benchmark completed successfully"),
+        Err(e) => eprintln!("Benchmark failed: {:?}", e),
+      }
+    });
+    return;
+  }
+
+  // Normal server startup
   let self_addr = std::env::var("SELF_ADDR")
     .ok()
     .map(|s| s.trim().to_string());

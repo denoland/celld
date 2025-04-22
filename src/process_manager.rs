@@ -257,6 +257,7 @@ impl ProcessManager {
       .join("src")
       .join("bootstrap.ts");
 
+    let spawn_start = Instant::now();
     info!(
       bootstrap = %bootstrap_script.display(),
       script = %main_script.display(),
@@ -294,15 +295,20 @@ impl ProcessManager {
     // Convert to tokio::process::Child using the PID
     let pid = child_guard.pid().unwrap() as u32;
 
-    info!(pid = pid, "Deno process spawned with parent-exit guard");
+    info!(
+        pid = pid,
+        spawn_duration = ?spawn_start.elapsed(),
+        "Deno process spawned with parent-exit guard"
+    );
 
     // --- Wait for the socket to become available (crucial for cold start) ---
     let socket_ = socket_path.clone();
     let wait_start = Instant::now();
     let wait_timeout = Duration::from_secs(10); // Timeout for socket connection
 
-    // Use minimal polling for fastest possible connection
-    let delay = Duration::from_micros(100);
+    // Use minimal polling for fastest possible connection with exponential backoff
+    let mut delay = Duration::from_micros(5); // Start with even smaller initial delay
+    let max_delay = Duration::from_millis(1); // Reduce max delay to improve responsiveness
 
     // Wait for the socket to be available and connect to it
     let stream = loop {
@@ -325,7 +331,8 @@ impl ProcessManager {
           info!(
             pid = pid,
             socket = %socket_.display(),
-            duration = ?wait_start.elapsed(),
+            socket_wait_duration = ?wait_start.elapsed(),
+            total_startup_duration = ?spawn_start.elapsed(),
             "Socket connected!"
           );
           // We have a connected socket
@@ -335,8 +342,10 @@ impl ProcessManager {
           if e.kind() == std::io::ErrorKind::ConnectionRefused
             || e.kind() == std::io::ErrorKind::NotFound =>
         {
-          // Socket not ready yet, use minimal polling with a tiny delay
+          // Socket not ready yet, use minimal polling with exponential backoff
           sleep(delay).await;
+          // Increase delay with exponential backoff, but cap at max_delay
+          delay = std::cmp::min(delay * 2, max_delay);
         }
         Err(e) => {
           error!(
