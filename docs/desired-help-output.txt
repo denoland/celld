@@ -19,8 +19,8 @@ DESCRIPTION:
     Routing is based on the request Host and room ID:
 
         http://myapp.localhost:3000/rooms/chat1
-                └────────┬────────┘ └───────┬──────┘
-                   tenant domain          room ID
+              └──────────┬────────┘ └────┬────┘
+                   tenant domain        room ID
 
     Each room runs in an isolated subprocess with its own state and lifecycle.
 

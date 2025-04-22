@@ -1,177 +1,143 @@
-# Self-Hosted Deno Deploy
+# roomd
 
-**Run JavaScript apps & functions securely. Anywhere.**
+The mesh‑aware daemon that lets you run **Durable‑Object‑style “rooms”** on your
+own infrastructure, with sub‑50 ms cold‑starts, real‑time WebSockets, and
+durable SQLite state replicated to S3 or MinIO via Litestream.
 
-A self-contained runtime for securely hosting JavaScript/TypeScript apps,
-plugins, and APIs real Deno subprocesses.
+## Why roomd?
 
-Push code. Route traffic. Enforce limits. Observe everything.
+- Build multiplayer chat, games, CRDT docs, AI agent swarms—anything that needs
+  a stateful “room” of logic.
+- Deploy locally in one Docker container or scale out to 1 000+ nodes; each room
+  is automatically routed to exactly one peer.
+- Keep state safe: every room writes to its own SQLite file that streams WAL
+  changes to object storage.
+- Enjoy a first‑class developer DX: drop a `main.ts` file that exports familiar
+  hooks (`onConnect`, `onMessage`, `onRequest`, …)—no boilerplate Deno.serve.
 
-**One container. Multi-tenant. No cloud needed.**
+## Features
 
-## Development Setup
+- **Room API**\
+  `/rooms/{roomId}` endpoint, PartyKit‑style hooks, automatic WebSocket upgrade.
+- **Mesh routing**\
+  Peers discover each other from `KNOWN_PEERS`, consistent‑hash every roomId to
+  a single owner, proxy WS frames across nodes.
+- **Lightning cold‑start**\
+  Deno subprocess reuse plus TCP header peek; first byte < 50 ms on an idle
+  node.
+- **Durable state**\
+  Per‑room SQLite; Litestream replicates WALs to S3/MinIO every second.
+- **Static asset offload**\
+  Serve `/static/*` straight from disk before it hits JavaScript.
+- **Observability**\
+  JSON logs per room, Prometheus endpoint (active rooms, cold‑start latency,
+  replication lag).
 
-This project is a Rust application that requires building for Linux ARM64, even
-if you're developing on another platform like macOS. We use Docker to build and
-run the project.
-
-### Prerequisites
-
-- Docker installed on your development machine
-- Rust (optional, for local development)
-
-### Building and Running
-
-1. Clone this repository
-2. Run the build script:
-
-```bash
-./build.sh
-```
-
-This will build a Docker image and run the container with the proxy listening on
-port 4000.
-
-### Environment Variables
-
-- `APPS_DIR`: Directory where app code is stored (default: "./apps")
-
-## Why?
-
-You need to run dynamic code in production—but:
-
-- You don’t trust it fully
-- You want isolation, observability, and control
-- You don’t want to spin up Kubernetes or roll your own platform
-
-Self-hosted Deno Deploy gives you a drop-in container to:
-
-- Run per-tenant logic or plugins
-- Host full HTTP/WS apps
-- Execute webhooks or background jobs
-- Track resource usage and runtime behavior
-
-## Get started
+## Quick start (single node)
 
 ```bash
-docker run -p 4000:4000 -p 4001:4001 --rm -ti denoland/deploy
+# one‑liner demo
+docker run --rm -ti -p 3000:3000 \
+  -e KNOWN_PEERS="127.0.0.1:3000" \
+  -v "$PWD/data:/data" \
+  denoland/roomd
 ```
 
-Port 4000 is the data plane, port 4001 is control plane.
+Open two tabs:
 
-## Deploy an app or plugin
+- http://ws‑echo.localhost:3000/rooms/chat1
+- http://ws‑echo.localhost:3000/rooms/chat1
+
+Type—messages echo between the tabs.
+
+## Two‑node mesh demo (no Docker)
 
 ```bash
-deno deploy -i local -d greeter
+# terminal 1
+ROOMD_PEER_ADDR=127.0.0.1:3000 KNOWN_PEERS=127.0.0.1:3000,127.0.0.1:4000 \
+roomd --port 3000 --data-dir ./data
+
+# terminal 2
+ROOMD_PEER_ADDR=127.0.0.1:4000 KNOWN_PEERS=127.0.0.1:3000,127.0.0.1:4000 \
+roomd --port 4000 --data-dir ./data
 ```
 
-Or via `curl`:
+Any client can connect to either port; rooms automatically locate their owner.
 
-```bash
-curl -X POST http://localhost:4001/deploy \
-  -F 'plugin=greeter' \
-  -F 'file=@main.ts'
+## Writing room code
+
+`data/ws-echo.localhost/code/main.ts`
+
+```ts
+export default {
+  onConnect(ws, { room }) {
+    ws.send(JSON.stringify({ type: "welcome" }));
+    room.broadcast(JSON.stringify({ type: "join", id: ws.id }), [ws.id]);
+  },
+
+  onMessage(msg, ws, { room }) {
+    room.broadcast(msg); // simple echo
+  },
+
+  onRequest(req, { room }) {
+    const { pathname } = new URL(req.url);
+
+    if (pathname === "/stats") {
+      const [{ count }] = room.db
+        .prepare("SELECT COUNT(*) AS count FROM requests")
+        .all();
+      return new Response(`Requests so far: ${count}`);
+    }
+
+    return new Response("hello from roomd\n");
+  },
+};
 ```
 
-**main.ts**
+Access a ready‑to‑use SQLite handle at `room.db`—no boilerplate, created lazily
+on first use.
 
-```tsx
-import { Hono } from "npm:hono";
-const app = new Hono();
-app.get("/", (c) => c.text("Hello " + c.req.query("name")));
-export default app;
-```
+## Environment variables
 
-Execute it
+| Variable              | Purpose                                           |
+| --------------------- | ------------------------------------------------- |
+| `KNOWN_PEERS`         | Comma‑separated host:port list for peer discovery |
+| `ROOMD_S3_ENDPOINT`   | S3 or MinIO URL (`http://localhost:9000`)         |
+| `ROOMD_S3_BUCKET`     | Bucket name (`roomd-dev`)                         |
+| `ROOMD_S3_REGION`     | Region (`us-east-1`)                              |
+| `ROOMD_S3_PREFIX`     | Path prefix per tenant (`roomd`)                  |
+| `ROOMD_S3_ACCESS_KEY` | Access key                                        |
+| `ROOMD_S3_SECRET_KEY` | Secret key                                        |
 
-```bash
-curl http://localhost:4000/run/greeter?name=Alice
-# → "Hello Alice"
-```
-
-## Host a full web app
-
-```bash
-deno deploy -i local -d app.example.com
-```
-
-**main.ts**
+roomd builds a Litestream config automatically:
 
 ```
-Deno.serve(() => {
-  return new Response("<h1>Hello from your app</h1>", {
-    headers: { "Content-Type": "text/html" }
-  });
-});
+s3://$ROOMD_S3_BUCKET/$ROOMD_S3_PREFIX/<tenant>/<roomId>
 ```
 
-```bash
-curl -H "Host: app.example.com" http://localhost:4000
+## CLI help excerpt
+
+```
+roomd 0.1.0  Self‑hosted Durable‑Object runtime
+
+USAGE:
+  roomd [--port 3000] [--data-dir ./data]
+
+OPTIONS:
+  -p, --port <PORT>           HTTP / WS port [default: 3000]
+  -d, --data-dir <DIR>        Tenant data root [default: ./data]
+  -n, --known-peers <LIST>    "host:port,host:port" mesh bootstrap
+  --log-level <LEVEL>         error | warn | info | debug
 ```
 
-Serve full apps over custom domains or wildcard subdomains with proper
-isolation.
+See docs/desired-help-output.txt for full details.
 
-## Invocation options
+## Roadmap snapshot
 
-- **Path-based**
+1. Seamless `roomd dev` hot‑reload, tunnel URL.
+2. Peer mTLS for zero‑config secure clusters.
+3. Resource quotas per isolate (cgroups + V8).
+4. Hosted control plane (optional SaaS).
+5. Geo‑sharding and room migration.
 
-  `POST /run/plugin=name`
-
-  → Great for lightweight plugin logic, webhooks, jobs
-
-- **Wildcard subdomain**
-
-  `name.localhost`
-
-  → Good for preview apps or internal multi-tenant routing
-
-- **Custom domain**
-
-  `app.example.com`
-
-  → Ideal for fully hosted frontend or backend apps
-
----
-
-## What makes this different from `deno run`?
-
-| Feature       | `deno run`        | Self-Hosted Deno Deploy                 |
-| ------------- | ----------------- | --------------------------------------- |
-| Target        | One app           | Many apps, scripts, plugins             |
-| Isolation     | Manual            | Subprocess + Deno permissions + cgroups |
-| Routing       | You build it      | Built-in by domain or plugin name       |
-| Observability | None              | OTel-compatible logs and metrics        |
-| Deployments   | Manual or CI only | Push/pull-based model                   |
-| Multi-tenancy | No                | Yes                                     |
-
-## Key features
-
-- **Real Deno subprocess per app**
-- **CPU & memory limits via cgroups**
-- **Per-app permissions (`--allow-net`, etc.)**
-- **Static files + WebSocket support**
-- **Push-to-deploy from CLI or CI**
-- **OpenTelemetry usage export**
-- **Zero-config startup for dev**
-- **Custom and wildcard domain support**
-
-## Who it's for
-
-- Teams building plugin systems
-- Internal platforms running user code
-- SaaS builders replacing `eval()`
-- Engineers looking for a small, safe function host
-
-> It’s eval() you can trust.
->
-> It’s Cloudflare Workers—but yours.
->
-> It’s what `deno run` would be if it scaled to 100 apps.
-
-## Coming soon
-
-- Pull-based deployments
-- Built-in TLS via Let’s Encrypt
-- Durable event queues
-- Federated control plane
+Full roadmap lives in docs/roadmap.md.
