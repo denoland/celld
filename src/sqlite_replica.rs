@@ -75,9 +75,18 @@ static S3_SECRET_ACCESS_KEY: Lazy<Option<String>> =
 
 /// Get S3 configuration for a specific tenant from environment variables
 pub fn get_s3_cfg_for_tenant(tenant: &str) -> Option<S3Config> {
-  // Check if all required environment variables are set
-  let endpoint = S3_ENDPOINT.as_ref()?.clone();
-  let bucket = S3_BUCKET.as_ref()?.clone();
+  // Early exit if any required environment variables are missing
+  if S3_ENDPOINT.is_none()
+    || S3_BUCKET.is_none()
+    || S3_ACCESS_KEY_ID.is_none()
+    || S3_SECRET_ACCESS_KEY.is_none()
+  {
+    return None;
+  }
+
+  // Extract the values (safe to unwrap since we checked above)
+  let endpoint = S3_ENDPOINT.as_ref().unwrap().clone();
+  let bucket = S3_BUCKET.as_ref().unwrap().clone();
   let region = S3_REGION
     .as_ref()
     .cloned()
@@ -86,8 +95,8 @@ pub fn get_s3_cfg_for_tenant(tenant: &str) -> Option<S3Config> {
     .as_ref()
     .cloned()
     .unwrap_or_else(|| "roomd".to_string());
-  let access_key_id = S3_ACCESS_KEY_ID.as_ref()?.clone();
-  let secret_access_key = S3_SECRET_ACCESS_KEY.as_ref()?.clone();
+  let access_key_id = S3_ACCESS_KEY_ID.as_ref().unwrap().clone();
+  let secret_access_key = S3_SECRET_ACCESS_KEY.as_ref().unwrap().clone();
 
   // Construct S3Config with tenant-specific path
   Some(S3Config {
