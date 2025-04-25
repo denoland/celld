@@ -17,7 +17,7 @@ use pingora::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, debug};
+use tracing::{debug, error};
 
 use peer_manager::PeerManager;
 use process_manager::ProcessManager;
@@ -61,25 +61,24 @@ pub enum ProxyError {
   InternalError(#[from] anyhow::Error),
 }
 
-/// DenoProxyApp implements the HTTP proxy service for Deno processes
-struct DenoProxyApp {
+struct Proxy {
   process_manager: ProcessManager,
   peer_manager: PeerManager,
 }
 
 #[derive(Debug, Default)]
-pub struct MyCtx {
+pub struct Ctx {
   tenant: String,
   room_id: Option<String>,
 }
 
 #[async_trait::async_trait]
-impl ProxyHttp for DenoProxyApp {
-  type CTX = MyCtx;
+impl ProxyHttp for Proxy {
+  type CTX = Ctx;
 
   // Required implementation of new_ctx
   fn new_ctx(&self) -> Self::CTX {
-    MyCtx::default()
+    Ctx::default()
   }
 
   // Called when the entire response is sent to the downstream, or when there is a fatal error
@@ -478,7 +477,7 @@ fn start_server(
   let process_manager = ProcessManager::new(data_dir.clone());
 
   // Create the proxy app that will handle routing
-  let app = DenoProxyApp {
+  let app = Proxy {
     process_manager: process_manager.clone(),
     peer_manager: {
       let peer_manager = PeerManager::new(known_peers, self_addr.clone());
