@@ -400,9 +400,13 @@ impl SqliteReplica {
 
   /// Kills the replicate process
   pub async fn shutdown(&self) -> Result<()> {
-    let mut process_guard = self.replication_process.lock().unwrap();
+    // Take the child process out of the mutex without holding the lock during the await
+    let mut child_opt = {
+      let mut process_guard = self.replication_process.lock().unwrap();
+      process_guard.take()
+    };
 
-    if let Some(mut child) = process_guard.take() {
+    if let Some(ref mut child) = child_opt {
       info!("Shutting down replication for {:?}", self.db_path);
 
       // Send SIGTERM for graceful shutdown
@@ -414,7 +418,7 @@ impl SqliteReplica {
         debug!("Process already exited");
       }
 
-      // Wait for process to exit
+      // Wait for process to exit (without holding the lock)
       match child.wait().await {
         Ok(status) => {
           debug!("Replication process exited with status: {:?}", status)

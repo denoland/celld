@@ -1,11 +1,10 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
-use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{error, info, instrument, trace, warn};
 use uuid::Uuid;
@@ -52,21 +51,30 @@ impl ProcessManager {
     room_id: &str,
   ) -> bool {
     let process_key = format!("{}:{}", host, room_id);
-    let mut processes = self.processes.lock().await;
-    if let Some(entry) = processes.get_mut(&process_key) {
-      entry.active_connections += 1;
-      entry.last_used = Instant::now();
+
+    // Scope the lock to minimize lock holding time
+    let result = {
+      let mut processes = self.processes.lock().unwrap();
+      if let Some(entry) = processes.get_mut(&process_key) {
+        entry.active_connections += 1;
+        entry.last_used = Instant::now();
+        (true, entry.pid, entry.active_connections)
+      } else {
+        (false, 0, 0)
+      }
+    };
+
+    if result.0 {
       info!(
         host = %host,
         room_id = %room_id,
-        pid = entry.pid,
-        active_connections = entry.active_connections,
+        pid = result.1,
+        active_connections = result.2,
         "Incremented active connection count"
       );
-      true
-    } else {
-      false
     }
+
+    result.0
   }
 
   /// Track a closed connection to the process
@@ -76,23 +84,32 @@ impl ProcessManager {
     room_id: &str,
   ) -> bool {
     let process_key = format!("{}:{}", host, room_id);
-    let mut processes = self.processes.lock().await;
-    if let Some(entry) = processes.get_mut(&process_key) {
-      if entry.active_connections > 0 {
-        entry.active_connections -= 1;
+
+    // Scope the lock to minimize lock holding time
+    let result = {
+      let mut processes = self.processes.lock().unwrap();
+      if let Some(entry) = processes.get_mut(&process_key) {
+        if entry.active_connections > 0 {
+          entry.active_connections -= 1;
+        }
+        entry.last_used = Instant::now();
+        (true, entry.pid, entry.active_connections)
+      } else {
+        (false, 0, 0)
       }
-      entry.last_used = Instant::now();
+    };
+
+    if result.0 {
       info!(
         host = %host,
         room_id = %room_id,
-        pid = entry.pid,
-        active_connections = entry.active_connections,
+        pid = result.1,
+        active_connections = result.2,
         "Decremented active connection count"
       );
-      true
-    } else {
-      false
     }
+
+    result.0
   }
 
   #[instrument(skip(self), fields(host = %host, room_id = %room_id))]
@@ -102,37 +119,46 @@ impl ProcessManager {
     room_id: &str,
     single_use: bool,
   ) -> Result<(PathBuf, UnixStream), ProxyError> {
-    let mut processes = self.processes.lock().await;
-
     // Create a combined key for host and room to ensure one isolate per room
     let process_key = format!("{}:{}", host, room_id);
 
     // For single_use requests, always spawn a new process
     // TODO: This should not be supported in production
     if !single_use {
-      if let Some(entry) = processes.get_mut(&process_key) {
-        // Skip single-use entries when looking for a regular process
-        if !entry.single_use {
-          entry.last_used = Instant::now();
-          info!("Found running process for host and room");
-          // Connect to the socket
-          let socket_path = entry.socket_path.clone();
-          match UnixStream::connect(&socket_path).await {
-            Ok(stream) => {
-              info!(
-                socket = %socket_path.display(),
-                "Connected to existing process socket"
-              );
-              return Ok((socket_path, stream));
-            }
-            Err(e) => {
-              error!(
-                socket = %socket_path.display(),
-                error = %e,
-                "Failed to connect to existing process socket, spawn new one"
-              );
-              // Fall through to spawn a new process
-            }
+      // First, try to find and connect to an existing process, keeping the lock time minimal
+      let socket_path_opt = {
+        let mut processes = self.processes.lock().unwrap();
+        if let Some(entry) = processes.get_mut(&process_key) {
+          // Skip single-use entries when looking for a regular process
+          if !entry.single_use {
+            entry.last_used = Instant::now();
+            Some(entry.socket_path.clone())
+          } else {
+            None
+          }
+        } else {
+          None
+        }
+      };
+
+      // If we found a socket path, try to connect without holding the lock
+      if let Some(socket_path) = socket_path_opt {
+        info!("Found running process for host and room");
+        match UnixStream::connect(&socket_path).await {
+          Ok(stream) => {
+            info!(
+              socket = %socket_path.display(),
+              "Connected to existing process socket"
+            );
+            return Ok((socket_path, stream));
+          }
+          Err(e) => {
+            error!(
+              socket = %socket_path.display(),
+              error = %e,
+              "Failed to connect to existing process socket, spawn new one"
+            );
+            // Fall through to spawn a new process
           }
         }
       }
@@ -384,7 +410,12 @@ impl ProcessManager {
       process_key
     };
 
-    processes.insert(final_key, entry);
+    // Add the entry to the processes map (minimal lock time)
+    {
+      let mut processes = self.processes.lock().unwrap();
+      processes.insert(final_key, entry);
+    }
+
     info!(
       single_use = single_use,
       host = %host,
@@ -406,25 +437,36 @@ impl ProcessManager {
       sleep(reaper_interval).await;
       trace!("Reaper checking for idle processes...");
 
-      let mut processes = self.processes.lock().await;
-      let now = Instant::now();
-      let mut hosts_to_reap = Vec::new();
+      // Collect hosts to reap without holding the lock too long
+      let hosts_to_reap = {
+        let processes = self.processes.lock().unwrap();
+        let now = Instant::now();
+        let mut to_reap = Vec::new();
 
-      for (host, entry) in processes.iter() {
-        if now.duration_since(entry.last_used) > idle_timeout {
-          info!(
-            host = %host,
-            pid = entry.pid,
-            idle_duration = ?now.duration_since(entry.last_used),
-            "Process marked for reaping due to inactivity"
-          );
-          hosts_to_reap.push(host.clone());
+        for (host, entry) in processes.iter() {
+          if now.duration_since(entry.last_used) > idle_timeout {
+            info!(
+              host = %host,
+              pid = entry.pid,
+              idle_duration = ?now.duration_since(entry.last_used),
+              "Process marked for reaping due to inactivity"
+            );
+            to_reap.push(host.clone());
+          }
         }
-      }
+        to_reap
+      };
 
-      // Separate loop for removal to avoid mutable borrow issues while iterating
+      // Process each host to reap
       for host in hosts_to_reap {
-        if let Some(entry) = processes.remove(&host) {
+        // Get the entry to remove
+        let entry = {
+          let mut processes = self.processes.lock().unwrap();
+          processes.remove(&host)
+        };
+
+        // If we got an entry, reap it
+        if let Some(entry) = entry {
           warn!(
             host = %host,
             pid = entry.pid,
@@ -476,8 +518,14 @@ impl ProcessManager {
   }
 
   pub async fn kill_all(&self) {
-    let mut processes = self.processes.lock().await;
-    for (host, entry) in processes.drain() {
+    // Move all entries into a local collection to minimize lock duration
+    let entries: Vec<_> = {
+      let mut processes = self.processes.lock().unwrap();
+      processes.drain().collect()
+    };
+
+    // Kill all processes without holding the lock
+    for (_, entry) in entries {
       entry.parent_exit_guard.kill();
     }
   }
