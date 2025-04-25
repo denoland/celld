@@ -17,7 +17,7 @@ use pingora::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, info};
+use tracing::{error, debug};
 
 use peer_manager::PeerManager;
 use process_manager::ProcessManager;
@@ -47,7 +47,7 @@ static DATA_DIR: Lazy<PathBuf> = Lazy::new(|| {
     std::process::exit(1);
   }
 
-  info!("Using DATA_DIR: {}", path.display());
+  debug!("Using DATA_DIR: {}", path.display());
   path
 });
 
@@ -232,11 +232,6 @@ impl ProxyHttp for DenoProxyApp {
         let room_id = room_path.split('/').next().unwrap_or(room_path);
         // Store the room ID in the context for later use
         ctx.room_id = Some(room_id.to_string());
-        info!(
-          room_id = %room_id,
-          request_filter_time = ?filter_start.elapsed(),
-          "Proxying request to room"
-        );
         return Ok(false); // Let it be handled by the upstream_peer method
       }
     }
@@ -260,7 +255,7 @@ impl ProxyHttp for DenoProxyApp {
     let file = match std::fs::read(&file_path) {
       Ok(file) => file,
       Err(_) => {
-        info!("File not found: {}", file_path.display());
+        debug!("File not found: {}", file_path.display());
         return Err(pingora::Error::explain(
           ErrorType::HTTPStatus(StatusCode::NOT_FOUND.into()),
           "Not found",
@@ -335,7 +330,7 @@ impl ProxyHttp for DenoProxyApp {
       None => "default-room", // Default room ID if none specified
     };
 
-    info!(
+    debug!(
       host = %ctx.tenant,
       room_id = %room_id,
       single_use = %single_use,
@@ -348,7 +343,7 @@ impl ProxyHttp for DenoProxyApp {
       // We need to forward this request to the responsible peer
       let upstream_addr = self.peer_manager.get_owner_peer(room_id);
 
-      info!(
+      debug!(
         host = %ctx.tenant,
         room_id = %room_id,
         responsible_peer = %upstream_addr,
@@ -361,7 +356,7 @@ impl ProxyHttp for DenoProxyApp {
       // Create HTTP peer for the remote peer
       let peer = HttpPeer::new(upstream_addr, false, sni);
 
-      info!(
+      debug!(
         host = %ctx.tenant,
         room_id = %room_id,
         upstream = %upstream_addr,
@@ -371,7 +366,7 @@ impl ProxyHttp for DenoProxyApp {
     }
 
     // We are the responsible peer, so handle the request locally
-    info!(
+    debug!(
       host = %ctx.tenant,
       room_id = %room_id,
       "This instance is responsible for handling the request"
@@ -395,14 +390,14 @@ impl ProxyHttp for DenoProxyApp {
           path
         }
         Err(ProxyError::AppNotFound(host_not_found)) => {
-          info!("Application not found for host: {}", host_not_found);
+          debug!("Application not found for host: {}", host_not_found);
           return Err(pingora::Error::explain(
             ErrorType::HTTPStatus(StatusCode::NOT_FOUND.into()),
             format!("App not found: {}", host_not_found),
           ));
         }
         Err(ProxyError::InvalidHost) => {
-          info!("Invalid hostname format: {}", ctx.tenant);
+          debug!("Invalid hostname format: {}", ctx.tenant);
           return Err(pingora::Error::explain(
             ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
             "Invalid hostname format provided",
@@ -419,7 +414,7 @@ impl ProxyHttp for DenoProxyApp {
     }; // Mutex guard dropped here
 
     // Configure backend using the Unix Domain Socket
-    info!(
+    debug!(
       process_manager_time = ?request_start.elapsed(),
       "Process manager get_or_spawn_process completed"
     );
@@ -440,7 +435,7 @@ impl ProxyHttp for DenoProxyApp {
     let sni = ctx.tenant.clone();
     match HttpPeer::new_uds(&socket_path_str, false, sni) {
       Ok(peer) => {
-        info!(
+        debug!(
           host = %ctx.tenant,
           socket = %socket_path.display(),
           uds_peer_creation_time = ?peer_start.elapsed(),
@@ -487,7 +482,7 @@ fn start_server(
     process_manager: process_manager.clone(),
     peer_manager: {
       let peer_manager = PeerManager::new(known_peers, self_addr.clone());
-      info!(
+      debug!(
         "Peer manager initialized with {} peers",
         peer_manager.num_peers()
       );
@@ -514,7 +509,7 @@ fn start_server(
   // Add the proxy service to the server
   server.add_service(proxy_service);
 
-  info!("Starting Deno Deploy proxy server on port {}", data_port);
+  debug!("Starting Deno Deploy proxy server on port {}", data_port);
   server
 }
 

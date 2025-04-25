@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
 use tokio::time::sleep;
-use tracing::{error, info, instrument, trace, warn};
+use tracing::{error, debug, instrument, trace, warn};
 use uuid::Uuid;
 
 use crate::child_on_parent_exit::ChildOnParentExit;
@@ -64,16 +64,6 @@ impl ProcessManager {
       }
     };
 
-    if result.0 {
-      info!(
-        host = %host,
-        room_id = %room_id,
-        pid = result.1,
-        active_connections = result.2,
-        "Incremented active connection count"
-      );
-    }
-
     result.0
   }
 
@@ -98,16 +88,6 @@ impl ProcessManager {
         (false, 0, 0)
       }
     };
-
-    if result.0 {
-      info!(
-        host = %host,
-        room_id = %room_id,
-        pid = result.1,
-        active_connections = result.2,
-        "Decremented active connection count"
-      );
-    }
 
     result.0
   }
@@ -143,10 +123,9 @@ impl ProcessManager {
 
       // If we found a socket path, try to connect without holding the lock
       if let Some(socket_path) = socket_path_opt {
-        info!("Found running process for host and room");
         match UnixStream::connect(&socket_path).await {
           Ok(stream) => {
-            info!(
+            debug!(
               socket = %socket_path.display(),
               "Connected to existing process socket"
             );
@@ -163,9 +142,6 @@ impl ProcessManager {
         }
       }
     }
-
-    // --- Process not running, need to spawn ---
-    info!("No running process found, spawning new one");
 
     // Validate host format briefly (prevent directory traversal)
     if host.contains('/') || host == ".." {
@@ -205,7 +181,7 @@ impl ProcessManager {
 
     if let Some(s3_config) = crate::sqlite_replica::get_s3_cfg_for_tenant(host)
     {
-      info!(
+      debug!(
         tenant = %host,
         room_id = %room_id,
         "S3 replication enabled for room"
@@ -217,7 +193,7 @@ impl ProcessManager {
       // Restore the database if needed
       match replica_instance.restore_if_needed().await {
         Ok(restored) => {
-          info!(
+          debug!(
             tenant = %host,
             room_id = %room_id,
             restored = restored,
@@ -244,7 +220,7 @@ impl ProcessManager {
       // Start replication
       match replica_instance.start_replication().await {
         Ok(_) => {
-          info!(
+          debug!(
             tenant = %host,
             room_id = %room_id,
             "Started SQLite replication"
@@ -267,12 +243,6 @@ impl ProcessManager {
           warn!("Failed to create empty database file: {}", e);
         });
       }
-
-      info!(
-        tenant = %host,
-        room_id = %room_id,
-        "S3 replication disabled (no configuration found)"
-      );
     }
 
     // Path to bootstrap.ts script
@@ -284,12 +254,6 @@ impl ProcessManager {
       .join("bootstrap.ts");
 
     let spawn_start = Instant::now();
-    info!(
-      bootstrap = %bootstrap_script.display(),
-      script = %main_script.display(),
-      socket = %socket_path.display(),
-      "Spawning Deno process"
-    );
 
     let mut cmd = std::process::Command::new("deno");
     cmd
@@ -299,6 +263,8 @@ impl ProcessManager {
         format!("unix:{}", socket_path.display()),
       )
       .env("X-Room-Id", room_id) // Pass room ID to bootstrap.ts
+      .stdout(std::process::Stdio::null())
+      .stderr(std::process::Stdio::null())
       .arg("run")
       .arg("--no-prompt")
       .arg(format!("--allow-read={}", tenant_dir.display()))
@@ -320,12 +286,6 @@ impl ProcessManager {
 
     // Convert to tokio::process::Child using the PID
     let pid = child_guard.pid().unwrap() as u32;
-
-    info!(
-        pid = pid,
-        spawn_duration = ?spawn_start.elapsed(),
-        "Deno process spawned with parent-exit guard"
-    );
 
     // --- Wait for the socket to become available (crucial for cold start) ---
     let socket_ = socket_path.clone();
@@ -354,7 +314,7 @@ impl ProcessManager {
 
       match UnixStream::connect(&socket_).await {
         Ok(stream) => {
-          info!(
+          debug!(
             pid = pid,
             socket = %socket_.display(),
             socket_wait_duration = ?wait_start.elapsed(),
@@ -416,13 +376,6 @@ impl ProcessManager {
       processes.insert(final_key, entry);
     }
 
-    info!(
-      single_use = single_use,
-      host = %host,
-      room_id = %room_id,
-      "Process entry added to map"
-    );
-
     Ok((socket_path, stream))
   }
 
@@ -432,7 +385,6 @@ impl ProcessManager {
     idle_timeout: Duration,
     reaper_interval: Duration,
   ) {
-    info!("Starting idle process reaper task");
     loop {
       sleep(reaper_interval).await;
       trace!("Reaper checking for idle processes...");
@@ -445,7 +397,7 @@ impl ProcessManager {
 
         for (host, entry) in processes.iter() {
           if now.duration_since(entry.last_used) > idle_timeout {
-            info!(
+            debug!(
               host = %host,
               pid = entry.pid,
               idle_duration = ?now.duration_since(entry.last_used),
@@ -475,7 +427,7 @@ impl ProcessManager {
 
           // Shutdown SQLite replica if it exists
           if let Some(replica) = &entry.replica {
-            info!(
+            debug!(
               host = %host,
               pid = entry.pid,
               "Flushing and shutting down SQLite replica before killing process"
@@ -486,13 +438,13 @@ impl ProcessManager {
               .wait_for_flush(std::time::Duration::from_secs(2))
               .await
             {
-              Ok(_) => info!("SQLite replica flush successful"),
+              Ok(_) => debug!("SQLite replica flush successful"),
               Err(e) => warn!("Error flushing SQLite replica: {}", e),
             }
 
             // Now shutdown the replica
             match replica.shutdown().await {
-              Ok(_) => info!("SQLite replica shutdown successful"),
+              Ok(_) => debug!("SQLite replica shutdown successful"),
               Err(e) => warn!("Error shutting down SQLite replica: {}", e),
             }
           }
@@ -501,12 +453,12 @@ impl ProcessManager {
           entry.parent_exit_guard.kill();
           // The Drop implementation of ChildOnParentExit will finish the process cleanup
           // The TempDir will be dropped when entry is dropped, cleaning up the socket file
-          info!(
+          debug!(
             host = %host,
             pid = entry.pid,
             "Killed process using parent-exit guard"
           );
-          info!(
+          debug!(
             host = %host,
             pid = entry.pid,
             "Process reaped successfully"
