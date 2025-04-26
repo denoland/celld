@@ -19,7 +19,7 @@ function App() {
   useEffect(() => {
     // Calculate WebSocket URL based on current location
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}`;
+    const wsUrl = `${protocol}//${window.location.host}/room/chat`;
     
     // Create WebSocket connection
     ws.current = new WebSocket(wsUrl);

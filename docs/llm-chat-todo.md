@@ -12,11 +12,10 @@
 
 ```
 roomd/
-├── demos/
-│   └── llm-chat/              ← Vite project (source)
-│       ├── index.html
-│       ├── main.ts
-│       └── ...
+├── demo-llm-chat/
+│   ├── index.html
+│   ├── vite.config.ts
+│   └── ...
 ├── data/
 │   └── llm-chat.localhost/
 │       ├── static/            ← built output of Vite
@@ -62,7 +61,7 @@ After each check stop to let me verify progress before continuing.
 - [x] Build rust code to read env vars and pass to deno subprocess in
       `src/process_manager.rs`
 - [x] Room subprocess should read `Deno.env.get("OPENAI_API_KEY")`
-- [ ] Add tests for env var handling
+- [x] Add tests for env var handling
 
 ### 4. UX polish
 

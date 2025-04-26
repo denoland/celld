@@ -1,5 +1,6 @@
 // Import the Connection and Room types from our bootstrap.ts
 import { Connection, Room } from "../../../src/bootstrap.ts";
+import { DatabaseSync } from "node:sqlite";
 
 interface Message {
   role: "user" | "assistant" | "system";
@@ -20,79 +21,56 @@ function createMessage(
 }
 
 // Initialize database with messages table
-async function initializeDatabase(roomId: string) {
-  const db = await Deno.openKv("sqlite://sqlite/" + roomId + ".db");
+function initializeDatabase(db: DatabaseSync) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      timestamp TEXT NOT NULL
+    )
+  `);
   
-  try {
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        timestamp TEXT NOT NULL
-      )
-    `);
-    
-    // Add a system message if the table is empty
-    const count = await db.query("SELECT COUNT(*) as count FROM messages");
-    if (count.rows[0].count === 0) {
-      await db.execute(
-        "INSERT INTO messages (role, content, timestamp) VALUES (?, ?, ?)",
-        ["system", "You are a helpful assistant.", new Date().toISOString()]
-      );
-    }
-  } finally {
-    await db.close();
+  // Add a system message if the table is empty
+  const count = db.prepare("SELECT COUNT(*) as count FROM messages").get();
+  if (count.count === 0) {
+    db.prepare(
+      "INSERT INTO messages (role, content, timestamp) VALUES (?, ?, ?)"
+    ).run("system", "You are a helpful assistant.", new Date().toISOString());
   }
 }
 
 // Get all messages from the database
-async function getMessages(roomId: string): Promise<Message[]> {
-  const db = await Deno.openKv("sqlite://sqlite/" + roomId + ".db");
-  try {
-    const result = await db.query(
-      "SELECT role, content, timestamp FROM messages ORDER BY id ASC"
-    );
-    return result.rows.map((row) => ({
-      role: row.role,
-      content: row.content,
-      timestamp: row.timestamp,
-    }));
-  } finally {
-    await db.close();
-  }
+function getMessages(db: DatabaseSync): Message[] {
+  const rows = db.prepare(
+    "SELECT role, content, timestamp FROM messages ORDER BY id ASC"
+  ).all();
+  
+  return rows.map((row) => ({
+    role: row.role as "user" | "assistant" | "system",
+    content: row.content,
+    timestamp: row.timestamp,
+  }));
 }
 
 // Save a message to the database
-async function saveMessage(
-  roomId: string, 
+function saveMessage(
+  db: DatabaseSync,
   role: "user" | "assistant" | "system", 
   content: string
-): Promise<void> {
-  const db = await Deno.openKv("sqlite://sqlite/" + roomId + ".db");
-  try {
-    await db.execute(
-      "INSERT INTO messages (role, content, timestamp) VALUES (?, ?, ?)",
-      [role, content, new Date().toISOString()]
-    );
-  } finally {
-    await db.close();
-  }
+): void {
+  db.prepare(
+    "INSERT INTO messages (role, content, timestamp) VALUES (?, ?, ?)"
+  ).run(role, content, new Date().toISOString());
 }
 
 // Clear all messages from the database
-async function clearMessages(roomId: string): Promise<void> {
-  const db = await Deno.openKv("sqlite://sqlite/" + roomId + ".db");
-  try {
-    await db.execute("DELETE FROM messages WHERE role != 'system'");
-  } finally {
-    await db.close();
-  }
+function clearMessages(db: DatabaseSync): void {
+  db.exec("DELETE FROM messages WHERE role != 'system'");
 }
 
 // Get assistant response from OpenAI API
 async function getAssistantResponse(
-  roomId: string,
   messages: Message[]
 ): Promise<string> {
   try {
@@ -134,16 +112,16 @@ async function getAssistantResponse(
 
 export default {
   // Called when the server starts, before accepting connections
-  async onStart(ctx: { roomId: string; room: Room }) {
+  onStart(ctx: { roomId: string; room: Room; db: DatabaseSync }) {
     console.log("Chat server started for room", { roomId: ctx.roomId });
-    await initializeDatabase(ctx.roomId);
+    initializeDatabase(ctx.db);
   },
 
   // Called when a new WebSocket connection is established
-  async onConnect(connection: Connection, ctx: { roomId: string; room: Room }) {
+  onConnect(connection: Connection, ctx: { roomId: string; room: Room; db: DatabaseSync }) {
     try {
       // Get all messages from the database
-      const messages = await getMessages(ctx.roomId);
+      const messages = getMessages(ctx.db);
       
       // Filter out system messages for the client
       const clientMessages = messages.filter(msg => msg.role !== "system");
@@ -168,7 +146,7 @@ export default {
   async onMessage(
     data: string,
     sender: Connection,
-    ctx: { roomId: string; room: Room },
+    ctx: { roomId: string; room: Room; db: DatabaseSync },
   ) {
     try {
       const message = JSON.parse(data);
@@ -176,16 +154,16 @@ export default {
       switch (message.type) {
         case "message":
           // Save user message to database
-          await saveMessage(ctx.roomId, "user", message.content);
+          saveMessage(ctx.db, "user", message.content);
           
           // Get all messages for context
-          const allMessages = await getMessages(ctx.roomId);
+          const allMessages = getMessages(ctx.db);
           
           // Get response from OpenAI
-          const responseContent = await getAssistantResponse(ctx.roomId, allMessages);
+          const responseContent = await getAssistantResponse(allMessages);
           
           // Save assistant response to database
-          await saveMessage(ctx.roomId, "assistant", responseContent);
+          saveMessage(ctx.db, "assistant", responseContent);
           
           // Send response to all clients
           ctx.room.broadcast(
@@ -198,7 +176,7 @@ export default {
           
         case "clear":
           // Clear messages from database
-          await clearMessages(ctx.roomId);
+          clearMessages(ctx.db);
           break;
           
         default:
@@ -219,27 +197,27 @@ export default {
   },
 
   // Called when a WebSocket connection is closed
-  async onClose(connection: Connection, ctx: { roomId: string; room: Room }) {
+  onClose(connection: Connection, ctx: { roomId: string; room: Room; db: DatabaseSync }) {
     console.log("Connection closed", { connectionId: connection.id });
   },
 
   // Called when a WebSocket error occurs
-  async onError(
+  onError(
     connection: Connection,
     error: Event,
-    ctx: { roomId: string; room: Room },
+    ctx: { roomId: string; room: Room; db: DatabaseSync },
   ) {
     console.error("WebSocket error:", error);
   },
 
   // Called for HTTP requests
-  async onRequest(request: Request, ctx: { roomId: string; room: Room }) {
+  onRequest(request: Request, ctx: { roomId: string; room: Room; db: DatabaseSync }) {
     const url = new URL(request.url);
     
     if (url.pathname === "/stats") {
       // Return chat room stats
       const connectionCount = ctx.room.connections.size;
-      const messageCount = (await getMessages(ctx.roomId)).length;
+      const messageCount = getMessages(ctx.db).length;
       
       return new Response(
         JSON.stringify({
