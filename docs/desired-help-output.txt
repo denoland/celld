@@ -62,6 +62,8 @@ S3 REPLICATION:
     - Continuously replicate changes to S3
     - Gracefully flush and snapshot on shutdown
 
+    s3://$ROOMD_S3_BUCKET/$ROOMD_S3_PREFIX/<tenant>/<roomId>
+
 PROJECT:
     https://github.com/denoland/roomd
 

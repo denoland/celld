@@ -1,42 +1,59 @@
 # roomd
 
-The mesh‑aware daemon that lets you run **Durable‑Object‑style “rooms”** on your
-own infrastructure, with sub‑50 ms cold‑starts, real‑time WebSockets, and
-durable SQLite state replicated to S3 or MinIO via Litestream.
+**Lightweight, Durable, Single-Threaded State Machines for the Web**
+
+roomd lets you spin up **tiny, real-time state machines** — each tied to a URL,
+WebSocket, or HTTP API.
+
+Every **room** is:
+
+- A **single-threaded, sandboxed** program (powered by Deno)
+- A **durable SQLite database**, streamed to S3/MinIO via Litestream
+- A **real-time WebSocket+HTTP endpoint** for clients
+- A **recoverable process** that survives peer failures and redeploys
+
+Build distributed systems where **each room is its own durable, recoverable
+machine**—without databases, Kubernetes, or complex scaling layers.
 
 ## Why roomd?
 
-- Build multiplayer chat, games, CRDT docs, AI agent swarms—anything that needs
-  a stateful “room” of logic.
-- Deploy locally in one Docker container or scale out to 1 000+ nodes; each room
-  is automatically routed to exactly one peer.
-- Keep state safe: every room writes to its own SQLite file that streams WAL
-  changes to object storage.
-- Enjoy a first‑class developer DX: drop a `main.ts` file that exports familiar
-  hooks (`onConnect`, `onMessage`, `onRequest`, …)—no boilerplate Deno.serve.
+- Build multiplayer chat, turn-based games, collaborative docs, AI agent
+  swarms—anything that needs a durable, memoryful **state machine** per key.
+- Deploy locally in a Docker container or scale out horizontally; rooms
+  auto-route across the mesh.
+- Write code the easy way: no multi-threaded race conditions, no locks, no
+  shared memory.
+- Familiar developer experience: just drop a `main.ts` with `onConnect`,
+  `onMessage`, `onRequest`, etc.—no boilerplate `Deno.serve`.
 
-## Features
+## Architecture Highlights
 
-- **Room API**\
-  `/rooms/{roomId}` endpoint, PartyKit‑style hooks, automatic WebSocket upgrade.
-- **Mesh routing**\
-  Peers discover each other from `KNOWN_PEERS`, consistent‑hash every roomId to
-  a single owner, proxy WS frames across nodes.
-- **Lightning cold‑start**\
-  Deno subprocess reuse plus TCP header peek; first byte < 50 ms on an idle
-  node.
-- **Durable state**\
-  Per‑room SQLite; Litestream replicates WALs to S3/MinIO every second.
+- **Single-threaded state machines**\
+  Each room runs independently on an event loop—no concurrency bugs, no global
+  locks, easy to reason about.
+
+- **Sub-50 ms cold-starts**\
+  First client byte typically served in < 50 ms via pre-warmed Deno subprocesses
+  and TCP header peeking.
+
+- **Durable state per room**\
+  Each room lazily gets a local SQLite DB; Litestream replicates changes
+  incrementally to object storage.
+
+- **Real-time mesh**\
+  Peers discover each other, shard rooms via consistent hash, and forward
+  WebSocket streams transparently across the network.
+
 - **Static asset offload**\
-  Serve `/static/*` straight from disk before it hits JavaScript.
-- **Observability**\
-  JSON logs per room, Prometheus endpoint (active rooms, cold‑start latency,
-  replication lag).
+  Serve `/static/*` directly from disk for maximum speed.
 
-## Quick start (single node)
+- **Observability built-in**\
+  JSON logs per room, Prometheus metrics for active rooms, cold-start times,
+  replication lag, etc.
+
+## Quick Start (Single Node)
 
 ```bash
-# one‑liner demo
 docker run --rm -ti -p 3000:3000 \
   -e KNOWN_PEERS="127.0.0.1:3000" \
   -v "$PWD/data:/data" \
@@ -45,12 +62,12 @@ docker run --rm -ti -p 3000:3000 \
 
 Open two tabs:
 
-- http://ws‑echo.localhost:3000/rooms/chat1
-- http://ws‑echo.localhost:3000/rooms/chat1
+- http://ws-echo.localhost:3000/rooms/chat1
+- http://ws-echo.localhost:3000/rooms/chat1
 
 Type—messages echo between the tabs.
 
-## Two‑node mesh demo (no Docker)
+## Two-node mesh demo (no Docker)
 
 ```bash
 # terminal 1
@@ -62,11 +79,11 @@ ROOMD_PEER_ADDR=127.0.0.1:4000 KNOWN_PEERS=127.0.0.1:3000,127.0.0.1:4000 \
 roomd --port 4000 --data-dir ./data
 ```
 
-Any client can connect to either port; rooms automatically locate their owner.
+Clients can connect to either port; rooms automatically find their owner.
 
 ## Writing room code
 
-`data/ws-echo.localhost/code/main.ts`
+Example: `data/ws-echo.localhost/code/main.ts`
 
 ```ts
 export default {
@@ -94,50 +111,80 @@ export default {
 };
 ```
 
-Access a ready‑to‑use SQLite handle at `room.db`—no boilerplate, created lazily
-on first use.
+Each room automatically:
 
-## Environment variables
+- Gets a WebSocket upgrade path
+- Lazily provisions its own SQLite DB
+- Persists state immediately to S3/MinIO without operator involvement
 
-| Variable              | Purpose                                           |
-| --------------------- | ------------------------------------------------- |
-| `KNOWN_PEERS`         | Comma‑separated host:port list for peer discovery |
-| `ROOMD_S3_ENDPOINT`   | S3 or MinIO URL (`http://localhost:9000`)         |
-| `ROOMD_S3_BUCKET`     | Bucket name (`roomd-dev`)                         |
-| `ROOMD_S3_REGION`     | Region (`us-east-1`)                              |
-| `ROOMD_S3_PREFIX`     | Path prefix per tenant (`roomd`)                  |
-| `ROOMD_S3_ACCESS_KEY` | Access key                                        |
-| `ROOMD_S3_SECRET_KEY` | Secret key                                        |
-
-roomd builds a Litestream config automatically:
+## CLI Help
 
 ```
-s3://$ROOMD_S3_BUCKET/$ROOMD_S3_PREFIX/<tenant>/<roomId>
-```
-
-## CLI help excerpt
-
-```
-roomd 0.1.0  Self‑hosted Durable‑Object runtime
+roomd 0.1.0
+Self-hosted real-time runtime for isolated JavaScript rooms.
 
 USAGE:
-  roomd [--port 3000] [--data-dir ./data]
+    roomd [OPTIONS]
 
 OPTIONS:
-  -p, --port <PORT>           HTTP / WS port [default: 3000]
-  -d, --data-dir <DIR>        Tenant data root [default: ./data]
-  -n, --known-peers <LIST>    "host:port,host:port" mesh bootstrap
-  --log-level <LEVEL>         error | warn | info | debug
+    -p, --port <PORT>           Port to bind the HTTP/WebSocket server [default: 3000]
+    -d, --data-dir <DIR>        Root data directory [default: ./data]
+    -n, --known-peers <PEERS>   Comma-separated list of peer addresses (host:port)
+    -h, --help                  Print help information
+    --version                   Print version info
+
+DESCRIPTION:
+    Roomd is a lightweight runtime inspired by Durable Objects and Deno Deploy.
+    It runs tenant-isolated JavaScript logic in per-room Deno subprocesses,
+    supports real-time WebSocket connections, and serves static files per tenant.
+
+    Routing is based on the request Host and room ID:
+
+        http://myapp.localhost:3000/rooms/chat1
+              └──────────┬────────┘ └────┬────┘
+                   tenant domain        room ID
+
+    Each room runs in an isolated subprocess with its own state and lifecycle.
+
+DATA LAYOUT:
+    The data directory contains one folder per tenant domain:
+
+        <data-dir>/
+        └── myapp.localhost/
+            ├── static/          # Served at /
+            │   └── index.html, client.js, etc.
+            ├── code/            # Room logic
+            │   └── main.ts      # Exports onConnect, onMessage, etc.
+            └── sockets/         # Internal room sockets (created at runtime)
+
+EXAMPLE:
+    Run roomd with two peers:
+        roomd --port 3000 --data-dir ./data --known-peers localhost:3000,localhost:4000
+
+    Open:
+        http://myapp.localhost:3000/rooms/chat1
+
+MORE:
+    - /rooms/{roomId} connections are upgraded to WebSockets
+    - Each tenant's code is hot-reloaded when the room starts
+    - Durable state and cold-start recovery with SQLite + S3/MinIO
+
+S3 REPLICATION:
+    Configure SQLite replication to S3/MinIO via these environment variables:
+
+    ROOMD_S3_ENDPOINT           S3 endpoint URL (e.g., http://localhost:9000)
+    ROOMD_S3_BUCKET             Bucket name for storing room databases
+    ROOMD_S3_REGION             S3 region (defaults to us-east-1 if not specified)
+    ROOMD_S3_PREFIX             Path prefix within bucket (defaults to "roomd")
+    ROOMD_S3_ACCESS_KEY_ID      S3 access key ID
+    ROOMD_S3_SECRET_ACCESS_KEY  S3 secret access key
+
+    When these variables are set, roomd will automatically:
+    - Restore room databases from S3 on cold start
+    - Continuously replicate changes to S3
+    - Gracefully flush and snapshot on shutdown
+
+PROJECT:
+    https://github.com/denoland/roomd
 ```
 
-See docs/desired-help-output.txt for full details.
-
-## Roadmap snapshot
-
-1. Seamless `roomd dev` hot‑reload, tunnel URL.
-2. Peer mTLS for zero‑config secure clusters.
-3. Resource quotas per isolate (cgroups + V8).
-4. Hosted control plane (optional SaaS).
-5. Geo‑sharding and room migration.
-
-Full roadmap lives in docs/roadmap.md.
