@@ -1,3 +1,4 @@
+.DS_Store
 /target
 data/basic-db.localhost/sqlite
 data/hello.localhost/sqlite/

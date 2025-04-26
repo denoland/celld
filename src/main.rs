@@ -861,4 +861,22 @@ mod tests {
     client1.close(None).await.unwrap();
     client2.close(None).await.unwrap();
   }
+
+  #[tokio::test]
+  async fn env_test() {
+    init();
+    let response = reqwest::Client::new()
+      .get("http://127.0.0.1:6146/room/test-room")
+      .header("Host", "env-test.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(response.status(), 200);
+    let env_vars: Value = response.json().await.unwrap();
+    let env_obj = env_vars.as_object().unwrap();
+    assert_eq!(env_obj["TEST_ENV_VAR"], "test_value");
+    assert_eq!(env_obj["ANOTHER_TEST_VAR"], "another_value");
+    assert_eq!(env_obj["X-Room-Id"], "test-room");
+    assert_eq!(env_obj.len(), 3, "Expected exactly 4 environment variables");
+  }
 }

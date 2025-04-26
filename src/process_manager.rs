@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
 use tokio::time::sleep;
-use tracing::{error, debug, instrument, trace, warn};
+use tracing::{debug, error, instrument, trace, warn};
 use uuid::Uuid;
 
 use crate::child_on_parent_exit::ChildOnParentExit;
@@ -262,17 +263,55 @@ impl ProcessManager {
         "DENO_SERVE_ADDRESS",
         format!("unix:{}", socket_path.display()),
       )
-      .env("X-Room-Id", room_id) // Pass room ID to bootstrap.ts
-      .stdout(std::process::Stdio::null())
-      .stderr(std::process::Stdio::null())
+      .env("X-Room-Id", room_id); // Pass room ID to bootstrap.ts
+
+    // Load environment variables from prod.env file
+    let env_file_path = tenant_dir.join("prod.env");
+    let mut env_vars = Vec::new();
+
+    match fs::read_to_string(&env_file_path) {
+      Ok(env_contents) => {
+        // Parse environment variables from the file contents
+        let parsed_env_vars = parse_env_vars(&env_contents);
+
+        // Apply the parsed variables to the command
+        for (key, value) in &parsed_env_vars {
+          debug!("Setting environment variable: {}", key);
+          cmd.env(key, value);
+          env_vars.push(key.clone());
+        }
+      }
+      Err(e) => {
+        if e.kind() != std::io::ErrorKind::NotFound {
+          warn!(
+            "Error reading environment file {}: {}",
+            env_file_path.display(),
+            e
+          );
+        }
+      }
+    }
+
+    // Add X-Room-Id to allowed env vars
+    env_vars.push("X-Room-Id".to_string());
+
+    cmd
       .arg("run")
       .arg("--no-prompt")
       .arg(format!("--allow-read={}", tenant_dir.display()))
       .arg(format!("--allow-write={}", tenant_dir.display()))
       .arg(format!("--allow-read={}", socket_path.display()))
       .arg(format!("--allow-write={}", socket_path.display()))
-      .arg("--allow-net")
-      .arg("--allow-env=X-Room-Id") // Permission to read env var
+      .arg("--allow-net");
+
+    // Only allow specifically named environment variables
+    if !env_vars.is_empty() {
+      cmd.arg(format!("--allow-env={}", env_vars.join(",")));
+    } else {
+      cmd.arg("--allow-env=X-Room-Id"); // Default minimum permission
+    }
+
+    cmd
       .arg(&bootstrap_script) // Use bootstrap.ts instead of main.ts directly
       .arg(&main_script); // Pass main.ts as argument to bootstrap.ts
 
@@ -480,5 +519,60 @@ impl ProcessManager {
     for (_, entry) in entries {
       entry.parent_exit_guard.kill();
     }
+  }
+}
+
+fn parse_env_vars(content: &str) -> HashMap<String, String> {
+  let mut env_vars = HashMap::new();
+  for line in content.lines() {
+    // Skip empty lines and comment lines that start with #
+    if line.trim().is_empty() || line.trim().starts_with('#') {
+      continue;
+    }
+
+    if let Some((key, value)) = line.split_once('=') {
+      let key = key.trim();
+
+      // Handle inline comments in values (e.g., VALUE=foo # comment)
+      let value = if let Some(comment_pos) = value.find('#') {
+        value[..comment_pos].trim()
+      } else {
+        value.trim()
+      };
+
+      if !key.is_empty() {
+        env_vars.insert(key.to_string(), value.to_string());
+      }
+    }
+  }
+  env_vars
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_parse_env_vars() {
+    // Test content with various environment variable formats
+    let content = r#"
+# This is a comment
+SIMPLE_VAR=simple_value
+QUOTED_VAR="quoted value"
+INLINE_COMMENT=value with comment # this is a comment
+"#;
+    let env_vars = parse_env_vars(content);
+    assert_eq!(
+      env_vars.get("SIMPLE_VAR"),
+      Some(&"simple_value".to_string())
+    );
+    assert_eq!(
+      env_vars.get("QUOTED_VAR"),
+      Some(&"\"quoted value\"".to_string())
+    );
+    assert_eq!(
+      env_vars.get("INLINE_COMMENT"),
+      Some(&"value with comment".to_string())
+    );
   }
 }
