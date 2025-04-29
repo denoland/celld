@@ -32,7 +32,7 @@
 
 ## TODO
 
-- [ ] Add `NodeState` which is often wrapped in Arc and contains
+- [x] Add `NodeState` which is often wrapped in Arc and contains
       `ProcessManager` and `PeerManager`. Proxy should have one member, just
       `Arc<NodeState>`. Make `ProcessManager` and `PeerManager` non-cloneable -
       since we lift the `Arc` to `NodeState`.

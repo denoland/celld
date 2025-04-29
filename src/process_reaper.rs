@@ -1,24 +1,25 @@
-use crate::process_manager::ProcessManager;
+use crate::NodeState;
 use pingora::server::ShutdownWatch;
 use pingora::services::background::BackgroundService;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, trace, warn};
 
 /// ProcessReaper service cleans up idle processes
 pub struct ProcessReaper {
-  process_manager: ProcessManager,
+  node_state: Arc<NodeState>,
   idle_timeout: Duration,
   interval: Duration,
 }
 
 impl ProcessReaper {
   pub fn new(
-    process_manager: ProcessManager,
+    node_state: Arc<NodeState>,
     idle_timeout: Duration,
     interval: Duration,
   ) -> Self {
     Self {
-      process_manager,
+      node_state,
       idle_timeout,
       interval,
     }
@@ -30,7 +31,7 @@ impl ProcessReaper {
 
     // Identify processes to reap without holding the lock too long
     let hosts_to_reap = {
-      let processes = self.process_manager.processes.lock().unwrap();
+      let processes = self.node_state.process_manager.processes.lock().unwrap();
       let mut to_reap = Vec::new();
 
       for (host, entry) in processes.iter() {
@@ -60,7 +61,8 @@ impl ProcessReaper {
     for host in hosts_to_reap {
       // Remove the entry from the map
       let entry = {
-        let mut processes = self.process_manager.processes.lock().unwrap();
+        let mut processes =
+          self.node_state.process_manager.processes.lock().unwrap();
         processes.remove(&host)
       };
 

@@ -23,6 +23,11 @@ use peer_manager::PeerManager;
 use process_manager::ProcessManager;
 use process_reaper::ProcessReaper;
 
+pub struct NodeState {
+  pub process_manager: ProcessManager,
+  pub peer_manager: PeerManager,
+}
+
 // Default values, can be overridden when creating ProcessManager
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_REAPER_INTERVAL: Duration = Duration::from_secs(10);
@@ -62,8 +67,7 @@ pub enum ProxyError {
 }
 
 struct Proxy {
-  process_manager: ProcessManager,
-  peer_manager: PeerManager,
+  node_state: Arc<NodeState>,
 }
 
 #[derive(Debug, Default)]
@@ -93,6 +97,7 @@ impl ProxyHttp for Proxy {
       let room_id = ctx.room_id.as_ref().unwrap_or(&default_room);
 
       let _ = self
+        .node_state
         .process_manager
         .decrement_connection_count(&ctx.tenant, room_id)
         .await;
@@ -145,8 +150,8 @@ impl ProxyHttp for Proxy {
     // Endpoint to list all peers in the mesh
     // TODO this shouldn't be on data_port but instead on control_port
     if path == "/_mesh/peers" {
-      let peers = self.peer_manager.get_all_peers();
-      let local_peer = self.peer_manager.get_local_peer();
+      let peers = self.node_state.peer_manager.get_all_peers();
+      let local_peer = self.node_state.peer_manager.get_local_peer();
 
       // Build a JSON array of peers
       let mut peer_json = String::from("[");
@@ -192,8 +197,8 @@ impl ProxyHttp for Proxy {
     // TODO this shouldn't be on data_port but instead on control_port
     if let Some(room_id) = path.strip_prefix("/_mesh/owner/") {
       if !room_id.is_empty() {
-        let owner = self.peer_manager.get_owner_peer(room_id);
-        let is_local = self.peer_manager.is_local_owner(room_id);
+        let owner = self.node_state.peer_manager.get_owner_peer(room_id);
+        let is_local = self.node_state.peer_manager.is_local_owner(room_id);
 
         // Return a simple JSON response with owner information
         let response = format!(
@@ -246,7 +251,7 @@ impl ProxyHttp for Proxy {
     };
 
     // Construct the file path
-    let tenant_dir = self.process_manager.data_dir.join(&ctx.tenant);
+    let tenant_dir = self.node_state.process_manager.data_dir.join(&ctx.tenant);
     let static_dir = tenant_dir.join("static");
     let file_path = static_dir.join(&rel_path_);
 
@@ -338,9 +343,9 @@ impl ProxyHttp for Proxy {
     );
 
     // Check if this instance is responsible for this room
-    if !self.peer_manager.is_local_owner(room_id) {
+    if !self.node_state.peer_manager.is_local_owner(room_id) {
       // We need to forward this request to the responsible peer
-      let upstream_addr = self.peer_manager.get_owner_peer(room_id);
+      let upstream_addr = self.node_state.peer_manager.get_owner_peer(room_id);
 
       debug!(
         host = %ctx.tenant,
@@ -373,6 +378,7 @@ impl ProxyHttp for Proxy {
 
     let socket_path: PathBuf = {
       match self
+        .node_state
         .process_manager
         .get_or_spawn_process(&ctx.tenant, room_id, single_use)
         .await
@@ -383,6 +389,7 @@ impl ProxyHttp for Proxy {
           let default_room = "default-room".to_string();
           let room_id = ctx.room_id.as_ref().unwrap_or(&default_room);
           self
+            .node_state
             .process_manager
             .increment_connection_count(&ctx.tenant, room_id)
             .await;
@@ -476,17 +483,22 @@ fn start_server(
   // Create the process manager with default timeout values
   let process_manager = ProcessManager::new(data_dir.clone());
 
+  // Create the peer manager
+  let peer_manager = PeerManager::new(known_peers, self_addr.clone());
+  debug!(
+    "Peer manager initialized with {} peers",
+    peer_manager.num_peers()
+  );
+
+  // Create NodeState container
+  let node_state = Arc::new(NodeState {
+    process_manager,
+    peer_manager,
+  });
+
   // Create the proxy app that will handle routing
   let app = Proxy {
-    process_manager: process_manager.clone(),
-    peer_manager: {
-      let peer_manager = PeerManager::new(known_peers, self_addr.clone());
-      debug!(
-        "Peer manager initialized with {} peers",
-        peer_manager.num_peers()
-      );
-      peer_manager
-    },
+    node_state: node_state.clone(),
   };
 
   // Create an HTTP proxy service with our app
@@ -498,7 +510,7 @@ fn start_server(
   let reaper_service = background_service(
     "process_reaper",
     ProcessReaper::new(
-      process_manager.clone(),
+      node_state.clone(),
       DEFAULT_IDLE_TIMEOUT,
       DEFAULT_REAPER_INTERVAL,
     ),

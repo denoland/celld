@@ -1,9 +1,8 @@
 use hashring::HashRing;
 use std::sync::Arc;
 
-#[derive(Clone)]
 pub struct PeerManager {
-  ring: Arc<HashRing<String>>,
+  ring: HashRing<String>,
   peers: Vec<String>,
   self_id: String,
 }
@@ -19,7 +18,7 @@ impl PeerManager {
       ring.add(peer.clone());
     }
     Self {
-      ring: ring.into(),
+      ring,
       peers,
       self_id,
     }

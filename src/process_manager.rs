@@ -25,10 +25,9 @@ pub struct ProcessEntry {
   pub replica: Option<SqliteReplica>, // SQLite replication to S3/MinIO
 }
 
-#[derive(Clone)]
 pub struct ProcessManager {
   pub data_dir: PathBuf,
-  pub processes: Arc<Mutex<HashMap<String, ProcessEntry>>>,
+  pub processes: Mutex<HashMap<String, ProcessEntry>>,
 }
 
 impl ProcessManager {
@@ -41,7 +40,7 @@ impl ProcessManager {
     // 3. Only removing databases that are successfully backed up to S3/MinIO
     ProcessManager {
       data_dir: std::fs::canonicalize(data_dir.clone()).unwrap(),
-      processes: Arc::new(Mutex::new(HashMap::new())),
+      processes: Mutex::new(HashMap::new()),
     }
   }
 
