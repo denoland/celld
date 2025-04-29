@@ -482,8 +482,8 @@ pub mod tests {
       region: "us-east-1".to_string(),
       bucket: test_name.to_string(),
       path: format!("roomd-test-{}", test_name),
-      access_key_id: minio.access_key.clone(),
-      secret_access_key: minio.secret_key.clone(),
+      access_key_id: minio.access_key_id.clone(),
+      secret_access_key: minio.secret_access_key.clone(),
     }
   }
 
@@ -500,7 +500,7 @@ pub mod tests {
         "-e",
         &format!(
           "MC_HOST_minio=http://{}:{}@localhost:{}",
-          minio.access_key, minio.secret_key, minio.port
+          minio.access_key_id, minio.secret_access_key, minio.port
         ),
         "minio/mc",
         "ls",

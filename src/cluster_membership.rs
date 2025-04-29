@@ -5,12 +5,11 @@ use aws_smithy_types::timeout::TimeoutConfig;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::time::{Duration, SystemTime};
-use tracing::{debug, error, info, warn};
+use std::time::Duration;
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 // Default heartbeat interval and staleness threshold
-const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_STALENESS_THRESHOLD: Duration = Duration::from_secs(90);
 
 /// Represents a node in the cluster
@@ -56,6 +55,50 @@ pub struct S3ClusterMembership {
 }
 
 impl S3ClusterMembership {
+  /// Initialize an S3ClusterMembership instance from environment variables
+  ///
+  /// This factory method encapsulates all configuration reading from environment variables
+  /// so that the S3 cluster membership code is in one place. The function returns None
+  /// if the required configuration variables are not set.
+  ///
+  /// Environment variables:
+  /// - ROOMD_S3_ENDPOINT: Optional S3 endpoint URL
+  /// - ROOMD_S3_REGION: S3 region (defaults to us-east-1)
+  /// - ROOMD_S3_BUCKET: Required bucket name for storing cluster state
+  /// - ROOMD_S3_PREFIX: Key prefix for cluster state objects (defaults to "cluster_state/nodes/")
+  /// - ROOMD_S3_ACCESS_KEY_ID: Required access key for S3
+  /// - ROOMD_S3_SECRET_ACCESS_KEY: Required secret key for S3
+  pub async fn from_env(
+    node_id: Option<String>,
+    advertise_addr: &str,
+  ) -> Option<Self> {
+    let s3_endpoint = std::env::var("ROOMD_S3_ENDPOINT").ok();
+    let s3_region = std::env::var("ROOMD_S3_REGION")
+      .unwrap_or_else(|_| "us-east-1".to_string());
+    let s3_bucket = std::env::var("ROOMD_S3_BUCKET").ok()?;
+    let s3_access_key_id = std::env::var("ROOMD_S3_ACCESS_KEY_ID").ok()?;
+    let s3_secret_access_key =
+      std::env::var("ROOMD_S3_SECRET_ACCESS_KEY").ok()?;
+
+    let bucket_prefix = std::env::var("ROOMD_S3_PREFIX")
+      .unwrap_or_else(|_| "cluster_state/nodes/".to_string());
+
+    let membership = Self::new(
+      s3_endpoint,
+      &s3_region,
+      &s3_bucket,
+      &bucket_prefix,
+      node_id,
+      advertise_addr,
+      None, // Use default staleness threshold
+      s3_access_key_id,
+      s3_secret_access_key,
+    )
+    .await;
+
+    Some(membership)
+  }
+
   /// Create a new S3ClusterMembership instance
   pub async fn new(
     endpoint_url: Option<String>,
@@ -65,8 +108,8 @@ impl S3ClusterMembership {
     node_id: Option<String>,
     advertise_addr: &str,
     staleness_threshold: Option<Duration>,
-    access_key: String,
-    secret_key: String,
+    access_key_id: String,
+    secret_access_key: String,
   ) -> Self {
     let node_id = node_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
@@ -77,12 +120,12 @@ impl S3ClusterMembership {
     };
 
     // Create the client with the path style config for MinIO compatibility
-    let endpoint = endpoint_url.unwrap_or_else(|| "".to_string());
+    let endpoint = endpoint_url.unwrap_or_default();
     let config = aws_sdk_s3::config::Builder::new()
       .behavior_version(BehaviorVersion::latest())
       .credentials_provider(Credentials::new(
-        access_key,
-        secret_key,
+        access_key_id,
+        secret_access_key,
         None,
         None,
         "minio-credentials",
@@ -113,6 +156,11 @@ impl S3ClusterMembership {
   /// Get the full S3 key for this node
   fn get_node_key(&self) -> String {
     format!("{}{}.json", self.prefix, self.node_info.node_id)
+  }
+
+  /// Get the bucket name
+  pub fn bucket(&self) -> &str {
+    &self.bucket
   }
 
   /// Check if a node is stale based on its heartbeat timestamp
@@ -307,8 +355,8 @@ mod tests {
       node_id,
       advertise_addr,
       Some(Duration::from_secs(5)), // Short staleness threshold for tests
-      minio.access_key.clone(),
-      minio.secret_key.clone(),
+      minio.access_key_id.clone(),
+      minio.secret_access_key.clone(),
     )
     .await
   }

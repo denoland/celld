@@ -1,6 +1,7 @@
 mod child_on_parent_exit;
 mod cluster_membership;
 mod deno_benchmark;
+mod heartbeat_service;
 mod peer_manager;
 mod process_manager;
 mod process_reaper;
@@ -18,27 +19,46 @@ use pingora::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
+use cluster_membership::ClusterMembership;
 use peer_manager::PeerManager;
 use process_manager::ProcessManager;
 use process_reaper::ProcessReaper;
 
 pub struct NodeState {
-  pub process_manager: ProcessManager,
-  pub peer_manager: PeerManager,
+  pub process_manager: Arc<ProcessManager>,
+  pub peer_manager: Arc<PeerManager>,
+  /// Empty in standalone mode
+  pub cluster_membership:
+    Option<Arc<dyn cluster_membership::ClusterMembership>>,
 }
 
 // Default values, can be overridden when creating ProcessManager
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_REAPER_INTERVAL: Duration = Duration::from_secs(10);
 
-static DATA_PORT: Lazy<u16> = Lazy::new(|| {
-  std::env::var("DATA_PORT")
+static ROOMD_HEARTBEAT_INTERVAL: Lazy<Duration> = Lazy::new(|| {
+  let secs = std::env::var("ROOMD_HEARTBEAT_INTERVAL")
     .ok()
-    .and_then(|s| s.parse().ok())
-    .map_or_else(|| 3000u16, |port| port)
+    .map(|s| s.parse::<u64>().unwrap())
+    .unwrap_or_else(|| 30);
+  Duration::from_secs(secs)
 });
+
+static LISTEN_ADDR: Lazy<String> = Lazy::new(|| {
+  std::env::var("LISTEN_ADDR").unwrap_or_else(|_| {
+    // If not set, use the port from ADVERTISE_ADDR or a default
+    let port = match &*ADVERTISE_ADDR {
+      addr if !addr.is_empty() => addr.split(':').nth(1).unwrap_or("3000"),
+      _ => "3000",
+    };
+    format!("0.0.0.0:{}", port)
+  })
+});
+
+static ADVERTISE_ADDR: Lazy<String> =
+  Lazy::new(|| std::env::var("ADVERTISE_ADDR").unwrap_or_default());
 
 static DATA_DIR: Lazy<PathBuf> = Lazy::new(|| {
   let path = PathBuf::from(
@@ -110,8 +130,6 @@ impl ProxyHttp for Proxy {
     session: &mut Session,
     ctx: &mut Self::CTX,
   ) -> Result<bool> {
-    // Track request start time
-    let filter_start = std::time::Instant::now();
     let req_header = session.req_header();
 
     // Extract and validate host header
@@ -151,20 +169,26 @@ impl ProxyHttp for Proxy {
     // Endpoint to list all peers in the mesh
     // TODO this shouldn't be on data_port but instead on control_port
     if path == "/_mesh/peers" {
-      let peers = self.node_state.peer_manager.get_all_peers();
       let local_peer = self.node_state.peer_manager.get_local_peer();
+
+      // Get peer info with full details if it's available through the cluster membership
+      let peer_infos = self.node_state.peer_manager.get_all_peer_info();
 
       // Build a JSON array of peers
       let mut peer_json = String::from("[");
-      for (i, peer) in peers.iter().enumerate() {
+      for (i, info) in peer_infos.iter().enumerate() {
         if i > 0 {
           peer_json.push(',');
         }
+        let is_local =
+          info.node_id == self.node_state.peer_manager.get_local_node_id();
         peer_json.push_str(&format!(
-          "{{\"address\":\"{}\",\"is_local\":{}}}",
-          peer,
-          peer == local_peer
-        ));
+            "{{\"node_id\":\"{}\",\"address\":\"{}\",\"is_local\":{},\"last_heartbeat\":\"{}\"}}",
+            info.node_id,
+            info.advertise_addr,
+            is_local,
+            info.heartbeat_timestamp
+          ));
       }
       peer_json.push(']');
 
@@ -172,7 +196,7 @@ impl ProxyHttp for Proxy {
       let response = format!(
         "{{\"peers\":{},\"count\":{},\"local\":\"{}\"}}",
         peer_json,
-        peers.len(),
+        peer_infos.len(),
         local_peer
       );
 
@@ -359,7 +383,7 @@ impl ProxyHttp for Proxy {
       let sni = ctx.tenant.clone();
 
       // Create HTTP peer for the remote peer
-      let peer = HttpPeer::new(upstream_addr, false, sni);
+      let peer = HttpPeer::new(upstream_addr.clone(), false, sni);
 
       debug!(
         host = %ctx.tenant,
@@ -464,37 +488,84 @@ impl ProxyHttp for Proxy {
   }
 }
 
-/// Starts the server with the given data directory and port
+/// Starts the server with the given data directory and listen address
 /// Returns the server instance
-fn start_server(
-  data_dir: PathBuf,
-  data_port: u16,
-  known_peers: Vec<String>,
-  self_addr: Option<String>,
-) -> Server {
+fn start_server(data_dir: PathBuf, listen_addr: String) -> Server {
   // Create a server configuration
   let server_conf = Arc::new(ServerConf::new().unwrap());
 
   // Create a new Pingora server
   let mut server = Server::new(None).unwrap();
 
-  let self_addr =
-    self_addr.unwrap_or_else(|| format!("127.0.0.1:{}", data_port));
+  // Get advertise address from environment
+  let advertise_addr = ADVERTISE_ADDR.to_string();
+
+  if advertise_addr.is_empty() {
+    error!(
+      "ADVERTISE_ADDR environment variable must be set (e.g., 1.2.3.4:8080)"
+    );
+    std::process::exit(1);
+  }
+
+  // Generate a unique node ID (UUID) for this instance
+  let node_id = uuid::Uuid::new_v4().to_string();
+  debug!("Generated node ID: {}", node_id);
 
   // Create the process manager with default timeout values
   let process_manager = ProcessManager::new(data_dir.clone());
 
-  // Create the peer manager
-  let peer_manager = PeerManager::new(known_peers, self_addr.clone());
-  debug!(
-    "Peer manager initialized with {} peers",
-    peer_manager.num_peers()
-  );
+  // Initialize cluster membership
+  let cluster_membership = {
+    // Create a small runtime just for initialization
+    let rt = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
 
-  // Create NodeState container
+    // Initialize the S3 cluster membership
+    rt.block_on(async {
+      // Try to get S3 membership config from environment variables
+      match cluster_membership::S3ClusterMembership::from_env(
+        Some(node_id.clone()),
+        &advertise_addr,
+      )
+      .await
+      {
+        Some(membership) => {
+          info!(
+            "Initializing S3 cluster membership with bucket {}",
+            membership.bucket()
+          );
+
+          // Register this node with the cluster
+          info!("Registering node {} with S3 cluster", node_id);
+          if let Err(e) = membership.register().await {
+            error!("Failed to register node in S3 cluster: {}", e);
+            None
+          } else {
+            Some(Arc::new(membership)
+              as Arc<dyn cluster_membership::ClusterMembership>)
+          }
+        }
+        None => {
+          info!(
+            "S3 cluster membership not configured, running in standalone mode"
+          );
+          None
+        }
+      }
+    })
+  };
+
+  // Create peer manager with only local node
+  let peer_manager = PeerManager::new(advertise_addr.clone(), node_id.clone());
+  debug!("Peer manager initialized in standalone mode");
+
+  // Create NodeState container with cluster membership if available
   let node_state = Arc::new(NodeState {
-    process_manager,
-    peer_manager,
+    process_manager: Arc::new(process_manager),
+    peer_manager: Arc::new(peer_manager),
+    cluster_membership,
   });
 
   // Create the proxy app that will handle routing
@@ -505,8 +576,8 @@ fn start_server(
   // Create an HTTP proxy service with our app
   let mut proxy_service = http_proxy_service(&server_conf, app);
 
-  // Configure the proxy service to listen on the specified port
-  proxy_service.add_tcp(&self_addr);
+  // Configure the proxy service to listen on the specified address
+  proxy_service.add_tcp(&listen_addr);
 
   let reaper_service = background_service(
     "process_reaper",
@@ -518,10 +589,25 @@ fn start_server(
   );
   server.add_service(reaper_service);
 
+  // Add a background service for S3 heartbeat and peer discovery if cluster membership is enabled
+  if let Some(cm) = &node_state.cluster_membership {
+    let cm_clone = cm.clone();
+    let peer_manager_clone = node_state.peer_manager.clone();
+
+    server.add_service(background_service(
+      "s3_heartbeat",
+      heartbeat_service::HeartbeatService {
+        cluster_membership: cm_clone,
+        peer_manager: peer_manager_clone,
+        interval: *ROOMD_HEARTBEAT_INTERVAL,
+      },
+    ));
+  }
+
   // Add the proxy service to the server
   server.add_service(proxy_service);
 
-  debug!("Starting Deno Deploy proxy server on port {}", data_port);
+  debug!("Starting Deno Deploy proxy server on {}", listen_addr);
   server
 }
 
@@ -551,20 +637,13 @@ fn main() {
     return;
   }
 
-  // Normal server startup
-  let self_addr = std::env::var("SELF_ADDR")
-    .ok()
-    .map(|s| s.trim().to_string());
-  let known_peers = std::env::var("KNOWN_PEERS")
-    .unwrap_or_default()
-    .split(',')
-    .map(str::trim)
-    .filter(|s| !s.is_empty())
-    .map(String::from)
-    .collect::<Vec<_>>();
+  // Get the environment variables and pass them to the start_server function
+  let listen_addr = LISTEN_ADDR.to_string();
 
-  let server =
-    start_server(DATA_DIR.clone(), *DATA_PORT, known_peers, self_addr);
+  info!("Starting server with dynamic cluster membership");
+
+  // Start the server with cluster membership capability
+  let server = start_server(DATA_DIR.clone(), listen_addr);
   server.run_forever();
 }
 
@@ -580,12 +659,11 @@ mod tests {
   pub static TEST_SERVER: Lazy<std::thread::JoinHandle<()>> = Lazy::new(|| {
     let data_dir = PathBuf::from("./data");
     // Ensure we're using a clean environment for the test server
-    std::env::set_var("KNOWN_PEERS", ""); // Empty string forces standalone mode
-    std::env::set_var("DATA_PORT", "6146"); // Explicitly set port for test server
-    assert_eq!(*DATA_PORT, 6146);
+    std::env::set_var("ADVERTISE_ADDR", "127.0.0.1:6146"); // Set advertise address
+    std::env::set_var("LISTEN_ADDR", "127.0.0.1:6146"); // Set listen address
 
     let h = std::thread::spawn(|| {
-      let server = start_server(data_dir, 6146, vec![], None);
+      let server = start_server(data_dir, "127.0.0.1:6146".to_string());
       server.run_forever();
     });
 

@@ -2,11 +2,10 @@
 mod test_utils;
 
 use futures_util::{SinkExt, StreamExt};
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
 use serde_json::Value;
-use std::fs;
-use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 use std::time::Duration;
 use test_utils::MinioTestServer;
 use tokio::time::sleep;
@@ -19,7 +18,7 @@ use uuid::Uuid;
 async fn test_mesh_room_connection() {
   // Start 3 server instances with different ports
   let ports = [6001, 6002, 6003];
-  let _test_env = MeshTest::new(&ports);
+  let _test_env = TestEnv::new(&ports);
 
   // Servers are already initialized with the TCP health checks
 
@@ -71,7 +70,7 @@ async fn test_mesh_room_connection() {
 async fn test_mesh_message_broadcast() {
   // Start 3 server instances with different ports
   let ports = [6011, 6012, 6013];
-  let _test_env = MeshTest::new(&ports);
+  let _test_env = TestEnv::new(&ports);
 
   // Servers are already initialized with the TCP health checks
 
@@ -117,167 +116,83 @@ async fn test_mesh_message_broadcast() {
   client2.close(None).await.unwrap();
 }
 
-/// Tests SQLite replication to S3/MinIO in the mesh
+/// Tests dynamic node membership in the mesh
 #[tokio::test]
-#[ignore]
-// TODO PeerManager doesn't have any mechanism to detect failed peers and update
-// the routing. When we kill the first server, the second server still thinks
-// that the first server is responsible for the room based on the hash ring, so
-// it tries to forward the request to the first server, which is now down.
-async fn test_sqlite_replication() {
-  // Start MinIO server for testing
-  let minio_port = 9009;
-  let bucket_name = "roomd-sqlreplica-test";
-  let minio_server = MinioTestServer::start(minio_port);
-  minio_server.create_bucket(bucket_name).unwrap();
+async fn test_mesh_dynamic_membership() {
+  // Start 3 server instances with different ports
+  let ports = [6041, 6042, 6043];
+  let mut test_env = TestEnv::new(&ports);
 
-  // Generate a unique room ID
-  let room_id = format!("repl-test-{}", Uuid::new_v4().simple().to_string());
+  // 1. Query the first node's /_mesh/peers endpoint to check if all nodes are visible
+  let peers_url = format!("http://localhost:{0}/_mesh/peers", ports[0]);
+  let peers_response = reqwest::get(&peers_url).await.unwrap();
+  let peers_text = peers_response.text().await.unwrap();
+  let peers_value: serde_json::Value =
+    serde_json::from_str(&peers_text).unwrap();
+  println!("Full peers response: {:?}", peers_value);
+  let peers = peers_value["peers"].as_array().unwrap();
+  assert_eq!(peers.len(), 2);
 
-  // Start a mesh with S3 replication enabled
-  let ports = [6031, 6032];
-  let mut servers = Vec::new();
-  let test_prefix = format!("test-{}", Uuid::new_v4().simple().to_string());
+  // Collect node IDs for later comparison
+  let original_node_ids: Vec<String> = peers
+    .iter()
+    .map(|peer| peer["node_id"].as_str().unwrap().to_string())
+    .collect();
 
-  println!("Starting servers with S3 replication enabled");
-  for (i, &port) in ports.iter().enumerate() {
-    // Create a comma-separated string of peers
-    let peers: Vec<String> = ports
-      .iter()
-      .enumerate()
-      .filter(|(j, _)| *j != i) // Skip self
-      .map(|(_, p)| format!("127.0.0.1:{}", p))
-      .collect();
+  // 2. Stop one node gracefully using SIGTERM
+  println!("Gracefully stopping the second node...");
+  test_env.kill_roomd_instance(1, Signal::SIGTERM);
 
-    let known_peers = peers.join(",");
-    let self_addr = format!("127.0.0.1:{}", port);
+  // Wait for heartbeat interval (shorter for tests)
+  println!("Waiting for heartbeat interval to expire...");
+  tokio::time::sleep(Duration::from_secs(3)).await;
 
-    // Start server with S3 replication environment variables
-    let server = Command::new(env!("CARGO_BIN_EXE_roomd"))
-      .env("DATA_PORT", port.to_string())
-      .env("SELF_ADDR", self_addr.clone())
-      .env("KNOWN_PEERS", known_peers.clone())
-      .env("DATA", "./data") // Point to the data directory
-      .env("RUST_LOG", "debug") // More detailed logging
-      // S3/MinIO configuration for replication
-      .env(
-        "ROOMD_S3_ENDPOINT",
-        format!("http://localhost:{}", minio_port),
-      )
-      .env("ROOMD_S3_BUCKET", bucket_name)
-      .env("ROOMD_S3_REGION", "us-east-1")
-      .env("ROOMD_S3_PREFIX", &test_prefix)
-      .env("ROOMD_S3_ACCESS_KEY_ID", &minio_server.access_key)
-      .env("ROOMD_S3_SECRET_ACCESS_KEY", &minio_server.secret_key)
-      .stdout(Stdio::inherit()) // Show output for debugging
-      .stderr(Stdio::inherit())
-      .spawn()
-      .expect(&format!("Failed to start server on port {}", port));
+  // Check peers again - should have one fewer node
+  let updated_peers_response = reqwest::get(&peers_url).await.unwrap();
+  let updated_peers_text = updated_peers_response.text().await.unwrap();
+  println!("Updated peers response: {}", updated_peers_text);
+  let updated_peers_value: serde_json::Value =
+    serde_json::from_str(&updated_peers_text).unwrap();
+  //println!("Updated peers full response: {:?}", updated_peers_value);
+  let updated_peers = updated_peers_value["peers"].as_array().unwrap();
+  //println!("Found {} peers after SIGTERM", updated_peers.len());
+  assert_eq!(updated_peers.len(), 1);
 
-    servers.push(server);
-    println!(
-      "Started server on port {} with S3 replication enabled",
-      port
-    );
-  }
+  // Start a new node
+  println!("Starting a new node...");
+  let new_port = 6044;
+  test_env.spawn_roomd_instance(new_port);
+  TestEnv::wait_for_server_ready(new_port);
 
-  // Wait for servers to be ready
-  println!("Waiting for servers to initialize...");
-  for &port in &ports {
-    MeshTest::wait_for_server_ready(port);
-  }
-  std::thread::sleep(Duration::from_millis(500));
+  // Wait for peer exchange
+  println!("Waiting for peer exchange...");
+  tokio::time::sleep(Duration::from_secs(3)).await;
 
-  // Connect to the room on the first server and make a database write
-  let tenant = "basic-db.localhost";
-  let url = format!("http://{}:{}/room/{}", tenant, ports[0], room_id);
-  println!("Making first request to create DB: {}", url);
+  // Check peers again - should have more nodes now with the new node
+  let recovery_peers_response = reqwest::get(&peers_url).await.unwrap();
+  let recovery_peers_text = recovery_peers_response.text().await.unwrap();
+  println!("Recovery peers response: {}", recovery_peers_text);
+  let recovery_peers_value: serde_json::Value =
+    serde_json::from_str(&recovery_peers_text).unwrap();
+  let recovery_peers = recovery_peers_value["peers"].as_array().unwrap();
+  assert_eq!(recovery_peers.len(), 2); // Back to having two again.
 
-  // First request to initialize the database and increment counter to 1
-  let first_response = reqwest::Client::new()
-    .get(&url)
-    .header("Host", tenant)
-    .send()
-    .await
-    .expect("Failed to send first request")
-    .text()
-    .await
-    .expect("Failed to get first response text");
+  // Verify at least one node in the final set has a node_id not in the original set
+  let new_node_ids: Vec<String> = recovery_peers
+    .iter()
+    .map(|peer| peer["node_id"].as_str().unwrap().to_string())
+    .collect();
 
-  assert_eq!(
-    first_response.trim(),
-    "1",
-    "First request should return count = 1"
-  );
+  println!("Original node IDs: {:?}", original_node_ids);
+  println!("Final node IDs: {:?}", new_node_ids);
 
-  // Allow time for replication to occur
-  println!("Waiting for replication to S3...");
-  tokio::time::sleep(Duration::from_secs(5)).await;
-
-  // Check that files exist in MinIO
-  println!("Checking if files are in MinIO...");
-  let output = std::process::Command::new("docker")
-    .args([
-      "run",
-      "--network=host",
-      "--rm",
-      "-e",
-      &format!(
-        "MC_HOST_minio=http://{}:{}@localhost:{}",
-        minio_server.access_key, minio_server.secret_key, minio_port
-      ),
-      "minio/mc",
-      "ls",
-      "--recursive",
-      &format!("minio/{}", bucket_name),
-    ])
-    .output()
-    .expect("Failed to run MinIO ls command");
-
-  let minio_listing = String::from_utf8_lossy(&output.stdout);
-  println!("MinIO bucket contents:\n{}", minio_listing);
-
-  // Verify that the room ID appears in the MinIO listing
+  let has_new_node = new_node_ids
+    .iter()
+    .any(|id| !original_node_ids.contains(id));
   assert!(
-    minio_listing.contains(&room_id),
-    "Room database should be replicated to MinIO"
+    has_new_node,
+    "Mesh should contain a newly added node with a new ID"
   );
-
-  // Kill server 1 and only use server 2 from now on
-  println!("Killing first server to simulate failure...");
-  servers[0].kill().expect("Failed to kill first server");
-
-  // Wait for peer manager to detect the failure and update routing
-  println!("Waiting for peer manager to update...");
-  tokio::time::sleep(Duration::from_secs(2)).await;
-
-  // Make a request to the second server (should restore DB from S3)
-  let second_url = format!("http://{}:{}/room/{}", tenant, ports[1], room_id);
-  println!("Making request to second server: {}", second_url);
-
-  let second_response = reqwest::Client::new()
-    .get(&second_url)
-    .header("Host", tenant)
-    .send()
-    .await
-    .expect("Failed to send second request")
-    .text()
-    .await
-    .expect("Failed to get second response text");
-
-  // The counter should be incremented to 2 since the previous state was restored
-  assert_eq!(
-    second_response.trim(),
-    "2",
-    "Second request should restore DB and return count = 2"
-  );
-
-  // Clean up the servers
-  for mut server in servers {
-    if let Err(e) = server.kill() {
-      eprintln!("Failed to kill server: {}", e);
-    }
-  }
 }
 
 /// Tests that room isolation works properly in the mesh
@@ -285,7 +200,7 @@ async fn test_sqlite_replication() {
 async fn test_mesh_room_isolation() {
   // Start 3 server instances with different ports
   let ports = [6021, 6022, 6023];
-  let _test_env = MeshTest::new(&ports);
+  let _test_env = TestEnv::new(&ports);
 
   // Servers are already initialized with the TCP health checks
 
@@ -335,158 +250,117 @@ async fn test_mesh_room_isolation() {
   client2.close(None).await.unwrap();
 }
 
-struct MeshTest {
+struct TestEnv {
   servers: Vec<Child>,
   ports: Vec<u16>,
+  minio_server: MinioTestServer,
+  test_id: String,
+  bucket_name: String,
 }
 
-impl MeshTest {
+impl TestEnv {
+  // Start mesh nodes with the provided ports, using a real MinIO server
+  fn new(ports: &[u16]) -> Self {
+    // Start MinIO server for testing with a unique port based on the first mesh port
+    let minio_port = 9000 + (ports[0] % 1000);
+    let bucket_name = "test-mesh-bucket".to_string();
+    let minio_server = MinioTestServer::start(minio_port);
+    minio_server.create_bucket(&bucket_name).unwrap();
+
+    println!("Started MinIO server on port {}", minio_port);
+
+    let servers = Vec::new();
+    let test_id = Uuid::new_v4().simple().to_string();
+    let mut test_env = TestEnv {
+      servers,
+      ports: ports.to_vec(),
+      minio_server,
+      bucket_name,
+      test_id: test_id.to_string(),
+    };
+
+    for (_i, &port) in ports.iter().enumerate() {
+      test_env.spawn_roomd_instance(port);
+    }
+
+    // Wait for servers to be ready by probing TCP connections
+    println!("Waiting for servers to initialize...");
+    for &port in ports {
+      Self::wait_for_server_ready(port);
+    }
+
+    // Longer delay for peer exchange after TCP connections are ready
+    // This is important to give time for S3 registration and peer discovery
+    std::thread::sleep(Duration::from_secs(2));
+    println!("All servers are ready now");
+    test_env
+  }
+
+  fn kill_roomd_instance(&mut self, index: usize, signal: Signal) {
+    let server = self.servers.remove(index);
+    let _ = self.ports.remove(index);
+    let pid = Pid::from_raw(server.id() as i32);
+    kill(pid, signal).unwrap();
+  }
+
+  fn spawn_roomd_instance(&mut self, port: u16) {
+    let advertise_addr = format!("127.0.0.1:{}", port);
+    let server = Command::new(env!("CARGO_BIN_EXE_roomd"))
+      .env("ADVERTISE_ADDR", &advertise_addr)
+      .env("DATA", "./data")
+      .env("ROOMD_HEARTBEAT_INTERVAL", "2")
+      .env(
+        "ROOMD_S3_ENDPOINT",
+        format!("http://localhost:{}", self.minio_server.port),
+      )
+      .env("ROOMD_S3_BUCKET", &self.bucket_name)
+      .env("ROOMD_S3_REGION", "us-east-1")
+      .env("ROOMD_S3_PREFIX", format!("roomd-test-{}", self.test_id))
+      .env("ROOMD_S3_ACCESS_KEY_ID", &self.minio_server.access_key_id)
+      .env(
+        "ROOMD_S3_SECRET_ACCESS_KEY",
+        &self.minio_server.secret_access_key,
+      )
+      //.env("RUST_LOG", "debug")
+      .stdout(Stdio::inherit())
+      .stderr(Stdio::inherit())
+      .spawn()
+      .expect(&format!("Failed to start server on port {}", port));
+
+    self.servers.push(server);
+    self.ports.push(port);
+    println!(
+      "Started server on port {} with ADVERTISE_ADDR={} and S3 mesh",
+      port, advertise_addr
+    );
+  }
+
   // Wait for a server to be ready by probing its TCP port
   fn wait_for_server_ready(port: u16) {
-    const MAX_ATTEMPTS: usize = 5;
-    const RETRY_DELAY_MS: u64 = 100;
-    for _attempt in 1..=MAX_ATTEMPTS {
+    const MAX_ATTEMPTS: usize = 10;
+    const RETRY_DELAY_MS: u64 = 200;
+    for attempt in 1..=MAX_ATTEMPTS {
       match std::net::TcpStream::connect(format!("127.0.0.1:{}", port)) {
         Ok(_) => {
           return;
         }
         Err(_) => {
+          println!(
+            "Waiting for server on port {} (attempt {}/{})",
+            port, attempt, MAX_ATTEMPTS
+          );
           std::thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
         }
       }
     }
     panic!("Server on port {} failed to start", port);
   }
-
-  // Start mesh nodes with the provided ports
-  fn new(ports: &[u16]) -> Self {
-    let mut servers = Vec::new();
-
-    for (i, &port) in ports.iter().enumerate() {
-      // Create a comma-separated string of peers for KNOWN_PEERS env var
-      let peers: Vec<String> = ports
-        .iter()
-        .enumerate()
-        .filter(|(j, _)| *j != i) // Skip self
-        .map(|(_, p)| format!("127.0.0.1:{}", p))
-        .collect();
-
-      let known_peers = peers.join(",");
-      let self_addr = format!("127.0.0.1:{}", port);
-
-      // Start server with appropriate environment variables
-      // The key environment variables:
-      // - DATA_PORT: The port the server listens on
-      // - SELF_ADDR: The address the server identifies itself as in the mesh
-      // - KNOWN_PEERS: Other peers in the mesh
-      // - DATA: Path to the data directory with application code
-      let server = Command::new(env!("CARGO_BIN_EXE_roomd"))
-        .env("DATA_PORT", port.to_string())
-        .env("SELF_ADDR", self_addr.clone())
-        .env("KNOWN_PEERS", known_peers.clone())
-        .env("DATA", "./data") // Point to the data directory
-        .env("RUST_LOG", "debug") // More detailed logging
-        .stdout(Stdio::inherit()) // Show output for debugging
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect(&format!("Failed to start server on port {}", port));
-
-      servers.push(server);
-      println!(
-        "Started server on port {} with SELF_ADDR={} and KNOWN_PEERS={}",
-        port, self_addr, known_peers
-      );
-    }
-
-    // Wait for servers to be ready by probing TCP connections
-    println!("Waiting for servers to initialize...");
-    for &port in ports {
-      Self::wait_for_server_ready(port);
-    }
-
-    // Brief delay for peer exchange after TCP connections are ready
-    std::thread::sleep(Duration::from_millis(500));
-    println!("All servers are ready now");
-
-    MeshTest {
-      servers,
-      ports: ports.to_vec(),
-    }
-  }
-
-  // Start mesh nodes with S3/MinIO replication enabled
-  fn new_with_s3(ports: &[u16], minio_port: u16, bucket: &str) -> Self {
-    let mut servers = Vec::new();
-    let test_id = Uuid::new_v4().simple().to_string();
-
-    for (i, &port) in ports.iter().enumerate() {
-      // Create a comma-separated string of peers for KNOWN_PEERS env var
-      let peers: Vec<String> = ports
-        .iter()
-        .enumerate()
-        .filter(|(j, _)| *j != i) // Skip self
-        .map(|(_, p)| format!("127.0.0.1:{}", p))
-        .collect();
-
-      let known_peers = peers.join(",");
-      let self_addr = format!("127.0.0.1:{}", port);
-
-      // Start server with S3 replication environment variables
-      let server = Command::new(env!("CARGO_BIN_EXE_roomd"))
-        .env("DATA_PORT", port.to_string())
-        .env("SELF_ADDR", self_addr.clone())
-        .env("KNOWN_PEERS", known_peers.clone())
-        .env("DATA", "./data") // Point to the data directory
-        .env("RUST_LOG", "debug") // More detailed logging
-        // S3/MinIO configuration
-        .env(
-          "ROOMD_S3_ENDPOINT",
-          format!("http://localhost:{}", minio_port),
-        )
-        .env("ROOMD_S3_BUCKET", bucket)
-        .env("ROOMD_S3_REGION", "us-east-1")
-        .env("ROOMD_S3_PREFIX", format!("roomd-test-{}", test_id))
-        .env("ROOMD_S3_ACCESS_KEY_ID", "minioadmin")
-        .env("ROOMD_S3_SECRET_ACCESS_KEY", "minioadmin")
-        .stdout(Stdio::inherit()) // Show output for debugging
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect(&format!("Failed to start server on port {}", port));
-
-      servers.push(server);
-      println!(
-        "Started server on port {} with S3 replication enabled",
-        port
-      );
-    }
-
-    // Wait for servers to be ready by probing TCP connections
-    println!("Waiting for servers to initialize...");
-    for &port in ports {
-      Self::wait_for_server_ready(port);
-    }
-
-    // Brief delay for peer exchange after TCP connections are ready
-    std::thread::sleep(Duration::from_millis(500));
-    println!("All servers are ready now");
-
-    MeshTest {
-      servers,
-      ports: ports.to_vec(),
-    }
-  }
 }
 
-impl Drop for MeshTest {
+impl Drop for TestEnv {
   fn drop(&mut self) {
-    // Cleanup: kill all server processes
-    for (i, server) in self.servers.iter_mut().enumerate() {
-      match server.kill() {
-        Ok(_) => println!("Killed server on port {}", self.ports[i]),
-        Err(e) => {
-          eprintln!("Failed to kill server on port {}: {}", self.ports[i], e)
-        }
-      }
+    for _i in 0..self.servers.len() {
+      self.kill_roomd_instance(0, Signal::SIGKILL);
     }
   }
 }

@@ -4,8 +4,8 @@ use uuid::Uuid;
 
 // Simple wrapper to manage the MinIO test server for tests
 pub struct MinioTestServer {
-  pub access_key: String,
-  pub secret_key: String,
+  pub access_key_id: String,
+  pub secret_access_key: String,
   pub port: u16,
   pub endpoint: String,
   pub docker_name: String,
@@ -45,8 +45,8 @@ impl MinioTestServer {
     std::thread::sleep(Duration::from_secs(3));
 
     MinioTestServer {
-      access_key: access_key.to_string(),
-      secret_key: secret_key.to_string(),
+      access_key_id: access_key.to_string(),
+      secret_access_key: secret_key.to_string(),
       docker_name,
       port,
       endpoint: format!("http://localhost:{}", port),
@@ -62,7 +62,7 @@ impl MinioTestServer {
         "-e",
         &format!(
           "MC_HOST_minio=http://{}:{}@localhost:{}",
-          self.access_key, self.secret_key, self.port,
+          self.access_key_id, self.secret_access_key, self.port,
         ),
         "minio/mc",
         "mb",
@@ -88,7 +88,7 @@ impl MinioTestServer {
         "-e",
         &format!(
           "MC_HOST_minio=http://{}:{}@localhost:{}",
-          self.access_key, self.secret_key, self.port
+          self.access_key_id, self.secret_access_key, self.port
         ),
         "minio/mc",
         "ls",

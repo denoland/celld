@@ -1,8 +1,5 @@
 use anyhow::Result;
-use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 
 use crate::process_manager::ProcessManager;
 
@@ -22,11 +19,6 @@ pub async fn benchmark_deno_coldstart(iterations: usize) -> Result<()> {
   let host = "hello.localhost";
   let room_id = "benchmark";
 
-  // Track total process metrics
-  let mut total_process_spawn_time = Duration::from_secs(0);
-  let mut total_socket_wait_time = Duration::from_secs(0);
-  let mut total_startup_time = Duration::from_secs(0);
-
   // Perform the benchmark
   println!(
     "Starting Deno coldstart benchmark with {} iterations...",
@@ -37,8 +29,7 @@ pub async fn benchmark_deno_coldstart(iterations: usize) -> Result<()> {
     let start = Instant::now();
 
     // Use single_use isolate to ensure a new process each time
-    let spawn_start = Instant::now();
-    let (socket_path, _stream) = process_manager
+    let (_socket_path, _stream) = process_manager
       .get_or_spawn_process(host, room_id, true)
       .await?;
     let elapsed = start.elapsed();
