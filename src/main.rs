@@ -1,4 +1,5 @@
 mod child_on_parent_exit;
+mod cluster_membership;
 mod deno_benchmark;
 mod peer_manager;
 mod process_manager;

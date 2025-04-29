@@ -36,8 +36,8 @@
       `ProcessManager` and `PeerManager`. Proxy should have one member, just
       `Arc<NodeState>`. Make `ProcessManager` and `PeerManager` non-cloneable -
       since we lift the `Arc` to `NodeState`.
-- [ ] Add `src/cluster_membership.rs` which has the trait and S3 implementation.
-      add standalone unit tests for the S3 implementation which spins up a
+- [x] Add `src/cluster_membership.rs` which has the trait and S3 implementation.
+      Add standalone unit tests for the S3 implementation which spins up a
       standalone ephemeral Minio instance for each test using
       `crate::test_utils::MinioTestServer`. - Verify `register` creates the
       correct S3 object key and content. - Verify `heartbeat` updates the
