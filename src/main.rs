@@ -1,5 +1,6 @@
 mod child_on_parent_exit;
 mod cluster_membership;
+mod config;
 mod deno_benchmark;
 mod heartbeat_service;
 mod peer_manager;
@@ -9,7 +10,6 @@ mod sqlite_replica;
 #[cfg(test)]
 pub mod test_utils;
 
-use once_cell::sync::Lazy;
 use pingora::http::StatusCode;
 use pingora::prelude::*;
 use pingora::server::configuration::ServerConf;
@@ -32,50 +32,13 @@ pub struct NodeState {
   /// Empty in standalone mode
   pub cluster_membership:
     Option<Arc<dyn cluster_membership::ClusterMembership>>,
+  /// Configuration
+  pub config: Arc<config::Config>,
 }
 
 // Default values, can be overridden when creating ProcessManager
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_REAPER_INTERVAL: Duration = Duration::from_secs(10);
-
-static ROOMD_HEARTBEAT_INTERVAL: Lazy<Duration> = Lazy::new(|| {
-  let secs = std::env::var("ROOMD_HEARTBEAT_INTERVAL")
-    .ok()
-    .map(|s| s.parse::<u64>().unwrap())
-    .unwrap_or_else(|| 30);
-  Duration::from_secs(secs)
-});
-
-static LISTEN_ADDR: Lazy<String> = Lazy::new(|| {
-  std::env::var("LISTEN_ADDR").unwrap_or_else(|_| {
-    // If not set, use the port from ADVERTISE_ADDR or a default
-    let port = match &*ADVERTISE_ADDR {
-      addr if !addr.is_empty() => addr.split(':').nth(1).unwrap_or("3000"),
-      _ => "3000",
-    };
-    format!("0.0.0.0:{}", port)
-  })
-});
-
-static ADVERTISE_ADDR: Lazy<String> =
-  Lazy::new(|| std::env::var("ADVERTISE_ADDR").unwrap_or_default());
-
-static DATA_DIR: Lazy<PathBuf> = Lazy::new(|| {
-  let path = PathBuf::from(
-    std::env::var("DATA").unwrap_or_else(|_| "./data".to_string()),
-  );
-
-  if !path.is_dir() {
-    error!(
-      "DATA_DIR ('{}') is not an existing directory.",
-      path.display()
-    );
-    std::process::exit(1);
-  }
-
-  debug!("Using DATA_DIR: {}", path.display());
-  path
-});
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
@@ -405,7 +368,12 @@ impl ProxyHttp for Proxy {
       match self
         .node_state
         .process_manager
-        .get_or_spawn_process(&ctx.tenant, room_id, single_use)
+        .get_or_spawn_process(
+          &ctx.tenant,
+          room_id,
+          single_use,
+          &self.node_state.config,
+        )
         .await
       {
         Ok((path, _stream)) => {
@@ -488,31 +456,21 @@ impl ProxyHttp for Proxy {
   }
 }
 
-/// Starts the server with the given data directory and listen address
+/// Starts the server with the given configuration
 /// Returns the server instance
-fn start_server(data_dir: PathBuf, listen_addr: String) -> Server {
+fn start_server(config: config::Config) -> Server {
   // Create a server configuration
   let server_conf = Arc::new(ServerConf::new().unwrap());
 
   // Create a new Pingora server
   let mut server = Server::new(None).unwrap();
 
-  // Get advertise address from environment
-  let advertise_addr = ADVERTISE_ADDR.to_string();
-
-  if advertise_addr.is_empty() {
-    error!(
-      "ADVERTISE_ADDR environment variable must be set (e.g., 1.2.3.4:8080)"
-    );
-    std::process::exit(1);
-  }
-
   // Generate a unique node ID (UUID) for this instance
   let node_id = uuid::Uuid::new_v4().to_string();
   debug!("Generated node ID: {}", node_id);
 
   // Create the process manager with default timeout values
-  let process_manager = ProcessManager::new(data_dir.clone());
+  let process_manager = ProcessManager::new(config.data_dir.clone());
 
   // Initialize cluster membership
   let cluster_membership = {
@@ -524,48 +482,60 @@ fn start_server(data_dir: PathBuf, listen_addr: String) -> Server {
 
     // Initialize the S3 cluster membership
     rt.block_on(async {
-      // Try to get S3 membership config from environment variables
-      match cluster_membership::S3ClusterMembership::from_env(
-        Some(node_id.clone()),
-        &advertise_addr,
-      )
-      .await
-      {
-        Some(membership) => {
-          info!(
-            "Initializing S3 cluster membership with bucket {}",
-            membership.bucket()
-          );
+      // Try to get S3 membership config from configuration
+      if config.has_s3_config() {
+        // Create membership using from_config
+        let membership =
+          match cluster_membership::S3ClusterMembership::from_config(
+            config.into_s3_config().unwrap(),
+            config.advertise_addr.clone(),
+            Some(node_id.clone()),
+          ) {
+            Ok(membership) => {
+              info!(
+                "Initializing S3 cluster membership with bucket {}",
+                membership.bucket()
+              );
+              membership
+            }
+            Err(e) => {
+              error!("Failed to create S3 cluster membership: {}", e);
+              std::process::exit(1);
+            }
+          };
 
-          // Register this node with the cluster
-          info!("Registering node {} with S3 cluster", node_id);
-          if let Err(e) = membership.register().await {
-            error!("Failed to register node in S3 cluster: {}", e);
-            None
-          } else {
-            Some(Arc::new(membership)
-              as Arc<dyn cluster_membership::ClusterMembership>)
-          }
+        // Register the node with the cluster
+        info!("Registering node {} with S3 cluster", node_id);
+        if let Err(e) = membership.register().await {
+          error!("Failed to register node in S3 cluster: {}", e);
+          std::process::exit(1);
         }
-        None => {
-          info!(
-            "S3 cluster membership not configured, running in standalone mode"
-          );
-          None
-        }
+
+        Some(Arc::new(membership)
+          as Arc<dyn cluster_membership::ClusterMembership>)
+      } else {
+        info!(
+          "S3 cluster membership not configured, running in standalone mode"
+        );
+        None
       }
     })
   };
 
   // Create peer manager with only local node
-  let peer_manager = PeerManager::new(advertise_addr.clone(), node_id.clone());
+  let peer_manager =
+    PeerManager::new(config.advertise_addr.clone(), node_id.clone());
   debug!("Peer manager initialized in standalone mode");
+
+  // Create config Arc for NodeState
+  let config_arc = Arc::new(config);
 
   // Create NodeState container with cluster membership if available
   let node_state = Arc::new(NodeState {
     process_manager: Arc::new(process_manager),
     peer_manager: Arc::new(peer_manager),
     cluster_membership,
+    config: config_arc,
   });
 
   // Create the proxy app that will handle routing
@@ -577,7 +547,7 @@ fn start_server(data_dir: PathBuf, listen_addr: String) -> Server {
   let mut proxy_service = http_proxy_service(&server_conf, app);
 
   // Configure the proxy service to listen on the specified address
-  proxy_service.add_tcp(&listen_addr);
+  proxy_service.add_tcp(&node_state.config.listen_addr);
 
   let reaper_service = background_service(
     "process_reaper",
@@ -599,7 +569,7 @@ fn start_server(data_dir: PathBuf, listen_addr: String) -> Server {
       heartbeat_service::HeartbeatService {
         cluster_membership: cm_clone,
         peer_manager: peer_manager_clone,
-        interval: *ROOMD_HEARTBEAT_INTERVAL,
+        interval: node_state.config.heartbeat_interval,
       },
     ));
   }
@@ -607,7 +577,10 @@ fn start_server(data_dir: PathBuf, listen_addr: String) -> Server {
   // Add the proxy service to the server
   server.add_service(proxy_service);
 
-  debug!("Starting Deno Deploy proxy server on {}", listen_addr);
+  debug!(
+    "Starting Deno Deploy proxy server on {}",
+    node_state.config.listen_addr
+  );
   server
 }
 
@@ -637,13 +610,19 @@ fn main() {
     return;
   }
 
-  // Get the environment variables and pass them to the start_server function
-  let listen_addr = LISTEN_ADDR.to_string();
+  // Parse configuration from environment variables
+  let config = match config::Config::from_env() {
+    Ok(config) => config,
+    Err(err) => {
+      error!("{}", err);
+      std::process::exit(1);
+    }
+  };
 
   info!("Starting server with dynamic cluster membership");
 
-  // Start the server with cluster membership capability
-  let server = start_server(DATA_DIR.clone(), listen_addr);
+  // Start the server with configuration
+  let server = start_server(config);
   server.run_forever();
 }
 
@@ -651,19 +630,23 @@ fn main() {
 mod tests {
   use super::*;
   use futures_util::{SinkExt, StreamExt};
+  use once_cell::sync::Lazy;
   use serde_json::Value;
   use std::time::Duration;
   use tokio_tungstenite::tungstenite::protocol::Message;
 
   // inspired by https://github.com/cloudflare/pingora/blob/caa6a0/pingora-core/tests/utils/mod.rs
   pub static TEST_SERVER: Lazy<std::thread::JoinHandle<()>> = Lazy::new(|| {
-    let data_dir = PathBuf::from("./data");
     // Ensure we're using a clean environment for the test server
     std::env::set_var("ADVERTISE_ADDR", "127.0.0.1:6146"); // Set advertise address
     std::env::set_var("LISTEN_ADDR", "127.0.0.1:6146"); // Set listen address
+    std::env::set_var("DATA", "./data"); // Set data directory
+    std::env::set_var("ROOMD_HEARTBEAT_INTERVAL", "2"); // Fast heartbeat for tests
 
     let h = std::thread::spawn(|| {
-      let server = start_server(data_dir, "127.0.0.1:6146".to_string());
+      // Create config from environment variables
+      let config = config::Config::from_env().expect("Failed to parse config");
+      let server = start_server(config);
       server.run_forever();
     });
 

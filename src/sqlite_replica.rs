@@ -46,10 +46,10 @@
 //! - allow querying or awaiting process termination,
 //! - ensure backups complete before cleanup.
 
+use crate::config::S3Config;
 use anyhow::{anyhow, Context, Result};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Write;
@@ -58,73 +58,6 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
-
-// Environment variables for S3 configuration, loaded once at startup
-static S3_ENDPOINT: Lazy<Option<String>> =
-  Lazy::new(|| std::env::var("ROOMD_S3_ENDPOINT").ok());
-static S3_BUCKET: Lazy<Option<String>> =
-  Lazy::new(|| std::env::var("ROOMD_S3_BUCKET").ok());
-static S3_REGION: Lazy<Option<String>> =
-  Lazy::new(|| std::env::var("ROOMD_S3_REGION").ok());
-static S3_PREFIX: Lazy<Option<String>> =
-  Lazy::new(|| std::env::var("ROOMD_S3_PREFIX").ok());
-static S3_ACCESS_KEY_ID: Lazy<Option<String>> =
-  Lazy::new(|| std::env::var("ROOMD_S3_ACCESS_KEY_ID").ok());
-static S3_SECRET_ACCESS_KEY: Lazy<Option<String>> =
-  Lazy::new(|| std::env::var("ROOMD_S3_SECRET_ACCESS_KEY").ok());
-
-/// Get S3 configuration for a specific tenant from environment variables
-pub fn get_s3_cfg_for_tenant(tenant: &str) -> Option<S3Config> {
-  // Early exit if any required environment variables are missing
-  if S3_ENDPOINT.is_none()
-    || S3_BUCKET.is_none()
-    || S3_ACCESS_KEY_ID.is_none()
-    || S3_SECRET_ACCESS_KEY.is_none()
-  {
-    return None;
-  }
-
-  // Extract the values (safe to unwrap since we checked above)
-  let endpoint = S3_ENDPOINT.as_ref().unwrap().clone();
-  let bucket = S3_BUCKET.as_ref().unwrap().clone();
-  let region = S3_REGION
-    .as_ref()
-    .cloned()
-    .unwrap_or_else(|| "us-east-1".to_string());
-  let prefix = S3_PREFIX
-    .as_ref()
-    .cloned()
-    .unwrap_or_else(|| "roomd".to_string());
-  let access_key_id = S3_ACCESS_KEY_ID.as_ref().unwrap().clone();
-  let secret_access_key = S3_SECRET_ACCESS_KEY.as_ref().unwrap().clone();
-
-  // Construct S3Config with tenant-specific path
-  Some(S3Config {
-    endpoint,
-    bucket,
-    path: format!("{}/{}", prefix, tenant),
-    region,
-    access_key_id,
-    secret_access_key,
-  })
-}
-
-/// Configuration for a MinIO or S3 replica target
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct S3Config {
-  /// S3 endpoint URL (e.g., http://localhost:9000)
-  pub endpoint: String,
-  /// S3 bucket name
-  pub bucket: String,
-  /// S3 path prefix within the bucket
-  pub path: String,
-  /// AWS region (often 'us-east-1' for MinIO)
-  pub region: String,
-  /// AWS access key
-  pub access_key_id: String,
-  /// AWS secret key
-  pub secret_access_key: String,
-}
 
 /// Configuration for a Litestream S3 replica
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,7 +193,11 @@ impl SqliteReplica {
       replica_type: "s3".to_string(),
       name: Some(format!("{}-replica", self.room_id)),
       bucket: self.s3_config.bucket.clone(),
-      path: format!("{}/{}", self.s3_config.path, self.room_id),
+      path: if let Some(p) = self.s3_config.path.as_ref() {
+        format!("{}/{}", p, self.room_id)
+      } else {
+        self.room_id.clone()
+      },
       region: self.s3_config.region.clone(),
       endpoint: Some(self.s3_config.endpoint.clone()),
       access_key_id: self.s3_config.access_key_id.clone(),
@@ -469,7 +406,6 @@ pub mod tests {
   use std::process::Command;
   use std::time::Duration;
   use tempfile;
-  use uuid;
 
   // Helper to create test S3Config
   fn create_test_s3_config(
@@ -481,7 +417,7 @@ pub mod tests {
       endpoint: minio.endpoint.clone(),
       region: "us-east-1".to_string(),
       bucket: test_name.to_string(),
-      path: format!("roomd-test-{}", test_name),
+      path: Some(format!("roomd-test-{}", test_name)),
       access_key_id: minio.access_key_id.clone(),
       secret_access_key: minio.secret_access_key.clone(),
     }

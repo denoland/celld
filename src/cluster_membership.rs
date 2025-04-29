@@ -1,3 +1,4 @@
+use crate::config::S3Config;
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::{config::Credentials, primitives::ByteStream, Client};
@@ -55,102 +56,57 @@ pub struct S3ClusterMembership {
 }
 
 impl S3ClusterMembership {
-  /// Initialize an S3ClusterMembership instance from environment variables
-  ///
-  /// This factory method encapsulates all configuration reading from environment variables
-  /// so that the S3 cluster membership code is in one place. The function returns None
-  /// if the required configuration variables are not set.
-  ///
-  /// Environment variables:
-  /// - ROOMD_S3_ENDPOINT: Optional S3 endpoint URL
-  /// - ROOMD_S3_REGION: S3 region (defaults to us-east-1)
-  /// - ROOMD_S3_BUCKET: Required bucket name for storing cluster state
-  /// - ROOMD_S3_PREFIX: Key prefix for cluster state objects (defaults to "cluster_state/nodes/")
-  /// - ROOMD_S3_ACCESS_KEY_ID: Required access key for S3
-  /// - ROOMD_S3_SECRET_ACCESS_KEY: Required secret key for S3
-  pub async fn from_env(
+  /// Create a new S3ClusterMembership instance from Config
+  pub fn from_config(
+    cfg: S3Config,
+    advertise_addr: String,
     node_id: Option<String>,
-    advertise_addr: &str,
-  ) -> Option<Self> {
-    let s3_endpoint = std::env::var("ROOMD_S3_ENDPOINT").ok();
-    let s3_region = std::env::var("ROOMD_S3_REGION")
-      .unwrap_or_else(|_| "us-east-1".to_string());
-    let s3_bucket = std::env::var("ROOMD_S3_BUCKET").ok()?;
-    let s3_access_key_id = std::env::var("ROOMD_S3_ACCESS_KEY_ID").ok()?;
-    let s3_secret_access_key =
-      std::env::var("ROOMD_S3_SECRET_ACCESS_KEY").ok()?;
-
-    let bucket_prefix = std::env::var("ROOMD_S3_PREFIX")
-      .unwrap_or_else(|_| "cluster_state/nodes/".to_string());
-
-    let membership = Self::new(
-      s3_endpoint,
-      &s3_region,
-      &s3_bucket,
-      &bucket_prefix,
-      node_id,
-      advertise_addr,
-      None, // Use default staleness threshold
-      s3_access_key_id,
-      s3_secret_access_key,
-    )
-    .await;
-
-    Some(membership)
-  }
-
-  /// Create a new S3ClusterMembership instance
-  pub async fn new(
-    endpoint_url: Option<String>,
-    region: &str,
-    bucket: &str,
-    prefix: &str,
-    node_id: Option<String>,
-    advertise_addr: &str,
-    staleness_threshold: Option<Duration>,
-    access_key_id: String,
-    secret_access_key: String,
-  ) -> Self {
+  ) -> anyhow::Result<Self> {
     let node_id = node_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
     let node_info = NodeInfo {
       node_id,
-      advertise_addr: advertise_addr.to_string(),
+      advertise_addr,
       heartbeat_timestamp: Utc::now(),
     };
 
     // Create the client with the path style config for MinIO compatibility
-    let endpoint = endpoint_url.unwrap_or_default();
-    let config = aws_sdk_s3::config::Builder::new()
-      .behavior_version(BehaviorVersion::latest())
-      .credentials_provider(Credentials::new(
-        access_key_id,
-        secret_access_key,
-        None,
-        None,
-        "minio-credentials",
-      ))
-      .endpoint_url(endpoint)
-      .region(aws_config::Region::new(region.to_string()))
-      .force_path_style(true)
-      // Add timeout configuration to avoid hanging in tests
-      .timeout_config(
-        TimeoutConfig::builder()
-          .operation_timeout(Duration::from_secs(10))
-          .build(),
-      )
-      .build();
 
-    let s3_client = Client::from_conf(config);
+    let s3_client = Client::from_conf(
+      aws_sdk_s3::config::Builder::new()
+        .behavior_version(BehaviorVersion::latest())
+        .credentials_provider(Credentials::new(
+          cfg.access_key_id,
+          cfg.secret_access_key,
+          None,
+          None,
+          "minio-credentials",
+        ))
+        .endpoint_url(cfg.endpoint)
+        .region(aws_config::Region::new(cfg.region))
+        .force_path_style(true)
+        // Add timeout configuration to avoid hanging in tests
+        .timeout_config(
+          TimeoutConfig::builder()
+            .operation_timeout(Duration::from_secs(10))
+            .build(),
+        )
+        .build(),
+    );
 
-    Self {
+    Ok(Self {
       s3_client,
-      bucket: bucket.to_string(),
-      prefix: prefix.to_string(),
+      bucket: cfg.bucket,
+      prefix: cfg.path.unwrap_or_default(),
       node_info,
-      staleness_threshold: staleness_threshold
-        .unwrap_or(DEFAULT_STALENESS_THRESHOLD),
-    }
+      staleness_threshold: DEFAULT_STALENESS_THRESHOLD,
+    })
+  }
+
+  /// Create a new S3ClusterMembership instance with custom staleness threshold
+  pub fn with_staleness_threshold(mut self, threshold: Duration) -> Self {
+    self.staleness_threshold = threshold;
+    self
   }
 
   /// Get the full S3 key for this node
@@ -339,26 +295,27 @@ mod tests {
   use crate::test_utils::MinioTestServer;
   use tokio::time::sleep;
 
-  async fn setup_test_membership(
+  fn setup_test_membership(
     minio: &MinioTestServer,
     node_id: Option<String>,
     advertise_addr: &str,
   ) -> S3ClusterMembership {
-    let bucket_name = "cluster-test";
-    let _ = minio.create_bucket(bucket_name);
+    let bucket = "cluster-test".to_string();
+    let _ = minio.create_bucket(&bucket);
 
-    S3ClusterMembership::new(
-      Some(format!("http://127.0.0.1:{}", minio.port)),
-      "us-east-1",
-      bucket_name,
-      "cluster_state/nodes/",
-      node_id,
-      advertise_addr,
-      Some(Duration::from_secs(5)), // Short staleness threshold for tests
-      minio.access_key_id.clone(),
-      minio.secret_access_key.clone(),
-    )
-    .await
+    // Create with a short staleness threshold for tests (1 second)
+    let cfg = S3Config {
+      endpoint: format!("http://127.0.0.1:{}", minio.port),
+      bucket,
+      region: "us-east-1".to_string(),
+      path: Some("cluster_state/nodes/".to_string()),
+      access_key_id: minio.access_key_id.clone(),
+      secret_access_key: minio.secret_access_key.clone(),
+    };
+
+    S3ClusterMembership::from_config(cfg, advertise_addr.to_string(), node_id)
+      .unwrap()
+      .with_staleness_threshold(Duration::from_secs(1)) // Custom short threshold for tests
   }
 
   #[tokio::test]
@@ -366,8 +323,7 @@ mod tests {
     let minio = MinioTestServer::start(9551);
     let node_id = Uuid::new_v4().to_string();
     let membership =
-      setup_test_membership(&minio, Some(node_id.clone()), "127.0.0.1:8080")
-        .await;
+      setup_test_membership(&minio, Some(node_id.clone()), "127.0.0.1:8080");
 
     // Register the node
     let register_result = membership.register().await;
@@ -417,8 +373,7 @@ mod tests {
     let minio = MinioTestServer::start(9552);
     let node_id = Uuid::new_v4().to_string();
     let membership =
-      setup_test_membership(&minio, Some(node_id.clone()), "127.0.0.1:8080")
-        .await;
+      setup_test_membership(&minio, Some(node_id.clone()), "127.0.0.1:8080");
 
     // Register the node
     let register_result = membership.register().await;
@@ -484,8 +439,7 @@ mod tests {
       &minio,
       Some(stale_node_id.clone()),
       "127.0.0.1:8081",
-    )
-    .await;
+    );
 
     // Register the first node
     let register_result = stale_membership.register().await;
@@ -501,8 +455,7 @@ mod tests {
       &minio,
       Some(active_node_id.clone()),
       "127.0.0.1:8082",
-    )
-    .await;
+    );
 
     // Register the active node
     let register_result = active_membership.register().await;
@@ -525,8 +478,7 @@ mod tests {
         &minio,
         Some(third_node_id.clone()),
         "127.0.0.1:8083",
-      )
-      .await;
+      );
 
       // Register the third node
       let register_result = third_membership.register().await;
@@ -552,8 +504,7 @@ mod tests {
     let minio = MinioTestServer::start(9554);
     let node_id = Uuid::new_v4().to_string();
     let membership =
-      setup_test_membership(&minio, Some(node_id.clone()), "127.0.0.1:8080")
-        .await;
+      setup_test_membership(&minio, Some(node_id.clone()), "127.0.0.1:8080");
 
     // Register the node
     let register_result = membership.register().await;

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::time::{Duration, Instant};
 
+use crate::config::Config;
 use crate::process_manager::ProcessManager;
 
 /// Benchmark function to measure Deno process coldstart performance
@@ -10,7 +11,21 @@ pub async fn benchmark_deno_coldstart(iterations: usize) -> Result<()> {
 
   // Setup the process manager with the same data directory
   let data_dir = current_dir.join("data");
-  let process_manager = ProcessManager::new(data_dir);
+  let process_manager = ProcessManager::new(data_dir.clone());
+
+  // Create a minimal config for benchmarking
+  let config = Config {
+    listen_addr: "127.0.0.1:3000".to_string(),
+    advertise_addr: "127.0.0.1:3000".to_string(),
+    data_dir: data_dir.clone(),
+    heartbeat_interval: Duration::from_secs(30),
+    s3_endpoint: None,
+    s3_bucket: None,
+    s3_region: None,
+    s3_prefix: None,
+    s3_access_key_id: None,
+    s3_secret_access_key: None,
+  };
 
   // Record the startup time for each iteration
   let mut results = Vec::with_capacity(iterations);
@@ -30,7 +45,7 @@ pub async fn benchmark_deno_coldstart(iterations: usize) -> Result<()> {
 
     // Use single_use isolate to ensure a new process each time
     let (_socket_path, _stream) = process_manager
-      .get_or_spawn_process(host, room_id, true)
+      .get_or_spawn_process(host, room_id, true, &config)
       .await?;
     let elapsed = start.elapsed();
 

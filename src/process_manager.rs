@@ -32,6 +32,7 @@ pub struct ProcessManager {
 
 impl ProcessManager {
   pub fn new(data_dir: PathBuf) -> Self {
+    let data_dir = data_dir.clone();
     // TODO: Implement a cleanup mechanism for old empty database files
     // This could be done by:
     // 1. Tracking database access times
@@ -92,12 +93,13 @@ impl ProcessManager {
     result.0
   }
 
-  #[instrument(skip(self), fields(host = %host, room_id = %room_id))]
+  #[instrument(skip(self, config), fields(host = %host, room_id = %room_id))]
   pub async fn get_or_spawn_process(
     &self,
     host: &str,
     room_id: &str,
     single_use: bool,
+    config: &crate::config::Config,
   ) -> Result<(PathBuf, UnixStream), ProxyError> {
     // Create a combined key for host and room to ensure one isolate per room
     let process_key = format!("{}:{}", host, room_id);
@@ -179,8 +181,7 @@ impl ProcessManager {
     let mut replica = None;
     let db_path = sqlite_dir.join(format!("{}.db", room_id));
 
-    if let Some(s3_config) = crate::sqlite_replica::get_s3_cfg_for_tenant(host)
-    {
+    if let Some(s3_config) = config.into_s3_config() {
       debug!(
         tenant = %host,
         room_id = %room_id,
