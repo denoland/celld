@@ -2,6 +2,7 @@ mod child_on_parent_exit;
 mod cluster_membership;
 mod config;
 mod deno_benchmark;
+mod distributed_lock;
 mod heartbeat_service;
 mod peer_manager;
 mod process_manager;

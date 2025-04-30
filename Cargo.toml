@@ -18,12 +18,14 @@ pingora = { version = "0.4", features = ["proxy"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+sha2 = "0.10"
 tempfile = "3.19.1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
+futures = "0.3"
 
 [patch.crates-io]
 sfv = { path = "vendor/sfv" }
