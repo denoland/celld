@@ -59,38 +59,51 @@ impl ProcessReaper {
 
     // Process each host to reap, acquiring the lock only for removal
     for host in hosts_to_reap {
-      // Remove the entry from the map
-      let entry = {
+      // Remove the entry from the map - keep lock held minimal time
+      let maybe_entry = {
         let mut processes =
           self.node_state.process_manager.processes.lock().unwrap();
         processes.remove(&host)
       };
 
       // If we got an entry, reap it (without holding the lock)
-      if let Some(entry) = entry {
+      if let Some(entry) = maybe_entry {
+        // TODO Move the following stanza to ProcessEntry::Drop ?
+
+        let pid = entry.pid;
         warn!(
           host = %host,
-          pid = entry.pid,
+          pid = pid,
           "Reaping idle process"
         );
 
-        // Kill process using the parent_exit_guard
+        // Kill the litestream replicate process.
+        if let Some(replica) = entry.replica {
+          if let Err(e) = replica.shutdown().await {
+            warn!(host = %host, error = %e, "Error shutting down litestream replicate");
+          }
+        }
+
+        // Kill the Deno process
         entry.parent_exit_guard.kill();
-        // The Drop implementation of ChildOnParentExit will finish the process cleanup
+
+        // Store socket path to clean up after reaping
+        let socket_path = entry.socket_path.clone();
+
+        // Log after the entry is dropped
         info!(
           host = %host,
-          pid = entry.pid,
+          pid = pid,
           "Killed process using parent-exit guard"
         );
 
-        // Attempt to clean up the socket file
-        if let Err(e) = tokio::fs::remove_file(&entry.socket_path).await {
+        if let Err(e) = std::fs::remove_file(&socket_path) {
           // Log error but continue cleanup - file might already be gone
           if e.kind() != std::io::ErrorKind::NotFound {
             error!(
               host = %host,
-              pid = entry.pid,
-              socket = %entry.socket_path.display(),
+              pid = pid,
+              socket = %socket_path.display(),
               error = %e,
               "Failed to remove socket file during reap"
             );
@@ -99,7 +112,7 @@ impl ProcessReaper {
 
         info!(
           host = %host,
-          pid = entry.pid,
+          pid = pid,
           "Process reaped successfully"
         );
       }

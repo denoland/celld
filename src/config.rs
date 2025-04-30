@@ -3,23 +3,34 @@ use serde::Serialize;
 use std::env::var;
 use std::path::PathBuf;
 use std::time::Duration;
+use tracing::info;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Config {
-  pub listen_addr: String,
-  pub advertise_addr: String,
+  /// Directory to store data in
   pub data_dir: PathBuf,
-  pub heartbeat_interval: Duration,
+  /// IP:port to listen on
+  pub listen_addr: String,
+  /// IP:port to advertise to other nodes
+  pub advertise_addr: String,
+  /// S3 endpoint for cluster membership and distributed locking
   pub s3_endpoint: Option<String>,
+  /// S3 bucket for cluster membership and distributed locking
   pub s3_bucket: Option<String>,
+  /// S3 region for cluster membership and distributed locking
   pub s3_region: Option<String>,
-  pub s3_prefix: Option<String>,
+  /// S3 path prefix for cluster membership and distributed locking
+  pub s3_path: Option<String>,
+  /// S3 access key for cluster membership and distributed locking
   pub s3_access_key_id: Option<String>,
+  /// S3 secret access key for cluster membership and distributed locking
   pub s3_secret_access_key: Option<String>,
+  /// Heartbeat interval in seconds
+  pub heartbeat_interval: Duration,
 }
 
 /// Configuration for a MinIO or S3 replica target
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3Config {
   /// S3 endpoint URL (e.g., http://localhost:9000)
   pub endpoint: String,
@@ -35,15 +46,45 @@ pub struct S3Config {
   pub region: String,
 }
 
+impl S3Config {
+  /// Constructs an S3 prefix for a specific sub-directory.
+  ///
+  /// Ensures the resulting prefix always ends with a '/'.
+  /// If `self.path` is None or empty, the result is "subpath/".
+  /// If `self.path` is "base", the result is "base/subpath/".
+  /// If `self.path` is "base/", the result is "base/subpath/".
+  ///
+  /// # Panics
+  /// Panics if `subpath` is empty or starts with '/'.
+  pub fn subpath(&self, subpath: &str) -> String {
+    assert!(!subpath.is_empty(), "subpath cannot be empty");
+    assert!(!subpath.starts_with('/'), "subpath must be relative");
+
+    match self.path.as_deref() {
+      // No base prefix, or empty base prefix
+      None | Some("") => format!("{}/", subpath),
+      // Base prefix exists
+      Some(base) => {
+        // Use format! which is efficient for joining parts.
+        // Check if base already ends with '/', format accordingly.
+        if base.ends_with('/') {
+          format!("{}{}/", base, subpath) // e.g., "base/subpath/"
+        } else {
+          format!("{}/{}/", base, subpath) // e.g., "base/subpath/"
+        }
+      }
+    }
+  }
+}
+
 impl Config {
   pub fn from_env() -> Result<Self, String> {
-    // Get the required values
     let advertise_addr = match var("ADVERTISE_ADDR") {
       Ok(addr) if !addr.is_empty() => addr,
-      _ => return Err(
-        "ADVERTISE_ADDR environment variable must be set (e.g., 1.2.3.4:8080)"
-          .into(),
-      ),
+      _ => {
+        info!("ADVERTISE_ADDR not set, using 127.0.0.1:8000");
+        "127.0.0.1:8000".to_string()
+      }
     };
 
     // Get listen_addr with fallback to advertise_addr port
@@ -76,7 +117,7 @@ impl Config {
     let s3_endpoint = var("ROOMD_S3_ENDPOINT").ok();
     let s3_bucket = var("ROOMD_S3_BUCKET").ok();
     let s3_region = var("ROOMD_S3_REGION").ok();
-    let s3_prefix = var("ROOMD_S3_PREFIX").ok();
+    let s3_path = var("ROOMD_S3_PREFIX").ok();
     let s3_access_key_id = var("ROOMD_S3_ACCESS_KEY_ID").ok();
     let s3_secret_access_key = var("ROOMD_S3_SECRET_ACCESS_KEY").ok();
 
@@ -88,7 +129,7 @@ impl Config {
       s3_endpoint,
       s3_bucket,
       s3_region,
-      s3_prefix,
+      s3_path,
       s3_access_key_id,
       s3_secret_access_key,
     })
@@ -101,13 +142,13 @@ impl Config {
       && self.s3_secret_access_key.is_some()
   }
 
-  pub fn into_s3_config(&self) -> Option<S3Config> {
+  pub fn to_s3_config(&self) -> Option<S3Config> {
     Some(S3Config {
       endpoint: self.s3_endpoint.as_ref()?.clone(),
       bucket: self.s3_bucket.as_ref()?.clone(),
       access_key_id: self.s3_access_key_id.as_ref()?.clone(),
       secret_access_key: self.s3_secret_access_key.as_ref()?.clone(),
-      path: self.s3_prefix.clone(),
+      path: self.s3_path.clone(),
       region: self
         .s3_region
         .as_ref()

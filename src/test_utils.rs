@@ -1,3 +1,4 @@
+use anyhow;
 use std::process::Command;
 use std::time::Duration;
 use uuid::Uuid;
@@ -79,6 +80,7 @@ impl MinioTestServer {
     Ok(())
   }
 
+  #[cfg(test)]
   pub fn has_files_for_room(&self, bucket: &str, room_id: &str) -> bool {
     let output = Command::new("docker")
       .args([
@@ -102,6 +104,37 @@ impl MinioTestServer {
     println!("MinIO bucket contents: {}", stdout);
 
     stdout.contains(room_id)
+  }
+
+  pub fn clear_bucket_files(
+    &self,
+    bucket_name: &str,
+    prefix: &str,
+  ) -> Result<(), anyhow::Error> {
+    let status = Command::new("docker")
+      .args([
+        "run",
+        "--network=host",
+        "--rm",
+        "-e",
+        &format!(
+          "MC_HOST_minio=http://{}:{}@localhost:{}",
+          self.access_key_id, self.secret_access_key, self.port
+        ),
+        "minio/mc",
+        "rm",
+        "--recursive",
+        "--force",
+        &format!("minio/{}/{}", bucket_name, prefix),
+      ])
+      .spawn()?
+      .wait()?;
+
+    if !status.success() {
+      return Err(anyhow::anyhow!("Failed to clear bucket files"));
+    }
+
+    Ok(())
   }
 }
 

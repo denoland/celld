@@ -1,18 +1,37 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
 use tokio::time::sleep;
-use tracing::{debug, error, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::child_on_parent_exit::ChildOnParentExit;
 use crate::sqlite_replica::{create_empty_database, SqliteReplica};
+use crate::NodeState;
 use crate::ProxyError;
+
+/// Represents the current state of a database restore operation
+#[derive(Debug, Clone, PartialEq)]
+pub enum RestoreState {
+  /// Initial state, no restore has been attempted
+  Idle,
+  /// Attempting to acquire a distributed lock
+  AcquiringLock,
+  /// Another node holds the lock, waiting for it to complete
+  WaitingForLock,
+  /// Actively restoring from backup
+  Restoring,
+  /// Restore process completed (bool indicates if data was actually restored)
+  Complete(bool),
+  /// Restore failed with the specified error message
+  Failed(String),
+}
 
 pub struct ProcessEntry {
   pub pid: u32,
@@ -23,6 +42,8 @@ pub struct ProcessEntry {
   pub active_connections: u32, // Counter for active connections (including WebSockets)
   pub _socket_tempdir: TempDir, // Keep tempdir alive as long as process exists
   pub replica: Option<SqliteReplica>, // SQLite replication to S3/MinIO
+  /// State of the database restore operation
+  pub restore_state: RestoreState,
 }
 
 pub struct ProcessManager {
@@ -53,19 +74,14 @@ impl ProcessManager {
   ) -> bool {
     let process_key = format!("{}:{}", host, room_id);
 
-    // Scope the lock to minimize lock holding time
-    let result = {
-      let mut processes = self.processes.lock().unwrap();
-      if let Some(entry) = processes.get_mut(&process_key) {
-        entry.active_connections += 1;
-        entry.last_used = Instant::now();
-        (true, entry.pid, entry.active_connections)
-      } else {
-        (false, 0, 0)
-      }
-    };
+    let mut processes = self.processes.lock().unwrap();
+    if let Some(entry) = processes.get_mut(&process_key) {
+      entry.active_connections += 1;
+      entry.last_used = Instant::now();
+      return true;
+    }
 
-    result.0
+    false
   }
 
   /// Track a closed connection to the process
@@ -76,30 +92,25 @@ impl ProcessManager {
   ) -> bool {
     let process_key = format!("{}:{}", host, room_id);
 
-    // Scope the lock to minimize lock holding time
-    let result = {
-      let mut processes = self.processes.lock().unwrap();
-      if let Some(entry) = processes.get_mut(&process_key) {
-        if entry.active_connections > 0 {
-          entry.active_connections -= 1;
-        }
-        entry.last_used = Instant::now();
-        (true, entry.pid, entry.active_connections)
-      } else {
-        (false, 0, 0)
+    let mut processes = self.processes.lock().unwrap();
+    if let Some(entry) = processes.get_mut(&process_key) {
+      if entry.active_connections > 0 {
+        entry.active_connections -= 1;
       }
-    };
+      entry.last_used = Instant::now();
+      return true;
+    }
 
-    result.0
+    false
   }
 
-  #[instrument(skip(self, config), fields(host = %host, room_id = %room_id))]
+  #[instrument(skip(self, node_state), fields(host = %host, room_id = %room_id))]
   pub async fn get_or_spawn_process(
     &self,
     host: &str,
     room_id: &str,
     single_use: bool,
-    config: &crate::config::Config,
+    node_state: Arc<NodeState>,
   ) -> Result<(PathBuf, UnixStream), ProxyError> {
     // Create a combined key for host and room to ensure one isolate per room
     let process_key = format!("{}:{}", host, room_id);
@@ -109,11 +120,10 @@ impl ProcessManager {
     if !single_use {
       // First, try to find and connect to an existing process, keeping the lock time minimal
       let socket_path_opt = {
-        let mut processes = self.processes.lock().unwrap();
-        if let Some(entry) = processes.get_mut(&process_key) {
+        let processes = self.processes.lock().unwrap();
+        if let Some(entry) = processes.get(&process_key) {
           // Skip single-use entries when looking for a regular process
           if !entry.single_use {
-            entry.last_used = Instant::now();
             Some(entry.socket_path.clone())
           } else {
             None
@@ -185,7 +195,7 @@ impl ProcessManager {
       &self.data_dir,
       host,
       room_id,
-      config.into_s3_config(),
+      node_state.config.to_s3_config(),
     )
     .await
     {
@@ -210,19 +220,121 @@ impl ProcessManager {
       }
     };
 
-    // If no replica was initialized and the database doesn't exist, create an empty one
-    if replica.is_none() && !db_path.exists() {
-      debug!(
+    // Initialize restore state variable
+    let restore_state;
+
+    // Handle database restoration if necessary
+    if let Some(ref replica) = replica {
+      // Only attempt coordinated restore if we have a distributed lock manager
+      let lock_manager = node_state.distributed_lock.as_ref().unwrap();
+      let node_id = node_state.peer_manager.get_local_node_id();
+
+      // Use a reasonable lock TTL (e.g., 30 seconds)
+      let lock_ttl = std::time::Duration::from_secs(30);
+
+      info!(
+        tenant = %host,
+        room_id = %room_id,
+        "Starting coordinated database restore process"
+      );
+
+      // Call ensure_restored to perform the restore with distributed locking
+      let restore_result = replica
+        .ensure_restored(lock_manager.clone(), node_id, lock_ttl)
+        .await?;
+
+      // Update the restore state based on the result
+      match restore_result {
+        state @ RestoreState::Complete(_) => {
+          info!(
+            tenant = %host,
+            room_id = %room_id,
+            restored = match &state {
+              RestoreState::Complete(restored) => *restored,
+              _ => false
+            },
+            "Database restore completed successfully"
+          );
+          // Update state and continue to spawn Deno
+          restore_state = state;
+        }
+        RestoreState::WaitingForLock => {
+          info!(
+            tenant = %host,
+            room_id = %room_id,
+            "Database restore lock held by another node"
+          );
+          // Update state and return error
+          return Err(ProxyError::InternalError(anyhow!(
+              "Database restore lock held by another node, please try again later"
+            )));
+        }
+        state @ RestoreState::Failed(_) => {
+          let err_msg = match &state {
+            RestoreState::Failed(msg) => msg.clone(),
+            _ => "Unknown error".to_string(),
+          };
+          error!(
+            tenant = %host,
+            room_id = %room_id,
+            error = %err_msg,
+            "Database restore failed"
+          );
+          // Update state and return error
+          return Err(ProxyError::InternalError(anyhow!(
+            "Database restore failed: {}",
+            err_msg
+          )));
+        }
+        _ => {
+          // Unexpected state
+          error!(
+            tenant = %host,
+            room_id = %room_id,
+            "Unexpected database restore state"
+          );
+          // Update state and return error
+          return Err(ProxyError::InternalError(anyhow!(
+            "Unexpected database restore state"
+          )));
+        }
+      }
+
+      replica.start_replication().await?;
+    } else if !db_path.exists() {
+      // No replica, but we still need a database - create an empty one
+      info!(
         tenant = %host,
         room_id = %room_id,
         "No S3 replication, creating empty database"
       );
-      create_empty_database(&db_path).unwrap_or_else(|e| {
+
+      if let Err(e) = create_empty_database(&db_path) {
         warn!("Failed to create empty database file: {}", e);
-      });
+      }
+
+      // Update state to Complete(false) since we created a new empty DB
+      restore_state = RestoreState::Complete(false);
+    } else {
+      // No replica and the database already exists
+      info!(
+        tenant = %host,
+        room_id = %room_id,
+        db_path = %db_path.display(),
+        "No replica and database already exists, using existing database"
+      );
+      restore_state = RestoreState::Complete(false);
     }
 
     let spawn_start = Instant::now();
+
+    debug!(
+      tenant = %host,
+      room_id = %room_id,
+      socket_path = %socket_path.display(),
+      main_script = %main_script.display(),
+      "About to spawn Deno process"
+    );
 
     // Spawn the Deno process
     let child_guard = spawn_deno_process(
@@ -234,8 +346,34 @@ impl ProcessManager {
       &main_script,
     )?;
 
+    debug!(
+      tenant = %host,
+      room_id = %room_id,
+      pid = child_guard.pid().unwrap_or(0),
+      "Deno process spawned successfully"
+    );
+
     // Convert to tokio::process::Child using the PID
     let pid = child_guard.pid().unwrap() as u32;
+
+    // Create a new ProcessEntry with proper values
+    let entry = ProcessEntry {
+      pid,
+      socket_path: socket_path.clone(),
+      last_used: Instant::now(),
+      parent_exit_guard: child_guard,
+      single_use,
+      active_connections: 0,
+      _socket_tempdir: socket_tempdir,
+      replica: replica.clone(),
+      restore_state,
+    };
+
+    // Insert the entry into the processes map using a short-lived lock
+    {
+      let mut processes = self.processes.lock().unwrap();
+      processes.insert(process_key.clone(), entry);
+    }
 
     // --- Wait for the socket to become available (crucial for cold start) ---
     let socket_ = socket_path.clone();
@@ -243,8 +381,8 @@ impl ProcessManager {
     let wait_timeout = Duration::from_secs(10); // Timeout for socket connection
 
     // Use minimal polling for fastest possible connection with exponential backoff
-    let mut delay = Duration::from_micros(5); // Start with even smaller initial delay
-    let max_delay = Duration::from_millis(1); // Reduce max delay to improve responsiveness
+    let mut delay = Duration::from_micros(50);
+    let max_delay = Duration::from_millis(20);
 
     // Wait for the socket to be available and connect to it
     let stream = loop {
@@ -252,21 +390,40 @@ impl ProcessManager {
         error!(
           pid = pid,
           socket = %socket_.display(),
+          tenant = %host,
+          room_id = %room_id,
           "Timeout waiting for Deno process socket"
         );
-        // Kill the process using ChildOnParentExit
-        child_guard.kill();
+
+        // Remove the entry from the map to avoid stale entries
+        let mut processes = self.processes.lock().unwrap();
+        if let Some(entry) = processes.remove(&process_key) {
+          // Kill the process to avoid zombies
+          entry.parent_exit_guard.kill();
+        }
+
         // The tempdir will be dropped at the end of this scope, cleaning up the socket file
         return Err(
           anyhow::anyhow!("Timeout waiting for process socket").into(),
         );
       }
 
+      debug!(
+        pid = pid,
+        socket = %socket_.display(),
+        tenant = %host,
+        room_id = %room_id,
+        elapsed = ?wait_start.elapsed(),
+        "Attempting to connect to Deno socket"
+      );
+
       match UnixStream::connect(&socket_).await {
         Ok(stream) => {
           debug!(
             pid = pid,
             socket = %socket_.display(),
+            tenant = %host,
+            room_id = %room_id,
             socket_wait_duration = ?wait_start.elapsed(),
             total_startup_duration = ?spawn_start.elapsed(),
             "Socket connected!"
@@ -278,6 +435,15 @@ impl ProcessManager {
           if e.kind() == std::io::ErrorKind::ConnectionRefused
             || e.kind() == std::io::ErrorKind::NotFound =>
         {
+          debug!(
+            pid = pid,
+            socket = %socket_.display(),
+            tenant = %host,
+            room_id = %room_id,
+            error = %e,
+            error_kind = ?e.kind(),
+            "Socket not yet available, retrying after delay"
+          );
           // Socket not ready yet, use minimal polling with exponential backoff
           sleep(delay).await;
           // Increase delay with exponential backoff, but cap at max_delay
@@ -290,8 +456,14 @@ impl ProcessManager {
             error = %e,
             "Error connecting to socket during startup"
           );
-          // Kill the process using ChildOnParentExit
-          child_guard.kill();
+
+          // Remove the entry from the map to avoid stale entries
+          let mut processes = self.processes.lock().unwrap();
+          if let Some(entry) = processes.remove(&process_key) {
+            // Kill the process to avoid zombies
+            entry.parent_exit_guard.kill();
+          }
+
           // The tempdir will be dropped at the end of this scope, cleaning up the socket file
           return Err(
             anyhow::anyhow!("Error connecting to process socket: {}", e).into(),
@@ -300,123 +472,19 @@ impl ProcessManager {
       }
     };
 
-    let entry = ProcessEntry {
-      pid,
-      socket_path: socket_path.clone(),
-      last_used: Instant::now(),
-      parent_exit_guard: child_guard, // Store the parent exit guard
-      single_use,
-      active_connections: 0, // Initialize with zero connections
-      _socket_tempdir: socket_tempdir, // Keep tempdir alive as long as process exists
-      replica, // Store the SQLite replica (None if not enabled)
-    };
-
     // For single-use isolates, use a unique key with a UUID suffix
     // This allows multiple single-use isolates for the same host+room combination
-    let final_key = if single_use {
-      format!("{}:{}-{}", host, room_id, Uuid::new_v4())
-    } else {
-      // Use the combined host:room_id key
-      process_key
-    };
+    if single_use {
+      let unique_key = format!("{}:{}-{}", host, room_id, Uuid::new_v4());
 
-    // Add the entry to the processes map (minimal lock time)
-    {
+      // Move the entry to a unique key
       let mut processes = self.processes.lock().unwrap();
-      processes.insert(final_key, entry);
+      if let Some(entry) = processes.remove(&process_key) {
+        processes.insert(unique_key, entry);
+      }
     }
 
     Ok((socket_path, stream))
-  }
-
-  #[instrument(skip(self))]
-  pub async fn start_reaper(
-    &self,
-    idle_timeout: Duration,
-    reaper_interval: Duration,
-  ) {
-    loop {
-      sleep(reaper_interval).await;
-      trace!("Reaper checking for idle processes...");
-
-      // Collect hosts to reap without holding the lock too long
-      let hosts_to_reap = {
-        let processes = self.processes.lock().unwrap();
-        let now = Instant::now();
-        let mut to_reap = Vec::new();
-
-        for (host, entry) in processes.iter() {
-          if now.duration_since(entry.last_used) > idle_timeout {
-            debug!(
-              host = %host,
-              pid = entry.pid,
-              idle_duration = ?now.duration_since(entry.last_used),
-              "Process marked for reaping due to inactivity"
-            );
-            to_reap.push(host.clone());
-          }
-        }
-        to_reap
-      };
-
-      // Process each host to reap
-      for host in hosts_to_reap {
-        // Get the entry to remove
-        let entry = {
-          let mut processes = self.processes.lock().unwrap();
-          processes.remove(&host)
-        };
-
-        // If we got an entry, reap it
-        if let Some(entry) = entry {
-          warn!(
-            host = %host,
-            pid = entry.pid,
-            "Reaping idle process"
-          );
-
-          // Shutdown SQLite replica if it exists
-          if let Some(replica) = &entry.replica {
-            debug!(
-              host = %host,
-              pid = entry.pid,
-              "Flushing and shutting down SQLite replica before killing process"
-            );
-
-            // Wait for flush with a timeout of 2 seconds
-            match replica
-              .wait_for_flush(std::time::Duration::from_secs(2))
-              .await
-            {
-              Ok(_) => debug!("SQLite replica flush successful"),
-              Err(e) => warn!("Error flushing SQLite replica: {}", e),
-            }
-
-            // Now shutdown the replica
-            match replica.shutdown().await {
-              Ok(_) => debug!("SQLite replica shutdown successful"),
-              Err(e) => warn!("Error shutting down SQLite replica: {}", e),
-            }
-          }
-
-          // Now kill the Deno process using the parent_exit_guard
-          entry.parent_exit_guard.kill();
-          // The Drop implementation of ChildOnParentExit will finish the process cleanup
-          // The TempDir will be dropped when entry is dropped, cleaning up the socket file
-          debug!(
-            host = %host,
-            pid = entry.pid,
-            "Killed process using parent-exit guard"
-          );
-          debug!(
-            host = %host,
-            pid = entry.pid,
-            "Process reaped successfully"
-          );
-        }
-      }
-      trace!("Reaper check complete.");
-    }
   }
 
   pub async fn kill_all(&self) {
@@ -462,11 +530,11 @@ fn parse_env_vars(content: &str) -> HashMap<String, String> {
 /// Spawn a Deno process for the given host and room
 #[instrument(skip(data_dir, socket_path, room_id), fields(host = %host, room_id = %room_id))]
 fn spawn_deno_process(
-  data_dir: &PathBuf,
+  data_dir: &Path,
   host: &str,
   room_id: &str,
   tenant_dir: &PathBuf,
-  socket_path: &PathBuf,
+  socket_path: &Path,
   main_script: &PathBuf,
 ) -> Result<ChildOnParentExit> {
   // Path to bootstrap.ts script
@@ -511,6 +579,15 @@ fn spawn_deno_process(
 
   // Add X-Room-Id to allowed env vars
   env_vars.push("X-Room-Id".to_string());
+
+  debug!(
+    host = %host,
+    room_id = %room_id,
+    socket_path = %socket_path.display(),
+    bootstrap_script = ?bootstrap_script.display(),
+    main_script = %main_script.display(),
+    "Preparing deno command"
+  );
 
   cmd
     .arg("run")

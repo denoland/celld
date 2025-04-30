@@ -12,9 +12,10 @@ use std::process::Command;
 /// On Linux this uses `prctl(PR_SET_DEATHSIG, SIGTERM)`;
 /// on other Unix platforms it forks a watcher that monitors
 /// the parent via a pipe and kills the real child when
-/// the pipe’s write end is closed.
+/// the pipe's write end is closed.
 ///
 /// Windows is not supported.
+#[derive(Debug)]
 pub struct ChildOnParentExit {
   watcher_pid: Pid,
   death_pipe_w: Option<OwnedFd>,
@@ -22,6 +23,7 @@ pub struct ChildOnParentExit {
 
 impl ChildOnParentExit {
   /// Spawn a subprocess that will receive SIGTERM if/when the parent exits.
+  #[must_use = "the returned guard must be kept alive to prevent the child process from being killed prematurely"]
   pub fn spawn(mut cmd: Command) -> io::Result<Self> {
     #[cfg(target_os = "linux")]
     {

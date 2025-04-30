@@ -115,7 +115,7 @@ runs often.
 
 **Part 2: Integrate Locking and State Machine**
 
-- **[ ] 2.1. Add Lock Manager to `NodeState`:**
+- **[x] 2.1. Add Lock Manager to `NodeState`:**
   - In `src/main.rs`, add
     `pub distributed_lock: Option<Arc<dyn DistributedLock>>` field to
     `NodeState`.
@@ -129,11 +129,11 @@ runs often.
       - Store `Some(lock_manager)` in `NodeState`.
     - Else: store `None`.
 
-- **[ ] 2.2. Define `RestoreState` Enum:**
+- **[x] 2.2. Define `RestoreState` Enum:**
   - In `src/process_manager.rs` (or `src/lib.rs`), define
     `#[derive(Debug, Clone, PartialEq)] pub enum RestoreState { Idle, AcquiringLock, WaitingForLock, Restoring, Complete(bool), Failed(String) }`.
 
-- **[ ] 2.3. Add State to `ProcessEntry`:**
+- **[x] 2.3. Add State to `ProcessEntry`:**
   - In `src/process_manager.rs`, modify `ProcessEntry`: add
     `pub restore_state: tokio::sync::Mutex<RestoreState>` (use
     `tokio::sync::Mutex` as state updates will happen across `.await` points).
@@ -142,7 +142,7 @@ runs often.
     `Mutex<HashMap<String, Arc<ProcessEntry>>>`. This allows holding a lock on a
     _single_ entry across awaits without blocking the whole map.
 
-- **[ ] 2.4. Refactor Restore Logic in `SqliteReplica`:**
+- **[x] 2.4. Refactor Restore Logic in `SqliteReplica`:**
   - Modify `SqliteReplica::initialize`: Remove the internal call to
     `restore_if_needed`. It should just return `Ok(Some(Self))` or `Ok(None)`.
   - Rename the existing `restore_if_needed` to
@@ -158,7 +158,7 @@ runs often.
       complete, new DB) or `Err(...)` only on _unexpected_ errors (like failure
       to contact S3 for the lock).
 
-- **[ ] 2.5. Integrate State Machine into `ProcessManager`:**
+- **[x] 2.5. Integrate State Machine into `ProcessManager`:**
   - Modify `get_or_spawn_process`:
     - It now needs access to `NodeState` (pass `node_state: Arc<NodeState>` as
       arg).
@@ -193,20 +193,82 @@ runs often.
           `Complete(false)`. Unlock. Proceed to spawn.
   - Ensure appropriate logging is added for each state transition.
 
-## Implement Durability Test (tests/test-mesh.rs)
+## 3. Implement Durability Test (tests/test-mesh.rs)
 
-- [ ] Add #[tokio::test] async fn test_restore_coordination().
-- [ ] Use TestEnv to start Node A (Port X).
-- [ ] Send request to Node A (Room R) to create data (basic-db is good).
-- [ ] Wait: Add a significant sleep (e.g., 5-10 seconds) to allow Litestream to
+- [x] Add #[tokio::test] async fn test_restore_coordination().
+- [x] Use TestEnv to start Node A (Port X).
+- [x] Send request to Node A (Room R) to create data (basic-db is good).
+- [x] Wait: Add a significant sleep (e.g., 5-10 seconds) to allow Litestream to
       replicate to S3.
-- [ ] Stop Node A: test_env.kill_roomd_instance(0, Signal::SIGTERM).
-- [ ] Spawn Node B (Port Y).
-- [ ] Spawn Node C (Port Z) immediately.
-- [ ] Wait for B and C to be ready (wait_for_server_ready).
-- [ ] Send request for Room R to Node B. Check response (e.g., counter = 2).
-- [ ] Send request for Room R to Node C. Check response (e.g., counter = 2 or 3
+- [x] Stop Node A: test_env.kill_roomd_instance(0, Signal::SIGTERM).
+- [x] Spawn Node B (Port Y).
+- [x] Spawn Node C (Port Z) immediately.
+- [x] Wait for B and C to be ready (wait_for_server_ready).
+- [x] Send request for Room R to Node B. Check response (e.g., counter = 2).
+- [x] Send request for Room R to Node C. Check response (e.g., counter = 2 or 3
       depending on timing).
 - [ ] Verify Logs: Add helper to capture/check logs (or manually inspect during
       development). Confirm one node logged "Acquiring Lock" -> "Restoring" ->
       "Complete", and the other logged "Acquiring Lock" -> "WaitingForLock".
+
+## 4. Clean up refactor MinioTestServer port allocation
+
+We use MinioTestServer extensively. It allows minio to spin up an ephemeral
+docker instance for each test. Currently each usage needs to have a unique port
+hard coded into the tests to avoid conflicting with other instances. We can
+avoid this by allowing docker to assign a port instead. Okay, here is a plan of
+action to modify the `MinioTestServer` in `test_utils.rs` to use dynamically
+assigned ports by Docker:
+
+4.1 **Modify the `start` function signature:** * Remove the `port: u16` argument
+from the `MinioTestServer::start` function signature. It will look like
+`pub fn start() -> Self {`.
+
+4.2 **Modify the `docker run` command in `start`:** * **Remove explicit port
+mapping:** Delete the arguments `"-p", format!("{}:9000", port).as_str(),`. *
+**Add publish-all flag:** Insert the `"-P"` flag into the `docker run`
+arguments. This tells Docker to map container port 9000 to a _random_ available
+port on the host.
+
+4.3 **Retrieve the dynamically assigned port:** * After the `docker run` command
+successfully spawns and waits (after the `assert!(status.success()...)` line),
+you need to get the port Docker assigned. * Execute a `docker port` command:
+
+````rust
+ let port_output = Command::new("docker") .args(["port", &docker_name,
+"9000"]) .output() .expect("Failed to get port from docker");
+assert!(port_output.status.success(), "docker port command failed");
+
+        let port_string = String::from_utf8_lossy(&port_output.stdout);
+        // The output is typically in the format "0.0.0.0:xxxxx" or "[::]:xxxxx"
+        let port: u16 = port_string
+            .split(':')
+            .last()
+            .expect("Unexpected docker port output format")
+            .trim()
+            .parse()
+            .expect("Failed to parse port number");
+        ```
+    * Make sure to handle potential errors during command execution and parsing.
+
+4.4. **Update `MinioTestServer` struct initialization:** * When creating the
+`MinioTestServer` instance at the end of the `start` function, use the `port`
+variable obtained in the previous step:
+`rust
+         MinioTestServer {
+             access_key_id: access_key.to_string(),
+             secret_access_key: secret_key.to_string(),
+             docker_name,
+             port, // Use the dynamically retrieved port here
+             endpoint: format!("http://localhost:{}", port), // And here
+         }`
+
+4.5. **Verify `create_bucket` and `has_files_for_room`:** * These functions use
+`self.port`. Since `self.port` is now correctly set with the dynamic port in the
+`start` function, they _should_ work without changes. However, double-check the
+construction of the `MC_HOST_minio` environment variable string to ensure it
+uses the correct dynamic port.
+
+4.6. **Update Test Calls:** * Go through your test suite and remove the port
+argument from all calls to `MinioTestServer::start(...)`.
+````

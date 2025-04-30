@@ -70,6 +70,8 @@ impl S3ClusterMembership {
       heartbeat_timestamp: Utc::now(),
     };
 
+    let prefix = cfg.subpath("cluster_state/nodes");
+
     // Create the client with the path style config for MinIO compatibility
 
     let s3_client = Client::from_conf(
@@ -97,13 +99,14 @@ impl S3ClusterMembership {
     Ok(Self {
       s3_client,
       bucket: cfg.bucket,
-      prefix: cfg.path.unwrap_or_default(),
+      prefix,
       node_info,
       staleness_threshold: DEFAULT_STALENESS_THRESHOLD,
     })
   }
 
   /// Create a new S3ClusterMembership instance with custom staleness threshold
+  #[cfg(test)]
   pub fn with_staleness_threshold(mut self, threshold: Duration) -> Self {
     self.staleness_threshold = threshold;
     self

@@ -17,7 +17,7 @@ use uuid::Uuid;
 #[tokio::test]
 async fn test_mesh_room_connection() {
   // Start 3 server instances with different ports
-  let ports = [6001, 6002, 6003];
+  let ports = [7001, 7002, 7003];
   let _test_env = TestEnv::new(&ports);
 
   // Servers are already initialized with the TCP health checks
@@ -69,7 +69,7 @@ async fn test_mesh_room_connection() {
 #[tokio::test]
 async fn test_mesh_message_broadcast() {
   // Start 3 server instances with different ports
-  let ports = [6011, 6012, 6013];
+  let ports = [7011, 7012, 7013];
   let _test_env = TestEnv::new(&ports);
 
   // Servers are already initialized with the TCP health checks
@@ -120,7 +120,7 @@ async fn test_mesh_message_broadcast() {
 #[tokio::test]
 async fn test_mesh_dynamic_membership() {
   // Start 3 server instances with different ports
-  let ports = [6041, 6042, 6043];
+  let ports = [7041, 7042, 7043];
   let mut test_env = TestEnv::new(&ports);
 
   // 1. Query the first node's /_mesh/peers endpoint to check if all nodes are visible
@@ -160,7 +160,7 @@ async fn test_mesh_dynamic_membership() {
 
   // Start a new node
   println!("Starting a new node...");
-  let new_port = 6044;
+  let new_port = 7044;
   test_env.spawn_roomd_instance(new_port);
   TestEnv::wait_for_server_ready(new_port);
 
@@ -199,7 +199,7 @@ async fn test_mesh_dynamic_membership() {
 #[tokio::test]
 async fn test_mesh_room_isolation() {
   // Start 3 server instances with different ports
-  let ports = [6021, 6022, 6023];
+  let ports = [7021, 7022, 7023];
   let _test_env = TestEnv::new(&ports);
 
   // Servers are already initialized with the TCP health checks
@@ -250,6 +250,202 @@ async fn test_mesh_room_isolation() {
   client2.close(None).await.unwrap();
 }
 
+/// Tests that database restore coordination works properly across nodes
+#[tokio::test]
+async fn test_restore_coordination() {
+  // Use unique room ID to avoid conflicts with other tests
+  let test_room_id = format!("restore-coord-{}", Uuid::new_v4().simple());
+  println!("test_restore_coordination with room ID: {}", test_room_id);
+
+  let port_a = 7051;
+  let mut test_env = TestEnv::new(&[port_a]);
+
+  // Send request to Node A to create data in the room
+  let url_a =
+    format!("http://basic-db.localhost:{}/room/{}", port_a, test_room_id);
+  let client = reqwest::Client::builder().build().unwrap();
+
+  let response_a = client.get(&url_a).send().await.unwrap();
+  assert_eq!(response_a.status(), 200);
+  let content_a = response_a.text().await.unwrap();
+  assert_eq!(content_a.trim(), "1");
+
+  // Make a second request to ensure data is updated
+  println!("Sending second request to Node A");
+  let response_a2 = client.get(&url_a).send().await.unwrap();
+  let content_a2 = response_a2.text().await.unwrap();
+  assert_eq!(content_a2.trim(), "2");
+
+  // Verify SQLite database exists
+  let db_path = format!("data/basic-db.localhost/sqlite/{}.db", test_room_id);
+  assert!(std::path::Path::new(&db_path).exists());
+
+  println!("Waiting for Litestream to replicate data to S3...");
+  sleep(Duration::from_secs(5)).await;
+
+  // Stop Node A
+  println!("Stopping Node A...");
+  test_env.kill_roomd_instance(0, Signal::SIGTERM);
+
+  // Wait for Node A to fully terminate and release resources
+  sleep(Duration::from_secs(2)).await;
+
+  // Remove the local database file to force restore from S3
+  std::fs::remove_file(&db_path).unwrap();
+
+  // Also remove any WAL or SHM files that might exist
+  let _ = std::fs::remove_file(&format!("{}-wal", db_path));
+  let _ = std::fs::remove_file(&format!("{}-shm", db_path));
+
+  // Rest of the test remains unchanged
+  // Spawn Node B and Node C immediately after each other
+  let port_b = 7052;
+  let port_c = 7053;
+
+  println!("Starting Node B on port {}", port_b);
+  test_env.spawn_roomd_instance(port_b);
+  println!("Starting Node C on port {}", port_c);
+  test_env.spawn_roomd_instance(port_c);
+
+  // Wait for both nodes to be ready
+  TestEnv::wait_for_server_ready(port_b);
+  TestEnv::wait_for_server_ready(port_c);
+
+  // Determine which node is responsible for the room by querying both
+  let owner_url_b =
+    format!("http://localhost:{}/_mesh/owner/{}", port_b, test_room_id);
+  let owner_url_c =
+    format!("http://localhost:{}/_mesh/owner/{}", port_c, test_room_id);
+
+  let owner_resp_b = reqwest::get(&owner_url_b)
+    .await
+    .unwrap()
+    .json::<serde_json::Value>()
+    .await
+    .unwrap();
+  let owner_resp_c = reqwest::get(&owner_url_c)
+    .await
+    .unwrap()
+    .json::<serde_json::Value>()
+    .await
+    .unwrap();
+
+  println!("Node B owner info: {}", owner_resp_b);
+  println!("Node C owner info: {}", owner_resp_c);
+
+  // Get the owner for the test room
+  let is_b_owner = owner_resp_b["is_local"].as_bool().unwrap();
+  let is_c_owner = owner_resp_c["is_local"].as_bool().unwrap();
+  assert!(
+    is_b_owner != is_c_owner,
+    "Only one node should be the owner of the room"
+  );
+
+  // Create URLs for both nodes
+  let url_b =
+    format!("http://basic-db.localhost:{}/room/{}", port_b, test_room_id);
+  let url_c =
+    format!("http://basic-db.localhost:{}/room/{}", port_c, test_room_id);
+
+  // First, try the node that should be the owner (more likely to succeed first)
+  let (first_url, second_url) = if is_b_owner {
+    (url_b.clone(), url_c.clone())
+  } else {
+    (url_c.clone(), url_b.clone())
+  };
+
+  let response_owner = client.get(&first_url).send().await.unwrap();
+  let content_owner = response_owner.text().await.unwrap();
+  assert_eq!(content_owner.trim(), "3");
+
+  let response_not_owner = client.get(&second_url).send().await.unwrap();
+  let content_not_owner = response_not_owner.text().await.unwrap();
+  assert_eq!(content_not_owner.trim(), "4");
+
+  // Note: In a full integration, we would also check logs to confirm one node
+  // logged "Acquiring Lock" -> "Restoring" -> "Complete", and the other logged
+  // "Acquiring Lock" -> "WaitingForLock". However, we'd need more detailed log
+  // capturing for that level of verification.
+}
+
+/// Tests that replication and restore works correctly within a single room
+#[tokio::test]
+async fn test_restore_single() {
+  let port = 7061;
+  let mut test_env = TestEnv::new(&[port]);
+
+  let test_room_id = "test-restore";
+  clean_room_workspace(test_room_id, &test_env);
+
+  let url = format!("http://basic-db.localhost:{}/room/{}", port, test_room_id);
+  let client = reqwest::Client::builder().build().unwrap();
+
+  let response1 = client.get(&url).send().await.unwrap();
+  assert_eq!(response1.status(), 200);
+  let content1 = response1.text().await.unwrap();
+  assert_eq!(content1.trim(), "1", "First request should return 1");
+
+  sleep(Duration::from_secs(2)).await;
+
+  println!("Shutting down roomd instance...");
+  test_env.kill_roomd_instance(0, Signal::SIGTERM);
+
+  println!("Removing local database files...");
+  clean_room_workspace(test_room_id, &test_env);
+
+  let new_port = 7062;
+  test_env.spawn_roomd_instance(new_port);
+  TestEnv::wait_for_server_ready(new_port);
+
+  let new_url = format!(
+    "http://basic-db.localhost:{}/room/{}",
+    new_port, test_room_id
+  );
+  let response2 = client.get(&new_url).send().await.unwrap();
+  assert_eq!(response2.status(), 200);
+  let content2 = response2.text().await.unwrap();
+  assert_eq!(
+    content2.trim(),
+    "2",
+    "Restored data should reflect previous state"
+  );
+
+  let response3 = client.get(&new_url).send().await.unwrap();
+  assert_eq!(response3.status(), 200);
+  let content3 = response3.text().await.unwrap();
+  assert_eq!(content3.trim(), "3", "Third request should return 3");
+}
+
+/// Helper function to clean up all files related to a room
+fn clean_room_workspace(room_id: &str, test_env: &TestEnv) {
+  let tenant = "basic-db.localhost";
+  let base_path = format!("data/{}/sqlite", tenant);
+
+  // Regular database files
+  let db_path = format!("{}/{}.db", base_path, room_id);
+  let db_path_wal = format!("{}-wal", db_path);
+  let db_path_shm = format!("{}-shm", db_path);
+  let db_yml = format!("{}/{}.yml", base_path, room_id);
+
+  // Litestream metadata directory
+  let litestream_dir = format!("{}/.{}.db-litestream", base_path, room_id);
+
+  // Remove all files
+  let _ = std::fs::remove_file(&db_path);
+  let _ = std::fs::remove_file(&db_path_wal);
+  let _ = std::fs::remove_file(&db_path_shm);
+  let _ = std::fs::remove_file(&db_yml);
+  let _ = std::fs::remove_dir_all(&litestream_dir);
+
+  // Also clear bucket contents
+  let _ = test_env.minio_server.clear_bucket_files(
+    "test-mesh-bucket",
+    &format!("sqlite/{}/{}", tenant, room_id),
+  );
+
+  println!("Cleaned workspace for room: {}", room_id);
+}
+
 struct TestEnv {
   servers: Vec<Child>,
   ports: Vec<u16>,
@@ -261,8 +457,13 @@ struct TestEnv {
 impl TestEnv {
   // Start mesh nodes with the provided ports, using a real MinIO server
   fn new(ports: &[u16]) -> Self {
-    // Start MinIO server for testing with a unique port based on the first mesh port
-    let minio_port = 9000 + (ports[0] % 1000);
+    // Start MinIO server for testing with a truly unique port
+    // Use a base port plus a random component from UUID to avoid conflicts
+    let test_id = Uuid::new_v4().simple().to_string();
+    let random_port_offset =
+      u16::from_str_radix(&test_id[0..4], 16).unwrap_or(1000) % 1000;
+    let minio_port = 20000 + random_port_offset;
+
     let bucket_name = "test-mesh-bucket".to_string();
     let minio_server = MinioTestServer::start(minio_port);
     minio_server.create_bucket(&bucket_name).unwrap();
@@ -279,7 +480,7 @@ impl TestEnv {
       test_id: test_id.to_string(),
     };
 
-    for (_i, &port) in ports.iter().enumerate() {
+    for &port in ports.iter() {
       test_env.spawn_roomd_instance(port);
     }
 
@@ -325,7 +526,7 @@ impl TestEnv {
       .stdout(Stdio::inherit())
       .stderr(Stdio::inherit())
       .spawn()
-      .expect(&format!("Failed to start server on port {}", port));
+      .unwrap_or_else(|_| panic!("Failed to start server on port {}", port));
 
     self.servers.push(server);
     self.ports.push(port);
@@ -419,10 +620,9 @@ async fn connect_to_room(
 
   let (mut ws_stream, _) = tokio_tungstenite::connect_async(url.to_string())
     .await
-    .expect(&format!(
-      "Failed to connect to room {} on port {}",
-      room_id, port
-    ));
+    .unwrap_or_else(|_| {
+      panic!("Failed to connect to room {} on port {}", room_id, port)
+    });
 
   // Read welcome message
   println!("Connected, waiting for welcome message");

@@ -47,6 +47,7 @@
 //! - ensure backups complete before cleanup.
 
 use crate::config::S3Config;
+use crate::distributed_lock;
 use anyhow::{anyhow, Context, Result};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
@@ -57,7 +58,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::process::Command;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 /// Configuration for a Litestream S3 replica
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +121,7 @@ struct LitestreamConfig {
 }
 
 /// Represents a SQLite database with replication capabilities
+#[derive(Debug, Clone)]
 pub struct SqliteReplica {
   /// Tenant identifier
   tenant: String,
@@ -138,97 +140,311 @@ pub struct SqliteReplica {
 }
 
 impl SqliteReplica {
-  /// Creates a new SqliteReplica instance without performing any I/O operations
-  pub fn new(
-    data_dir: &Path,
-    tenant: &str,
-    room_id: &str,
-    s3_config: S3Config,
-  ) -> Self {
-    let room_dir = data_dir.join(tenant).join("sqlite");
-    let db_path = room_dir.join(format!("{}.db", room_id));
-    let config_path = room_dir.join(format!("{}.yml", room_id));
-
-    fs::create_dir_all(&room_dir).unwrap_or_else(|e| {
-      warn!("Failed to create room directory: {}", e);
-    });
-
-    SqliteReplica {
-      tenant: tenant.to_string(),
-      room_id: room_id.to_string(),
-      data_dir: data_dir.to_path_buf(),
-      s3_config,
-      db_path,
-      config_path,
-      replication_process: Arc::new(Mutex::new(None)),
-    }
-  }
-
-  /// Initialize and prepare the replica, including restoring data if needed.
-  /// Returns Ok(Some(Self)) if successful, Ok(None) if no S3 config provided,
-  /// or Err if initialization fails fatally.
+  /// Initialize a new SQLite replica if S3 is configured
+  /// Returns Some(Self) if initialized, None if S3 is not configured
+  /// Note: This does NOT restore the database, only sets up the replica
   pub async fn initialize(
     data_dir: &Path,
     tenant: &str,
     room_id: &str,
     s3_config: Option<S3Config>,
   ) -> Result<Option<Self>> {
-    // If no S3 config, just return None
+    // If S3 is not configured, return None (no replication)
     let s3_config = match s3_config {
-      Some(cfg) => cfg,
-      None => return Ok(None),
+      Some(config) => config,
+      None => {
+        debug!("S3 not configured, skipping SQLite replica initialization");
+        return Ok(None);
+      }
     };
 
-    // Create a new replica instance
-    let replica = Self::new(data_dir, tenant, room_id, s3_config);
+    let db_path = Path::new(data_dir)
+      .join(tenant)
+      .join("sqlite")
+      .join(format!("{}.db", room_id));
 
-    // Try to restore the database if needed
-    match replica.restore_if_needed().await {
-      Ok(restored) => {
-        debug!(
-          tenant = %tenant,
-          room_id = %room_id,
-          restored = restored,
-          "Database restore completed successfully"
-        );
-      }
-      Err(e) => {
+    let data_dir = Path::new(data_dir).to_path_buf();
+
+    // Create the configuration directory
+    let config_dir = data_dir.join(tenant).join("sqlite");
+    fs::create_dir_all(&config_dir)
+      .context("Failed to create sqlite directory")?;
+
+    // Create a unique config file name for this replica
+    let config_file = config_dir.join(format!("{}.yml", room_id));
+
+    // Create SqliteReplica instance (without running restore yet)
+    let replica = Self {
+      tenant: tenant.to_string(),
+      room_id: room_id.to_string(),
+      data_dir: data_dir.clone(),
+      db_path: db_path.clone(),
+      s3_config: s3_config.clone(),
+      config_path: config_file.clone(),
+      replication_process: Arc::new(Mutex::new(None)),
+    };
+
+    // Write the config file (needed for restore/replicate operations)
+    if let Err(err) = replica.write_config() {
+      warn!(
+        tenant = %tenant,
+        room_id = %room_id,
+        error = %err,
+        "Failed to write litestream config"
+      );
+      // Continue anyway - we'll try again later if needed
+    }
+
+    // Return the replica (restore will be done separately)
+    Ok(Some(replica))
+  }
+
+  /// Run the restore operation for this replica
+  /// Returns true if data was restored, false if no backup was found or the database already exists
+  #[instrument(skip(self))]
+  pub async fn run_restore(&self) -> Result<bool> {
+    // If the database already exists, nothing to restore
+    if self.db_path.exists() {
+      debug!(
+        tenant = %self.tenant,
+        room_id = %self.room_id,
+        db_path = %self.db_path.display(),
+        "Database already exists, skipping restore"
+      );
+      return Ok(false);
+    }
+
+    // Ensure the database directory exists
+    if let Some(parent) = self.db_path.parent() {
+      fs::create_dir_all(parent)
+        .context("Failed to create database directory")?;
+    }
+
+    info!(
+      tenant = %self.tenant,
+      room_id = %self.room_id,
+      db_path = %self.db_path.display(),
+      config_path = %self.config_path.display(),
+      "Attempting to restore database from S3"
+    );
+
+    // Verify config file exists
+    if !self.config_path.exists() {
+      info!(
+        tenant = %self.tenant,
+        room_id = %self.room_id,
+        config_path = %self.config_path.display(),
+        "Config file doesn't exist, generating it"
+      );
+      // Try to write config file
+      if let Err(e) = self.write_config() {
         warn!(
-          tenant = %tenant,
-          room_id = %room_id,
+          tenant = %self.tenant,
+          room_id = %self.room_id,
           error = %e,
-          "Failed to restore database, falling back to empty database"
+          "Failed to write config file for restore"
         );
-
-        // Create empty database file if restore failed and file doesn't exist
-        if !replica.db_path.exists() {
-          create_empty_database(&replica.db_path).unwrap_or_else(|e| {
-            warn!("Failed to create empty database file: {}", e);
-          });
-        }
       }
     }
 
-    // Start replication
-    match replica.start_replication().await {
-      Ok(_) => {
-        debug!(
-          tenant = %tenant,
-          room_id = %room_id,
-          "Started SQLite replication"
-        );
-        Ok(Some(replica))
-      }
-      Err(e) => {
-        warn!(
-          tenant = %tenant,
-          room_id = %room_id,
-          error = %e,
-          "Failed to start replication"
+    // Try to restore from S3
+    let output = Command::new("litestream")
+      .arg("restore")
+      .arg("-config")
+      .arg(&self.config_path)
+      .arg(&self.db_path)
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .output()
+      .await
+      .context("Failed to execute litestream restore")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() {
+      // Check for the specific "no matching backup" messages which mean there's no backup yet
+      if stdout.contains("no matching backups")
+        || stderr.contains("no matching backups")
+        || stderr.contains("no matching replica")
+        || stderr.contains("no generations found")
+        || stderr.contains("failed to run")
+        || stderr.contains("no matching backups found")
+      {
+        info!(
+          tenant = %self.tenant,
+          room_id = %self.room_id,
+          stdout = %stdout,
+          stderr = %stderr,
+          "No existing backup found in S3, creating new database"
         );
 
-        // Return the replica anyway, even without replication
-        Ok(Some(replica))
+        // Create an empty database instead
+        if let Err(e) = create_empty_database(&self.db_path) {
+          error!(
+            tenant = %self.tenant,
+            room_id = %self.room_id,
+            error = %e,
+            db_path = %self.db_path.display(),
+            "Failed to create empty database after restore found no backups"
+          );
+          return Err(e);
+        }
+
+        // This wasn't an error, just no backup available yet
+        return Ok(false);
+      }
+
+      // Any other error is unexpected
+      warn!(
+        tenant = %self.tenant,
+        room_id = %self.room_id,
+        status = ?output.status,
+        stdout = %stdout,
+        stderr = %stderr,
+        "Litestream restore failed"
+      );
+
+      return Err(anyhow!("Litestream restore failed: {}", stderr));
+    }
+
+    info!(
+      tenant = %self.tenant,
+      room_id = %self.room_id,
+      "Successfully restored database from S3"
+    );
+
+    // Database was successfully restored
+    Ok(true)
+  }
+
+  /// Ensure the database is restored, coordinating with other nodes using distributed lock
+  #[instrument(skip(self, lock_manager), fields(node_id = %self_node_id, lock_ttl_secs = %lock_ttl.as_secs()))]
+  pub async fn ensure_restored(
+    &self,
+    lock_manager: Arc<dyn distributed_lock::DistributedLock>,
+    self_node_id: &str,
+    lock_ttl: std::time::Duration,
+  ) -> Result<crate::process_manager::RestoreState, anyhow::Error> {
+    use crate::process_manager::RestoreState;
+
+    // Check if database already exists locally
+    if self.db_path.exists() {
+      debug!(
+        tenant = %self.tenant,
+        room_id = %self.room_id,
+        "Database already exists locally, no restore needed"
+      );
+      return Ok(RestoreState::Complete(false));
+    }
+
+    // Create a lock name based on tenant and room_id
+    let lock_name = format!("{}:{}", self.tenant, self.room_id);
+
+    // Try to acquire the distributed lock
+    debug!(
+      tenant = %self.tenant,
+      room_id = %self.room_id,
+      node_id = %self_node_id,
+      "Attempting to acquire distributed lock for restore"
+    );
+
+    // Attempt to acquire the lock
+    match lock_manager
+      .try_acquire(&lock_name, self_node_id, lock_ttl)
+      .await
+    {
+      Ok(lock_handle) => {
+        // We got the lock, proceed with restore
+        info!(
+          tenant = %self.tenant,
+          room_id = %self.room_id,
+          "Lock acquired, proceeding with database restore"
+        );
+
+        // Run the actual restore operation
+        let restore_result = match self.run_restore().await {
+          Ok(restored) => {
+            // Restore succeeded
+            info!(
+              tenant = %self.tenant,
+              room_id = %self.room_id,
+              "Database restore completed successfully (restored = {})",
+              restored
+            );
+
+            // Return Complete state with whether data was actually restored
+            RestoreState::Complete(restored)
+          }
+          Err(e) => {
+            // Restore failed
+            error!(
+              tenant = %self.tenant,
+              room_id = %self.room_id,
+              error = %e,
+              "Database restore failed"
+            );
+
+            // Return Failed state with error message
+            RestoreState::Failed(e.to_string())
+          }
+        };
+
+        // Release the lock regardless of restore outcome
+        if let Err(e) = lock_manager.release(lock_handle).await {
+          warn!(
+            tenant = %self.tenant,
+            room_id = %self.room_id,
+            error = %e,
+            "Failed to release distributed lock after restore"
+          );
+          // Continue anyway, the lock will expire on its own
+        } else {
+          debug!(
+            tenant = %self.tenant,
+            room_id = %self.room_id,
+            "Successfully released distributed lock after restore"
+          );
+        }
+
+        // Return the final state
+        Ok(restore_result)
+      }
+      Err(distributed_lock::LockAcquireError::LockHeld(lock_info)) => {
+        // Another node holds the lock
+        if let Some(info) = lock_info {
+          info!(
+            tenant = %self.tenant,
+            room_id = %self.room_id,
+            owner_node_id = %info.node_id,
+            acquired_at = %info.timestamp,
+            "Distributed lock already held by another node"
+          );
+        } else {
+          info!(
+            tenant = %self.tenant,
+            room_id = %self.room_id,
+            "Distributed lock already held by unknown node"
+          );
+        }
+
+        // Return WaitingForLock state
+        Ok(RestoreState::WaitingForLock)
+      }
+      Err(e) => {
+        // Unexpected error acquiring lock
+        error!(
+          tenant = %self.tenant,
+          room_id = %self.room_id,
+          error = %e,
+          "Failed to acquire distributed lock for restore"
+        );
+
+        // Return Failed state with error message
+        Ok(RestoreState::Failed(format!(
+          "Lock acquisition failed: {}",
+          e
+        )))
       }
     }
   }
@@ -258,15 +474,17 @@ impl SqliteReplica {
       })?;
     }
 
+    assert!(!self.tenant.contains('/'));
+    assert!(!self.room_id.contains('/'));
+    let path = self
+      .s3_config
+      .subpath(&format!("sqlite/{}/{}", self.tenant, self.room_id));
+
     let replica = LitestreamS3Replica {
       replica_type: "s3".to_string(),
       name: Some(format!("{}-replica", self.room_id)),
       bucket: self.s3_config.bucket.clone(),
-      path: if let Some(p) = self.s3_config.path.as_ref() {
-        format!("{}/{}", p, self.room_id)
-      } else {
-        self.room_id.clone()
-      },
+      path,
       region: self.s3_config.region.clone(),
       endpoint: Some(self.s3_config.endpoint.clone()),
       access_key_id: self.s3_config.access_key_id.clone(),
@@ -299,64 +517,6 @@ impl SqliteReplica {
 
     debug!("Wrote Litestream config to {:?}", self.config_path);
     Ok(())
-  }
-
-  /// Checks if DB exists; if not, calls `litestream restore`
-  pub async fn restore_if_needed(&self) -> Result<bool> {
-    // If the database already exists, nothing to do
-    if self.db_exists() {
-      debug!("Database already exists: {:?}", self.db_path);
-      return Ok(false);
-    }
-
-    // Ensure config is written
-    self.write_config()?;
-
-    // Create parent directory if needed
-    if let Some(parent) = self.db_path.parent() {
-      fs::create_dir_all(parent).with_context(|| {
-        format!("Failed to create DB directory: {:?}", parent)
-      })?;
-    }
-
-    info!("Restoring database from S3: {:?}", self.db_path);
-
-    // Try to restore from S3
-    let output = Command::new("litestream")
-      .arg("restore")
-      .arg("-config")
-      .arg(&self.config_path)
-      .arg(&self.db_path)
-      .stdout(Stdio::piped())
-      .stderr(Stdio::piped())
-      .output()
-      .await
-      .context("Failed to execute litestream restore")?;
-
-    if !output.status.success() {
-      let stderr = String::from_utf8_lossy(&output.stderr);
-      let stdout = String::from_utf8_lossy(&output.stdout);
-      println!(
-        "Litestream restore output:\nSTDOUT: {}\nSTDERR: {}",
-        stdout, stderr
-      );
-
-      // Check if it failed because replica doesn't exist (first time)
-      if stdout.contains("no matching backups found") {
-        // This is a first-time setup, create an empty database
-        debug!("No existing replicas found, creating new empty database");
-        File::create(&self.db_path).with_context(|| {
-          format!("Failed to create empty DB: {:?}", self.db_path)
-        })?;
-        info!("Created new empty database: {:?}", self.db_path);
-        return Ok(false); // Indicate that no restoration occurred
-      }
-
-      return Err(anyhow!("Litestream restore failed: {}", stderr));
-    }
-
-    info!("Database restored successfully: {:?}", self.db_path);
-    Ok(true)
   }
 
   /// Spawns `litestream replicate -config ...` in background
@@ -451,19 +611,50 @@ impl SqliteReplica {
 /// Creates an empty but valid SQLite database file
 pub fn create_empty_database(db_path: &Path) -> Result<()> {
   debug!(path = %db_path.display(), "Creating empty SQLite database file");
-  let status = std::process::Command::new("sqlite3")
+
+  // Make sure parent directory exists
+  if let Some(parent) = db_path.parent() {
+    if !parent.exists() {
+      debug!(path = %parent.display(), "Creating parent directory for database");
+      std::fs::create_dir_all(parent).with_context(|| {
+        format!(
+          "Failed to create parent directory for database: {}",
+          parent.display()
+        )
+      })?;
+    }
+  }
+
+  // Now create the database
+  let output = std::process::Command::new("sqlite3")
     .arg(db_path)
-    .arg("") // No SQL commands, just open and close to create empty file
-    .status()
+    // https://litestream.io/tips/
+    .arg("PRAGMA busy_timeout = 5000; PRAGMA journal_mode=WAL;")
+    .output()
     .with_context(|| {
       format!(
         "Failed to execute sqlite3 command for {}",
         db_path.display()
       )
     })?;
-  if !status.success() {
-    return Err(anyhow!("sqlite3 command failed with status: {}", status));
+
+  if !output.status.success() {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    return Err(anyhow!(
+      "sqlite3 command failed with status: {} and error: {}",
+      output.status,
+      stderr
+    ));
   }
+
+  // Verify file was created
+  if !db_path.exists() {
+    return Err(anyhow!(
+      "sqlite3 command appeared to succeed but database file wasn't created at {}", 
+      db_path.display()
+    ));
+  }
+
   debug!(path = %db_path.display(), "Empty SQLite database file created successfully");
   Ok(())
 }
@@ -472,7 +663,6 @@ pub fn create_empty_database(db_path: &Path) -> Result<()> {
 pub mod tests {
   use super::*;
   use crate::test_utils::MinioTestServer;
-  use std::process::Command;
   use std::time::Duration;
   use tempfile;
 
@@ -492,36 +682,6 @@ pub mod tests {
     }
   }
 
-  // Helper to check if MinIO bucket has any data for our room
-  async fn minio_bucket_has_room_data(
-    room_id: &str,
-    minio: &MinioTestServer,
-  ) -> Result<bool> {
-    let output = Command::new("docker")
-      .args([
-        "run",
-        "--network=host",
-        "--rm",
-        "-e",
-        &format!(
-          "MC_HOST_minio=http://{}:{}@localhost:{}",
-          minio.access_key_id, minio.secret_access_key, minio.port
-        ),
-        "minio/mc",
-        "ls",
-        "--recursive",
-        &format!("minio/{}", room_id), // Just check the bucket itself
-      ])
-      .output()
-      .context("Failed to list MinIO bucket contents")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    println!("Checking bucket '{}', contents: {}", room_id, stdout);
-
-    // If we got any output, there's data
-    Ok(!stdout.trim().is_empty())
-  }
-
   #[test]
   fn test_create_empty_database_file() {
     let temp_dir = tempfile::TempDir::new().unwrap();
@@ -539,7 +699,7 @@ pub mod tests {
 
   #[tokio::test]
   async fn basic_replica_lifecycle() {
-    tracing_subscriber::fmt::init();
+    let _ = tracing_subscriber::fmt::try_init();
 
     // Initialize MinIO per-test instance
     let minio_guard = MinioTestServer::start(9001);
@@ -550,61 +710,78 @@ pub mod tests {
 
     let room_id = "basic-replica-lifecycle";
     let s3_config = create_test_s3_config(room_id, &minio_guard);
-    let replica =
-      SqliteReplica::new(data_dir, "test-tenant", room_id, s3_config);
 
-    // On first run, restore_if_needed will return false (no restoration)
+    // Initialize the SqliteReplica with the new API
+    let replica = SqliteReplica::initialize(
+      data_dir,
+      "test-tenant",
+      room_id,
+      Some(s3_config),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // Verify config file was created
+    let config_path = data_dir
+      .join("test-tenant")
+      .join("sqlite")
+      .join(format!("{}.yml", room_id));
+    assert!(config_path.exists(), "Config file should exist");
+
+    // On first run, restore should return false (no restoration)
     // but will create an empty DB file
-    let restored = replica.restore_if_needed().await.unwrap();
-    println!(
-      "Restore result: {}",
-      if restored {
-        "restored from backup"
-      } else {
-        "created new empty DB"
-      }
-    );
+    let restored = replica.run_restore().await.unwrap();
+    assert!(!restored, "No data should be restored on first run");
 
-    // Insert data using sqlite3 CLI
+    // Make sure DB exists after restore operation
     let db_path = replica.db_path().to_string_lossy().to_string();
-    // Make sure DB exists after restore
     assert!(
       std::fs::metadata(&db_path).is_ok(),
       "DB file should exist after restore"
     );
 
+    // Verify DB is accessible, insert test data
     let output = std::process::Command::new("sqlite3")
-            .arg(&db_path)
-            .arg("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO test VALUES (1, 'test-data');")
-            .output()
-            .unwrap();
+      .arg(&db_path)
+      .arg("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO test VALUES (1, 'test-data');")
+      .output()
+      .unwrap();
 
-    if !output.status.success() {
-      println!("SQLite error: {}", String::from_utf8_lossy(&output.stderr));
-      println!("SQLite output: {}", String::from_utf8_lossy(&output.stdout));
-    }
-
-    assert!(output.status.success(), "SQLite command should succeed");
+    assert!(
+      output.status.success(),
+      "SQLite command should succeed: {}",
+      String::from_utf8_lossy(&output.stderr)
+    );
     println!("Inserted data into SQLite DB {}", db_path);
 
     // Start replication
+    let start_result = replica.start_replication().await;
     assert!(
-      replica.start_replication().await.is_ok(),
-      "Should start Litestream"
+      start_result.is_ok(),
+      "Should start Litestream: {:?}",
+      start_result
     );
 
     // Give the replication process time to run and create snapshots
     println!("Waiting for replication to complete...");
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    // Stop replication cleanly
-    replica.shutdown().await.unwrap();
+    // Test that wait_for_flush works
+    let flush_result = replica.wait_for_flush(Duration::from_millis(500)).await;
+    assert!(flush_result.is_ok(), "Wait for flush should succeed");
 
+    // Stop replication cleanly
+    let shutdown_result = replica.shutdown().await;
     assert!(
-      minio_bucket_has_room_data(&room_id, &minio_guard)
-        .await
-        .unwrap(),
-      "Expected replica data"
+      shutdown_result.is_ok(),
+      "Shutdown should succeed: {:?}",
+      shutdown_result
     );
+
+    // Check MinIO to ensure data was replicated
+    assert!(minio_guard.has_files_for_room(room_id, room_id));
+
+    println!("Basic replica lifecycle test completed successfully");
   }
 }

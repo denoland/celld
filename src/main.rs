@@ -33,6 +33,8 @@ pub struct NodeState {
   /// Empty in standalone mode
   pub cluster_membership:
     Option<Arc<dyn cluster_membership::ClusterMembership>>,
+  /// Distributed lock for coordinating operations (empty in standalone mode)
+  pub distributed_lock: Option<Arc<dyn distributed_lock::DistributedLock>>,
   /// Configuration
   pub config: Arc<config::Config>,
 }
@@ -373,7 +375,7 @@ impl ProxyHttp for Proxy {
           &ctx.tenant,
           room_id,
           single_use,
-          &self.node_state.config,
+          self.node_state.clone(),
         )
         .await
       {
@@ -473,22 +475,24 @@ fn start_server(config: config::Config) -> Server {
   // Create the process manager with default timeout values
   let process_manager = ProcessManager::new(config.data_dir.clone());
 
-  // Initialize cluster membership
-  let cluster_membership = {
+  // Initialize cluster membership and distributed lock
+  let (cluster_membership, distributed_lock) = {
     // Create a small runtime just for initialization
     let rt = tokio::runtime::Builder::new_current_thread()
       .enable_all()
       .build()
       .unwrap();
 
-    // Initialize the S3 cluster membership
+    // Initialize the S3 cluster membership and distributed lock
     rt.block_on(async {
       // Try to get S3 membership config from configuration
       if config.has_s3_config() {
+        let s3_config = config.to_s3_config().unwrap();
+
         // Create membership using from_config
         let membership =
           match cluster_membership::S3ClusterMembership::from_config(
-            config.into_s3_config().unwrap(),
+            s3_config.clone(),
             config.advertise_addr.clone(),
             Some(node_id.clone()),
           ) {
@@ -512,13 +516,51 @@ fn start_server(config: config::Config) -> Server {
           std::process::exit(1);
         }
 
-        Some(Arc::new(membership)
-          as Arc<dyn cluster_membership::ClusterMembership>)
+        // Initialize the S3 client for distributed lock
+        let aws_config = aws_config::from_env()
+          .region(aws_config::Region::new(s3_config.region.clone()))
+          .load()
+          .await;
+
+        // Create S3 client with path style config for MinIO compatibility
+        let s3_client = aws_sdk_s3::Client::from_conf(
+          aws_sdk_s3::config::Builder::from(&aws_config)
+            .endpoint_url(s3_config.endpoint.clone())
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+              s3_config.access_key_id.clone(),
+              s3_config.secret_access_key.clone(),
+              None,
+              None,
+              "manual-minio",
+            ))
+            .force_path_style(true)
+            .build(),
+        );
+
+        // Create lock prefix (locks/restore/ by default)
+        let lock_prefix = s3_config.subpath("locks/restore");
+
+        // Create the distributed lock manager
+        info!(
+          "Initializing S3 distributed lock with bucket {} and prefix {}",
+          s3_config.bucket, lock_prefix
+        );
+        let lock_manager = Arc::new(distributed_lock::S3DistributedLock::new(
+          s3_client,
+          s3_config.bucket,
+          lock_prefix,
+        ));
+
+        (
+          Some(Arc::new(membership)
+            as Arc<dyn cluster_membership::ClusterMembership>),
+          Some(lock_manager as Arc<dyn distributed_lock::DistributedLock>),
+        )
       } else {
         info!(
           "S3 cluster membership not configured, running in standalone mode"
         );
-        None
+        (None, None)
       }
     })
   };
@@ -536,6 +578,7 @@ fn start_server(config: config::Config) -> Server {
     process_manager: Arc::new(process_manager),
     peer_manager: Arc::new(peer_manager),
     cluster_membership,
+    distributed_lock,
     config: config_arc,
   });
 
@@ -550,15 +593,14 @@ fn start_server(config: config::Config) -> Server {
   // Configure the proxy service to listen on the specified address
   proxy_service.add_tcp(&node_state.config.listen_addr);
 
-  let reaper_service = background_service(
+  server.add_service(background_service(
     "process_reaper",
     ProcessReaper::new(
       node_state.clone(),
       DEFAULT_IDLE_TIMEOUT,
       DEFAULT_REAPER_INTERVAL,
     ),
-  );
-  server.add_service(reaper_service);
+  ));
 
   // Add a background service for S3 heartbeat and peer discovery if cluster membership is enabled
   if let Some(cm) = &node_state.cluster_membership {
@@ -638,6 +680,8 @@ mod tests {
 
   // inspired by https://github.com/cloudflare/pingora/blob/caa6a0/pingora-core/tests/utils/mod.rs
   pub static TEST_SERVER: Lazy<std::thread::JoinHandle<()>> = Lazy::new(|| {
+    let _ = tracing_subscriber::fmt::try_init();
+
     // Ensure we're using a clean environment for the test server
     std::env::set_var("ADVERTISE_ADDR", "127.0.0.1:6146"); // Set advertise address
     std::env::set_var("LISTEN_ADDR", "127.0.0.1:6146"); // Set listen address
@@ -783,7 +827,7 @@ mod tests {
 
     let (mut ws_stream, _) = tokio_tungstenite::connect_async(url)
       .await
-      .expect(&format!("Failed to connect to room {}", room_id));
+      .unwrap_or_else(|_| panic!("Failed to connect to room {}", room_id));
 
     // Read welcome message
     let welcome_msg = ws_stream.next().await.unwrap().unwrap();
