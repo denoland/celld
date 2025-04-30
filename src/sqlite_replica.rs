@@ -138,7 +138,7 @@ pub struct SqliteReplica {
 }
 
 impl SqliteReplica {
-  /// Creates a new SqliteReplica instance
+  /// Creates a new SqliteReplica instance without performing any I/O operations
   pub fn new(
     data_dir: &Path,
     tenant: &str,
@@ -161,6 +161,75 @@ impl SqliteReplica {
       db_path,
       config_path,
       replication_process: Arc::new(Mutex::new(None)),
+    }
+  }
+
+  /// Initialize and prepare the replica, including restoring data if needed.
+  /// Returns Ok(Some(Self)) if successful, Ok(None) if no S3 config provided,
+  /// or Err if initialization fails fatally.
+  pub async fn initialize(
+    data_dir: &Path,
+    tenant: &str,
+    room_id: &str,
+    s3_config: Option<S3Config>,
+  ) -> Result<Option<Self>> {
+    // If no S3 config, just return None
+    let s3_config = match s3_config {
+      Some(cfg) => cfg,
+      None => return Ok(None),
+    };
+
+    // Create a new replica instance
+    let replica = Self::new(data_dir, tenant, room_id, s3_config);
+
+    // Try to restore the database if needed
+    match replica.restore_if_needed().await {
+      Ok(restored) => {
+        debug!(
+          tenant = %tenant,
+          room_id = %room_id,
+          restored = restored,
+          "Database restore completed successfully"
+        );
+      }
+      Err(e) => {
+        warn!(
+          tenant = %tenant,
+          room_id = %room_id,
+          error = %e,
+          "Failed to restore database, falling back to empty database"
+        );
+
+        // Create empty database file if restore failed and file doesn't exist
+        if !replica.db_path.exists() {
+          create_empty_database(&replica.db_path).unwrap_or_else(|e| {
+            warn!("Failed to create empty database file: {}", e);
+          });
+        }
+      }
+    }
+
+    // Start replication
+    match replica.start_replication().await {
+      Ok(_) => {
+        debug!(
+          tenant = %tenant,
+          room_id = %room_id,
+          "Started SQLite replication"
+        );
+        Ok(Some(replica))
+      }
+      Err(e) => {
+        warn!(
+          tenant = %tenant,
+          room_id = %room_id,
+          error = %e,
+          "Failed to start replication"
+        );
+
+        // Return the replica anyway, even without replication
+        Ok(Some(replica))
+      }
     }
   }
 

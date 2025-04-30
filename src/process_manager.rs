@@ -178,150 +178,61 @@ impl ProcessManager {
     });
 
     // Configure SQLite replication if S3 is configured
-    let mut replica = None;
     let db_path = sqlite_dir.join(format!("{}.db", room_id));
 
-    if let Some(s3_config) = config.into_s3_config() {
+    // Try to initialize the SqliteReplica with the S3 config
+    let replica = match SqliteReplica::initialize(
+      &self.data_dir,
+      host,
+      room_id,
+      config.into_s3_config(),
+    )
+    .await
+    {
+      Ok(replica_opt) => {
+        if replica_opt.is_some() {
+          debug!(
+            tenant = %host,
+            room_id = %room_id,
+            "S3 replication initialized successfully"
+          );
+        }
+        replica_opt
+      }
+      Err(e) => {
+        warn!(
+          tenant = %host,
+          room_id = %room_id,
+          error = %e,
+          "Fatal error initializing replica"
+        );
+        None
+      }
+    };
+
+    // If no replica was initialized and the database doesn't exist, create an empty one
+    if replica.is_none() && !db_path.exists() {
       debug!(
         tenant = %host,
         room_id = %room_id,
-        "S3 replication enabled for room"
+        "No S3 replication, creating empty database"
       );
-
-      let replica_instance =
-        SqliteReplica::new(&self.data_dir, host, room_id, s3_config);
-
-      // Restore the database if needed
-      match replica_instance.restore_if_needed().await {
-        Ok(restored) => {
-          debug!(
-            tenant = %host,
-            room_id = %room_id,
-            restored = restored,
-            "Database restore completed successfully"
-          );
-        }
-        Err(e) => {
-          warn!(
-            tenant = %host,
-            room_id = %room_id,
-            error = %e,
-            "Failed to restore database, falling back to empty database"
-          );
-
-          // Create empty database file if restore failed and file doesn't exist
-          if !db_path.exists() {
-            create_empty_database(&db_path).unwrap_or_else(|e| {
-              warn!("Failed to create empty database file: {}", e);
-            });
-          }
-        }
-      }
-
-      // Start replication
-      match replica_instance.start_replication().await {
-        Ok(_) => {
-          debug!(
-            tenant = %host,
-            room_id = %room_id,
-            "Started SQLite replication"
-          );
-          replica = Some(replica_instance);
-        }
-        Err(e) => {
-          warn!(
-            tenant = %host,
-            room_id = %room_id,
-            error = %e,
-            "Failed to start replication"
-          );
-        }
-      }
-    } else {
-      // No S3 config available, create empty database file
-      if !db_path.exists() {
-        create_empty_database(&db_path).unwrap_or_else(|e| {
-          warn!("Failed to create empty database file: {}", e);
-        });
-      }
+      create_empty_database(&db_path).unwrap_or_else(|e| {
+        warn!("Failed to create empty database file: {}", e);
+      });
     }
-
-    // Path to bootstrap.ts script
-    let bootstrap_script = self
-      .data_dir
-      .parent()
-      .unwrap()
-      .join("src")
-      .join("bootstrap.ts");
 
     let spawn_start = Instant::now();
 
-    let mut cmd = std::process::Command::new("deno");
-    cmd
-      .current_dir(&tenant_dir)
-      .env(
-        "DENO_SERVE_ADDRESS",
-        format!("unix:{}", socket_path.display()),
-      )
-      .env("X-Room-Id", room_id); // Pass room ID to bootstrap.ts
-
-    // Load environment variables from prod.env file
-    let env_file_path = tenant_dir.join("prod.env");
-    let mut env_vars = Vec::new();
-
-    match fs::read_to_string(&env_file_path) {
-      Ok(env_contents) => {
-        // Parse environment variables from the file contents
-        let parsed_env_vars = parse_env_vars(&env_contents);
-
-        // Apply the parsed variables to the command
-        for (key, value) in &parsed_env_vars {
-          debug!("Setting environment variable: {}", key);
-          cmd.env(key, value);
-          env_vars.push(key.clone());
-        }
-      }
-      Err(e) => {
-        if e.kind() != std::io::ErrorKind::NotFound {
-          warn!(
-            "Error reading environment file {}: {}",
-            env_file_path.display(),
-            e
-          );
-        }
-      }
-    }
-
-    // Add X-Room-Id to allowed env vars
-    env_vars.push("X-Room-Id".to_string());
-
-    cmd
-      .arg("run")
-      .arg("--no-prompt")
-      .arg(format!("--allow-read={}", tenant_dir.display()))
-      .arg(format!("--allow-write={}", tenant_dir.display()))
-      .arg(format!("--allow-read={}", socket_path.display()))
-      .arg(format!("--allow-write={}", socket_path.display()))
-      .arg("--allow-net");
-
-    // Only allow specifically named environment variables
-    if !env_vars.is_empty() {
-      cmd.arg(format!("--allow-env={}", env_vars.join(",")));
-    } else {
-      cmd.arg("--allow-env=X-Room-Id"); // Default minimum permission
-    }
-
-    cmd
-      .arg(&bootstrap_script) // Use bootstrap.ts instead of main.ts directly
-      .arg(&main_script); // Pass main.ts as argument to bootstrap.ts
-
-    // Spawn with ChildOnParentExit for automatic termination when parent exits
-    let child_guard = ChildOnParentExit::spawn(cmd).with_context(|| {
-      format!(
-        "Failed to spawn Deno process for {} with parent-exit guard",
-        host
-      )
-    })?;
+    // Spawn the Deno process
+    let child_guard = spawn_deno_process(
+      &self.data_dir,
+      host,
+      room_id,
+      &tenant_dir,
+      &socket_path,
+      &main_script,
+    )?;
 
     // Convert to tokio::process::Child using the PID
     let pid = child_guard.pid().unwrap() as u32;
@@ -546,6 +457,88 @@ fn parse_env_vars(content: &str) -> HashMap<String, String> {
     }
   }
   env_vars
+}
+
+/// Spawn a Deno process for the given host and room
+#[instrument(skip(data_dir, socket_path, room_id), fields(host = %host, room_id = %room_id))]
+fn spawn_deno_process(
+  data_dir: &PathBuf,
+  host: &str,
+  room_id: &str,
+  tenant_dir: &PathBuf,
+  socket_path: &PathBuf,
+  main_script: &PathBuf,
+) -> Result<ChildOnParentExit> {
+  // Path to bootstrap.ts script
+  let bootstrap_script =
+    data_dir.parent().unwrap().join("src").join("bootstrap.ts");
+
+  let mut cmd = std::process::Command::new("deno");
+  cmd
+    .current_dir(tenant_dir)
+    .env(
+      "DENO_SERVE_ADDRESS",
+      format!("unix:{}", socket_path.display()),
+    )
+    .env("X-Room-Id", room_id); // Pass room ID to bootstrap.ts
+
+  // Load environment variables from prod.env file
+  let env_file_path = tenant_dir.join("prod.env");
+  let mut env_vars = Vec::new();
+
+  match fs::read_to_string(&env_file_path) {
+    Ok(env_contents) => {
+      // Parse environment variables from the file contents
+      let parsed_env_vars = parse_env_vars(&env_contents);
+
+      // Apply the parsed variables to the command
+      for (key, value) in &parsed_env_vars {
+        debug!("Setting environment variable: {}", key);
+        cmd.env(key, value);
+        env_vars.push(key.clone());
+      }
+    }
+    Err(e) => {
+      if e.kind() != std::io::ErrorKind::NotFound {
+        warn!(
+          "Error reading environment file {}: {}",
+          env_file_path.display(),
+          e
+        );
+      }
+    }
+  }
+
+  // Add X-Room-Id to allowed env vars
+  env_vars.push("X-Room-Id".to_string());
+
+  cmd
+    .arg("run")
+    .arg("--no-prompt")
+    .arg(format!("--allow-read={}", tenant_dir.display()))
+    .arg(format!("--allow-write={}", tenant_dir.display()))
+    .arg(format!("--allow-read={}", socket_path.display()))
+    .arg(format!("--allow-write={}", socket_path.display()))
+    .arg("--allow-net");
+
+  // Only allow specifically named environment variables
+  if !env_vars.is_empty() {
+    cmd.arg(format!("--allow-env={}", env_vars.join(",")));
+  } else {
+    cmd.arg("--allow-env=X-Room-Id"); // Default minimum permission
+  }
+
+  cmd
+    .arg(&bootstrap_script) // Use bootstrap.ts instead of main.ts directly
+    .arg(main_script); // Pass main.ts as argument to bootstrap.ts
+
+  // Spawn with ChildOnParentExit for automatic termination when parent exits
+  ChildOnParentExit::spawn(cmd).with_context(|| {
+    format!(
+      "Failed to spawn Deno process for {} with parent-exit guard",
+      host
+    )
+  })
 }
 
 #[cfg(test)]
