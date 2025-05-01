@@ -355,32 +355,34 @@ impl ProxyHttp for Proxy {
       .peer_manager
       .is_local_owner(&ctx.tenant, room_id)
     {
-      // We need to forward this request to the responsible peer
-      let upstream_addr = self
+      let owners = self
         .node_state
         .peer_manager
-        .get_owner_peer(&ctx.tenant, room_id);
-
-      debug!(
-        host = %ctx.tenant,
-        room_id = %room_id,
-        responsible_peer = %upstream_addr,
-        "Forwarding request to responsible peer"
-      );
-
-      // Create a Backend using the responsible peer's socket address
-      let sni = ctx.tenant.clone();
-
-      // Create HTTP peer for the remote peer
-      let peer = HttpPeer::new(upstream_addr.clone(), false, sni);
-
-      debug!(
-        host = %ctx.tenant,
-        room_id = %room_id,
-        upstream = %upstream_addr,
-        "Selected remote peer"
-      );
-      return Ok(Box::new(peer));
+        .get_room_owners(&ctx.tenant, room_id);
+      if let Some(primary_owner_addr) = owners.first() {
+        debug!(
+            host = %ctx.tenant,
+            room_id = %room_id,
+            responsible_peer = %primary_owner_addr,
+            "Forwarding request to primary active owner"
+        );
+        let sni = ctx.tenant.clone();
+        let peer = HttpPeer::new(primary_owner_addr.clone(), false, sni);
+        return Ok(Box::new(peer));
+      } else {
+        // This case means no active owners were found according to PeerManager,
+        // which might indicate cluster inconsistency or that the local node
+        // should have been the owner but wasn't identified as such.
+        error!(
+            host = %ctx.tenant,
+            room_id = %room_id,
+            "No active owner found for room, cannot forward request."
+        );
+        return Err(pingora::Error::explain(
+          ErrorType::HTTPStatus(StatusCode::SERVICE_UNAVAILABLE.into()),
+          "No available upstream node for the requested room",
+        ));
+      }
     }
 
     // We are the responsible peer, so handle the request locally

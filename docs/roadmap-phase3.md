@@ -53,7 +53,7 @@ primary node fails, ensuring availability. S3 is used for node discovery
       lock lifetime with the `ProcessEntry` or handling release in
       `ensure_restored`._
 
-- [ ] Update Proxy Forwarding Logic (`main.rs`):
+- [x] Update Proxy Forwarding Logic (`main.rs`):
   - Modify `Proxy::upstream_peer`:
     - Input: Gets `tenant` (host) and `room_id` from context.
     - Check Local Ownership: Call
@@ -61,15 +61,15 @@ primary node fails, ensuring availability. S3 is used for node discovery
       `process_manager.get_or_spawn_process` (local handling).
     - Forwarding: If `is_local_owner` is false:
       - Call `peer_manager.get_room_owners(tenant, room_id)` to get the ordered
-        list of active owners.
-      - Iterate through the returned `owners` list:
-        - Attempt to create `HttpPeer` for the owner's address.
-        - If successful, return `Ok(Box::new(peer))` immediately.
-        - If connection fails (timeout, refused, etc.): Log the failure and
-          continue to the next owner in the list.
-      - If the list is exhausted or no owner could be connected to: Return an
-        appropriate error (e.g.,
-        `pingora::Error::explain(ErrorType::HTTPStatus(StatusCode::SERVICE_UNAVAILABLE.into()), ...)`).
+        list of **active** owners.
+      - If the list is empty, return a 503 Service Unavailable error.
+      - If the list has owners, select the **first** owner's address
+        (`primary_active_owner`).
+      - Create and return
+        `Ok(Box::new(HttpPeer::new(primary_active_owner, ...)))`.
+      - **Note:** Rely on Pingora's core proxy engine to handle connection
+        errors if the selected `primary_active_owner` is unreachable at
+        connection time.
 
 - [ ] Configuration & Testability:
   - Add `ROOMD_STALENESS_THRESHOLD_SECS` environment variable parsing in

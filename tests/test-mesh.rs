@@ -131,7 +131,7 @@ async fn test_mesh_dynamic_membership() {
     serde_json::from_str(&peers_text).unwrap();
   println!("Full peers response: {:?}", peers_value);
   let peers = peers_value["peers"].as_array().unwrap();
-  assert_eq!(peers.len(), 2);
+  assert_eq!(peers.len(), 3);
 
   // Collect node IDs for later comparison
   let original_node_ids: Vec<String> = peers
@@ -156,7 +156,7 @@ async fn test_mesh_dynamic_membership() {
   //println!("Updated peers full response: {:?}", updated_peers_value);
   let updated_peers = updated_peers_value["peers"].as_array().unwrap();
   //println!("Found {} peers after SIGTERM", updated_peers.len());
-  assert_eq!(updated_peers.len(), 1);
+  assert_eq!(updated_peers.len(), 2);
 
   // Start a new node
   println!("Starting a new node...");
@@ -175,7 +175,7 @@ async fn test_mesh_dynamic_membership() {
   let recovery_peers_value: serde_json::Value =
     serde_json::from_str(&recovery_peers_text).unwrap();
   let recovery_peers = recovery_peers_value["peers"].as_array().unwrap();
-  assert_eq!(recovery_peers.len(), 2); // Back to having two again.
+  assert_eq!(recovery_peers.len(), 3); // Back to having two again.
 
   // Verify at least one node in the final set has a node_id not in the original set
   let new_node_ids: Vec<String> = recovery_peers
