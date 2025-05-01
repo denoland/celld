@@ -44,7 +44,7 @@ peer-to-peer dependencies beyond proxying.
 
 ### Phase 1: Dynamic Node Discovery & Basic Heartbeat
 
-CURRENT UNDERTAKING - see docs/phase1.md
+DONE
 
 - **Problem:** Static `KNOWN_PEERS` prevents dynamic scaling and fault
   tolerance.
@@ -77,6 +77,8 @@ CURRENT UNDERTAKING - see docs/phase1.md
   active list.
 
 ### Phase 2: S3-based Locking & Robust Litestream Recovery
+
+DONE
 
 - **Problem:** `litestream restore` might be slow and needs coordination,
   especially during startup or node takeover.
@@ -117,6 +119,8 @@ CURRENT UNDERTAKING - see docs/phase1.md
   conflicts. The restore process is more observable and robust.
 
 ### Phase 3: Room Resilience & Takeover
+
+CURRENT
 
 - **Problem:** If a node hosting a room fails, the room becomes inaccessible.
 - **Goal:** Another node automatically takes over responsibility for the room,
