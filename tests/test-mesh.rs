@@ -457,18 +457,10 @@ struct TestEnv {
 impl TestEnv {
   // Start mesh nodes with the provided ports, using a real MinIO server
   fn new(ports: &[u16]) -> Self {
-    // Start MinIO server for testing with a truly unique port
-    // Use a base port plus a random component from UUID to avoid conflicts
-    let test_id = Uuid::new_v4().simple().to_string();
-    let random_port_offset =
-      u16::from_str_radix(&test_id[0..4], 16).unwrap_or(1000) % 1000;
-    let minio_port = 20000 + random_port_offset;
-
+    // Start MinIO server for testing with a dynamically assigned port
     let bucket_name = "test-mesh-bucket".to_string();
-    let minio_server = MinioTestServer::start(minio_port);
+    let minio_server = MinioTestServer::start();
     minio_server.create_bucket(&bucket_name).unwrap();
-
-    println!("Started MinIO server on port {}", minio_port);
 
     let servers = Vec::new();
     let test_id = Uuid::new_v4().simple().to_string();

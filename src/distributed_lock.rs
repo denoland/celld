@@ -609,14 +609,13 @@ mod tests {
   static NEXT_MINIO_PORT: AtomicU16 = AtomicU16::new(9745);
 
   async fn setup_test_env() -> (S3DistributedLock, String, MinioTestServer) {
-    let minio_port = NEXT_MINIO_PORT.fetch_add(1, Ordering::SeqCst);
-    let minio = MinioTestServer::start(minio_port);
-    let bucket = format!("test-lock-bucket-{}", minio_port);
+    let minio = MinioTestServer::start();
+    let bucket = "test-lock-bucket".to_string();
     minio
       .create_bucket(&bucket)
       .expect("Failed to create bucket");
 
-    let endpoint_url = format!("http://127.0.0.1:{}", minio_port);
+    let endpoint_url = format!("http://127.0.0.1:{}", minio.port);
 
     // Create credentials from MinIO server
     let credentials = Credentials::new(
@@ -643,7 +642,7 @@ mod tests {
 
     let s3_client = Client::from_conf(s3_config);
 
-    let prefix = format!("test_locks_{}/", minio_port);
+    let prefix = "test_locks".to_string();
     let lock_manager =
       S3DistributedLock::new(s3_client.clone(), bucket.clone(), prefix);
 

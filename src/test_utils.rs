@@ -13,7 +13,7 @@ pub struct MinioTestServer {
 }
 
 impl MinioTestServer {
-  pub fn start(port: u16) -> Self {
+  pub fn start() -> Self {
     let access_key = "adminadmin";
     let secret_key = "adminadmin";
     let docker_name = format!("minio-test-server-{}", Uuid::new_v4());
@@ -21,8 +21,7 @@ impl MinioTestServer {
       .args([
         "run",
         "--rm",
-        "-p",
-        format!("{}:9000", port).as_str(),
+        "-P", // Dynamically assign port
         "-detach",
         "--name",
         docker_name.as_str(),
@@ -44,6 +43,23 @@ impl MinioTestServer {
 
     // Give MinIO some time to start
     std::thread::sleep(Duration::from_secs(3));
+
+    // Get the dynamically assigned port
+    let port_output = Command::new("docker")
+      .args(["port", &docker_name, "9000"])
+      .output()
+      .expect("Failed to get port from docker");
+    assert!(port_output.status.success(), "docker port command failed");
+
+    let port_string = String::from_utf8_lossy(&port_output.stdout);
+    // The output is typically in the format "0.0.0.0:xxxxx" or "[::]:xxxxx"
+    let port: u16 = port_string
+      .split(':')
+      .last()
+      .expect("Unexpected docker port output format")
+      .trim()
+      .parse()
+      .expect("Failed to parse port number");
 
     MinioTestServer {
       access_key_id: access_key.to_string(),

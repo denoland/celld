@@ -702,7 +702,7 @@ pub mod tests {
     let _ = tracing_subscriber::fmt::try_init();
 
     // Initialize MinIO per-test instance
-    let minio_guard = MinioTestServer::start(9001);
+    let minio_guard = MinioTestServer::start();
 
     // Use a temporary directory for the test
     let temp_dir = tempfile::TempDir::new().unwrap();

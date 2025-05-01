@@ -323,7 +323,7 @@ mod tests {
 
   #[tokio::test]
   async fn test_register_creates_correct_s3_object() {
-    let minio = MinioTestServer::start(9551);
+    let minio = MinioTestServer::start();
     let node_id = Uuid::new_v4().to_string();
     let membership =
       setup_test_membership(&minio, Some(node_id.clone()), "127.0.0.1:8080");
@@ -373,7 +373,7 @@ mod tests {
 
   #[tokio::test]
   async fn test_heartbeat_updates_timestamp() {
-    let minio = MinioTestServer::start(9552);
+    let minio = MinioTestServer::start();
     let node_id = Uuid::new_v4().to_string();
     let membership =
       setup_test_membership(&minio, Some(node_id.clone()), "127.0.0.1:8080");
@@ -434,7 +434,7 @@ mod tests {
 
   #[tokio::test]
   async fn test_get_active_peers_filters_stale_nodes() {
-    let minio = MinioTestServer::start(9553);
+    let minio = MinioTestServer::start();
 
     // Create first node (will go stale)
     let stale_node_id = Uuid::new_v4().to_string();
@@ -504,7 +504,7 @@ mod tests {
 
   #[tokio::test]
   async fn test_unregister_deletes_s3_object() {
-    let minio = MinioTestServer::start(9554);
+    let minio = MinioTestServer::start();
     let node_id = Uuid::new_v4().to_string();
     let membership =
       setup_test_membership(&minio, Some(node_id.clone()), "127.0.0.1:8080");
