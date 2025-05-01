@@ -65,7 +65,7 @@
 //! injected via `NodeState`) to acquire and release locks before performing
 //! operations like `litestream restore`.
 
-use anyhow::{Context, Error as AnyhowError};
+use anyhow::{anyhow, Context, Error as AnyhowError};
 use async_trait::async_trait;
 use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::error::SdkError;
@@ -75,6 +75,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::error::Error as StdError;
+use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -105,15 +107,116 @@ pub struct LockHandle {
   node_id: String,
 }
 
+// Should not be Clone
+pub struct LockGuard {
+  lock_key: String,
+  node_id: String,
+  // Reference back to the manager to call release
+  // Use Arc if the manager itself is shared via Arc
+  lock_manager: Arc<dyn DistributedLock>,
+  released: bool, // Prevent double-release
+}
+
+impl LockGuard {
+  /// Explicitly releases the distributed lock.
+  /// Consumes the guard to prevent further attempts to release.
+  pub async fn release(mut self) -> Result<(), anyhow::Error> {
+    if !self.released {
+      self.released = true;
+      // Create the simple handle needed by the manager's release method
+      let handle = LockHandle {
+        lock_key: self.lock_key.clone(),
+        node_id: self.node_id.clone(),
+      };
+      // Call the manager's release function
+      self.lock_manager.release(handle).await?;
+      // Ensure the guard is dropped now that release is done
+      drop(self);
+    }
+    Ok(())
+  }
+
+  /// Renews the lock lease asynchronously, extending its TTL.
+  ///
+  /// If renewal fails (e.g., the lock was lost or stolen), this method
+  /// returns an error, and the guard should be considered invalid
+  /// (it will be marked as released internally to prevent Drop warnings).
+  pub async fn renew(
+    &mut self,
+    new_ttl: Duration,
+  ) -> Result<(), anyhow::Error> {
+    if self.released {
+      // Or return Ok(()), depending on desired semantics for renewing an already released guard
+      return Err(anyhow!(
+        "Cannot renew a LockGuard that has already been released"
+      ));
+    }
+
+    // Create the simple handle needed by the manager's renew method
+    let handle = LockHandle {
+      lock_key: self.lock_key.clone(),
+      node_id: self.node_id.clone(),
+    };
+
+    // Call the underlying lock manager's renew function
+    match self.lock_manager.renew(handle, new_ttl).await {
+      Ok(_) => {
+        // Successfully renewed. The LockGuard remains valid.
+        // The timestamp/TTL was updated in S3 by the lock manager.
+        debug!("Successfully renewed lock key '{}'", self.lock_key);
+        Ok(())
+      }
+      Err(lock_err) => {
+        // Renewal failed. The lock might be lost.
+        // Mark this guard as released to prevent Drop warnings/panics,
+        // as we can no longer guarantee we hold the lock.
+        warn!("Failed to renew lock key '{}': {:?}. Marking guard as invalid/released.", self.lock_key, lock_err);
+        self.released = true; // Prevent Drop side-effects
+
+        // Return an error indicating renewal failure.
+        Err(anyhow!("Failed to renew lock: {:?}", lock_err))
+      }
+    }
+  }
+}
+
+impl fmt::Debug for LockGuard {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_struct("LockGuard")
+      .field("lock_key", &self.lock_key)
+      .field("node_id", &self.node_id)
+      // Since Arc<dyn DistributedLock> isn't Debug, provide a placeholder
+      .field("lock_manager", &"<DistributedLock Manager>")
+      .field("released", &self.released)
+      .finish() // Complete the struct formatting
+  }
+}
+
+impl Drop for LockGuard {
+  fn drop(&mut self) {
+    if !self.released {
+      warn!(
+              "LockGuard dropped without explicit async release for lock key: {}. Lock will time out via TTL.",
+              self.lock_key
+          );
+      #[cfg(debug_assertions)]
+      panic!(
+        "LockGuard dropped without explicit async release for lock key: {}",
+        self.lock_key
+      );
+    }
+  }
+}
+
 #[async_trait]
 pub trait DistributedLock: Send + Sync {
   /// Attempts to atomically acquire a distributed lock for a resource.
   async fn try_acquire(
-    &self,
+    self: Arc<Self>,
     lock_name: &str,
     node_id: &str,
     ttl: Duration,
-  ) -> Result<LockHandle, LockAcquireError>;
+  ) -> Result<LockGuard, LockAcquireError>;
 
   /// Releases a previously acquired distributed lock.
   async fn release(&self, handle: LockHandle) -> Result<(), AnyhowError>;
@@ -160,11 +263,11 @@ impl S3DistributedLock {
 #[async_trait]
 impl DistributedLock for S3DistributedLock {
   async fn try_acquire(
-    &self,
+    self: Arc<Self>,
     lock_name: &str,
     node_id: &str,
     ttl: Duration,
-  ) -> Result<LockHandle, LockAcquireError> {
+  ) -> Result<LockGuard, LockAcquireError> {
     let lock_key = self.get_lock_key(lock_name);
     debug!(lock_key, node_id, ?ttl, "Attempting to acquire S3 lock");
 
@@ -198,9 +301,11 @@ impl DistributedLock for S3DistributedLock {
     match put_result {
       Ok(_) => {
         info!(lock_key, node_id, "Successfully acquired S3 lock");
-        Ok(LockHandle {
+        Ok(LockGuard {
           lock_key,
           node_id: node_id.to_string(),
+          lock_manager: self,
+          released: false,
         })
       }
       Err(SdkError::ServiceError(service_err)) => {
@@ -292,9 +397,11 @@ impl DistributedLock for S3DistributedLock {
                       lock_key,
                       node_id, "Successfully acquired S3 lock on retry"
                     );
-                    Ok(LockHandle {
+                    Ok(LockGuard {
                       lock_key,
                       node_id: node_id.to_string(),
+                      lock_manager: self,
+                      released: false,
                     })
                   }
                   Err(SdkError::ServiceError(retry_service_err)) => {
@@ -346,9 +453,11 @@ impl DistributedLock for S3DistributedLock {
                       node_id,
                       "Successfully acquired S3 lock on retry (after NoSuchKey)"
                     );
-                    Ok(LockHandle {
+                    Ok(LockGuard {
                       lock_key,
                       node_id: node_id.to_string(),
+                      lock_manager: self,
+                      released: false,
                     })
                   }
                   Err(SdkError::ServiceError(retry_service_err)) => {
@@ -601,14 +710,13 @@ mod tests {
   use aws_config::meta::credentials::CredentialsProviderChain;
   use aws_sdk_s3::config::{Credentials, Region};
   use aws_sdk_s3::Client;
-  use std::sync::atomic::{AtomicU16, Ordering};
+
   use std::sync::Arc;
   use std::time::Duration;
   use tokio::time::sleep;
 
-  static NEXT_MINIO_PORT: AtomicU16 = AtomicU16::new(9745);
-
-  async fn setup_test_env() -> (S3DistributedLock, String, MinioTestServer) {
+  async fn setup_test_env() -> (Arc<S3DistributedLock>, String, MinioTestServer)
+  {
     let minio = MinioTestServer::start();
     let bucket = "test-lock-bucket".to_string();
     minio
@@ -647,7 +755,7 @@ mod tests {
       S3DistributedLock::new(s3_client.clone(), bucket.clone(), prefix);
 
     // Return a more concise tuple - endpoint not used in tests
-    (lock_manager, bucket, minio)
+    (Arc::new(lock_manager), bucket, minio)
   }
 
   async fn s3_object_exists(client: &Client, bucket: &str, key: &str) -> bool {
@@ -668,21 +776,18 @@ mod tests {
     let node_id = "node_a";
     let ttl = Duration::from_secs(60);
 
-    let handle = lock_manager
+    let guard = lock_manager
+      .clone()
       .try_acquire(lock_name, node_id, ttl)
       .await
       .expect("Failed to acquire lock");
 
     assert!(
-      s3_object_exists(&lock_manager.s3_client, &bucket, &handle.lock_key)
-        .await,
+      s3_object_exists(&lock_manager.s3_client, &bucket, &guard.lock_key).await,
       "Lock object should exist after acquire"
     );
 
-    lock_manager
-      .release(handle)
-      .await
-      .expect("Failed to release lock");
+    guard.release().await.expect("Failed to release lock");
 
     let lock_key_after_release = lock_manager.get_lock_key(lock_name);
     assert!(
@@ -705,35 +810,36 @@ mod tests {
     let node_b = "node_b";
     let ttl = Duration::from_secs(60);
 
-    let handle_a = lock_manager
+    let guard_a = lock_manager
+      .clone()
       .try_acquire(lock_name, node_a, ttl)
       .await
       .expect("Node A failed to acquire lock");
 
-    let result_b = lock_manager.try_acquire(lock_name, node_b, ttl).await;
+    let guard_b = lock_manager
+      .clone()
+      .try_acquire(lock_name, node_b, ttl)
+      .await;
 
-    match result_b {
+    match guard_b {
       Err(LockAcquireError::LockHeld(Some(info))) => {
         assert_eq!(info.node_id, node_a);
       }
-      _ => panic!(
-        "Node B should have failed with LockHeld, got {:?}",
-        result_b
-      ),
+      _ => panic!("Node B should have failed with LockHeld, got {:?}", guard_b),
     }
 
-    lock_manager
-      .release(handle_a)
+    guard_a
+      .release()
       .await
       .expect("Node A failed to release lock");
 
-    let handle_b = lock_manager
+    let guard_b = lock_manager
       .try_acquire(lock_name, node_b, ttl)
       .await
       .expect("Node B failed to acquire lock after release");
 
-    lock_manager
-      .release(handle_b)
+    guard_b
+      .release()
       .await
       .expect("Node B failed to release lock");
   }
@@ -748,28 +854,29 @@ mod tests {
     let short_ttl = Duration::from_secs(2);
     let long_ttl = Duration::from_secs(60);
 
-    let handle_a = lock_manager
+    let guard_a = lock_manager
+      .clone()
       .try_acquire(lock_name, node_a, short_ttl)
       .await
       .expect("Node A failed to acquire lock with short TTL");
 
     sleep(short_ttl + Duration::from_secs(1)).await;
 
-    let handle_b = lock_manager
+    let guard_b = lock_manager
       .try_acquire(lock_name, node_b, long_ttl)
       .await
       .expect("Node B failed to acquire expired lock");
 
-    assert_eq!(handle_b.node_id, node_b);
+    assert_eq!(guard_b.node_id, node_b);
 
-    let release_a_result = lock_manager.release(handle_a).await;
+    let release_a_result = guard_a.release().await;
     assert!(
       release_a_result.is_ok(),
       "Releasing stale handle should be okay (lock already gone or owned by B)"
     );
 
-    lock_manager
-      .release(handle_b)
+    guard_b
+      .release()
       .await
       .expect("Node B failed to release lock");
   }
@@ -797,20 +904,17 @@ mod tests {
 
   #[tokio::test]
   async fn test_concurrent_acquisition_attempts() {
-    let (lock_manager_arc, _bucket, _minio) = setup_test_env().await;
+    let (lock_manager, _bucket, _minio) = setup_test_env().await;
 
-    let lock_manager_arc = Arc::new(lock_manager_arc);
     let lock_name = "test_lock_concurrent";
     let node_ids = vec!["node_1", "node_2", "node_3"];
     let ttl = Duration::from_secs(10);
 
     let mut handles = vec![];
     for &node_id in &node_ids {
-      let lock_manager_clone = Arc::clone(&lock_manager_arc);
+      let lock_manager_ = lock_manager.clone();
       let handle = tokio::spawn(async move {
-        lock_manager_clone
-          .try_acquire(lock_name, node_id, ttl)
-          .await
+        lock_manager_.try_acquire(lock_name, node_id, ttl).await
       });
       handles.push(handle);
     }
@@ -819,13 +923,13 @@ mod tests {
 
     let mut success_count = 0;
     let mut held_count = 0;
-    let mut acquired_handle: Option<LockHandle> = None;
+    let mut acquired_guard: Option<LockGuard> = None;
 
     for result in results {
       match result {
-        Ok(Ok(handle)) => {
+        Ok(Ok(guard)) => {
           success_count += 1;
-          acquired_handle = Some(handle);
+          acquired_guard = Some(guard);
         }
         Ok(Err(LockAcquireError::LockHeld(_))) => {
           held_count += 1;
@@ -846,9 +950,9 @@ mod tests {
       "All other nodes should fail with LockHeld"
     );
 
-    if let Some(handle) = acquired_handle {
-      lock_manager_arc
-        .release(handle)
+    if let Some(guard) = acquired_guard {
+      guard
+        .release()
         .await
         .expect("Failed to release lock after concurrent test");
     }
@@ -864,21 +968,21 @@ mod tests {
     let new_ttl = Duration::from_secs(60);
 
     // First acquire the lock
-    let handle = lock_manager
+    let mut guard = lock_manager
+      .clone()
       .try_acquire(lock_name, node_id, initial_ttl)
       .await
       .expect("Failed to acquire lock initially");
 
     // Check lock exists
     assert!(
-      s3_object_exists(&lock_manager.s3_client, &bucket, &handle.lock_key)
-        .await,
+      s3_object_exists(&lock_manager.s3_client, &bucket, &guard.lock_key).await,
       "Lock object should exist after acquire"
     );
 
     // Get the initial lock info to verify timestamps later
     let initial_lock_info =
-      get_lock_info(&lock_manager.s3_client, &bucket, &handle.lock_key)
+      get_lock_info(&lock_manager.s3_client, &bucket, &guard.lock_key)
         .await
         .expect("Failed to get initial lock info");
 
@@ -886,25 +990,17 @@ mod tests {
     sleep(Duration::from_secs(1)).await; // Increased sleep time to ensure timestamp difference
 
     // Renew the lock with a longer TTL
-    let renewed_handle = lock_manager
-      .renew(handle, new_ttl)
-      .await
-      .expect("Failed to renew lock");
+    guard.renew(new_ttl).await.expect("Failed to renew lock");
 
     // Lock should still exist
     assert!(
-      s3_object_exists(
-        &lock_manager.s3_client,
-        &bucket,
-        &renewed_handle.lock_key
-      )
-      .await,
+      s3_object_exists(&lock_manager.s3_client, &bucket, &guard.lock_key).await,
       "Lock object should still exist after renewal"
     );
 
     // Get the updated lock info
     let renewed_lock_info =
-      get_lock_info(&lock_manager.s3_client, &bucket, &renewed_handle.lock_key)
+      get_lock_info(&lock_manager.s3_client, &bucket, &guard.lock_key)
         .await
         .expect("Failed to get renewed lock info");
 
@@ -934,7 +1030,7 @@ mod tests {
     // Test that another node can't renew our lock
     let different_node_id = "node_b";
     let invalid_handle = LockHandle {
-      lock_key: renewed_handle.lock_key.clone(),
+      lock_key: guard.lock_key.clone(),
       node_id: different_node_id.to_string(),
     };
 
@@ -949,8 +1045,8 @@ mod tests {
     }
 
     // Clean up - release the lock
-    lock_manager
-      .release(renewed_handle)
+    guard
+      .release()
       .await
       .expect("Failed to release lock after renewal test");
   }

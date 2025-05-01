@@ -36,7 +36,7 @@ impl BackgroundService for HeartbeatService {
               }
 
               // Get active peers from S3 and update peer manager
-              match cm.get_active_peers().await {
+              match cm.get_active_nodes().await {
                   Ok(active_peers) => {
                       debug!("Found {} active peers in cluster", active_peers.len());
                       // Update the peer manager with active peers

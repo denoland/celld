@@ -1,4 +1,3 @@
-use anyhow;
 use std::process::Command;
 use std::time::Duration;
 use uuid::Uuid;
@@ -97,6 +96,7 @@ impl MinioTestServer {
   }
 
   #[cfg(test)]
+  #[allow(dead_code)]
   pub fn has_files_for_room(&self, bucket: &str, room_id: &str) -> bool {
     let output = Command::new("docker")
       .args([

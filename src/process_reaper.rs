@@ -85,7 +85,8 @@ impl ProcessReaper {
         }
 
         // Kill the Deno process
-        entry.parent_exit_guard.kill();
+        use nix::sys::signal::Signal;
+        entry.parent_exit_guard.kill(Signal::SIGTERM);
 
         // Store socket path to clean up after reaping
         let socket_path = entry.socket_path.clone();

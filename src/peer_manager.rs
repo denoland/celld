@@ -41,28 +41,14 @@ impl PeerManager {
   }
 
   /// Update the peer list from a list of active NodeInfo peers from the cluster membership
+  /// Note: argument active_peers should include self.
   pub fn update_peers(&self, active_peers: Vec<NodeInfo>) {
-    // Create new peer state
     let mut state = self.state.write().unwrap();
-
-    // Store the updated peer list
     state.peers = active_peers;
-
-    // Create a new hash ring with all the updated peers
     let mut new_ring = HashRing::new();
-
-    // Always add ourselves
-    new_ring.add(self.self_advertise_addr.clone());
-
-    // Add each peer's advertise_addr to the ring
     for peer in &state.peers {
-      // Skip ourselves (already added)
-      if peer.node_id != self.self_node_id {
-        new_ring.add(peer.advertise_addr.clone());
-      }
+      new_ring.add(peer.advertise_addr.clone());
     }
-
-    // Replace the old ring with the new one
     state.ring = new_ring;
   }
 
@@ -104,12 +90,16 @@ impl PeerManager {
     {
       for addr in potential_owners {
         // Filter out any nodes that are no longer considered active
+        println!(">> get_room_owners Checking if {} is active", addr);
         if self.is_peer_active(&addr) {
+          println!(">> get_room_owners ---- {} is active", addr);
           owners.push(addr.clone()); // Clone the address string
                                      // Stop once we have enough active owners
           if owners.len() >= MAX_OWNERS {
             break;
           }
+        } else {
+          println!(">> get_room_owners ---- {} is NOT active", addr);
         }
       }
     }
@@ -121,6 +111,7 @@ impl PeerManager {
   pub fn is_peer_active(&self, node_addr: &str) -> bool {
     let state = self.state.read().unwrap();
     // The `state.peers` list only contains nodes deemed active by ClusterMembership
+    println!(">> is_peer_active state.peers {:?}", state.peers);
     state
       .peers
       .iter()

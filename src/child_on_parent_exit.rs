@@ -71,7 +71,7 @@ impl ChildOnParentExit {
           let _ = read(r.as_raw_fd(), &mut buf);
 
           // parent gone → kill real child
-          let _ = kill(Pid::from_raw(real_child.id() as i32), Signal::SIGTERM);
+          let _ = kill(Pid::from_raw(real_child.id() as i32), Signal::SIGINT);
           let _ = real_child.wait();
           std::process::exit(0);
         }
@@ -80,8 +80,8 @@ impl ChildOnParentExit {
   }
 
   /// Send SIGTERM to the watcher (and thus the real child on macOS).
-  pub fn kill(&self) {
-    let _ = kill(self.watcher_pid, Signal::SIGTERM);
+  pub fn kill(&self, sig: Signal) {
+    let _ = kill(self.watcher_pid, sig);
   }
 
   /// Get the PID of the child process
@@ -120,7 +120,7 @@ mod tests {
     let guard = ChildOnParentExit::spawn(cmd).expect("failed to spawn process");
 
     let start = Instant::now();
-    guard.kill();
+    guard.kill(Signal::SIGTERM);
     guard.wait();
     let elapsed = start.elapsed();
 

@@ -51,6 +51,8 @@ pub enum ProxyError {
   AppNotFound(String),
   #[error("Internal Server Error: {0}")]
   InternalError(#[from] anyhow::Error),
+  #[error("Room lock held by another node or takeover in progress")]
+  LockContention,
 }
 
 struct Proxy {
@@ -119,6 +121,14 @@ impl ProxyHttp for Proxy {
     // Extract hostname without port
     let hostname = host.split(':').next().unwrap_or(host);
     ctx.tenant = hostname.to_string();
+
+    // Validate host format briefly (prevent directory traversal)
+    if ctx.tenant.contains('/') || ctx.tenant.contains("..") {
+      return Err(pingora::Error::explain(
+        ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
+        "Invalid Host header",
+      ));
+    }
 
     // Only handle GET and HEAD requests
     if req_header.method != http::Method::GET

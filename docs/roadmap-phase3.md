@@ -4,7 +4,7 @@ Goal: Another node automatically takes over responsibility for a room if the
 primary node fails, ensuring availability. S3 is used for node discovery
 (Phase 1) and lock coordination (Phase 2).
 
-- [ ] Refine Hashing Key & PeerManager:
+- [x] Refine Hashing Key & PeerManager:
   - Define/confirm a shared utility function
     `get_room_hash_key(tenant: &str, room_id: &str) -> String`.
   - Update `PeerManager::get_owner_peer` to accept `tenant` and `room_id`, using
@@ -16,7 +16,7 @@ primary node fails, ensuring availability. S3 is used for node discovery
     `room_id`, and use `get_room_hash_key` for the `get_with_replicas` lookup.
     Ensure it continues to filter for active peers using `is_peer_active`.
 
-- [ ] Implement Takeover Coordination Logic (`process_manager.rs`):
+- [x] Implement Takeover Coordination Logic (`process_manager.rs`):
   - Modify `ProcessManager::get_or_spawn_process`:
     - Input: Takes `host` (tenant), `room_id`.
     - Key: Calculate `process_key = get_room_hash_key(host, room_id)`.
@@ -52,9 +52,6 @@ primary node fails, ensuring availability. S3 is used for node discovery
       definitively). _This might need careful placement, potentially associating
       lock lifetime with the `ProcessEntry` or handling release in
       `ensure_restored`._
-  - (Optional) Update `status.json`: After a successful takeover (lock acquired,
-    restore complete, process running), write the current `node_id` to
-    `s3://<bucket>/<prefix>/room_status/<tenant>/<room_id>.json`.
 
 - [ ] Update Proxy Forwarding Logic (`main.rs`):
   - Modify `Proxy::upstream_peer`:
@@ -92,3 +89,6 @@ primary node fails, ensuring availability. S3 is used for node discovery
     appropriate (favoring "Node").
   - Ensure consistent logging for takeover events (detection, lock attempts,
     restore, success/failure).
+  - Update `status.json`: After a successful takeover in `process_manager.rs`
+    (lock acquired, restore complete, process running), write the current
+    `node_id` to `s3://<bucket>/<prefix>/room_status/<tenant>/<room_id>.json`.

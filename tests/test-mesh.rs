@@ -294,8 +294,8 @@ async fn test_restore_coordination() {
   std::fs::remove_file(&db_path).unwrap();
 
   // Also remove any WAL or SHM files that might exist
-  let _ = std::fs::remove_file(&format!("{}-wal", db_path));
-  let _ = std::fs::remove_file(&format!("{}-shm", db_path));
+  let _ = std::fs::remove_file(format!("{}-wal", db_path));
+  let _ = std::fs::remove_file(format!("{}-shm", db_path));
 
   // Rest of the test remains unchanged
   // Spawn Node B and Node C immediately after each other

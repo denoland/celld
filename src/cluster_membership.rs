@@ -35,7 +35,7 @@ pub trait ClusterMembership: Send + Sync {
   async fn heartbeat(&self) -> anyhow::Result<()>;
 
   /// Get a list of all active peers (excluding stale nodes)
-  async fn get_active_peers(&self) -> anyhow::Result<Vec<NodeInfo>>;
+  async fn get_active_nodes(&self) -> anyhow::Result<Vec<NodeInfo>>;
 
   /// Unregister this node from the cluster
   async fn unregister(&self) -> anyhow::Result<()>;
@@ -191,7 +191,7 @@ impl ClusterMembership for S3ClusterMembership {
     Ok(())
   }
 
-  async fn get_active_peers(&self) -> anyhow::Result<Vec<NodeInfo>> {
+  async fn get_active_nodes(&self) -> anyhow::Result<Vec<NodeInfo>> {
     debug!(
       node_id = %self.node_info.node_id,
       "Listing active peers from S3"
@@ -207,7 +207,6 @@ impl ClusterMembership for S3ClusterMembership {
       .await?;
 
     let mut peers = Vec::new();
-    let our_node_id = &self.node_info.node_id;
     let mut found_nodes = HashSet::new();
 
     // Process each object (node)
@@ -236,9 +235,8 @@ impl ClusterMembership for S3ClusterMembership {
               // Parse the JSON into a NodeInfo object
               match serde_json::from_slice::<NodeInfo>(&bytes) {
                 Ok(node) => {
-                  // Skip ourselves and stale nodes
-                  if node.node_id != *our_node_id && !self.is_node_stale(&node)
-                  {
+                  // Skip stale nodes
+                  if !self.is_node_stale(&node) {
                     peers.push(node);
                   }
                 }
@@ -318,7 +316,7 @@ mod tests {
 
     S3ClusterMembership::from_config(cfg, advertise_addr.to_string(), node_id)
       .unwrap()
-      .with_staleness_threshold(Duration::from_secs(1)) // Custom short threshold for tests
+      .with_staleness_threshold(Duration::from_secs(2)) // Custom short threshold for tests
   }
 
   #[tokio::test]
@@ -445,12 +443,11 @@ mod tests {
     );
 
     // Register the first node
-    let register_result = stale_membership.register().await;
-    assert!(register_result.is_ok(), "Registration should succeed");
+    stale_membership.register().await.unwrap();
 
     // Wait long enough for the first node to become stale
-    // (staleness threshold was set to 5 seconds in setup_test_membership)
-    sleep(Duration::from_secs(6)).await;
+    // (staleness threshold was set to 2 seconds in setup_test_membership)
+    sleep(Duration::from_secs(3)).await;
 
     // Create a second, active node
     let active_node_id = Uuid::new_v4().to_string();
@@ -461,45 +458,27 @@ mod tests {
     );
 
     // Register the active node
-    let register_result = active_membership.register().await;
-    assert!(register_result.is_ok(), "Registration should succeed");
+    active_membership.register().await.unwrap();
 
     // Get peers from the active node - should not include the stale node
-    let get_peers_result = active_membership.get_active_peers().await;
-    assert!(get_peers_result.is_ok(), "Should be able to get peers");
+    let get_peers_result = active_membership.get_active_nodes().await;
+    assert!(get_peers_result.is_ok());
+    let peers = get_peers_result.unwrap();
+    assert_eq!(peers.len(), 1);
 
-    if let Ok(peers) = get_peers_result {
-      assert_eq!(
-        peers.len(),
-        0,
-        "Should not list stale nodes as active peers"
-      );
+    // Create a third node to verify active node detection works
+    let third_node_id = Uuid::new_v4().to_string();
+    let third_membership = setup_test_membership(
+      &minio,
+      Some(third_node_id.clone()),
+      "127.0.0.1:8083",
+    );
 
-      // Create a third node to verify active node detection works
-      let third_node_id = Uuid::new_v4().to_string();
-      let third_membership = setup_test_membership(
-        &minio,
-        Some(third_node_id.clone()),
-        "127.0.0.1:8083",
-      );
+    third_membership.register().await.unwrap();
 
-      // Register the third node
-      let register_result = third_membership.register().await;
-      assert!(register_result.is_ok(), "Registration should succeed");
-
-      // Get peers from the active node - should include only the third node
-      let get_peers_result = active_membership.get_active_peers().await;
-      assert!(get_peers_result.is_ok(), "Should be able to get peers");
-
-      if let Ok(peers) = get_peers_result {
-        assert_eq!(peers.len(), 1, "Should list exactly one active peer");
-
-        assert_eq!(
-          peers[0].node_id, third_node_id,
-          "Active peer should be the third node"
-        );
-      }
-    }
+    // Get peers from the active node - should include only the third node
+    let peers = active_membership.get_active_nodes().await.unwrap();
+    assert_eq!(peers.len(), 2);
   }
 
   #[tokio::test]

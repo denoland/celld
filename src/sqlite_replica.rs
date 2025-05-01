@@ -354,7 +354,7 @@ impl SqliteReplica {
       .try_acquire(&lock_name, self_node_id, lock_ttl)
       .await
     {
-      Ok(lock_handle) => {
+      Ok(lock_guard) => {
         // We got the lock, proceed with restore
         info!(
           tenant = %self.tenant,
@@ -391,7 +391,7 @@ impl SqliteReplica {
         };
 
         // Release the lock regardless of restore outcome
-        if let Err(e) = lock_manager.release(lock_handle).await {
+        if let Err(e) = lock_guard.release().await {
           warn!(
             tenant = %self.tenant,
             room_id = %self.room_id,
