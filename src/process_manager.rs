@@ -12,6 +12,7 @@ use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::child_on_parent_exit::ChildOnParentExit;
+use crate::peer_manager::room_hash_key;
 use crate::sqlite_replica::{create_empty_database, SqliteReplica};
 use crate::NodeState;
 use crate::ProxyError;
@@ -72,7 +73,7 @@ impl ProcessManager {
     host: &str,
     room_id: &str,
   ) -> bool {
-    let process_key = format!("{}:{}", host, room_id);
+    let process_key = room_hash_key(host, room_id);
 
     let mut processes = self.processes.lock().unwrap();
     if let Some(entry) = processes.get_mut(&process_key) {
@@ -90,7 +91,7 @@ impl ProcessManager {
     host: &str,
     room_id: &str,
   ) -> bool {
-    let process_key = format!("{}:{}", host, room_id);
+    let process_key = room_hash_key(host, room_id);
 
     let mut processes = self.processes.lock().unwrap();
     if let Some(entry) = processes.get_mut(&process_key) {
@@ -113,7 +114,7 @@ impl ProcessManager {
     node_state: Arc<NodeState>,
   ) -> Result<(PathBuf, UnixStream), ProxyError> {
     // Create a combined key for host and room to ensure one isolate per room
-    let process_key = format!("{}:{}", host, room_id);
+    let process_key = room_hash_key(host, room_id);
 
     // For single_use requests, always spawn a new process
     // TODO: This should not be supported in production
@@ -475,7 +476,8 @@ impl ProcessManager {
     // For single-use isolates, use a unique key with a UUID suffix
     // This allows multiple single-use isolates for the same host+room combination
     if single_use {
-      let unique_key = format!("{}:{}-{}", host, room_id, Uuid::new_v4());
+      let unique_key =
+        format!("{}/{}", room_hash_key(host, room_id), Uuid::new_v4());
 
       // Move the entry to a unique key
       let mut processes = self.processes.lock().unwrap();

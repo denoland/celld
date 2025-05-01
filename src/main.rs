@@ -188,8 +188,14 @@ impl ProxyHttp for Proxy {
     // TODO this shouldn't be on data_port but instead on control_port
     if let Some(room_id) = path.strip_prefix("/_mesh/owner/") {
       if !room_id.is_empty() {
-        let owner = self.node_state.peer_manager.get_owner_peer(room_id);
-        let is_local = self.node_state.peer_manager.is_local_owner(room_id);
+        let owner = self
+          .node_state
+          .peer_manager
+          .get_owner_peer(&ctx.tenant, room_id);
+        let is_local = self
+          .node_state
+          .peer_manager
+          .is_local_owner(&ctx.tenant, room_id);
 
         // Return a simple JSON response with owner information
         let response = format!(
@@ -334,9 +340,16 @@ impl ProxyHttp for Proxy {
     );
 
     // Check if this instance is responsible for this room
-    if !self.node_state.peer_manager.is_local_owner(room_id) {
+    if !self
+      .node_state
+      .peer_manager
+      .is_local_owner(&ctx.tenant, room_id)
+    {
       // We need to forward this request to the responsible peer
-      let upstream_addr = self.node_state.peer_manager.get_owner_peer(room_id);
+      let upstream_addr = self
+        .node_state
+        .peer_manager
+        .get_owner_peer(&ctx.tenant, room_id);
 
       debug!(
         host = %ctx.tenant,

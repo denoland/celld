@@ -67,15 +67,64 @@ impl PeerManager {
   }
 
   /// Get the peer responsible for a given room ID
-  pub fn get_owner_peer(&self, room_id: &str) -> String {
+  pub fn get_owner_peer(&self, tenant: &str, room_id: &str) -> String {
     let state = self.state.read().unwrap();
-    state.ring.get(&room_id).unwrap().to_string()
+    let key = room_hash_key(tenant, room_id);
+    state.ring.get(&key).unwrap().to_string()
   }
 
   /// Check if the local instance is responsible for handling this room
-  pub fn is_local_owner(&self, room_id: &str) -> bool {
-    let owner = self.get_owner_peer(room_id);
+  pub fn is_local_owner(&self, tenant: &str, room_id: &str) -> bool {
+    let owner = self.get_owner_peer(tenant, room_id);
     owner == self.self_advertise_addr
+  }
+
+  /// Get an ordered list of active node addresses responsible for a given room,
+  /// based on the consistent hash of tenant:room_id.
+  ///
+  /// This method returns up to MAX_OWNERS active nodes that could own the room,
+  /// in preference order according to the hash ring.
+  pub fn get_room_owners(&self, tenant: &str, room_id: &str) -> Vec<String> {
+    let state = self.state.read().unwrap();
+
+    // Define a reasonable maximum number of owners/candidates we want to return
+    // This limits how many nodes the proxy might try to contact in sequence.
+    const MAX_OWNERS: usize = 3;
+
+    let mut owners = Vec::new();
+
+    // Use the combined key for hashing
+    let key = room_hash_key(tenant, room_id);
+
+    // Get the primary node and potential replicas/successors from the ring
+    if let Some(potential_owners) =
+      // Use num_peers() to get enough potential owners to filter down from.
+      // get_with_replicas handles cases where replicas > ring size.
+      state.ring.get_with_replicas(&key, self.num_peers())
+    {
+      for addr in potential_owners {
+        // Filter out any nodes that are no longer considered active
+        if self.is_peer_active(&addr) {
+          owners.push(addr.clone()); // Clone the address string
+                                     // Stop once we have enough active owners
+          if owners.len() >= MAX_OWNERS {
+            break;
+          }
+        }
+      }
+    }
+    owners
+  }
+
+  /// Check if a node is considered active, meaning it was present in the
+  /// latest list of active nodes received from the ClusterMembership service.
+  pub fn is_peer_active(&self, node_addr: &str) -> bool {
+    let state = self.state.read().unwrap();
+    // The `state.peers` list only contains nodes deemed active by ClusterMembership
+    state
+      .peers
+      .iter()
+      .any(|node| node.advertise_addr == node_addr)
   }
 
   /// Get the number of peers in the mesh
@@ -99,4 +148,8 @@ impl PeerManager {
   pub fn get_local_node_id(&self) -> &str {
     &self.self_node_id
   }
+}
+
+pub fn room_hash_key(tenant: &str, room_id: &str) -> String {
+  format!("{}/{}", tenant, room_id)
 }
