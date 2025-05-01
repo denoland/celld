@@ -514,12 +514,13 @@ fn start_server(config: config::Config) -> Server {
       if config.has_s3_config() {
         let s3_config = config.to_s3_config().unwrap();
 
-        // Create membership using from_config
+        // Create membership using from_config with configured staleness threshold
         let membership =
           match cluster_membership::S3ClusterMembership::from_config(
             s3_config.clone(),
             config.advertise_addr.clone(),
             Some(node_id.clone()),
+            Some(config.staleness_threshold),
           ) {
             Ok(membership) => {
               info!(

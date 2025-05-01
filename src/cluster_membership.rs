@@ -61,6 +61,7 @@ impl S3ClusterMembership {
     cfg: S3Config,
     advertise_addr: String,
     node_id: Option<String>,
+    staleness_threshold: Option<Duration>,
   ) -> anyhow::Result<Self> {
     let node_id = node_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
@@ -101,7 +102,8 @@ impl S3ClusterMembership {
       bucket: cfg.bucket,
       prefix,
       node_info,
-      staleness_threshold: DEFAULT_STALENESS_THRESHOLD,
+      staleness_threshold: staleness_threshold
+        .unwrap_or(DEFAULT_STALENESS_THRESHOLD),
     })
   }
 
@@ -304,7 +306,7 @@ mod tests {
     let bucket = "cluster-test".to_string();
     let _ = minio.create_bucket(&bucket);
 
-    // Create with a short staleness threshold for tests (1 second)
+    // Create with a short staleness threshold for tests (2 seconds)
     let cfg = S3Config {
       endpoint: format!("http://127.0.0.1:{}", minio.port),
       bucket,
@@ -314,9 +316,13 @@ mod tests {
       secret_access_key: minio.secret_access_key.clone(),
     };
 
-    S3ClusterMembership::from_config(cfg, advertise_addr.to_string(), node_id)
-      .unwrap()
-      .with_staleness_threshold(Duration::from_secs(2)) // Custom short threshold for tests
+    S3ClusterMembership::from_config(
+      cfg,
+      advertise_addr.to_string(),
+      node_id,
+      Some(Duration::from_secs(2)), // Custom short threshold for tests
+    )
+    .unwrap()
   }
 
   #[tokio::test]

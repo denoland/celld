@@ -26,6 +26,7 @@ pub async fn benchmark_deno_coldstart(iterations: usize) -> Result<()> {
         s3_access_key_id: None,
         s3_secret_access_key: None,
         heartbeat_interval: Duration::from_secs(30),
+        staleness_threshold: Duration::from_secs(90),
       }
     }
   };

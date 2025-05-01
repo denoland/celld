@@ -71,7 +71,7 @@ primary node fails, ensuring availability. S3 is used for node discovery
         errors if the selected `primary_active_owner` is unreachable at
         connection time.
 
-- [ ] Configuration & Testability:
+- [x] Configuration & Testability:
   - Add `ROOMD_STALENESS_THRESHOLD_SECS` environment variable parsing in
     `config.rs`.
   - Pass the configured staleness threshold value when creating

@@ -5,3 +5,5 @@ data/hello.localhost/sqlite/
 data/ws-echo.localhost/sqlite/
 data/llm-chat.localhost/sqlite/
 data/llm-chat.localhost/prod.env
+
+**/.claude/settings.local.json

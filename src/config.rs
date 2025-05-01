@@ -27,6 +27,8 @@ pub struct Config {
   pub s3_secret_access_key: Option<String>,
   /// Heartbeat interval in seconds
   pub heartbeat_interval: Duration,
+  /// Staleness threshold in seconds for detecting inactive nodes
+  pub staleness_threshold: Duration,
 }
 
 /// Configuration for a MinIO or S3 replica target
@@ -113,6 +115,13 @@ impl Config {
       .unwrap_or(30);
     let heartbeat_interval = Duration::from_secs(heartbeat_secs);
 
+    // Get staleness threshold with fallback to 90 seconds
+    let staleness_secs = var("ROOMD_STALENESS_THRESHOLD_SECS")
+      .ok()
+      .and_then(|s| s.parse::<u64>().ok())
+      .unwrap_or(90);
+    let staleness_threshold = Duration::from_secs(staleness_secs);
+
     // Get optional S3 configuration
     let s3_endpoint = var("ROOMD_S3_ENDPOINT").ok();
     let s3_bucket = var("ROOMD_S3_BUCKET").ok();
@@ -126,6 +135,7 @@ impl Config {
       advertise_addr,
       data_dir,
       heartbeat_interval,
+      staleness_threshold,
       s3_endpoint,
       s3_bucket,
       s3_region,
