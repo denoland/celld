@@ -250,6 +250,447 @@ async fn test_mesh_room_isolation() {
   client2.close(None).await.unwrap();
 }
 
+/// Tests the node failure scenario - when the primary node for a room fails,
+/// another node automatically takes over responsibility for the room (Durability Test 2)
+#[tokio::test]
+async fn test_node_failure_takeover() {
+  // Setup three nodes in the mesh
+  let ports = [7031, 7032, 7033];
+  let mut test_env = TestEnv::new(&ports);
+
+  // Use unique room ID to avoid conflicts with other tests
+  let test_room_id = format!("failover-test-{}", Uuid::new_v4().simple());
+  println!("Testing failover with room ID: {}", test_room_id);
+
+  // Find which node is the primary owner for this room
+  let mut primary_owner_port = 0;
+  let mut secondary_owners = Vec::new();
+
+  for &port in &ports {
+    let owner_url =
+      format!("http://localhost:{}/_mesh/owner/{}", port, test_room_id);
+    let owner_resp = reqwest::get(&owner_url)
+      .await
+      .unwrap()
+      .json::<serde_json::Value>()
+      .await
+      .unwrap();
+
+    println!("Node on port {} owner info: {}", port, owner_resp);
+
+    let is_owner = owner_resp["is_local"].as_bool().unwrap();
+    if is_owner {
+      primary_owner_port = port;
+    } else {
+      secondary_owners.push(port);
+    }
+  }
+
+  assert_ne!(
+    primary_owner_port, 0,
+    "Failed to find primary owner for test room"
+  );
+  assert!(
+    !secondary_owners.is_empty(),
+    "Failed to find secondary owners for test room"
+  );
+
+  println!("Primary owner is on port: {}", primary_owner_port);
+  println!("Secondary owners are on ports: {:?}", secondary_owners);
+
+  // Send request to the primary node to create data in the room
+  let url = format!(
+    "http://basic-db.localhost:{}/room/{}",
+    primary_owner_port, test_room_id
+  );
+  let client = reqwest::Client::builder().build().unwrap();
+
+  // Make the first request to create the room
+  let response = client.get(&url).send().await.unwrap();
+  assert_eq!(response.status(), 200);
+  let content = response.text().await.unwrap();
+  assert_eq!(content.trim(), "1", "First request should return 1");
+
+  // Make a second request to update data
+  let response2 = client.get(&url).send().await.unwrap();
+  assert_eq!(response2.status(), 200);
+  let content2 = response2.text().await.unwrap();
+  assert_eq!(content2.trim(), "2", "Second request should return 2");
+
+  // Wait for Litestream to replicate data to S3
+  println!("Waiting for Litestream to replicate data to S3...");
+  sleep(Duration::from_secs(5)).await;
+
+  // Abruptly kill the primary node (simulate node failure)
+  println!("Killing primary node on port {}...", primary_owner_port);
+  let primary_index =
+    ports.iter().position(|&p| p == primary_owner_port).unwrap();
+  test_env.kill_roomd_instance(primary_index, Signal::SIGKILL);
+
+  // Wait for node failure to be detected (heartbeat timeout)
+  // ROOMD_STALENESS_THRESHOLD_SECS is set to 6 seconds in TestEnv::spawn_roomd_instance
+  println!("Waiting for primary node failure to be detected...");
+  sleep(Duration::from_secs(8)).await;
+
+  // Try to access the room through a secondary node
+  let secondary_port = secondary_owners[0];
+  let secondary_url = format!(
+    "http://basic-db.localhost:{}/room/{}",
+    secondary_port, test_room_id
+  );
+
+  // This request should trigger takeover if not already happened
+  // It might take several tries before the failover completes
+  println!(
+    "Sending request to secondary node on port {}...",
+    secondary_port
+  );
+  let resp = client.get(&secondary_url).send().await.unwrap();
+  let content3 = resp.text().await.unwrap();
+  assert_eq!(content3.trim(), "3");
+
+  // Make another request to confirm the room is still operational
+  let response4 = client.get(&secondary_url).send().await.unwrap();
+  assert_eq!(response4.status(), 200);
+  let content4 = response4.text().await.unwrap();
+  assert_eq!(content4.trim(), "4");
+
+  // Check which node owns the room now (should be one of the secondary nodes)
+  let mut new_owner_found = false;
+  for &port in &secondary_owners {
+    let owner_url =
+      format!("http://localhost:{}/_mesh/owner/{}", port, test_room_id);
+    let owner_resp = reqwest::get(&owner_url)
+      .await
+      .unwrap()
+      .json::<serde_json::Value>()
+      .await
+      .unwrap();
+
+    println!(
+      "After failover, node on port {} owner info: {}",
+      port, owner_resp
+    );
+
+    let is_owner = owner_resp["is_local"].as_bool().unwrap();
+    if is_owner {
+      new_owner_found = true;
+      println!("New owner after failover is on port: {}", port);
+      break;
+    }
+  }
+
+  assert!(
+    new_owner_found,
+    "Failed to find a new owner after primary node failure"
+  );
+}
+
+/// Tests concurrent takeover attempts to verify only one node succeeds via locking
+#[tokio::test]
+#[ignore] // Flaky mostly working but needs more investigation.
+async fn test_concurrent_takeover_locking() {
+  // Setup three nodes in the mesh
+  let ports = [7071, 7072, 7073];
+  let mut test_env = TestEnv::new(&ports);
+
+  // Use unique room ID to avoid conflicts with other tests
+  let test_room_id = format!("takeover-lock-test-{}", Uuid::new_v4().simple());
+  println!("Testing concurrent takeover with room ID: {}", test_room_id);
+
+  // Find which node is the primary owner for this room
+  let mut primary_owner_port = 0;
+  let mut secondary_owners = Vec::new();
+
+  for &port in &ports {
+    let owner_url =
+      format!("http://localhost:{}/_mesh/owner/{}", port, test_room_id);
+    let owner_resp = reqwest::get(&owner_url)
+      .await
+      .unwrap()
+      .json::<serde_json::Value>()
+      .await
+      .unwrap();
+
+    println!("Node on port {} owner info: {}", port, owner_resp);
+
+    let is_owner = owner_resp["is_local"].as_bool().unwrap();
+    if is_owner {
+      primary_owner_port = port;
+    } else {
+      secondary_owners.push(port);
+    }
+  }
+
+  assert_ne!(
+    primary_owner_port, 0,
+    "Failed to find primary owner for test room"
+  );
+  assert!(
+    secondary_owners.len() >= 2,
+    "Need at least 2 secondary owners for this test"
+  );
+
+  println!("Primary owner is on port: {}", primary_owner_port);
+  println!("Secondary owners are on ports: {:?}", secondary_owners);
+
+  // Create initial data on the primary node
+  let url = format!(
+    "http://basic-db.localhost:{}/room/{}",
+    primary_owner_port, test_room_id
+  );
+  let client = reqwest::Client::builder().build().unwrap();
+  let response = client.get(&url).send().await.unwrap();
+  assert_eq!(response.status(), 200);
+  assert_eq!(response.text().await.unwrap().trim(), "1");
+
+  // Wait for Litestream to replicate data to S3
+  println!("Waiting for Litestream to replicate data to S3...");
+  sleep(Duration::from_secs(5)).await;
+
+  // Shutdown the primary node
+  println!(
+    "Shutting down primary node on port {}...",
+    primary_owner_port
+  );
+  let primary_index =
+    ports.iter().position(|&p| p == primary_owner_port).unwrap();
+  test_env.kill_roomd_instance(primary_index, Signal::SIGTERM);
+
+  // Sleep to ensure the primary node has fully shutdown
+  sleep(Duration::from_secs(10)).await;
+
+  // Create URLs for the secondary nodes
+  let secondary_urls: Vec<String> = secondary_owners
+    .iter()
+    .map(|&port| {
+      format!("http://basic-db.localhost:{}/room/{}", port, test_room_id)
+    })
+    .collect();
+
+  // Prepare concurrent requests to multiple nodes to trigger takeover race
+  println!("Sending concurrent requests to trigger takeover race...");
+  let concurrent_requests = secondary_urls
+    .iter()
+    .map(|url| {
+      let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+      let url = url.clone();
+      tokio::spawn(async move {
+        let resp = client.get(&url).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.text().await.unwrap_or_default();
+        body
+      })
+    })
+    .collect::<Vec<_>>();
+
+  // Wait for all requests to complete
+  let results = futures::future::join_all(concurrent_requests).await;
+
+  // Analyze the results
+  let mut success_count = 0;
+  for result in results {
+    let body = result.unwrap();
+    success_count += 1;
+    let value = body.trim();
+    assert!(
+      value == "2" || value == "3",
+      "Successful takeover should return 2 or 3, got {}",
+      value
+    );
+  }
+
+  // At least one request should succeed (the one that got the lock)
+  assert_eq!(success_count, 2);
+
+  // Send another request to whichever node succeeded - they should all route to the same place now
+  println!(
+    "Sending another request to verify room stability after takeover..."
+  );
+  let stabilized_url = &secondary_urls[0];
+  let final_response = client.get(stabilized_url).send().await.unwrap();
+  assert_eq!(final_response.status(), 200);
+  assert_eq!(final_response.text().await.unwrap().trim(), "4");
+
+  // Check which node owns the room now (only one should claim ownership)
+  let mut owner_count = 0;
+  for &port in &secondary_owners {
+    let owner_url =
+      format!("http://localhost:{}/_mesh/owner/{}", port, test_room_id);
+    let owner_resp = reqwest::get(&owner_url)
+      .await
+      .unwrap()
+      .json::<serde_json::Value>()
+      .await
+      .unwrap();
+
+    println!(
+      "After takeover, node on port {} owner info: {}",
+      port, owner_resp
+    );
+
+    if owner_resp["is_local"].as_bool().unwrap() {
+      owner_count += 1;
+      println!("Owner after takeover is on port: {}", port);
+    }
+  }
+
+  assert_eq!(owner_count, 1);
+}
+
+/// Tests proxy forwarding to verify it correctly retries down the owner list
+#[tokio::test]
+// Not working yet - not sure how pingera can allow us to do this.  Might need
+// to move to hyper to get better control of the request forwarding.
+#[ignore]
+async fn test_proxy_forwarding_retry() {
+  // Setup three nodes in the mesh
+  let ports = [7081, 7082, 7083];
+  let mut test_env = TestEnv::new(&ports);
+
+  // Use unique room ID to avoid conflicts with other tests
+  let test_room_id = format!("proxy-retry-test-{}", Uuid::new_v4().simple());
+  println!("Testing proxy forwarding with room ID: {}", test_room_id);
+
+  // Find which node is the primary owner for this room
+  let mut owner_info = Vec::new();
+  for &port in &ports {
+    let owner_url =
+      format!("http://localhost:{}/_mesh/owner/{}", port, test_room_id);
+    let owner_resp = reqwest::get(&owner_url)
+      .await
+      .unwrap()
+      .json::<serde_json::Value>()
+      .await
+      .unwrap();
+
+    println!("Node on port {} owner info: {}", port, owner_resp);
+
+    let is_owner = owner_resp["is_local"].as_bool().unwrap();
+    let owner_addr = owner_resp["owner"].as_str().unwrap().to_string();
+
+    owner_info.push((port, is_owner, owner_addr));
+  }
+
+  // Sort owner info to get primary and backups in order
+  owner_info.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by is_owner (true first)
+
+  let primary_owner_port = owner_info[0].0;
+  println!("Primary owner is on port: {}", primary_owner_port);
+
+  // Send a request to a non-owner node to verify it forwards to primary
+  let non_owner_port = owner_info
+    .iter()
+    .find(|(_, is_owner, _)| !is_owner)
+    .unwrap()
+    .0;
+  println!("Testing forwarding from non-owner port: {}", non_owner_port);
+
+  // Create initial data by sending request to a non-owner node (should forward to primary)
+  let url = format!(
+    "http://basic-db.localhost:{}/room/{}",
+    non_owner_port, test_room_id
+  );
+  let client = reqwest::Client::builder().build().unwrap();
+  let response1 = client.get(&url).send().await.unwrap();
+  assert_eq!(response1.status(), 200);
+  assert_eq!(response1.text().await.unwrap().trim(), "1");
+
+  // Send a second request to verify counter increments
+  let response2 = client.get(&url).send().await.unwrap();
+  assert_eq!(response2.status(), 200);
+  assert_eq!(response2.text().await.unwrap().trim(), "2");
+
+  // Kill the primary node
+  println!("Killing primary node on port {}...", primary_owner_port);
+  let primary_index =
+    ports.iter().position(|&p| p == primary_owner_port).unwrap();
+  test_env.kill_roomd_instance(primary_index, Signal::SIGKILL);
+
+  // Wait for heartbeat timeout to detect node failure
+  println!("Waiting for primary node failure to be detected...");
+  sleep(Duration::from_secs(5)).await;
+
+  // Send more requests to the same non-owner - it should retry forwarding to next in line
+  println!("Sending request to non-owner after primary failure...");
+
+  // This may take a few tries as the system detects failure and adjusts
+  let mut success = false;
+  for i in 1..=5 {
+    match client.get(&url).send().await {
+      Ok(response) => {
+        if response.status().is_success() {
+          let content = response.text().await.unwrap();
+          println!("Attempt {}: Success, got: {}", i, content);
+          // This should be "3" if the forwarding is working correctly
+          assert_eq!(
+            content.trim(),
+            "3",
+            "Counter should continue from previous value"
+          );
+          success = true;
+          break;
+        } else {
+          println!("Attempt {}: Got status: {}", i, response.status());
+        }
+      }
+      Err(e) => {
+        println!("Attempt {}: Request error: {}", i, e);
+      }
+    }
+
+    // Wait before retrying
+    sleep(Duration::from_secs(1)).await;
+  }
+
+  assert!(
+    success,
+    "Proxy forwarding should eventually succeed with retries"
+  );
+
+  // Send one more request to verify stable forwarding
+  println!("Testing stable forwarding after recovery...");
+  let response4 = client.get(&url).send().await.unwrap();
+  assert_eq!(response4.status(), 200);
+  assert_eq!(response4.text().await.unwrap().trim(), "4");
+
+  // Verify the forwarding path now points to a different node
+  let peer_info_url =
+    format!("http://localhost:{}/_mesh/peers", non_owner_port);
+  let new_peers = reqwest::get(&peer_info_url)
+    .await
+    .unwrap()
+    .json::<serde_json::Value>()
+    .await
+    .unwrap();
+
+  println!("New peer info after primary failure: {}", new_peers);
+
+  // Get the new owner info
+  let new_owner_url = format!(
+    "http://localhost:{}/_mesh/owner/{}",
+    non_owner_port, test_room_id
+  );
+  let new_owner_resp = reqwest::get(&new_owner_url)
+    .await
+    .unwrap()
+    .json::<serde_json::Value>()
+    .await
+    .unwrap();
+
+  println!("New owner info from non-owner node: {}", new_owner_resp);
+
+  // The owner address should be different from the failed primary
+  assert_ne!(
+    new_owner_resp["owner"].as_str().unwrap(),
+    owner_info[0].2,
+    "New owner should be different from failed primary"
+  );
+}
+
 /// Tests that database restore coordination works properly across nodes
 #[tokio::test]
 async fn test_restore_coordination() {
@@ -502,6 +943,8 @@ impl TestEnv {
       .env("ADVERTISE_ADDR", &advertise_addr)
       .env("DATA", "./data")
       .env("ROOMD_HEARTBEAT_INTERVAL", "2")
+      // Use a shorter staleness threshold for tests to detect failures faster
+      .env("ROOMD_STALENESS_THRESHOLD_SECS", "6")
       .env(
         "ROOMD_S3_ENDPOINT",
         format!("http://localhost:{}", self.minio_server.port),

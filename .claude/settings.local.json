@@ -4,7 +4,11 @@
       "Bash(cargo check:*)",
       "Bash(cargo check:*)",
       "Bash(cargo check:*)",
-      "Bash(cargo check:*)"
+      "Bash(cargo check:*)",
+      "Bash(killall:*)",
+      "Bash(true)",
+      "Bash(killall:*)",
+      "Bash(true)"
     ],
     "deny": []
   }

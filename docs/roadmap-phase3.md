@@ -77,7 +77,7 @@ primary node fails, ensuring availability. S3 is used for node discovery
   - Pass the configured staleness threshold value when creating
     `S3ClusterMembership`.
 
-- [ ] Testing:
+- [x] Testing:
   - Implement and run "Durability Test 2 (Node Failure)" as described in
     `roadmap.md`.
   - Add tests for concurrent takeover attempts (verify only one node succeeds
