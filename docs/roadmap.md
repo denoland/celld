@@ -1,5 +1,4 @@
 # roomd · Roadmap
-
 _Last updated: 2025-05-02_
 
 ## What is this?
@@ -85,7 +84,9 @@ SKIPPING FOR NOW.
 - **Outcome:** A clear demonstration of the system's dynamic nature and
   resilience, proving the core value proposition of the "substrate".
 
-### Phase 5: Internal Control Plane (COMPLETED)
+### Phase 5: Internal Control Plane
+
+DONE
 
 - **Problem:** Internal operations (cluster status checks, future RPCs like
   alarm scheduling/dispatch) currently lack a dedicated, secure communication
@@ -112,14 +113,15 @@ SKIPPING FOR NOW.
 
 ### Phase 6: Alarms API (Best Effort)
 
+CURRENTLY IN PROGRESS
+
 - **Problem:** Rooms cannot schedule tasks to run at a specific time in the
   future, limiting workflow and agent capabilities.
 - **Goal:** Implement a Durable Objects-inspired Alarms API allowing rooms to
   set, delete, and handle time-based alarms, using best-effort dispatch
   semantics.
 - **Depends On:** Phase 5 (Internal Control Plane for RPCs).
-- **Tasks:** See detailed `roadmap-phase5.md` (Note: File name should be
-  `roadmap-phase6.md` based on this sequence).
+- **Tasks:** See detailed `roadmap-phase6.md`.
 - **Outcome:** Rooms can reliably schedule `onAlarm` handler execution for
   future timestamps, enabling time-based workflows even for dormant rooms.
 
