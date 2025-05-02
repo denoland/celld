@@ -59,10 +59,167 @@ struct Proxy {
   node_state: Arc<NodeState>,
 }
 
+struct InternalAPI {
+  node_state: Arc<NodeState>,
+}
+
 #[derive(Debug, Default)]
 pub struct Ctx {
   tenant: String,
   room_id: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct InternalCtx {}
+
+#[async_trait::async_trait]
+impl ProxyHttp for InternalAPI {
+  type CTX = InternalCtx;
+
+  fn new_ctx(&self) -> Self::CTX {
+    InternalCtx::default()
+  }
+
+  async fn request_filter(
+    &self,
+    session: &mut Session,
+    _ctx: &mut Self::CTX,
+  ) -> Result<bool> {
+    let req_header = session.req_header();
+
+    // Get the path
+    let path = req_header.uri.path();
+
+    // Handle internal endpoints
+    if path == "/_internal/mesh/peers" {
+      let local_peer = self.node_state.peer_manager.get_local_peer();
+
+      // Get peer info with full details if it's available through the cluster membership
+      let peer_infos = self.node_state.peer_manager.get_all_peer_info();
+
+      // Build a JSON array of peers
+      let mut peer_json = String::from("[");
+      for (i, info) in peer_infos.iter().enumerate() {
+        if i > 0 {
+          peer_json.push(',');
+        }
+        let is_local =
+          info.node_id == self.node_state.peer_manager.get_local_node_id();
+        peer_json.push_str(&format!(
+            "{{\"node_id\":\"{}\",\"address\":\"{}\",\"is_local\":{},\"last_heartbeat\":\"{}\"}}",
+            info.node_id,
+            info.advertise_addr,
+            is_local,
+            info.heartbeat_timestamp
+          ));
+      }
+      peer_json.push(']');
+
+      // Return a JSON response with all peers
+      let response = format!(
+        "{{\"peers\":{},\"count\":{},\"local\":\"{}\"}}",
+        peer_json,
+        peer_infos.len(),
+        local_peer
+      );
+
+      let content_length = response.len();
+      let mut resp =
+        pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
+      resp
+        .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
+        .unwrap();
+      resp
+        .insert_header(http::header::CONTENT_TYPE, "application/json")
+        .unwrap();
+
+      session.write_response_header(Box::new(resp), false).await?;
+      session
+        .write_response_body(Some(response.into()), true)
+        .await?;
+      session.set_keepalive(None);
+      return Ok(true);
+    }
+
+    // Handle the owner endpoint
+    if let Some(path_part) = path.strip_prefix("/_internal/mesh/owner/") {
+      if !path_part.is_empty() {
+        // Extract tenant and room_id from the path
+        // Expected format: /_internal/mesh/owner/{tenant}/{room_id}
+        let parts: Vec<&str> = path_part.split('/').collect();
+        if parts.len() == 2 {
+          let tenant = parts[0];
+          let room_id = parts[1];
+
+          let owner =
+            self.node_state.peer_manager.get_owner_peer(tenant, room_id);
+          let is_local =
+            self.node_state.peer_manager.is_local_owner(tenant, room_id);
+
+          // Return a simple JSON response with owner information
+          let response = format!(
+            "{{\"tenant\":\"{}\",\"room_id\":\"{}\",\"owner\":\"{}\",\"is_local\":{}}}",
+            tenant, room_id, owner, is_local
+          );
+
+          let content_length = response.len();
+          let mut resp =
+            pingora::http::ResponseHeader::build(StatusCode::OK, Some(2))
+              .unwrap();
+          resp
+            .insert_header(
+              http::header::CONTENT_LENGTH,
+              content_length.to_string(),
+            )
+            .unwrap();
+          resp
+            .insert_header(http::header::CONTENT_TYPE, "application/json")
+            .unwrap();
+
+          session.write_response_header(Box::new(resp), false).await?;
+          session
+            .write_response_body(Some(response.into()), true)
+            .await?;
+          session.set_keepalive(None);
+          return Ok(true);
+        }
+      }
+    }
+
+    // If we didn't match any known internal endpoint, return a 404
+    let response = "Not Found";
+    let content_length = response.len();
+    let mut resp =
+      pingora::http::ResponseHeader::build(StatusCode::NOT_FOUND, Some(2))
+        .unwrap();
+    resp
+      .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
+      .unwrap();
+    resp
+      .insert_header(http::header::CONTENT_TYPE, "text/plain")
+      .unwrap();
+
+    session.write_response_header(Box::new(resp), false).await?;
+    session
+      .write_response_body(Some(response.into()), true)
+      .await?;
+    session.set_keepalive(None);
+
+    Ok(true)
+  }
+
+  // This is a simple endpoint handler that doesn't need to proxy to an upstream
+  async fn upstream_peer(
+    &self,
+    _session: &mut Session,
+    _ctx: &mut Self::CTX,
+  ) -> pingora::Result<Box<HttpPeer>> {
+    // This should not be called because request_filter always returns true
+    Err(pingora::Error::explain(
+      ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
+      "Internal control plane does not support proxying",
+    ))
+  }
 }
 
 #[async_trait::async_trait]
@@ -140,50 +297,18 @@ impl ProxyHttp for Proxy {
     // Get the path
     let path = req_header.uri.path();
 
-    // Special endpoints for mesh network debugging
-
-    // Endpoint to list all peers in the mesh
-    // TODO this shouldn't be on data_port but instead on control_port
-    if path == "/_mesh/peers" {
-      let local_peer = self.node_state.peer_manager.get_local_peer();
-
-      // Get peer info with full details if it's available through the cluster membership
-      let peer_infos = self.node_state.peer_manager.get_all_peer_info();
-
-      // Build a JSON array of peers
-      let mut peer_json = String::from("[");
-      for (i, info) in peer_infos.iter().enumerate() {
-        if i > 0 {
-          peer_json.push(',');
-        }
-        let is_local =
-          info.node_id == self.node_state.peer_manager.get_local_node_id();
-        peer_json.push_str(&format!(
-            "{{\"node_id\":\"{}\",\"address\":\"{}\",\"is_local\":{},\"last_heartbeat\":\"{}\"}}",
-            info.node_id,
-            info.advertise_addr,
-            is_local,
-            info.heartbeat_timestamp
-          ));
-      }
-      peer_json.push(']');
-
-      // Return a JSON response with all peers
-      let response = format!(
-        "{{\"peers\":{},\"count\":{},\"local\":\"{}\"}}",
-        peer_json,
-        peer_infos.len(),
-        local_peer
-      );
-
+    // Handle requests to the old mesh endpoints - just return 404 to indicate they've moved
+    if path.starts_with("/_mesh/") {
+      let response = "Mesh endpoints have moved to the internal API";
       let content_length = response.len();
       let mut resp =
-        pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
+        pingora::http::ResponseHeader::build(StatusCode::NOT_FOUND, Some(2))
+          .unwrap();
       resp
         .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
         .unwrap();
       resp
-        .insert_header(http::header::CONTENT_TYPE, "application/json")
+        .insert_header(http::header::CONTENT_TYPE, "text/plain")
         .unwrap();
 
       session.write_response_header(Box::new(resp), false).await?;
@@ -192,48 +317,6 @@ impl ProxyHttp for Proxy {
         .await?;
       session.set_keepalive(None);
       return Ok(true);
-    }
-
-    // Endpoint to check which peer is responsible for a room
-    // TODO this shouldn't be on data_port but instead on control_port
-    if let Some(room_id) = path.strip_prefix("/_mesh/owner/") {
-      if !room_id.is_empty() {
-        let owner = self
-          .node_state
-          .peer_manager
-          .get_owner_peer(&ctx.tenant, room_id);
-        let is_local = self
-          .node_state
-          .peer_manager
-          .is_local_owner(&ctx.tenant, room_id);
-
-        // Return a simple JSON response with owner information
-        let response = format!(
-          "{{\"room_id\":\"{}\",\"owner\":\"{}\",\"is_local\":{}}}",
-          room_id, owner, is_local
-        );
-
-        let content_length = response.len();
-        let mut resp =
-          pingora::http::ResponseHeader::build(StatusCode::OK, Some(2))
-            .unwrap();
-        resp
-          .insert_header(
-            http::header::CONTENT_LENGTH,
-            content_length.to_string(),
-          )
-          .unwrap();
-        resp
-          .insert_header(http::header::CONTENT_TYPE, "application/json")
-          .unwrap();
-
-        session.write_response_header(Box::new(resp), false).await?;
-        session
-          .write_response_body(Some(response.into()), true)
-          .await?;
-        session.set_keepalive(None);
-        return Ok(true);
-      }
     }
 
     // Check if this is a /room/* path - if so, let the default proxy path handle it
@@ -627,6 +710,17 @@ fn start_server(config: config::Config) -> Server {
   // Configure the proxy service to listen on the specified address
   proxy_service.add_tcp(&node_state.config.listen_addr);
 
+  // Create the internal API handler
+  let internal_api = InternalAPI {
+    node_state: node_state.clone(),
+  };
+
+  // Create an HTTP service for the internal API
+  let mut internal_service = http_proxy_service(&pingora_config2, internal_api);
+
+  // Configure the internal service to listen on the internal address
+  internal_service.add_tcp(&node_state.config.internal_listen_addr);
+
   server.add_service(background_service(
     "process_reaper",
     ProcessReaper::new(
@@ -651,12 +745,15 @@ fn start_server(config: config::Config) -> Server {
     ));
   }
 
-  // Add the proxy service to the server
+  // Add the public proxy service to the server
   server.add_service(proxy_service);
 
+  // Add the internal service to the server
+  server.add_service(internal_service);
+
   debug!(
-    "Starting Deno Deploy proxy server on {}",
-    node_state.config.listen_addr
+    "Starting Deno Deploy proxy server on {} (public) and {} (internal)",
+    node_state.config.listen_addr, node_state.config.internal_listen_addr
   );
   server
 }
@@ -719,6 +816,7 @@ mod tests {
     // Ensure we're using a clean environment for the test server
     std::env::set_var("ADVERTISE_ADDR", "127.0.0.1:6146"); // Set advertise address
     std::env::set_var("LISTEN_ADDR", "127.0.0.1:6146"); // Set listen address
+    std::env::set_var("INTERNAL_LISTEN_ADDR", "127.0.0.1:6147"); // Set internal address
     std::env::set_var("DATA", "./data"); // Set data directory
     std::env::set_var("ROOMD_HEARTBEAT_INTERVAL", "2"); // Fast heartbeat for tests
     std::env::set_var("ROOMD_GRACE_PERIOD_SECONDS", "0");

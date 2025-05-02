@@ -13,6 +13,8 @@ pub struct Config {
   pub listen_addr: String,
   /// IP:port to advertise to other nodes
   pub advertise_addr: String,
+  /// IP:port for internal control plane communication
+  pub internal_listen_addr: String,
   /// S3 endpoint for cluster membership and distributed locking
   pub s3_endpoint: Option<String>,
   /// S3 bucket for cluster membership and distributed locking
@@ -96,6 +98,24 @@ impl Config {
       format!("0.0.0.0:{}", port)
     });
 
+    // Get internal_listen_addr with fallback to advertise_addr + 1
+    let internal_listen_addr = var("INTERNAL_LISTEN_ADDR").unwrap_or_else(|_| {
+      // If not set, use advertise_addr with port + 1
+      let host = advertise_addr.split(':').next().unwrap_or("127.0.0.1");
+      let port = advertise_addr
+        .split(':')
+        .nth(1)
+        .and_then(|p| p.parse::<u16>().ok())
+        .map(|p| p + 1)
+        .unwrap_or(3001);
+      // Log a warning for multi-node setups
+      info!(
+        "INTERNAL_LISTEN_ADDR not set, using {}:{} (derived from ADVERTISE_ADDR). For production clusters, explicitly set INTERNAL_LISTEN_ADDR.",
+        host, port
+      );
+      format!("{}:{}", host, port)
+    });
+
     // Get data_dir with fallback to ./data
     let data_dir_str = var("DATA").unwrap_or_else(|_| "./data".to_string());
     let data_dir = PathBuf::from(&data_dir_str);
@@ -133,6 +153,7 @@ impl Config {
     Ok(Config {
       listen_addr,
       advertise_addr,
+      internal_listen_addr,
       data_dir,
       heartbeat_interval,
       staleness_threshold,

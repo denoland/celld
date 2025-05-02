@@ -1,7 +1,6 @@
 # Roadmap: Phase 5 - Internal Control Plane
 
-**Status:** Not Started 
-**Leads To:** Phase 6 (Alarms API)
+**Status:** Completed **Leads To:** Phase 6 (Alarms API)
 
 ## Goal
 
@@ -19,9 +18,8 @@ infrastructure for future features requiring node-to-node RPCs (like Alarms).
 ## Key Tasks
 
 1. **Configuration:**
-   - **Define Env Var:** Introduce `ROOMD_INTERNAL_LISTEN_ADDR` environment
-     variable (e.g., `127.0.0.1:6147`). This address is used _only_ for internal
-     RPCs.
+   - **Define Env Var:** Introduce `INTERNAL_LISTEN_ADDR` environment variable
+     (e.g., `127.0.0.1:6147`). This address is used _only_ for internal RPCs.
    - **Default Behavior (Optional):** Consider if a default derivation (e.g.,
      from `LISTEN_ADDR` or `ADVERTISE_ADDR` + offset, bound to loopback) is
      useful for single-node convenience, but log a warning recommending explicit
@@ -29,11 +27,10 @@ infrastructure for future features requiring node-to-node RPCs (like Alarms).
      explicitly per instance.
    - **Update `config.rs`:** Parse and store `internal_listen_addr`. Validate
      format.
-   - **Documentation:** Clearly document `ROOMD_INTERNAL_LISTEN_ADDR`, its
-     purpose (internal control plane), and recommend firewalling it from
-     external access. Explain its relationship to `LISTEN_ADDR` (public data
-     plane) and `ADVERTISE_ADDR` (how other nodes reach this node's public data
-     plane).
+   - **Documentation:** Clearly document `INTERNAL_LISTEN_ADDR`, its purpose
+     (internal control plane), and recommend firewalling it from external
+     access. Explain its relationship to `LISTEN_ADDR` (public data plane) and
+     `ADVERTISE_ADDR` (how other nodes reach this node's public data plane).
 
 2. **Pingora Server Setup (`main.rs`):**
    - In `start_server`:
@@ -63,7 +60,7 @@ infrastructure for future features requiring node-to-node RPCs (like Alarms).
        conflicts. Suggestion: use base port `N` for public (`ADVERTISE_ADDR`,
        `LISTEN_ADDR`) and `N+1` for internal (`INTERNAL_LISTEN_ADDR`).
      - `spawn_roomd_instance` must set both `ADVERTISE_ADDR` (for data plane
-       routing/S3 registration) and `ROOMD_INTERNAL_LISTEN_ADDR` env vars.
+       routing/S3 registration) and `INTERNAL_LISTEN_ADDR` env vars.
      - `TestEnv` should provide helpers to get _both_ the public and internal
        address for a given test instance.
      - Modify tests like `test_mesh_dynamic_membership`,
@@ -73,8 +70,7 @@ infrastructure for future features requiring node-to-node RPCs (like Alarms).
        - Target the new `/_internal/mesh/*` paths.
    - **Refactor `main.rs` tests (`TEST_SERVER`):**
      - The `Lazy` static setup needs to set _both_ `LISTEN_ADDR` (e.g.,
-       `127.0.0.1:6146`) and `ROOMD_INTERNAL_LISTEN_ADDR` (e.g.,
-       `127.0.0.1:6147`).
+       `127.0.0.1:6146`) and `INTERNAL_LISTEN_ADDR` (e.g., `127.0.0.1:6147`).
      - Verify if any tests in `main.rs::tests` were implicitly relying on
        `/mesh` endpoints (unlikely, but double-check). Most tests there focus on
        public port functionality (proxying, websockets, static files) and should

@@ -19,6 +19,7 @@ pub async fn benchmark_deno_coldstart(iterations: usize) -> Result<()> {
         data_dir: PathBuf::from("./data"),
         listen_addr: "127.0.0.1:8000".to_string(),
         advertise_addr: "127.0.0.1:8000".to_string(),
+        internal_listen_addr: "127.0.0.1:8001".to_string(),
         s3_endpoint: None,
         s3_bucket: None,
         s3_region: None,

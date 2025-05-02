@@ -85,7 +85,7 @@ SKIPPING FOR NOW.
 - **Outcome:** A clear demonstration of the system's dynamic nature and
   resilience, proving the core value proposition of the "substrate".
 
-### Phase 5: Internal Control Plane
+### Phase 5: Internal Control Plane (COMPLETED)
 
 - **Problem:** Internal operations (cluster status checks, future RPCs like
   alarm scheduling/dispatch) currently lack a dedicated, secure communication
@@ -95,7 +95,7 @@ SKIPPING FOR NOW.
   node-to-node communication and internal API calls.
 - **Tasks:**
   1. **Configuration:** Add new configuration option (e.g., env var
-     `ROOMD_INTERNAL_LISTEN_ADDR`) for the internal listener address/port.
+     `INTERNAL_LISTEN_ADDR`) for the internal listener address/port.
   2. **Pingora Setup:** Configure Pingora (`main.rs`) to start a _second_
      listener service bound to the internal address.
   3. **Internal Handlers:** Implement basic handlers on the internal service.

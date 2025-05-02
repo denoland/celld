@@ -5,7 +5,9 @@ use futures_util::{SinkExt, StreamExt};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::Duration;
 use test_utils::MinioTestServer;
 use tokio::time::sleep;
@@ -16,9 +18,8 @@ use uuid::Uuid;
 /// Tests that we can connect to a room through any node in the mesh
 #[tokio::test]
 async fn test_mesh_room_connection() {
-  // Start 3 server instances with different ports
-  let ports = [7001, 7002, 7003];
-  let _test_env = TestEnv::new(&ports);
+  // Start 3 server instances with auto-allocated ports
+  let test_env = TestEnv::new(3);
 
   // Servers are already initialized with the TCP health checks
 
@@ -29,7 +30,7 @@ async fn test_mesh_room_connection() {
   let mut connections = Vec::new();
   let mut usernames = Vec::new();
 
-  for &port in &ports {
+  for &port in &test_env.public_ports {
     let (conn, username) = connect_to_room(port, room_id).await;
     connections.push(conn);
     usernames.push(username);
@@ -68,9 +69,8 @@ async fn test_mesh_room_connection() {
 /// Tests that messages broadcast correctly across the mesh
 #[tokio::test]
 async fn test_mesh_message_broadcast() {
-  // Start 3 server instances with different ports
-  let ports = [7011, 7012, 7013];
-  let _test_env = TestEnv::new(&ports);
+  // Start 3 server instances with auto-allocated ports
+  let test_env = TestEnv::new(3);
 
   // Servers are already initialized with the TCP health checks
 
@@ -78,10 +78,12 @@ async fn test_mesh_message_broadcast() {
   let room_id = "broadcast-mesh-test";
 
   // Connect two clients to the room through different servers
-  let (mut client1, username1) = connect_to_room(ports[0], room_id).await;
+  let (mut client1, username1) =
+    connect_to_room(test_env.public_ports[0], room_id).await;
 
   // The second client connection will now wait until it gets proper welcome messages
-  let (mut client2, _) = connect_to_room(ports[1], room_id).await;
+  let (mut client2, _) =
+    connect_to_room(test_env.public_ports[1], room_id).await;
 
   // Client 1 should receive system message about client 2 joining
   let system_data = read_message_of_type(&mut client1, "system", 5000).await;
@@ -120,11 +122,13 @@ async fn test_mesh_message_broadcast() {
 #[tokio::test]
 async fn test_mesh_dynamic_membership() {
   // Start 3 server instances with different ports
-  let ports = [7041, 7042, 7043];
-  let mut test_env = TestEnv::new(&ports);
+  // Using ports far enough apart to avoid conflicts with internal ports (port+1)
+  let ports = [7041, 7043, 7045];
+  let mut test_env = TestEnv::new_with_ports(&ports);
 
-  // 1. Query the first node's /_mesh/peers endpoint to check if all nodes are visible
-  let peers_url = format!("http://localhost:{0}/_mesh/peers", ports[0]);
+  // 1. Query the first node's internal mesh/peers endpoint to check if all nodes are visible
+  let peers_url =
+    format!("http://localhost:{}/_internal/mesh/peers", ports[0] + 1);
   let peers_response = reqwest::get(&peers_url).await.unwrap();
   let peers_text = peers_response.text().await.unwrap();
   let peers_value: serde_json::Value =
@@ -197,15 +201,16 @@ async fn test_mesh_dynamic_membership() {
 /// Tests that room isolation works properly in the mesh
 #[tokio::test]
 async fn test_mesh_room_isolation() {
-  // Start 3 server instances with different ports
-  let ports = [7021, 7022, 7023];
-  let _test_env = TestEnv::new(&ports);
+  // Start 3 server instances with auto-allocated ports
+  let test_env = TestEnv::new(3);
 
   // Servers are already initialized with the TCP health checks
 
   // Connect to two different rooms through different servers
-  let (mut client1, username1) = connect_to_room(ports[0], "room-a").await;
-  let (mut client2, username2) = connect_to_room(ports[1], "room-b").await;
+  let (mut client1, username1) =
+    connect_to_room(test_env.public_ports[0], "room-a").await;
+  let (mut client2, username2) =
+    connect_to_room(test_env.public_ports[1], "room-b").await;
 
   // Send a message in room-a
   let message_room1 = "This message should only be in room-a";
@@ -253,9 +258,8 @@ async fn test_mesh_room_isolation() {
 /// another node automatically takes over responsibility for the room (Durability Test 2)
 #[tokio::test]
 async fn test_node_failure_takeover() {
-  // Setup three nodes in the mesh
-  let ports = [7031, 7032, 7033];
-  let mut test_env = TestEnv::new(&ports);
+  // Setup three nodes in the mesh with auto-allocated ports
+  let mut test_env = TestEnv::new(3);
 
   // Use unique room ID to avoid conflicts with other tests
   let test_room_id = format!("failover-test-{}", Uuid::new_v4().simple());
@@ -265,9 +269,13 @@ async fn test_node_failure_takeover() {
   let mut primary_owner_port = 0;
   let mut secondary_owners = Vec::new();
 
-  for &port in &ports {
-    let owner_url =
-      format!("http://localhost:{}/_mesh/owner/{}", port, test_room_id);
+  for i in 0..test_env.public_ports.len() {
+    let public_port = test_env.public_ports[i];
+    let internal_port = test_env.internal_ports[i];
+    let owner_url = format!(
+      "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
+      internal_port, test_room_id
+    );
     let owner_resp = reqwest::get(&owner_url)
       .await
       .unwrap()
@@ -275,13 +283,13 @@ async fn test_node_failure_takeover() {
       .await
       .unwrap();
 
-    println!("Node on port {} owner info: {}", port, owner_resp);
+    println!("Node on port {} owner info: {}", public_port, owner_resp);
 
     let is_owner = owner_resp["is_local"].as_bool().unwrap();
     if is_owner {
-      primary_owner_port = port;
+      primary_owner_port = public_port;
     } else {
-      secondary_owners.push(port);
+      secondary_owners.push(public_port);
     }
   }
 
@@ -296,6 +304,13 @@ async fn test_node_failure_takeover() {
 
   println!("Primary owner is on port: {}", primary_owner_port);
   println!("Secondary owners are on ports: {:?}", secondary_owners);
+
+  // Find the index of the primary owner in the test_env.public_ports array
+  let primary_index = test_env
+    .public_ports
+    .iter()
+    .position(|&p| p == primary_owner_port)
+    .unwrap();
 
   // Send request to the primary node to create data in the room
   let url = format!(
@@ -322,8 +337,7 @@ async fn test_node_failure_takeover() {
 
   // Abruptly kill the primary node (simulate node failure)
   println!("Killing primary node on port {}...", primary_owner_port);
-  let primary_index =
-    ports.iter().position(|&p| p == primary_owner_port).unwrap();
+  // We already found the primary_index earlier
   test_env.kill_roomd_instance(primary_index);
 
   // Wait for node failure to be detected (heartbeat timeout)
@@ -356,9 +370,25 @@ async fn test_node_failure_takeover() {
 
   // Check which node owns the room now (should be one of the secondary nodes)
   let mut new_owner_found = false;
-  for &port in &secondary_owners {
-    let owner_url =
-      format!("http://localhost:{}/_mesh/owner/{}", port, test_room_id);
+  for &public_port in &secondary_owners {
+    // Find the matching internal port for this public port
+    let i = test_env
+      .public_ports
+      .iter()
+      .position(|&p| p == public_port)
+      .unwrap_or_else(|| {
+        // This could happen if ports changed - find the index in the secondary_owners array instead
+        secondary_owners
+          .iter()
+          .position(|&p| p == public_port)
+          .unwrap()
+      });
+    let internal_port = test_env.internal_ports[i];
+
+    let owner_url = format!(
+      "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
+      internal_port, test_room_id
+    );
     let owner_resp = reqwest::get(&owner_url)
       .await
       .unwrap()
@@ -368,13 +398,13 @@ async fn test_node_failure_takeover() {
 
     println!(
       "After failover, node on port {} owner info: {}",
-      port, owner_resp
+      public_port, owner_resp
     );
 
     let is_owner = owner_resp["is_local"].as_bool().unwrap();
     if is_owner {
       new_owner_found = true;
-      println!("New owner after failover is on port: {}", port);
+      println!("New owner after failover is on port: {}", public_port);
       break;
     }
   }
@@ -389,9 +419,8 @@ async fn test_node_failure_takeover() {
 #[tokio::test]
 #[ignore] // Flaky mostly working but needs more investigation.
 async fn test_concurrent_takeover_locking() {
-  // Setup three nodes in the mesh
-  let ports = [7071, 7072, 7073];
-  let mut test_env = TestEnv::new(&ports);
+  // Setup three nodes in the mesh with auto-allocated ports
+  let mut test_env = TestEnv::new(3);
 
   // Use unique room ID to avoid conflicts with other tests
   let test_room_id = format!("takeover-lock-test-{}", Uuid::new_v4().simple());
@@ -401,9 +430,13 @@ async fn test_concurrent_takeover_locking() {
   let mut primary_owner_port = 0;
   let mut secondary_owners = Vec::new();
 
-  for &port in &ports {
-    let owner_url =
-      format!("http://localhost:{}/_mesh/owner/{}", port, test_room_id);
+  for i in 0..test_env.public_ports.len() {
+    let public_port = test_env.public_ports[i];
+    let internal_port = test_env.internal_ports[i];
+    let owner_url = format!(
+      "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
+      internal_port, test_room_id
+    );
     let owner_resp = reqwest::get(&owner_url)
       .await
       .unwrap()
@@ -411,13 +444,13 @@ async fn test_concurrent_takeover_locking() {
       .await
       .unwrap();
 
-    println!("Node on port {} owner info: {}", port, owner_resp);
+    println!("Node on port {} owner info: {}", public_port, owner_resp);
 
     let is_owner = owner_resp["is_local"].as_bool().unwrap();
     if is_owner {
-      primary_owner_port = port;
+      primary_owner_port = public_port;
     } else {
-      secondary_owners.push(port);
+      secondary_owners.push(public_port);
     }
   }
 
@@ -452,8 +485,11 @@ async fn test_concurrent_takeover_locking() {
     "Shutting down primary node on port {}...",
     primary_owner_port
   );
-  let primary_index =
-    ports.iter().position(|&p| p == primary_owner_port).unwrap();
+  let primary_index = test_env
+    .public_ports
+    .iter()
+    .position(|&p| p == primary_owner_port)
+    .unwrap();
   test_env.kill_roomd_instance(primary_index);
 
   // Sleep to ensure the primary node has fully shutdown
@@ -462,8 +498,11 @@ async fn test_concurrent_takeover_locking() {
   // Create URLs for the secondary nodes
   let secondary_urls: Vec<String> = secondary_owners
     .iter()
-    .map(|&port| {
-      format!("http://basic-db.localhost:{}/room/{}", port, test_room_id)
+    .map(|&public_port| {
+      format!(
+        "http://basic-db.localhost:{}/room/{}",
+        public_port, test_room_id
+      )
     })
     .collect();
 
@@ -516,9 +555,26 @@ async fn test_concurrent_takeover_locking() {
 
   // Check which node owns the room now (only one should claim ownership)
   let mut owner_count = 0;
-  for &port in &secondary_owners {
-    let owner_url =
-      format!("http://localhost:{}/_mesh/owner/{}", port, test_room_id);
+  for &public_port in &secondary_owners {
+    // Find the matching internal port
+    let i = test_env
+      .public_ports
+      .iter()
+      .position(|&p| p == public_port)
+      .unwrap_or_else(|| {
+        // This could happen if ports changed - fall back to a reasonable default
+        println!(
+          "Warning: Could not find public port {} in test_env.public_ports",
+          public_port
+        );
+        0
+      });
+    let internal_port = test_env.internal_ports[i];
+
+    let owner_url = format!(
+      "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
+      internal_port, test_room_id
+    );
     let owner_resp = reqwest::get(&owner_url)
       .await
       .unwrap()
@@ -528,12 +584,12 @@ async fn test_concurrent_takeover_locking() {
 
     println!(
       "After takeover, node on port {} owner info: {}",
-      port, owner_resp
+      public_port, owner_resp
     );
 
     if owner_resp["is_local"].as_bool().unwrap() {
       owner_count += 1;
-      println!("Owner after takeover is on port: {}", port);
+      println!("Owner after takeover is on port: {}", public_port);
     }
   }
 
@@ -546,9 +602,8 @@ async fn test_concurrent_takeover_locking() {
 // to move to hyper to get better control of the request forwarding.
 #[ignore]
 async fn test_proxy_forwarding_retry() {
-  // Setup three nodes in the mesh
-  let ports = [7081, 7082, 7083];
-  let mut test_env = TestEnv::new(&ports);
+  // Setup three nodes in the mesh with auto-allocated ports
+  let mut test_env = TestEnv::new(3);
 
   // Use unique room ID to avoid conflicts with other tests
   let test_room_id = format!("proxy-retry-test-{}", Uuid::new_v4().simple());
@@ -556,9 +611,13 @@ async fn test_proxy_forwarding_retry() {
 
   // Find which node is the primary owner for this room
   let mut owner_info = Vec::new();
-  for &port in &ports {
-    let owner_url =
-      format!("http://localhost:{}/_mesh/owner/{}", port, test_room_id);
+  for i in 0..test_env.public_ports.len() {
+    let public_port = test_env.public_ports[i];
+    let internal_port = test_env.internal_ports[i];
+    let owner_url = format!(
+      "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
+      internal_port, test_room_id
+    );
     let owner_resp = reqwest::get(&owner_url)
       .await
       .unwrap()
@@ -566,12 +625,12 @@ async fn test_proxy_forwarding_retry() {
       .await
       .unwrap();
 
-    println!("Node on port {} owner info: {}", port, owner_resp);
+    println!("Node on port {} owner info: {}", public_port, owner_resp);
 
     let is_owner = owner_resp["is_local"].as_bool().unwrap();
     let owner_addr = owner_resp["owner"].as_str().unwrap().to_string();
 
-    owner_info.push((port, is_owner, owner_addr));
+    owner_info.push((public_port, is_owner, owner_addr));
   }
 
   // Sort owner info to get primary and backups in order
@@ -605,8 +664,11 @@ async fn test_proxy_forwarding_retry() {
 
   // Kill the primary node
   println!("Killing primary node on port {}...", primary_owner_port);
-  let primary_index =
-    ports.iter().position(|&p| p == primary_owner_port).unwrap();
+  let primary_index = test_env
+    .public_ports
+    .iter()
+    .position(|&p| p == primary_owner_port)
+    .unwrap();
   test_env.kill_roomd_instance(primary_index);
 
   // Wait for heartbeat timeout to detect node failure
@@ -697,8 +759,9 @@ async fn test_restore_coordination() {
   let test_room_id = format!("restore-coord-{}", Uuid::new_v4().simple());
   println!("test_restore_coordination with room ID: {}", test_room_id);
 
-  let port_a = 7051;
-  let mut test_env = TestEnv::new(&[port_a]);
+  // Create a single-node environment
+  let mut test_env = TestEnv::new(1);
+  let port_a = test_env.public_ports[0];
 
   // Send request to Node A to create data in the room
   let url_a =
@@ -738,9 +801,10 @@ async fn test_restore_coordination() {
   let _ = std::fs::remove_file(format!("{}-shm", db_path));
 
   // Rest of the test remains unchanged
-  // Spawn Node B and Node C immediately after each other
-  let port_b = 7052;
-  let port_c = 7053;
+  // Spawn two more nodes with auto-allocated ports
+  println!("Starting Node B and Node C with auto-allocated ports");
+  let port_b = TestEnv::allocate_ports(7600, 1, 2)[0];
+  let port_c = TestEnv::allocate_ports(7610, 1, 2)[0];
 
   println!("Starting Node B on port {}", port_b);
   test_env.spawn_roomd_instance(port_b);
@@ -753,10 +817,16 @@ async fn test_restore_coordination() {
   sleep(Duration::from_secs(8)).await;
 
   // Determine which node is responsible for the room by querying both
-  let owner_url_b =
-    format!("http://localhost:{}/_mesh/owner/{}", port_b, test_room_id);
-  let owner_url_c =
-    format!("http://localhost:{}/_mesh/owner/{}", port_c, test_room_id);
+  let owner_url_b = format!(
+    "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
+    port_b + 1,
+    test_room_id
+  );
+  let owner_url_c = format!(
+    "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
+    port_c + 1,
+    test_room_id
+  );
 
   let owner_resp_b = reqwest::get(&owner_url_b)
     .await
@@ -812,8 +882,9 @@ async fn test_restore_coordination() {
 /// Tests that replication and restore works correctly within a single room
 #[tokio::test]
 async fn test_restore_single() {
-  let port = 7061;
-  let mut test_env = TestEnv::new(&[port]);
+  // Create a single-node environment
+  let mut test_env = TestEnv::new(1);
+  let port = test_env.public_ports[0];
 
   let test_room_id = "test-restore";
   clean_room_workspace(test_room_id, &test_env);
@@ -834,7 +905,7 @@ async fn test_restore_single() {
   println!("Removing local database files...");
   clean_room_workspace(test_room_id, &test_env);
 
-  let new_port = 7062;
+  let new_port = TestEnv::allocate_ports(7620, 1, 2)[0];
   test_env.spawn_roomd_instance(new_port);
   TestEnv::wait_for_server_ready(new_port);
 
@@ -889,17 +960,63 @@ fn clean_room_workspace(room_id: &str, test_env: &TestEnv) {
   println!("Cleaned workspace for room: {}", room_id);
 }
 
+lazy_static::lazy_static! {
+  static ref USED_PORTS: Mutex<HashSet<u16>> = Mutex::new(HashSet::new());
+}
+
 struct TestEnv {
   servers: Vec<Child>,
   ports: Vec<u16>,
   minio_server: MinioTestServer,
   test_id: String,
   bucket_name: String,
+  // Make public_ports public for tests that need to access them
+  pub public_ports: Vec<u16>,
+  pub internal_ports: Vec<u16>,
 }
 
 impl TestEnv {
-  // Start mesh nodes with the provided ports, using a real MinIO server
-  fn new(ports: &[u16]) -> Self {
+  // Reserve a block of consecutive free ports
+  fn allocate_ports(base: u16, count: usize, spacing: u16) -> Vec<u16> {
+    let mut lock = USED_PORTS.lock().unwrap();
+    let mut allocated = Vec::with_capacity(count);
+    let mut next_port = base;
+
+    while allocated.len() < count {
+      // Check if this port or its internal port (port+1) are already used
+      if !lock.contains(&next_port) && !lock.contains(&(next_port + 1)) {
+        // Reserve both the public port and its internal port
+        lock.insert(next_port);
+        lock.insert(next_port + 1);
+        allocated.push(next_port);
+      }
+      // Move to next port candidate with spacing to avoid conflicts
+      next_port += spacing;
+    }
+
+    allocated
+  }
+
+  // Start mesh nodes with auto-allocated non-conflicting ports
+  fn new(count: usize) -> Self {
+    // Start with port 7500 and use spacing of 2 to avoid conflicts with internal ports
+    let ports = Self::allocate_ports(7500, count, 2);
+    Self::new_with_ports(&ports)
+  }
+
+  // Backwards compatibility method that takes explicit ports
+  fn new_with_ports(ports: &[u16]) -> Self {
+    // Mark all the provided ports and their internal ports as used
+    let mut lock = USED_PORTS.lock().unwrap();
+    for &port in ports {
+      lock.insert(port);
+      lock.insert(port + 1);
+    }
+    drop(lock);
+
+    // Calculate internal ports
+    let public_ports = ports.to_vec();
+    let internal_ports: Vec<u16> = ports.iter().map(|&p| p + 1).collect();
     // Start MinIO server for testing with a dynamically assigned port
     let bucket_name = "test-mesh-bucket".to_string();
     let minio_server = MinioTestServer::start();
@@ -913,6 +1030,8 @@ impl TestEnv {
       minio_server,
       bucket_name,
       test_id: test_id.to_string(),
+      public_ports: public_ports.clone(),
+      internal_ports: internal_ports.clone(),
     };
 
     for &port in ports.iter() {
@@ -942,8 +1061,10 @@ impl TestEnv {
 
   fn spawn_roomd_instance(&mut self, port: u16) {
     let advertise_addr = format!("127.0.0.1:{}", port);
+    let internal_addr = format!("127.0.0.1:{}", port + 1);
     let server = Command::new(env!("CARGO_BIN_EXE_roomd"))
       .env("ADVERTISE_ADDR", &advertise_addr)
+      .env("INTERNAL_LISTEN_ADDR", &internal_addr)
       .env("DATA", "./data")
       .env("ROOMD_HEARTBEAT_INTERVAL", "2")
       .env("ROOMD_GRACE_PERIOD_SECONDS", "0")
@@ -979,28 +1100,45 @@ impl TestEnv {
   fn wait_for_server_ready(port: u16) {
     const MAX_ATTEMPTS: usize = 10;
     const RETRY_DELAY_MS: u64 = 200;
-    for attempt in 1..=MAX_ATTEMPTS {
-      match std::net::TcpStream::connect(format!("127.0.0.1:{}", port)) {
-        Ok(_) => {
-          return;
-        }
-        Err(_) => {
-          println!(
-            "Waiting for server on port {} (attempt {}/{})",
-            port, attempt, MAX_ATTEMPTS
-          );
-          std::thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
+
+    // Check both the data port and the internal port (port + 1)
+    let ports = [port, port + 1];
+
+    for &p in &ports {
+      for attempt in 1..=MAX_ATTEMPTS {
+        match std::net::TcpStream::connect(format!("127.0.0.1:{}", p)) {
+          Ok(_) => {
+            println!("Port {} is ready", p);
+            break;
+          }
+          Err(_) => {
+            println!(
+              "Waiting for server on port {} (attempt {}/{})",
+              p, attempt, MAX_ATTEMPTS
+            );
+            std::thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
+            if attempt == MAX_ATTEMPTS {
+              panic!("Server on port {} failed to start", p);
+            }
+          }
         }
       }
     }
-    panic!("Server on port {} failed to start", port);
   }
 }
 
 impl Drop for TestEnv {
   fn drop(&mut self) {
+    // Kill all server instances
     for _i in 0..self.servers.len() {
       self.kill_roomd_instance(0);
+    }
+
+    // Release all ports
+    let mut lock = USED_PORTS.lock().unwrap();
+    for &port in &self.ports {
+      lock.remove(&port);
+      lock.remove(&(port + 1));
     }
   }
 }
@@ -1075,4 +1213,89 @@ async fn connect_to_room(
 
   println!("Connected to room {} as {}", room_id, username);
   (ws_stream, username)
+}
+
+/// Example of using the port allocation mechanism to get non-conflicting ports
+#[test]
+fn test_port_allocation() {
+  // Allocate 3 ports starting from 8000 with spacing of 2
+  let ports = TestEnv::allocate_ports(8000, 3, 2);
+
+  // Check we got 3 ports
+  assert_eq!(ports.len(), 3);
+
+  // Check the spacing is correct (each port should be 2 more than the previous)
+  for i in 1..ports.len() {
+    assert_eq!(ports[i], ports[i - 1] + 2);
+  }
+
+  // Try to allocate the same ports again - should get different ones
+  let ports2 = TestEnv::allocate_ports(8000, 3, 2);
+
+  // Check none of the ports in ports2 are in ports
+  for &p in &ports2 {
+    assert!(!ports.contains(&p));
+  }
+
+  // Manually mark one port as used
+  {
+    let mut lock = USED_PORTS.lock().unwrap();
+    lock.insert(8100);
+    lock.insert(8101); // its internal port
+  }
+
+  // Try to allocate starting from 8098 - should skip 8100
+  let ports3 = TestEnv::allocate_ports(8098, 3, 2);
+  assert_eq!(ports3.len(), 3);
+  assert!(!ports3.contains(&8100));
+}
+
+/// Example of using the automatic port allocation in TestEnv
+#[test]
+fn test_auto_port_allocation() {
+  // Create two TestEnv instances with 3 nodes each
+  let env1 = TestEnv::new(3);
+  let env2 = TestEnv::new(3);
+
+  println!("Env1 public ports: {:?}", env1.public_ports);
+  println!("Env1 internal ports: {:?}", env1.internal_ports);
+  println!("Env2 public ports: {:?}", env2.public_ports);
+  println!("Env2 internal ports: {:?}", env2.internal_ports);
+
+  // Check that none of the ports in env1 are in env2
+  for &p1 in &env1.public_ports {
+    for &p2 in &env2.public_ports {
+      assert_ne!(p1, p2, "Port {} was reused between environments", p1);
+    }
+  }
+
+  // Check that public and internal ports don't conflict
+  for &pub1 in &env1.public_ports {
+    for &int2 in &env2.internal_ports {
+      assert_ne!(
+        pub1, int2,
+        "Public port {} conflicts with internal port",
+        pub1
+      );
+    }
+  }
+
+  for &int1 in &env1.internal_ports {
+    for &pub2 in &env2.public_ports {
+      assert_ne!(
+        int1, pub2,
+        "Internal port {} conflicts with public port",
+        int1
+      );
+    }
+  }
+
+  // Check that each public port's corresponding internal port is correct (public+1)
+  for i in 0..env1.public_ports.len() {
+    assert_eq!(
+      env1.internal_ports[i],
+      env1.public_ports[i] + 1,
+      "Internal port should be public port + 1"
+    );
+  }
 }

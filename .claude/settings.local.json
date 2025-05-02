@@ -8,7 +8,13 @@
       "Bash(killall:*)",
       "Bash(true)",
       "Bash(killall:*)",
-      "Bash(true)"
+      "Bash(true)",
+      "Bash(cargo test)",
+      "Bash(cargo test)",
+      "Bash(cargo test:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(cargo fmt:*)"
     ],
     "deny": []
   }
