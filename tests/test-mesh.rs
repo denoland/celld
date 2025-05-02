@@ -943,6 +943,7 @@ impl TestEnv {
       .env("ADVERTISE_ADDR", &advertise_addr)
       .env("DATA", "./data")
       .env("ROOMD_HEARTBEAT_INTERVAL", "2")
+      .env("ROOMD_GRACE_PERIOD_SECONDS", "1")
       // Use a shorter staleness threshold for tests to detect failures faster
       .env("ROOMD_STALENESS_THRESHOLD_SECS", "6")
       .env(

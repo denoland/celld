@@ -488,10 +488,18 @@ impl ProxyHttp for Proxy {
 /// Returns the server instance
 fn start_server(config: config::Config) -> Server {
   // Create a server configuration
-  let server_conf = Arc::new(ServerConf::new().unwrap());
 
-  // Create a new Pingora server
-  let mut server = Server::new(None).unwrap();
+  let mut pingora_config = ServerConf::new().unwrap();
+  //pingora_config.graceful_shutdown_timeout_seconds = Some(1);
+  pingora_config.grace_period_seconds =
+    std::env::var("ROOMD_GRACE_PERIOD_SECONDS")
+      .ok()
+      .and_then(|s| s.parse().ok());
+
+  // not sure why we need this...
+  let pingora_config2 = Arc::new(ServerConf::new().unwrap());
+
+  let mut server = Server::new_with_opt_and_conf(None, pingora_config);
 
   // Generate a unique node ID (UUID) for this instance
   let node_id = uuid::Uuid::new_v4().to_string();
@@ -614,7 +622,7 @@ fn start_server(config: config::Config) -> Server {
   };
 
   // Create an HTTP proxy service with our app
-  let mut proxy_service = http_proxy_service(&server_conf, app);
+  let mut proxy_service = http_proxy_service(&pingora_config2, app);
 
   // Configure the proxy service to listen on the specified address
   proxy_service.add_tcp(&node_state.config.listen_addr);
@@ -713,6 +721,7 @@ mod tests {
     std::env::set_var("LISTEN_ADDR", "127.0.0.1:6146"); // Set listen address
     std::env::set_var("DATA", "./data"); // Set data directory
     std::env::set_var("ROOMD_HEARTBEAT_INTERVAL", "2"); // Fast heartbeat for tests
+    std::env::set_var("ROOMD_GRACE_PERIOD_SECONDS", "1");
 
     let h = std::thread::spawn(|| {
       // Create config from environment variables

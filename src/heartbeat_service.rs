@@ -1,6 +1,9 @@
 use crate::cluster_membership::ClusterMembership;
 use crate::peer_manager::PeerManager;
-use pingora::services::background::BackgroundService;
+use pingora::{
+  protocols::Shutdown, server::ShutdownWatch,
+  services::background::BackgroundService,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info};
@@ -18,13 +21,12 @@ pub struct HeartbeatService {
 
 #[async_trait::async_trait]
 impl BackgroundService for HeartbeatService {
-  async fn start(&self, shutdown: tokio::sync::watch::Receiver<bool>) {
+  async fn start(&self, mut shutdown: ShutdownWatch) {
     let cm = self.cluster_membership.clone();
     let peer_manager = self.peer_manager.clone();
     let interval = self.interval;
 
     let mut interval_timer = tokio::time::interval(interval);
-    let mut shutdown_receiver = shutdown.clone();
 
     loop {
       tokio::select! {
@@ -46,7 +48,7 @@ impl BackgroundService for HeartbeatService {
               }
           }
 
-          _ = shutdown_receiver.changed() => {
+          _ = shutdown.changed() => {
               // Shutdown triggered, unregister node from S3
               info!("Shutting down heartbeat service, unregistering from cluster");
               if let Err(e) = cm.unregister().await {
