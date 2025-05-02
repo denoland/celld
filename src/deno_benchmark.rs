@@ -1,12 +1,9 @@
 use anyhow::Result;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
-use crate::peer_manager::PeerManager;
-use crate::process_manager::ProcessManager;
-use crate::NodeState;
+use crate::node_state::NodeState;
 
 /// Benchmark function to measure Deno process coldstart performance
 pub async fn benchmark_deno_coldstart(iterations: usize) -> Result<()> {
@@ -31,21 +28,9 @@ pub async fn benchmark_deno_coldstart(iterations: usize) -> Result<()> {
       }
     }
   };
-  let data_dir = PathBuf::from("./data");
-  let process_manager = ProcessManager::new(data_dir);
 
-  // Create minimal peer manager and node_state for benchmark
-  let peer_manager = PeerManager::new(
-    "127.0.0.1:8000".to_string(),
-    "benchmark-node".to_string(),
-  );
-  let node_state = Arc::new(NodeState {
-    process_manager: Arc::new(process_manager),
-    peer_manager: Arc::new(peer_manager),
-    cluster_membership: None,
-    distributed_lock: None,
-    config: Arc::new(config.clone()),
-  });
+  // Create minimal node_state for benchmark
+  let node_state = NodeState::new_for_benchmark(config.clone());
 
   // Record the startup time for each iteration
   let mut results = Vec::with_capacity(iterations);

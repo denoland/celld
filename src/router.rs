@@ -1,0 +1,533 @@
+use http;
+use pingora::http::StatusCode;
+use pingora::prelude::*;
+use pingora::upstreams::peer::HttpPeer;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tracing::{debug, error};
+
+use crate::node_state::NodeState;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProxyError {
+  #[error("Invalid hostname format")]
+  InvalidHost,
+  #[error("Application not found for host: {0}")]
+  AppNotFound(String),
+  #[error("Internal Server Error: {0}")]
+  InternalError(#[from] anyhow::Error),
+  #[error("Room lock held by another node or takeover in progress")]
+  LockContention,
+}
+
+pub struct Proxy {
+  pub node_state: Arc<NodeState>,
+}
+
+pub struct InternalAPI {
+  pub node_state: Arc<NodeState>,
+}
+
+#[derive(Debug, Default)]
+pub struct Ctx {
+  pub tenant: String,
+  pub room_id: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct InternalCtx {}
+
+#[async_trait::async_trait]
+impl ProxyHttp for InternalAPI {
+  type CTX = InternalCtx;
+
+  fn new_ctx(&self) -> Self::CTX {
+    InternalCtx::default()
+  }
+
+  async fn request_filter(
+    &self,
+    session: &mut Session,
+    _ctx: &mut Self::CTX,
+  ) -> Result<bool> {
+    let req_header = session.req_header();
+
+    // Get the path
+    let path = req_header.uri.path();
+
+    // Handle internal endpoints
+    if path == "/_internal/mesh/peers" {
+      let local_peer = self.node_state.peer_manager.get_local_peer();
+
+      // Get peer info with full details if it's available through the cluster membership
+      let peer_infos = self.node_state.peer_manager.get_all_peer_info();
+
+      // Build a JSON array of peers
+      let mut peer_json = String::from("[");
+      for (i, info) in peer_infos.iter().enumerate() {
+        if i > 0 {
+          peer_json.push(',');
+        }
+        let is_local =
+          info.node_id == self.node_state.peer_manager.get_local_node_id();
+        peer_json.push_str(&format!(
+            "{{\"node_id\":\"{}\",\"address\":\"{}\",\"is_local\":{},\"last_heartbeat\":\"{}\"}}",
+            info.node_id,
+            info.advertise_addr,
+            is_local,
+            info.heartbeat_timestamp
+          ));
+      }
+      peer_json.push(']');
+
+      // Return a JSON response with all peers
+      let response = format!(
+        "{{\"peers\":{},\"count\":{},\"local\":\"{}\"}}",
+        peer_json,
+        peer_infos.len(),
+        local_peer
+      );
+
+      let content_length = response.len();
+      let mut resp =
+        pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
+      resp
+        .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
+        .unwrap();
+      resp
+        .insert_header(http::header::CONTENT_TYPE, "application/json")
+        .unwrap();
+
+      session.write_response_header(Box::new(resp), false).await?;
+      session
+        .write_response_body(Some(response.into()), true)
+        .await?;
+      session.set_keepalive(None);
+      return Ok(true);
+    }
+
+    // Handle the owner endpoint
+    if let Some(path_part) = path.strip_prefix("/_internal/mesh/owner/") {
+      if !path_part.is_empty() {
+        // Extract tenant and room_id from the path
+        // Expected format: /_internal/mesh/owner/{tenant}/{room_id}
+        let parts: Vec<&str> = path_part.split('/').collect();
+        if parts.len() == 2 {
+          let tenant = parts[0];
+          let room_id = parts[1];
+
+          let owner =
+            self.node_state.peer_manager.get_owner_peer(tenant, room_id);
+          let is_local =
+            self.node_state.peer_manager.is_local_owner(tenant, room_id);
+
+          // Return a simple JSON response with owner information
+          let response = format!(
+            "{{\"tenant\":\"{}\",\"room_id\":\"{}\",\"owner\":\"{}\",\"is_local\":{}}}",
+            tenant, room_id, owner, is_local
+          );
+
+          let content_length = response.len();
+          let mut resp =
+            pingora::http::ResponseHeader::build(StatusCode::OK, Some(2))
+              .unwrap();
+          resp
+            .insert_header(
+              http::header::CONTENT_LENGTH,
+              content_length.to_string(),
+            )
+            .unwrap();
+          resp
+            .insert_header(http::header::CONTENT_TYPE, "application/json")
+            .unwrap();
+
+          session.write_response_header(Box::new(resp), false).await?;
+          session
+            .write_response_body(Some(response.into()), true)
+            .await?;
+          session.set_keepalive(None);
+          return Ok(true);
+        }
+      }
+    }
+
+    // If we didn't match any known internal endpoint, return a 404
+    let response = "Not Found";
+    let content_length = response.len();
+    let mut resp =
+      pingora::http::ResponseHeader::build(StatusCode::NOT_FOUND, Some(2))
+        .unwrap();
+    resp
+      .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
+      .unwrap();
+    resp
+      .insert_header(http::header::CONTENT_TYPE, "text/plain")
+      .unwrap();
+
+    session.write_response_header(Box::new(resp), false).await?;
+    session
+      .write_response_body(Some(response.into()), true)
+      .await?;
+    session.set_keepalive(None);
+
+    Ok(true)
+  }
+
+  // This is a simple endpoint handler that doesn't need to proxy to an upstream
+  async fn upstream_peer(
+    &self,
+    _session: &mut Session,
+    _ctx: &mut Self::CTX,
+  ) -> pingora::Result<Box<HttpPeer>> {
+    // This should not be called because request_filter always returns true
+    Err(pingora::Error::explain(
+      ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
+      "Internal control plane does not support proxying",
+    ))
+  }
+}
+
+#[async_trait::async_trait]
+impl ProxyHttp for Proxy {
+  type CTX = Ctx;
+
+  // Required implementation of new_ctx
+  fn new_ctx(&self) -> Self::CTX {
+    Ctx::default()
+  }
+
+  // Called when the entire response is sent to the downstream, or when there is a fatal error
+  async fn logging(
+    &self,
+    _session: &mut Session,
+    _e: Option<&pingora::Error>,
+    ctx: &mut Self::CTX,
+  ) {
+    if !ctx.tenant.is_empty() {
+      let default_room = "default-room".to_string();
+      let room_id = ctx.room_id.as_ref().unwrap_or(&default_room);
+
+      let _ = self
+        .node_state
+        .process_manager
+        .decrement_connection_count(&ctx.tenant, room_id)
+        .await;
+    }
+  }
+
+  async fn request_filter(
+    &self,
+    session: &mut Session,
+    ctx: &mut Self::CTX,
+  ) -> Result<bool> {
+    let req_header = session.req_header();
+
+    // Extract and validate host header
+    let host =
+      if let Some(header_value) = req_header.headers.get(http::header::HOST) {
+        header_value.to_str().map_err(|_| {
+          error!("Host header contains invalid characters");
+          pingora::Error::explain(
+            ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
+            "Invalid Host header encoding",
+          )
+        })?
+      } else {
+        error!("Missing host header");
+        return Err(pingora::Error::explain(
+          ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
+          "Missing Host header",
+        ));
+      };
+
+    // Extract hostname without port
+    let hostname = host.split(':').next().unwrap_or(host);
+    ctx.tenant = hostname.to_string();
+
+    // Validate host format briefly (prevent directory traversal)
+    if ctx.tenant.contains('/') || ctx.tenant.contains("..") {
+      return Err(pingora::Error::explain(
+        ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
+        "Invalid Host header",
+      ));
+    }
+
+    // Only handle GET and HEAD requests
+    if req_header.method != http::Method::GET
+      && req_header.method != http::Method::HEAD
+    {
+      return Ok(false);
+    }
+
+    // Get the path
+    let path = req_header.uri.path();
+
+    // Handle requests to the old mesh endpoints - just return 404 to indicate they've moved
+    if path.starts_with("/_mesh/") {
+      let response = "Mesh endpoints have moved to the internal API";
+      let content_length = response.len();
+      let mut resp =
+        pingora::http::ResponseHeader::build(StatusCode::NOT_FOUND, Some(2))
+          .unwrap();
+      resp
+        .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
+        .unwrap();
+      resp
+        .insert_header(http::header::CONTENT_TYPE, "text/plain")
+        .unwrap();
+
+      session.write_response_header(Box::new(resp), false).await?;
+      session
+        .write_response_body(Some(response.into()), true)
+        .await?;
+      session.set_keepalive(None);
+      return Ok(true);
+    }
+
+    // Check if this is a /room/* path - if so, let the default proxy path handle it
+    if let Some(room_path) = path.strip_prefix("/room/") {
+      if !room_path.is_empty() {
+        // Store the room ID as the first path segment
+        let room_id = room_path.split('/').next().unwrap_or(room_path);
+        // Store the room ID in the context for later use
+        ctx.room_id = Some(room_id.to_string());
+        return Ok(false); // Let it be handled by the upstream_peer method
+      }
+    }
+
+    // Process the path and handle static files for non-room paths
+    let rel_path = path.trim_start_matches('/');
+
+    // Create a String to store our modified path
+    let rel_path_ = if rel_path.is_empty() || rel_path.ends_with('/') {
+      format!("{}index.html", rel_path)
+    } else {
+      rel_path.to_string()
+    };
+
+    // Construct the file path
+    let tenant_dir = self.node_state.process_manager.data_dir.join(&ctx.tenant);
+    let static_dir = tenant_dir.join("static");
+    let file_path = static_dir.join(&rel_path_);
+
+    // Try to read the file
+    let file = match std::fs::read(&file_path) {
+      Ok(file) => file,
+      Err(_) => {
+        debug!("File not found: {}", file_path.display());
+        return Err(pingora::Error::explain(
+          ErrorType::HTTPStatus(StatusCode::NOT_FOUND.into()),
+          "Not found",
+        ));
+      }
+    };
+
+    // Determine content type based on file extension
+    let content_type = match rel_path_.rsplit('.').next() {
+      Some("html") | Some("htm") => "text/html",
+      Some("css") => "text/css",
+      Some("js") => "application/javascript",
+      Some("json") => "application/json",
+      Some("png") => "image/png",
+      Some("jpg") | Some("jpeg") => "image/jpeg",
+      Some("gif") => "image/gif",
+      Some("svg") => "image/svg+xml",
+      Some("webp") => "image/webp",
+      Some("ico") => "image/x-icon",
+      Some("woff") => "font/woff",
+      Some("woff2") => "font/woff2",
+      Some("ttf") => "font/ttf",
+      Some("txt") => "text/plain",
+      Some("pdf") => "application/pdf",
+      Some("xml") => "application/xml",
+      _ => "application/octet-stream",
+    };
+
+    let content_length = file.len();
+
+    // Build and send response
+    let mut resp =
+      pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
+    resp
+      .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
+      .unwrap();
+    resp
+      .insert_header(http::header::CONTENT_TYPE, content_type)
+      .unwrap();
+
+    let end_of_stream = req_header.method == http::Method::HEAD;
+    session
+      .write_response_header(Box::new(resp), end_of_stream)
+      .await?;
+
+    if !end_of_stream {
+      session.write_response_body(Some(file.into()), true).await?;
+    }
+
+    session.set_keepalive(None);
+    Ok(true)
+  }
+
+  // This method is called for each HTTP request to determine the upstream server
+  async fn upstream_peer(
+    &self,
+    session: &mut Session,
+    ctx: &mut Self::CTX,
+  ) -> pingora::Result<Box<HttpPeer>> {
+    // Start timing the request path
+    let request_start = std::time::Instant::now();
+
+    // Check for the single-use header
+    let single_use = session
+      .req_header()
+      .headers
+      .contains_key("x-single-use-isolate");
+
+    // Get the room_id from the context, or use a default value
+    let room_id = match &ctx.room_id {
+      Some(id) => id.as_str(),
+      None => "default-room", // Default room ID if none specified
+    };
+
+    debug!(
+      host = %ctx.tenant,
+      room_id = %room_id,
+      single_use = %single_use,
+      request_init_time = ?request_start.elapsed(),
+      "Processing request"
+    );
+
+    // Check if this instance is responsible for this room
+    if !self
+      .node_state
+      .peer_manager
+      .is_local_owner(&ctx.tenant, room_id)
+    {
+      let owners = self
+        .node_state
+        .peer_manager
+        .get_room_owners(&ctx.tenant, room_id);
+      if let Some(primary_owner_addr) = owners.first() {
+        debug!(
+            host = %ctx.tenant,
+            room_id = %room_id,
+            responsible_peer = %primary_owner_addr,
+            "Forwarding request to primary active owner"
+        );
+        let sni = ctx.tenant.clone();
+        let peer = HttpPeer::new(primary_owner_addr.clone(), false, sni);
+        return Ok(Box::new(peer));
+      } else {
+        // This case means no active owners were found according to PeerManager,
+        // which might indicate cluster inconsistency or that the local node
+        // should have been the owner but wasn't identified as such.
+        error!(
+            host = %ctx.tenant,
+            room_id = %room_id,
+            "No active owner found for room, cannot forward request."
+        );
+        return Err(pingora::Error::explain(
+          ErrorType::HTTPStatus(StatusCode::SERVICE_UNAVAILABLE.into()),
+          "No available upstream node for the requested room",
+        ));
+      }
+    }
+
+    // We are the responsible peer, so handle the request locally
+    debug!(
+      host = %ctx.tenant,
+      room_id = %room_id,
+      "This instance is responsible for handling the request"
+    );
+
+    let socket_path: PathBuf = {
+      match self
+        .node_state
+        .process_manager
+        .get_or_spawn_process(
+          &ctx.tenant,
+          room_id,
+          single_use,
+          self.node_state.clone(),
+        )
+        .await
+      {
+        Ok((path, _stream)) => {
+          // We only need the path, Pingora will handle the connection
+          // Increment active connection count
+          let default_room = "default-room".to_string();
+          let room_id = ctx.room_id.as_ref().unwrap_or(&default_room);
+          self
+            .node_state
+            .process_manager
+            .increment_connection_count(&ctx.tenant, room_id)
+            .await;
+          path
+        }
+        Err(ProxyError::AppNotFound(host_not_found)) => {
+          debug!("Application not found for host: {}", host_not_found);
+          return Err(pingora::Error::explain(
+            ErrorType::HTTPStatus(StatusCode::NOT_FOUND.into()),
+            format!("App not found: {}", host_not_found),
+          ));
+        }
+        Err(ProxyError::InvalidHost) => {
+          debug!("Invalid hostname format: {}", ctx.tenant);
+          return Err(pingora::Error::explain(
+            ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
+            "Invalid hostname format provided",
+          ));
+        }
+        Err(e) => {
+          error!("Error getting or spawning process: {:?}", e);
+          return Err(pingora::Error::explain(
+            ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
+            "Internal server error during process lookup",
+          ));
+        }
+      }
+    }; // Mutex guard dropped here
+
+    // Configure backend using the Unix Domain Socket
+    debug!(
+      process_manager_time = ?request_start.elapsed(),
+      "Process manager get_or_spawn_process completed"
+    );
+
+    let socket_path_str = match socket_path.to_str() {
+      Some(s) => s.to_string(),
+      None => {
+        error!("Invalid UTF-8 in socket path: {:?}", socket_path);
+        return Err(pingora::Error::explain(
+          ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
+          "Invalid backend path encoding",
+        ));
+      }
+    };
+
+    // Create a Backend using the Unix Domain Socket address
+    let peer_start = std::time::Instant::now();
+    let sni = ctx.tenant.clone();
+    match HttpPeer::new_uds(&socket_path_str, false, sni) {
+      Ok(peer) => {
+        debug!(
+          host = %ctx.tenant,
+          socket = %socket_path.display(),
+          uds_peer_creation_time = ?peer_start.elapsed(),
+          total_time_so_far = ?request_start.elapsed(),
+          "Selected upstream UDS peer"
+        );
+        // Assume anything after this point is handled by Pingora proxy machinery
+        Ok(Box::new(peer))
+      }
+      Err(e) => {
+        error!("Failed to create HTTP peer: {:?}", e);
+        Err(pingora::Error::because(
+          ErrorType::HTTPStatus(StatusCode::SERVICE_UNAVAILABLE.into()),
+          "Failed to connect to upstream application",
+          e,
+        ))
+      }
+    }
+  }
+}

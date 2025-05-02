@@ -16,9 +16,9 @@ use crate::child_on_parent_exit::ChildOnParentExit;
 use crate::distributed_lock::LockAcquireError::LockHeld;
 use crate::distributed_lock::LockGuard;
 use crate::peer_manager::room_hash_key;
+use crate::router::ProxyError;
 use crate::sqlite_replica::{create_empty_database, SqliteReplica};
 use crate::NodeState;
-use crate::ProxyError;
 
 /// Represents the current state of a database restore operation
 #[derive(Debug, Clone, PartialEq)]
