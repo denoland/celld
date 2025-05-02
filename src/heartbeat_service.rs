@@ -1,9 +1,6 @@
 use crate::cluster_membership::ClusterMembership;
 use crate::peer_manager::PeerManager;
-use pingora::{
-  protocols::Shutdown, server::ShutdownWatch,
-  services::background::BackgroundService,
-};
+use pingora::{server::ShutdownWatch, services::background::BackgroundService};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info};

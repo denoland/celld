@@ -107,13 +107,6 @@ impl S3ClusterMembership {
     })
   }
 
-  /// Create a new S3ClusterMembership instance with custom staleness threshold
-  #[cfg(test)]
-  pub fn with_staleness_threshold(mut self, threshold: Duration) -> Self {
-    self.staleness_threshold = threshold;
-    self
-  }
-
   /// Get the full S3 key for this node
   fn get_node_key(&self) -> String {
     format!("{}{}.json", self.prefix, self.node_info.node_id)

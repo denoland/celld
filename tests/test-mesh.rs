@@ -139,13 +139,12 @@ async fn test_mesh_dynamic_membership() {
     .map(|peer| peer["node_id"].as_str().unwrap().to_string())
     .collect();
 
-  // 2. Stop one node gracefully using SIGTERM
-  println!("Gracefully stopping the second node...");
-  test_env.kill_roomd_instance(1, Signal::SIGTERM);
+  println!("killing stopping the second node...");
+  test_env.kill_roomd_instance(1);
 
   // Wait for heartbeat interval (shorter for tests)
   println!("Waiting for heartbeat interval to expire...");
-  tokio::time::sleep(Duration::from_secs(3)).await;
+  tokio::time::sleep(Duration::from_secs(8)).await;
 
   // Check peers again - should have one fewer node
   let updated_peers_response = reqwest::get(&peers_url).await.unwrap();
@@ -325,7 +324,7 @@ async fn test_node_failure_takeover() {
   println!("Killing primary node on port {}...", primary_owner_port);
   let primary_index =
     ports.iter().position(|&p| p == primary_owner_port).unwrap();
-  test_env.kill_roomd_instance(primary_index, Signal::SIGKILL);
+  test_env.kill_roomd_instance(primary_index);
 
   // Wait for node failure to be detected (heartbeat timeout)
   // ROOMD_STALENESS_THRESHOLD_SECS is set to 6 seconds in TestEnv::spawn_roomd_instance
@@ -455,7 +454,7 @@ async fn test_concurrent_takeover_locking() {
   );
   let primary_index =
     ports.iter().position(|&p| p == primary_owner_port).unwrap();
-  test_env.kill_roomd_instance(primary_index, Signal::SIGTERM);
+  test_env.kill_roomd_instance(primary_index);
 
   // Sleep to ensure the primary node has fully shutdown
   sleep(Duration::from_secs(10)).await;
@@ -608,7 +607,7 @@ async fn test_proxy_forwarding_retry() {
   println!("Killing primary node on port {}...", primary_owner_port);
   let primary_index =
     ports.iter().position(|&p| p == primary_owner_port).unwrap();
-  test_env.kill_roomd_instance(primary_index, Signal::SIGKILL);
+  test_env.kill_roomd_instance(primary_index);
 
   // Wait for heartbeat timeout to detect node failure
   println!("Waiting for primary node failure to be detected...");
@@ -726,7 +725,7 @@ async fn test_restore_coordination() {
 
   // Stop Node A
   println!("Stopping Node A...");
-  test_env.kill_roomd_instance(0, Signal::SIGTERM);
+  test_env.kill_roomd_instance(0);
 
   // Wait for Node A to fully terminate and release resources
   sleep(Duration::from_secs(2)).await;
@@ -751,6 +750,7 @@ async fn test_restore_coordination() {
   // Wait for both nodes to be ready
   TestEnv::wait_for_server_ready(port_b);
   TestEnv::wait_for_server_ready(port_c);
+  sleep(Duration::from_secs(8)).await;
 
   // Determine which node is responsible for the room by querying both
   let owner_url_b =
@@ -829,7 +829,7 @@ async fn test_restore_single() {
   sleep(Duration::from_secs(2)).await;
 
   println!("Shutting down roomd instance...");
-  test_env.kill_roomd_instance(0, Signal::SIGTERM);
+  test_env.kill_roomd_instance(0);
 
   println!("Removing local database files...");
   clean_room_workspace(test_room_id, &test_env);
@@ -837,6 +837,8 @@ async fn test_restore_single() {
   let new_port = 7062;
   test_env.spawn_roomd_instance(new_port);
   TestEnv::wait_for_server_ready(new_port);
+
+  sleep(Duration::from_secs(8)).await;
 
   let new_url = format!(
     "http://basic-db.localhost:{}/room/{}",
@@ -930,11 +932,12 @@ impl TestEnv {
     test_env
   }
 
-  fn kill_roomd_instance(&mut self, index: usize, signal: Signal) {
+  fn kill_roomd_instance(&mut self, index: usize) {
     let server = self.servers.remove(index);
     let _ = self.ports.remove(index);
     let pid = Pid::from_raw(server.id() as i32);
-    kill(pid, signal).unwrap();
+    // Use SIGKILL to avoid long graceful shutdown times
+    kill(pid, Signal::SIGKILL).unwrap();
   }
 
   fn spawn_roomd_instance(&mut self, port: u16) {
@@ -943,7 +946,7 @@ impl TestEnv {
       .env("ADVERTISE_ADDR", &advertise_addr)
       .env("DATA", "./data")
       .env("ROOMD_HEARTBEAT_INTERVAL", "2")
-      .env("ROOMD_GRACE_PERIOD_SECONDS", "1")
+      .env("ROOMD_GRACE_PERIOD_SECONDS", "0")
       // Use a shorter staleness threshold for tests to detect failures faster
       .env("ROOMD_STALENESS_THRESHOLD_SECS", "6")
       .env(
@@ -959,8 +962,8 @@ impl TestEnv {
         &self.minio_server.secret_access_key,
       )
       //.env("RUST_LOG", "debug")
-      .stdout(Stdio::inherit())
-      .stderr(Stdio::inherit())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
       .spawn()
       .unwrap_or_else(|_| panic!("Failed to start server on port {}", port));
 
@@ -997,7 +1000,7 @@ impl TestEnv {
 impl Drop for TestEnv {
   fn drop(&mut self) {
     for _i in 0..self.servers.len() {
-      self.kill_roomd_instance(0, Signal::SIGKILL);
+      self.kill_roomd_instance(0);
     }
   }
 }

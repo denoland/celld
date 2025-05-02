@@ -120,7 +120,9 @@ DONE
 
 ### Phase 3: Room Resilience & Takeover
 
-CURRENT
+MOSTLY DONE, test_concurrent_takeover_locking and test_proxy_forwarding_retry
+added but not working. test_node_failure_takeover does work as well as existing
+tests. Will move on to Phase 4.
 
 - **Problem:** If a node hosting a room fails, the room becomes inaccessible.
 - **Goal:** Another node automatically takes over responsibility for the room,

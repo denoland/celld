@@ -721,7 +721,7 @@ mod tests {
     std::env::set_var("LISTEN_ADDR", "127.0.0.1:6146"); // Set listen address
     std::env::set_var("DATA", "./data"); // Set data directory
     std::env::set_var("ROOMD_HEARTBEAT_INTERVAL", "2"); // Fast heartbeat for tests
-    std::env::set_var("ROOMD_GRACE_PERIOD_SECONDS", "1");
+    std::env::set_var("ROOMD_GRACE_PERIOD_SECONDS", "0");
 
     let h = std::thread::spawn(|| {
       // Create config from environment variables

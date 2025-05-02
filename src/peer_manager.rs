@@ -90,16 +90,12 @@ impl PeerManager {
     {
       for addr in potential_owners {
         // Filter out any nodes that are no longer considered active
-        println!(">> get_room_owners Checking if {} is active", addr);
         if self.is_peer_active(&addr) {
-          println!(">> get_room_owners ---- {} is active", addr);
           owners.push(addr.clone()); // Clone the address string
                                      // Stop once we have enough active owners
           if owners.len() >= MAX_OWNERS {
             break;
           }
-        } else {
-          println!(">> get_room_owners ---- {} is NOT active", addr);
         }
       }
     }
