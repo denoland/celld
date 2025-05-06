@@ -5,4 +5,4 @@ echo "Building production version..."
 cargo build --release
 
 echo "Starting benchmark..."
-DENO_BENCH=1 ./target/release/roomd
+DENO_BENCH=1 ./target/release/celld

@@ -13,11 +13,13 @@ export default {
     `);
   },
 
-  async onRequest(req: Request, ctx: { room: Room }): Promise<Response> {
+  async onRequest(req: Request, ctx: { cell: Cell }): Promise<Response> {
     const userAgent = req.headers.get("user-agent");
     const timestamp = new Date().toISOString();
 
-    const insert = ctx.db.prepare("INSERT INTO requests (method, url, user_agent, timestamp) VALUES (?, ?, ?, ?)");
+    const insert = ctx.db.prepare(
+      "INSERT INTO requests (method, url, user_agent, timestamp) VALUES (?, ?, ?, ?)",
+    );
     insert.run(req.method, req.url, userAgent, timestamp);
 
     const countRow = ctx.db

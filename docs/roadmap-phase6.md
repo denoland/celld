@@ -6,7 +6,7 @@ To:** Phase 7 (Advanced Demos), Future Streams (Exactly-Once Alarms, Cron)
 ## Goal
 
 Implement a time-based Alarms API, inspired by Cloudflare Durable Objects,
-allowing user code within a room (`main.ts`) to schedule its `onAlarm` handler
+allowing user code within a cell (`main.ts`) to schedule its `onAlarm` handler
 to be executed at a specific future time. This implementation (V1) will provide
 **best-effort** dispatch semantics using a centralized system database managed
 by a single leader node.
@@ -22,7 +22,7 @@ by a single leader node.
 
 ## Architecture: Centralized System Database & RPC Forwarding
 
-- **System Tenant and Room:** Use the tenant name `_system` and room ID `main`
+- **System Tenant and Cell:** Use the tenant name `_system` and cell ID `main`
   for shared system state.
 - **System Data Storage:** A single SQLite database
   (`data/_system/sqlite/main.db`) storing all shared system state cluster-wide,
@@ -32,7 +32,7 @@ by a single leader node.
     are fast enough not to require `spawn_blocking`, as the service runs in its
     own background task. Re-evaluate if performance issues arise.]_
   - **Table (`globalalarms`):**
-    `scheduled_time_unix_ms INTEGER NOT NULL, tenant TEXT NOT NULL, room_id TEXT NOT NULL, PRIMARY KEY (scheduled_time_unix_ms, tenant, room_id)`.
+    `scheduled_time_unix_ms INTEGER NOT NULL, tenant TEXT NOT NULL, cell_id TEXT NOT NULL, PRIMARY KEY (scheduled_time_unix_ms, tenant, cell_id)`.
   - **Index:**
     `idx_globalalarms_scheduled_time ON globalalarms (scheduled_time_unix_ms)`.
 - **Durability (Litestream):** This central DB (`main.db` for the `_system`
@@ -45,7 +45,7 @@ by a single leader node.
     (`alarm_scheduler_service.rs::AlarmSchedulerService`).
   - **Leadership:** Determined by holding S3 lock `"alarm_scheduler_lock"`.
   - **Leader Responsibilities:** Manages its own `SqliteReplica` for `_system`
-    tenant / `main` room_id, performs restore (using S3 lock `"_system:main"`),
+    tenant / `main` cell_id, performs restore (using S3 lock `"_system:main"`),
     starts replication, queries local DB (`rusqlite`), dispatches alarms via
     HTTP RPC to the appropriate node's internal API.
 - **UDS Communication (Two Sockets):**
@@ -56,11 +56,11 @@ by a single leader node.
   - **Control Socket (`control.sock`):** Deno connects -> Rust listens
     (`tokio::net::UnixListener`). Used for Deno sending `set/delete/getAlarm`
     commands back to Rust using **manually constructed HTTP requests over UDS**.
-    Path passed via `ROOMD_CONTROL_SOCKET`.
+    Path passed via `CELLD_CONTROL_SOCKET`.
 - **API Call Flow (`set/delete/getAlarm` via Control Socket):**
   - User code calls `ctx.setAlarm(timestamp)`.
   - `bootstrap.ts` connects to the `control.sock` UDS path specified by
-    `ROOMD_CONTROL_SOCKET`.
+    `CELLD_CONTROL_SOCKET`.
   - `bootstrap.ts` **manually constructs a raw HTTP request string** (e.g.,
     `POST /_internal/alarms HTTP/1.1\r\nHost: control\r\nContent-Type: application/json\r\nContent-Length: N\r\n\r\n{"scheduled_time_unix_ms": ...}`),
     encodes it to bytes, and writes it to the Control Socket `Deno.UnixConn`.
@@ -88,7 +88,7 @@ by a single leader node.
 - **Alarm Trigger Path (Primary UDS):**
   - Scheduler Leader (`AlarmSchedulerService`) -> finds due alarm, deletes from
     DB.
-  - Scheduler Leader -> finds target node for the room.
+  - Scheduler Leader -> finds target node for the cell.
   - Scheduler Leader -> `POST /_internal/dispatch_alarm` (HTTP RPC) -> Target
     Node `InternalAPI`.
   - Target Node `InternalAPI` -> `ProcessManager::get_or_spawn_process` (spawns
@@ -110,16 +110,16 @@ socket uses raw HTTP formatting.
    - **Forwarding:** Request must be forwarded to the current scheduler leader
      node.
    - **Request Body (JSON):** Matches
-     `struct SetAlarmRequest { tenant: String, room_id: String, scheduled_time_unix_ms: i64 }`
+     `struct SetAlarmRequest { tenant: String, cell_id: String, scheduled_time_unix_ms: i64 }`
      ```json
      {
        "tenant": "your-tenant-id",
-       "room_id": "your-room-id",
+       "cell_id": "your-cell-id",
        "scheduled_time_unix_ms": 1735689600000
      }
      ```
    - **Leader Action:**
-     `INSERT OR REPLACE INTO globalalarms (scheduled_time_unix_ms, tenant, room_id) VALUES (?, ?, ?)`
+     `INSERT OR REPLACE INTO globalalarms (scheduled_time_unix_ms, tenant, cell_id) VALUES (?, ?, ?)`
      using `rusqlite`.
    - **Response (Success):** `200 OK` with `{"status": "success"}`.
 
@@ -127,50 +127,50 @@ socket uses raw HTTP formatting.
    - **Forwarding:** Request must be forwarded to the current scheduler leader
      node.
    - **Request Body (JSON):** Matches
-     `struct DeleteAlarmRequest { tenant: String, room_id: String }`
+     `struct DeleteAlarmRequest { tenant: String, cell_id: String }`
      ```json
      {
        "tenant": "your-tenant-id",
-       "room_id": "your-room-id"
+       "cell_id": "your-cell-id"
      }
      ```
    - **Leader Action:**
-     `DELETE FROM globalalarms WHERE tenant = ? AND room_id = ?` using
+     `DELETE FROM globalalarms WHERE tenant = ? AND cell_id = ?` using
      `rusqlite`.
    - **Response (Success):** `200 OK` with
      `{"status": "success", "deleted_count": 1}` (or 0).
 
 3. **Get Alarm:**
-   `GET /_internal/alarms?tenant=your-tenant-id&room_id=your-room-id`
+   `GET /_internal/alarms?tenant=your-tenant-id&cell_id=your-cell-id`
    - **Forwarding:** Request must be forwarded to the current scheduler leader
      node.
    - **Leader Action:**
-     `SELECT scheduled_time_unix_ms FROM globalalarms WHERE tenant = ? AND room_id = ?`
+     `SELECT scheduled_time_unix_ms FROM globalalarms WHERE tenant = ? AND cell_id = ?`
      using `rusqlite`.
    - **Response (Success):** `200 OK` with JSON matching
-     `struct GetAlarmResponse { tenant: String, room_id: String, scheduled_time_unix_ms: Option<i64> }`
+     `struct GetAlarmResponse { tenant: String, cell_id: String, scheduled_time_unix_ms: Option<i64> }`
      ```json
      // Found
-     { "tenant": "your-tenant-id", "room_id": "your-room-id", "scheduled_time_unix_ms": 1735689600000 }
+     { "tenant": "your-tenant-id", "cell_id": "your-cell-id", "scheduled_time_unix_ms": 1735689600000 }
      // Not Found
-     { "tenant": "your-tenant-id", "room_id": "your-room-id", "scheduled_time_unix_ms": null }
+     { "tenant": "your-tenant-id", "cell_id": "your-cell-id", "scheduled_time_unix_ms": null }
      ```
 
 4. **Dispatch Alarm:** `POST /_internal/dispatch_alarm`
    - **Source:** Sent _by the scheduler leader_ to the target node hosting the
-     room.
+     cell.
    - **Forwarding:** Sent directly to the target node's internal listener. _Not_
      forwarded further.
    - **Request Body (JSON):** Matches
-     `struct DispatchAlarmRequest { tenant: String, room_id: String }`
+     `struct DispatchAlarmRequest { tenant: String, cell_id: String }`
      ```json
      {
        "tenant": "your-tenant-id",
-       "room_id": "your-room-id"
+       "cell_id": "your-cell-id"
      }
      ```
    - **Target Node Action:** Uses `ProcessManager::get_or_spawn_process` to
-     get/spawn the room, then sends `POST /_internal/alarm` to the Deno process
+     get/spawn the cell, then sends `POST /_internal/alarm` to the Deno process
      via the _primary_ UDS (`main.sock`).
    - **Response (Success):** `200 OK` with `{"status": "success"}`.
 
@@ -212,7 +212,7 @@ _Stub implementations using `unimplemented!()` are acceptable initially._
 2. **Verify `SqliteReplica` for System DB:**
    - [ ] Verify `SqliteReplica::initialize` and `write_config` correctly
          generate the local path (`data/_system/sqlite/main.db`) and S3 path
-         (`sqlite/_system/main/`) when `tenant` is `_system` and `room_id` is
+         (`sqlite/_system/main/`) when `tenant` is `_system` and `cell_id` is
          `main`.
    - [ ] Verify/Update `SqliteReplica::ensure_restored` uses the correct S3 lock
          name (`"_system:main"`) for the system database restore coordination.
@@ -233,7 +233,7 @@ _Stub implementations using `unimplemented!()` are acceptable initially._
      - **If Not Leader (lock error):** Log appropriately and potentially backoff
        before next check.
    - [ ] Implement `AlarmSchedulerService::initialize_and_restore_system_db`:
-     - Get or create `SqliteReplica` instance for tenant `_system`, room_id
+     - Get or create `SqliteReplica` instance for tenant `_system`, cell_id
        `main`. Store it potentially in `AlarmSchedulerService` or retrieve as
        needed.
      - Call `system_replica.ensure_restored(lock_manager, node_id, ...)` using
@@ -256,15 +256,15 @@ _Stub implementations using `unimplemented!()` are acceptable initially._
      - Open `rusqlite::Connection`. _[Note: DB queries here are blocking. Run in
        spawn_blocking if they cause performance issues.]_
      - Perform
-       `SELECT tenant, room_id FROM globalalarms WHERE scheduled_time_unix_ms <= ? ORDER BY scheduled_time_unix_ms LIMIT 100`
+       `SELECT tenant, cell_id FROM globalalarms WHERE scheduled_time_unix_ms <= ? ORDER BY scheduled_time_unix_ms LIMIT 100`
        (get current time in ms).
-     - For each due alarm (`tenant`, `room_id`):
-       - `DELETE FROM globalalarms WHERE tenant = ? AND room_id = ?`.
+     - For each due alarm (`tenant`, `cell_id`):
+       - `DELETE FROM globalalarms WHERE tenant = ? AND cell_id = ?`.
        - Find target node address:
-         `node_state.peer_manager.get_room_owners(tenant, room_id)`. Pick the
+         `node_state.peer_manager.get_cell_owners(tenant, cell_id)`. Pick the
          first owner.
        - **If owner list is empty:** Log a warning (e.g., "No owner found for
-         due alarm tenant/room...") and drop the alarm (best effort V1).
+         due alarm tenant/cell...") and drop the alarm (best effort V1).
        - **If owner found:**
          - Construct `DispatchAlarmRequest`.
          - Send `POST http://{target_addr}/_internal/dispatch_alarm` using
@@ -310,14 +310,14 @@ _Stub implementations using `unimplemented!()` are acceptable initially._
      - `DELETE /_internal/alarms`: Read body into `DeleteAlarmRequest`, open DB
        _[spawn_blocking?]_ , execute `DELETE`. Return `200 OK` with
        `deleted_count` or `5xx`.
-     - `GET /_internal/alarms`: Parse query params `tenant`, `room_id`. Open DB
+     - `GET /_internal/alarms`: Parse query params `tenant`, `cell_id`. Open DB
        _[spawn_blocking?]_ , execute `SELECT`. Return `200 OK` with
        `GetAlarmResponse` JSON or `5xx`.
    - [ ] **Implement Dispatch Receiver:** Add logic for
          `POST /_internal/dispatch_alarm`:
      - Read body into `DispatchAlarmRequest`.
      - Call
-       `node_state.process_manager.get_or_spawn_process(&req.tenant, &req.room_id, false, node_state.clone())`.
+       `node_state.process_manager.get_or_spawn_process(&req.tenant, &req.cell_id, false, node_state.clone())`.
        Handle errors (return 5xx).
      - Get the `socket_path` (primary socket) from the result.
      - **Send UDS Request:** Use `tokio::net::UnixStream::connect(&socket_path)`
@@ -331,7 +331,7 @@ _Stub implementations using `unimplemented!()` are acceptable initially._
 6. **Rust Host UDS Handling (Control Socket - Manual HTTP Parsing):**
    - [ ] **Modify `process_manager.rs::spawn_deno_process`:**
      - Create `main.sock` (primary) and `control.sock` paths.
-     - Pass paths via `DENO_SERVE_ADDRESS` and `ROOMD_CONTROL_SOCKET`.
+     - Pass paths via `DENO_SERVE_ADDRESS` and `CELLD_CONTROL_SOCKET`.
      - **Bind and Listen:** After spawn, `tokio::net::UnixListener::bind` to
        `control.sock`.
    - [ ] **Modify `ProcessEntry`:** Add a field to hold the
@@ -357,7 +357,7 @@ _Stub implementations using `unimplemented!()` are acceptable initially._
          - Based on parsed method/path (`POST /_internal/alarms`,
            `DELETE /_internal/alarms`, `GET /_internal/alarms`):
            - Extract necessary data (body for POST/DELETE, query params derived
-             from path for GET). Get `tenant`/`room_id` associated with the Deno
+             from path for GET). Get `tenant`/`cell_id` associated with the Deno
              process.
            - Construct the corresponding JSON body or URL query string for the
              _actual_ internal HTTP API call.
@@ -384,7 +384,7 @@ _Stub implementations using `unimplemented!()` are acceptable initially._
 
 7. **Deno Integration (`bootstrap.ts` - Manual HTTP over UDS):**
    - [ ] **Establish Control Connection:**
-     - Read `ROOMD_CONTROL_SOCKET` env var.
+     - Read `CELLD_CONTROL_SOCKET` env var.
      - `await Deno.connect(...)` to the control socket path. Store the
        `Deno.UnixConn` (e.g., `controlConn`).
    - [ ] **Implement Manual HTTP-over-UDS Helpers:**
@@ -419,7 +419,7 @@ _Stub implementations using `unimplemented!()` are acceptable initially._
        - Await the response. Check parsed status code (e.g., 200). Throw error
          if status indicates failure.
      - Modify `deleteAlarm(): Promise<boolean>`:
-       - Prepare JSON body `{}` or perhaps include tenant/room? [Check internal
+       - Prepare JSON body `{}` or perhaps include tenant/cell? [Check internal
          API req].
        - Call `sendHttpRequestOverUds` with `DELETE`, path `/_internal/alarms`,
          headers, and body.
@@ -428,8 +428,8 @@ _Stub implementations using `unimplemented!()` are acceptable initially._
          200).
      - Modify `getAlarm(): Promise<number | null>`:
        - Call `sendHttpRequestOverUds` with `GET` and path `/_internal/alarms`
-         (tenant/room info needs to be implicitly associated by the Rust host or
-         passed in path/query if the API changes). [Clarify how tenant/room are
+         (tenant/cell info needs to be implicitly associated by the Rust host or
+         passed in path/query if the API changes). [Clarify how tenant/cell are
          passed for GET via UDS]. For now, assume path is just
          `/_internal/alarms`.
        - Await the response. Check status code. If 200, parse JSON body
@@ -438,7 +438,7 @@ _Stub implementations using `unimplemented!()` are acceptable initially._
      - **Add `onAlarm` Handler:** Define
        `onAlarm?(ctx: Context): Promise<void> | void;` in the `Server`
        interface.
-     - Ensure `X-Room-Tenant` and `X-Room-Id` are available via env vars (set in
+     - Ensure `X-Cell-Tenant` and `X-Cell-Id` are available via env vars (set in
        `process_manager.rs::spawn_deno_process`).
    - [ ] **Handle `onAlarm` Trigger (Primary Socket):**
      - The existing `Deno.serve` listening on the primary socket
@@ -478,7 +478,7 @@ _Stub implementations using `unimplemented!()` are acceptable initially._
 - [ ] The new scheduler correctly restores the central alarm DB state
       (`_system/sqlite/main.db`) from S3 using its dedicated lock
       (`"_system:main"`).
-- [ ] Alarms trigger correctly even if the target room process is not running
+- [ ] Alarms trigger correctly even if the target cell process is not running
       when the alarm becomes due (`get_or_spawn_process` handles wake-up).
 - [ ] Internal RPCs (`/_internal/alarms`, `/_internal/dispatch_alarm`) use the
       dedicated internal HTTP port and are correctly forwarded to the scheduler

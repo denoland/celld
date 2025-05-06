@@ -52,25 +52,25 @@ impl PeerManager {
     state.ring = new_ring;
   }
 
-  /// Get the peer responsible for a given room ID
-  pub fn get_owner_peer(&self, tenant: &str, room_id: &str) -> String {
+  /// Get the peer responsible for a given cell ID
+  pub fn get_owner_peer(&self, tenant: &str, cell_id: &str) -> String {
     let state = self.state.read().unwrap();
-    let key = room_hash_key(tenant, room_id);
+    let key = cell_hash_key(tenant, cell_id);
     state.ring.get(&key).unwrap().to_string()
   }
 
-  /// Check if the local instance is responsible for handling this room
-  pub fn is_local_owner(&self, tenant: &str, room_id: &str) -> bool {
-    let owner = self.get_owner_peer(tenant, room_id);
+  /// Check if the local instance is responsible for handling this cell
+  pub fn is_local_owner(&self, tenant: &str, cell_id: &str) -> bool {
+    let owner = self.get_owner_peer(tenant, cell_id);
     owner == self.self_advertise_addr
   }
 
-  /// Get an ordered list of active node addresses responsible for a given room,
-  /// based on the consistent hash of tenant:room_id.
+  /// Get an ordered list of active node addresses responsible for a given cell,
+  /// based on the consistent hash of tenant:cell_id.
   ///
-  /// This method returns up to MAX_OWNERS active nodes that could own the room,
+  /// This method returns up to MAX_OWNERS active nodes that could own the cell,
   /// in preference order according to the hash ring.
-  pub fn get_room_owners(&self, tenant: &str, room_id: &str) -> Vec<String> {
+  pub fn get_cell_owners(&self, tenant: &str, cell_id: &str) -> Vec<String> {
     let state = self.state.read().unwrap();
 
     // Define a reasonable maximum number of owners/candidates we want to return
@@ -80,7 +80,7 @@ impl PeerManager {
     let mut owners = Vec::new();
 
     // Use the combined key for hashing
-    let key = room_hash_key(tenant, room_id);
+    let key = cell_hash_key(tenant, cell_id);
 
     // Get the primary node and potential replicas/successors from the ring
     if let Some(potential_owners) =
@@ -137,6 +137,6 @@ impl PeerManager {
   }
 }
 
-pub fn room_hash_key(tenant: &str, room_id: &str) -> String {
-  format!("{}/{}", tenant, room_id)
+pub fn cell_hash_key(tenant: &str, cell_id: &str) -> String {
+  format!("{}/{}", tenant, cell_id)
 }

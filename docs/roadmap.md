@@ -1,9 +1,10 @@
-# roomd · Roadmap
+# celld · Roadmap
+
 _Last updated: 2025-05-02_
 
 ## What is this?
 
-roomd gives you a new kind of building block:
+celld gives you a new kind of building block:
 
 🧱 **Many tiny, durable, real-time workers**—each with its own code, its own
 SQLite state, and sub‑100ms cold start.
@@ -14,16 +15,16 @@ software.
 You spin up a container, mount a directory, and get:
 
 - Durable objects that speak WebSocket and HTTP
-- Per-room state with S3-backed persistence
+- Per-cell state with S3-backed persistence
 - Built-in Deno isolation per tenant or project
 - Lightweight mesh networking
 - Familiar APIs inspired by PartyKit and Durable Objects
 
 ## Why this matters?
 
-roomd aims to be a simple, resilient "substrate" for building stateful,
+celld aims to be a simple, resilient "substrate" for building stateful,
 distributed applications, particularly envisioning a future of collaborative AI
-agents. It provides durable "rooms" that manage persistent state (using SQLite
+agents. It provides durable "cells" that manage persistent state (using SQLite
 
 - Litestream to S3) and handles complexities like node discovery, replication,
   and failover automatically. This drastically lowers the barrier for
@@ -33,10 +34,10 @@ agents. It provides durable "rooms" that manage persistent state (using SQLite
 
 ## Roadmap
 
-**Goal:** Demonstrate a multi-node `roomd` cluster where nodes can join/leave,
-rooms remain available after node failures, and data is persisted via
+**Goal:** Demonstrate a multi-node `celld` cluster where nodes can join/leave,
+cells remain available after node failures, and data is persisted via
 Litestream/S3. Add Alarms and improve DX. Work towards a demo of an AI agent
-running in a room that you can ask "say 'ping' in 10 seconds".
+running in a cell that you can ask "say 'ping' in 10 seconds".
 
 **Core Principle:** Leverage S3 as the "source of truth" for cluster membership
 and potentially for lightweight locking/coordination, minimizing direct
@@ -51,7 +52,7 @@ DONE
 
 DONE
 
-### Phase 3: Room Resilience & Takeover
+### Phase 3: Cell Resilience & Takeover
 
 MOSTLY DONE, `test_concurrent_takeover_locking` and
 `test_proxy_forwarding_retry` added but not working.
@@ -64,21 +65,21 @@ SKIPPING FOR NOW.
 - **Goal:** Package the current features into a compelling demonstration.
 - **Tasks:**
   1. **Multi-Node Demo Script:**
-     - Script to easily launch 2-3 `roomd` nodes locally (e.g., using Docker
+     - Script to easily launch 2-3 `celld` nodes locally (e.g., using Docker
        Compose or simple shell scripts).
      - A simple client application/script that connects to _any_ node:
-       - Creates a few rooms (which will be distributed by the hash).
+       - Creates a few cells (which will be distributed by the hash).
        - Writes/reads data to demonstrate basic function.
        - _Crucially:_ Includes steps to kill one node and show that requests for
-         its rooms are automatically routed to and served by a backup node after
+         its cells are automatically routed to and served by a backup node after
          a short delay (discovery timeout + restore time).
        - (Bonus): Show a new node starting, joining the cluster (visible via
-         logs/querying state?), and taking load for new rooms.
+         logs/querying state?), and taking load for new cells.
   2. **Configuration:** Ensure S3 bucket, region, heartbeat intervals, timeouts,
      etc., are easily configurable (e.g., via environment variables or a config
      file).
   3. **Logging/Observability:** Enhance logging to make the dynamic discovery,
-     node failures, lock acquisition, and room takeovers clearly visible.
+     node failures, lock acquisition, and cell takeovers clearly visible.
   4. **README:** Update documentation explaining the architecture (S3 usage),
      setup, configuration, and how to run the demo.
 - **Outcome:** A clear demonstration of the system's dynamic nature and
@@ -115,15 +116,15 @@ DONE
 
 CURRENTLY IN PROGRESS
 
-- **Problem:** Rooms cannot schedule tasks to run at a specific time in the
+- **Problem:** Cells cannot schedule tasks to run at a specific time in the
   future, limiting workflow and agent capabilities.
-- **Goal:** Implement a Durable Objects-inspired Alarms API allowing rooms to
+- **Goal:** Implement a Durable Objects-inspired Alarms API allowing cells to
   set, delete, and handle time-based alarms, using best-effort dispatch
   semantics.
 - **Depends On:** Phase 5 (Internal Control Plane for RPCs).
 - **Tasks:** See detailed `roadmap-phase6.md`.
-- **Outcome:** Rooms can reliably schedule `onAlarm` handler execution for
-  future timestamps, enabling time-based workflows even for dormant rooms.
+- **Outcome:** Cells can reliably schedule `onAlarm` handler execution for
+  future timestamps, enabling time-based workflows even for dormant cells.
 
 ### Phase 7: Developer Experience & Advanced Demos
 
@@ -131,14 +132,14 @@ CURRENTLY IN PROGRESS
   testing. Lack of compelling demos hinders adoption.
 - **Goal:** Improve the developer experience and create showcase demos.
 - **Tasks:**
-  1. **JS API Refactor:** Change API to `import room from "..."; room({...});`
+  1. **JS API Refactor:** Change API to `import cell from "..."; cell({...});`
      style for better type checking, LSP support, and local testability.
   2. **Compelling Demos:** Develop 1-2 demos showcasing core features, including
      resilience (Phase 4) and Alarms (Phase 6). Examples: Collaborative Pixel
      Canvas, AI Chat w/ Timers, Simple Turn-Based Game.
   3. **Documentation:** Enhance documentation based on API changes and demo
      development.
-- **Outcome:** `roomd` is easier and more pleasant to develop for. Clear
+- **Outcome:** `celld` is easier and more pleasant to develop for. Clear
   examples demonstrate its capabilities.
 
 ### Future Streams
@@ -147,8 +148,8 @@ CURRENTLY IN PROGRESS
 - Exactly-Once Alarm Semantics
 - Cron Support
 - Database Migrations API
-- Inter-Room Communication API
+- Inter-Cell Communication API
 - Dynamic Code Deployment (S3-based)
 - Enhanced Observability (Distributed Tracing, Dashboards)
 - Performance Optimizations (Litestream tuning, proxy improvements)
-- Advanced Security (Per-tenant/room auth tokens, resource limits)
+- Advanced Security (Per-tenant/cell auth tokens, resource limits)

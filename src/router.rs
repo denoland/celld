@@ -16,7 +16,7 @@ pub enum ProxyError {
   AppNotFound(String),
   #[error("Internal Server Error: {0}")]
   InternalError(#[from] anyhow::Error),
-  #[error("Room lock held by another node or takeover in progress")]
+  #[error("Cell lock held by another node or takeover in progress")]
   LockContention,
 }
 
@@ -31,7 +31,7 @@ pub struct InternalAPI {
 #[derive(Debug, Default)]
 pub struct Ctx {
   pub tenant: String,
-  pub room_id: Option<String>,
+  pub cell_id: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -109,22 +109,22 @@ impl ProxyHttp for InternalAPI {
     // Handle the owner endpoint
     if let Some(path_part) = path.strip_prefix("/_internal/mesh/owner/") {
       if !path_part.is_empty() {
-        // Extract tenant and room_id from the path
-        // Expected format: /_internal/mesh/owner/{tenant}/{room_id}
+        // Extract tenant and cell_id from the path
+        // Expected format: /_internal/mesh/owner/{tenant}/{cell_id}
         let parts: Vec<&str> = path_part.split('/').collect();
         if parts.len() == 2 {
           let tenant = parts[0];
-          let room_id = parts[1];
+          let cell_id = parts[1];
 
           let owner =
-            self.node_state.peer_manager.get_owner_peer(tenant, room_id);
+            self.node_state.peer_manager.get_owner_peer(tenant, cell_id);
           let is_local =
-            self.node_state.peer_manager.is_local_owner(tenant, room_id);
+            self.node_state.peer_manager.is_local_owner(tenant, cell_id);
 
           // Return a simple JSON response with owner information
           let response = format!(
-            "{{\"tenant\":\"{}\",\"room_id\":\"{}\",\"owner\":\"{}\",\"is_local\":{}}}",
-            tenant, room_id, owner, is_local
+            "{{\"tenant\":\"{}\",\"cell_id\":\"{}\",\"owner\":\"{}\",\"is_local\":{}}}",
+            tenant, cell_id, owner, is_local
           );
 
           let content_length = response.len();
@@ -204,13 +204,13 @@ impl ProxyHttp for Proxy {
     ctx: &mut Self::CTX,
   ) {
     if !ctx.tenant.is_empty() {
-      let default_room = "default-room".to_string();
-      let room_id = ctx.room_id.as_ref().unwrap_or(&default_room);
+      let default_cell = "default-cell".to_string();
+      let cell_id = ctx.cell_id.as_ref().unwrap_or(&default_cell);
 
       let _ = self
         .node_state
         .process_manager
-        .decrement_connection_count(&ctx.tenant, room_id)
+        .decrement_connection_count(&ctx.tenant, cell_id)
         .await;
     }
   }
@@ -284,18 +284,18 @@ impl ProxyHttp for Proxy {
       return Ok(true);
     }
 
-    // Check if this is a /room/* path - if so, let the default proxy path handle it
-    if let Some(room_path) = path.strip_prefix("/room/") {
-      if !room_path.is_empty() {
-        // Store the room ID as the first path segment
-        let room_id = room_path.split('/').next().unwrap_or(room_path);
-        // Store the room ID in the context for later use
-        ctx.room_id = Some(room_id.to_string());
+    // Check if this is a /cell/* path - if so, let the default proxy path handle it
+    if let Some(cell_path) = path.strip_prefix("/cell/") {
+      if !cell_path.is_empty() {
+        // Store the cell ID as the first path segment
+        let cell_id = cell_path.split('/').next().unwrap_or(cell_path);
+        // Store the cell ID in the context for later use
+        ctx.cell_id = Some(cell_id.to_string());
         return Ok(false); // Let it be handled by the upstream_peer method
       }
     }
 
-    // Process the path and handle static files for non-room paths
+    // Process the path and handle static files for non-cell paths
     let rel_path = path.trim_start_matches('/');
 
     // Create a String to store our modified path
@@ -383,34 +383,34 @@ impl ProxyHttp for Proxy {
       .headers
       .contains_key("x-single-use-isolate");
 
-    // Get the room_id from the context, or use a default value
-    let room_id = match &ctx.room_id {
+    // Get the cell_id from the context, or use a default value
+    let cell_id = match &ctx.cell_id {
       Some(id) => id.as_str(),
-      None => "default-room", // Default room ID if none specified
+      None => "default-cell", // Default cell ID if none specified
     };
 
     debug!(
       host = %ctx.tenant,
-      room_id = %room_id,
+      cell_id = %cell_id,
       single_use = %single_use,
       request_init_time = ?request_start.elapsed(),
       "Processing request"
     );
 
-    // Check if this instance is responsible for this room
+    // Check if this instance is responsible for this cell
     if !self
       .node_state
       .peer_manager
-      .is_local_owner(&ctx.tenant, room_id)
+      .is_local_owner(&ctx.tenant, cell_id)
     {
       let owners = self
         .node_state
         .peer_manager
-        .get_room_owners(&ctx.tenant, room_id);
+        .get_cell_owners(&ctx.tenant, cell_id);
       if let Some(primary_owner_addr) = owners.first() {
         debug!(
             host = %ctx.tenant,
-            room_id = %room_id,
+            cell_id = %cell_id,
             responsible_peer = %primary_owner_addr,
             "Forwarding request to primary active owner"
         );
@@ -423,12 +423,12 @@ impl ProxyHttp for Proxy {
         // should have been the owner but wasn't identified as such.
         error!(
             host = %ctx.tenant,
-            room_id = %room_id,
-            "No active owner found for room, cannot forward request."
+            cell_id = %cell_id,
+            "No active owner found for cell, cannot forward request."
         );
         return Err(pingora::Error::explain(
           ErrorType::HTTPStatus(StatusCode::SERVICE_UNAVAILABLE.into()),
-          "No available upstream node for the requested room",
+          "No available upstream node for the requested cell",
         ));
       }
     }
@@ -436,7 +436,7 @@ impl ProxyHttp for Proxy {
     // We are the responsible peer, so handle the request locally
     debug!(
       host = %ctx.tenant,
-      room_id = %room_id,
+      cell_id = %cell_id,
       "This instance is responsible for handling the request"
     );
 
@@ -446,7 +446,7 @@ impl ProxyHttp for Proxy {
         .process_manager
         .get_or_spawn_process(
           &ctx.tenant,
-          room_id,
+          cell_id,
           single_use,
           self.node_state.clone(),
         )
@@ -455,12 +455,12 @@ impl ProxyHttp for Proxy {
         Ok((path, _stream)) => {
           // We only need the path, Pingora will handle the connection
           // Increment active connection count
-          let default_room = "default-room".to_string();
-          let room_id = ctx.room_id.as_ref().unwrap_or(&default_room);
+          let default_cell = "default-cell".to_string();
+          let cell_id = ctx.cell_id.as_ref().unwrap_or(&default_cell);
           self
             .node_state
             .process_manager
-            .increment_connection_count(&ctx.tenant, room_id)
+            .increment_connection_count(&ctx.tenant, cell_id)
             .await;
           path
         }

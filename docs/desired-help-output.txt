@@ -1,8 +1,8 @@
-roomd 0.1.0
-Self-hosted real-time runtime for isolated JavaScript rooms.
+celld 0.1.0
+Self-hosted real-time runtime for isolated JavaScript cells.
 
 USAGE:
-    roomd [OPTIONS]
+    celld [OPTIONS]
 
 OPTIONS:
     -p, --port <PORT>           Port to bind the HTTP/WebSocket server [default: 3000]
@@ -12,17 +12,17 @@ OPTIONS:
     --version                   Print version info
 
 DESCRIPTION:
-    Roomd is a lightweight runtime inspired by Durable Objects and Deno Deploy.
-    It runs tenant-isolated JavaScript logic in per-room Deno subprocesses,
+    Celld is a lightweight runtime inspired by Durable Objects and Deno Deploy.
+    It runs tenant-isolated JavaScript logic in per-cell Deno subprocesses,
     supports real-time WebSocket connections, and serves static files per tenant.
 
-    Routing is based on the request Host and room ID:
+    Routing is based on the request Host and cell ID:
 
-        http://myapp.localhost:3000/rooms/chat1
+        http://myapp.localhost:3000/cells/chat1
               └──────────┬────────┘ └────┬────┘
-                   tenant domain        room ID
+                   tenant domain        cell ID
 
-    Each room runs in an isolated subprocess with its own state and lifecycle.
+    Each cell runs in an isolated subprocess with its own state and lifecycle.
 
 DATA LAYOUT:
     The data directory contains one folder per tenant domain:
@@ -31,39 +31,39 @@ DATA LAYOUT:
         └── myapp.localhost/
             ├── static/          # Served at /
             │   └── index.html, client.js, etc.
-            ├── code/            # Room logic
+            ├── code/            # Cell logic
             │   └── main.ts      # Exports onConnect, onMessage, etc.
-            └── sockets/         # Internal room sockets (created at runtime)
+            └── sockets/         # Internal cell sockets (created at runtime)
 
 EXAMPLE:
-    Run roomd with two peers:
-        roomd --port 3000 --data-dir ./data --known-peers localhost:3000,localhost:4000
+    Run celld with two peers:
+        celld --port 3000 --data-dir ./data --known-peers localhost:3000,localhost:4000
 
     Open:
-        http://myapp.localhost:3000/rooms/chat1
+        http://myapp.localhost:3000/cells/chat1
 
 MORE:
-    - /rooms/{roomId} connections are upgraded to WebSockets
-    - Each tenant's code is hot-reloaded when the room starts
+    - /cells/{cellId} connections are upgraded to WebSockets
+    - Each tenant's code is hot-reloaded when the cell starts
     - Durable state and cold-start recovery with SQLite + S3/MinIO
 
 S3 REPLICATION:
     Configure SQLite replication to S3/MinIO via these environment variables:
 
-    ROOMD_S3_ENDPOINT           S3 endpoint URL (e.g., http://localhost:9000)
-    ROOMD_S3_BUCKET             Bucket name for storing room databases
-    ROOMD_S3_REGION             S3 region (defaults to us-east-1 if not specified)
-    ROOMD_S3_PREFIX             Path prefix within bucket (defaults to "roomd")
-    ROOMD_S3_ACCESS_KEY_ID      S3 access key ID
-    ROOMD_S3_SECRET_ACCESS_KEY  S3 secret access key
+    CELLD_S3_ENDPOINT           S3 endpoint URL (e.g., http://localhost:9000)
+    CELLD_S3_BUCKET             Bucket name for storing cell databases
+    CELLD_S3_REGION             S3 region (defaults to us-east-1 if not specified)
+    CELLD_S3_PREFIX             Path prefix within bucket (defaults to "celld")
+    CELLD_S3_ACCESS_KEY_ID      S3 access key ID
+    CELLD_S3_SECRET_ACCESS_KEY  S3 secret access key
 
-    When these variables are set, roomd will automatically:
-    - Restore room databases from S3 on cold start
+    When these variables are set, celld will automatically:
+    - Restore cell databases from S3 on cold start
     - Continuously replicate changes to S3
     - Gracefully flush and snapshot on shutdown
 
-    s3://$ROOMD_S3_BUCKET/$ROOMD_S3_PREFIX/<tenant>/<roomId>
+    s3://$CELLD_S3_BUCKET/$CELLD_S3_PREFIX/<tenant>/<cellId>
 
 PROJECT:
-    https://github.com/denoland/roomd
+    https://github.com/denoland/celld
 

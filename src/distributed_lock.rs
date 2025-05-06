@@ -2,7 +2,7 @@
 //!
 //! ## Purpose
 //!
-//! In a distributed system like `roomd` where multiple nodes might operate on
+//! In a distributed system like `celld` where multiple nodes might operate on
 //! shared resources or need to coordinate actions, a distributed lock is
 //! crucial to prevent race conditions and ensure data consistency. This module
 //! implements such a lock, specifically tailored for controlling access during
@@ -27,11 +27,11 @@
 //!     can try to delete the stale lock and acquire it.
 //! 4.  **Release:** The lock is explicitly released by deleting the corresponding S3 object.
 //!
-//! ## Context in `roomd`: Coordinating SQLite Restores
+//! ## Context in `celld`: Coordinating SQLite Restores
 //!
-//! The primary use case within `roomd` is to coordinate the `litestream
-//! restore` process for SQLite databases associated with specific rooms
-//! (`tenant`/`room_id`). When a `roomd` node needs to potentially restore a
+//! The primary use case within `celld` is to coordinate the `litestream
+//! restore` process for SQLite databases associated with specific cells
+//! (`tenant`/`cell_id`). When a `celld` node needs to potentially restore a
 //! database (e.g., on cold start or node takeover), it must first acquire the
 //! distributed lock for that specific database.
 //!
@@ -44,15 +44,15 @@
 //! ### Example S3 Lock Path
 //!
 //! The specific S3 key for a lock is determined by a configured prefix and a hash of the
-//! unique resource being locked (typically the tenant and room ID combined).
+//! unique resource being locked (typically the tenant and cell ID combined).
 //!
-//! For example, if the S3 bucket is `my-roomd-state` and the lock prefix is configured as
+//! For example, if the S3 bucket is `my-celld-state` and the lock prefix is configured as
 //! `cluster_state/locks/restore/`, acquiring a lock for the database corresponding to
-//! tenant `my-app.localhost` and room `user-session-abc` might result in an attempt
+//! tenant `my-app.localhost` and cell `user-session-abc` might result in an attempt
 //! to atomically create an S3 object like:
 //!
 //! ```text
-//! s3://my-roomd-state/cluster_state/locks/restore/f8a3b1e4c9d0...{hash_of_"my-app.localhost/user-session-abc"}...e5f6a7b8.lock
+//! s3://my-celld-state/cluster_state/locks/restore/f8a3b1e4c9d0...{hash_of_"my-app.localhost/user-session-abc"}...e5f6a7b8.lock
 //! ```
 //!
 //! The content of this object would be a JSON representation of the `LockInfo` struct.

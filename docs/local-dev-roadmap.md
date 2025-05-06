@@ -4,8 +4,8 @@
 
 - Dev server runs Vite (frontend)
 - Vite plugin spawns a Deno process:
-  - Listens on `/rooms/:roomId`
-  - When first request hits a `roomId`, spins up a subprocess (Deno isolate)
+  - Listens on `/cells/:cellId`
+  - When first request hits a `cellId`, spins up a subprocess (Deno isolate)
     with:
     - `--allow-net` (for WebSockets)
     - `--allow-read`/`--allow-write` (for SQLite database)
@@ -13,20 +13,20 @@
 
 **Result:** frontend + backend fullstack dev in one local server.
 
-### 2. **Room code uses `jsr:@deno/roomd`**
+### 2. **Cell code uses `jsr:@deno/celld`**
 
-- Room code imports from `@deno/roomd`.
+- Cell code imports from `@deno/celld`.
 - Inside the module, it detects:
   - **Local dev:** spawn Deno subprocess or run inline.
-  - **Prod (roomd mesh):** run inside bootstrap.ts + subprocess management.
+  - **Prod (celld mesh):** run inside bootstrap.ts + subprocess management.
 
 **Result:** Same source code works everywhere.
 
 ### 3. **Type-checking + LSP support**
 
 - Frontend gets normal Vite LSP (TypeScript types, etc).
-- Backend (room code) gets Deno LSP and types from `@deno/roomd`.
-- `createRoom()` + `addEventListener()` model ensures type inference for event
+- Backend (cell code) gets Deno LSP and types from `@deno/celld`.
+- `createCell()` + `addEventListener()` model ensures type inference for event
   handlers.
 
 **Result:** Seamless dev experience — like writing React components but for
@@ -41,9 +41,9 @@ Example layout:
 ```
 demo-llm-chat/
   vite.config.ts
-  rooms/       <-- all backend code
+  cells/       <-- all backend code
     main.ts
-    support.ts (maybe extra room logic)
+    support.ts (maybe extra cell logic)
   static/      <-- frontend code
     index.html
     main.ts
@@ -55,4 +55,4 @@ Would you like me to now:
 
 - Draft a **mock vite.config.ts** for this model
 - Draft a **mock dev.ts** (Deno script) that launches frontend+backend cleanly
-- Sketch a **future multiple-room-type dispatch** system
+- Sketch a **future multiple-cell-type dispatch** system

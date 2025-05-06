@@ -16,8 +16,8 @@ export interface Connection extends WebSocket {
   setState(state: Record<string, unknown> | null): void;
 }
 
-// Room context similar to PartyKit
-export interface Room {
+// Cell context similar to PartyKit
+export interface Cell {
   id: string;
   name: string;
   connections: Map<string, Connection>;
@@ -30,9 +30,9 @@ export interface Room {
 }
 
 interface Context {
-  roomId: string; // superfluous - remove in favor of room.id
-  room: Room;
-  db: DatabaseSync; // should this be in Room interface?
+  cellId: string; // superfluous - remove in favor of cell.id
+  cell: Cell;
+  db: DatabaseSync; // should this be in Cell interface?
 }
 
 interface Server {
@@ -71,14 +71,14 @@ async function bootstrap(userModulePath: string) {
   // Support export default pattern
   const userModule: Server = module.default || module;
 
-  // Get the room ID from environment variable once, when the process starts
-  const roomId = Deno.env.get("X-Room-Id")!;
+  // Get the cell ID from environment variable once, when the process starts
+  const cellId = Deno.env.get("X-Cell-Id")!;
 
-  // Create a Room object to track connections and provide broadcast functionality
+  // Create a Cell object to track connections and provide broadcast functionality
   const connections = new Map<string, Connection>();
 
-  const room: Room = {
-    id: roomId,
+  const cell: Cell = {
+    id: cellId,
     name: userModulePath.split("/").pop()?.replace(/\.ts$/, "") || "unknown",
     connections,
 
@@ -104,7 +104,7 @@ async function bootstrap(userModulePath: string) {
   };
 
   // Create context object
-  const ctx = { roomId, room };
+  const ctx = { cellId, cell };
 
   let dbInstance: DatabaseSync | null = null;
   Object.defineProperty(ctx, "db", {
@@ -112,7 +112,7 @@ async function bootstrap(userModulePath: string) {
     enumerable: true,
     get() {
       if (!dbInstance) {
-        dbInstance = new DatabaseSync(`./sqlite/${roomId}.db`);
+        dbInstance = new DatabaseSync(`./sqlite/${cellId}.db`);
       }
       return dbInstance;
     },

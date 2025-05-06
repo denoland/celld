@@ -1,7 +1,7 @@
 # Architecture: Self‑Hosted Deno Deploy (MVP)
 
 A containerized, multi‑tenant Deno runtime delivered via Docker. It combines
-**PartyKit‑style rooms**, **Erlang‑inspired mesh routing**, **real‑time
+**PartyKit‑style cells**, **Erlang‑inspired mesh routing**, **real‑time
 WebSocket hooks**, and **sub‑50 ms cold starts**, with secure per‑tenant
 isolation and fast static asset serving.
 
@@ -22,16 +22,16 @@ docker run \
   -ti denoland/deploy
 ```
 
-Open two browser tabs pointing at `http://tenant.local:3000/rooms/chat1`.\
+Open two browser tabs pointing at `http://tenant.local:3000/cells/chat1`.\
 Type in one tab and see the message appear in the other—across containers.
 
 ### 2. High‑Level Goals
 
-- **Room API**\
-  First‑class `/rooms/{roomId}` endpoint with hooks\
+- **Cell API**\
+  First‑class `/cells/{cellId}` endpoint with hooks\
   `onConnect`, `onMessage`, `onDisconnect`, and optional `onRequest`
 - **Peer Mesh**\
-  Containers read `KNOWN_PEERS`, form an Erlang‑style mesh, and shard rooms by
+  Containers read `KNOWN_PEERS`, form an Erlang‑style mesh, and shard cells by
   consistent hashing
 - **Ultra‑Fast Cold‑Start**\
   TCP header peek + Deno subprocess reuse → first byte in < 50 ms
@@ -40,7 +40,7 @@ Type in one tab and see the message appear in the other—across containers.
 - **Strict Isolation**\
   Each tenant runs in its own Deno subprocess (V8 sandbox + cgroup limits)
 - **Horizontal Scale‑Out**\
-  Add nodes to increase capacity; rooms auto‑route to their owner
+  Add nodes to increase capacity; cells auto‑route to their owner
 
 ### 3. Core Components
 
@@ -50,18 +50,18 @@ Type in one tab and see the message appear in the other—across containers.
 - **Pipeline**:
   1. **TenantExtraction** – parse `Host:` → tenant context
   2. **StaticFileModule** – serve `$DATA_DIR/<tenant>/static/*`
-  3. **RoomProxyService** – intercept `/rooms/{roomId}`, decide local vs remote
+  3. **CellProxyService** – intercept `/cells/{cellId}`, decide local vs remote
 
 - **Routing Logic**:
-  - **Local** – connect to Unix socket at `/data/<tenant>/sockets/{roomId}.sock`
+  - **Local** – connect to Unix socket at `/data/<tenant>/sockets/{cellId}.sock`
   - **Remote** – forward connection to the owning peer (consistent‑hash on
-    `roomId`)
+    `cellId`)
 
 #### 3.2 Peer Mesh
 
 - **Discovery** – read `KNOWN_PEERS` at startup
 - **Handshake** – establish TCP connections to peers, maintain live list
-- **Sharding** – hash `roomId` → peer index (ensures exactly one owner per room)
+- **Sharding** – hash `cellId` → peer index (ensures exactly one owner per cell)
 - **Use‑cases** – cross‑container WS proxying, fail‑over, elastic scaling
 
 #### 3.3 Subprocess Manager
@@ -79,21 +79,21 @@ Drop `data/<tenant>/code/user_code.ts` exporting:
 
 ```ts
 export default {
-  async onConnect(ws: WebSocket, ctx: { roomId: string }) {
+  async onConnect(ws: WebSocket, ctx: { cellId: string }) {
     // called once when a client connects
   },
 
-  async onMessage(ws: WebSocket, message: string, ctx: { roomId: string }) {
+  async onMessage(ws: WebSocket, message: string, ctx: { cellId: string }) {
     // called on each message
   },
 
-  async onDisconnect(ws: WebSocket, ctx: { roomId: string }) {
+  async onDisconnect(ws: WebSocket, ctx: { cellId: string }) {
     // called when the connection closes
   },
 
-  // Optional HTTP handler for non‑WebSocket requests to /rooms/{roomId}
-  async onRequest(req: Request, ctx: { roomId: string }): Promise<Response> {
-    return new Response(`Room ${ctx.roomId} got ${req.method}`, {
+  // Optional HTTP handler for non‑WebSocket requests to /cells/{cellId}
+  async onRequest(req: Request, ctx: { cellId: string }): Promise<Response> {
+    return new Response(`Cell ${ctx.cellId} got ${req.method}`, {
       status: 200,
     });
   },
@@ -102,7 +102,7 @@ export default {
 
 - **No manual `Deno.serve`** – shim takes care of HTTP & WS
 - Hooks named for PartyKit familiarity
-- All dynamic behavior lives under `/rooms/{roomId}`
+- All dynamic behavior lives under `/cells/{cellId}`
 
 ### 5. Storage & Layout
 
@@ -111,14 +111,14 @@ export default {
 └── <tenant>/
     ├── static/        # index.html, client.js, assets
     ├── code/          # user_code.ts only
-    └── sockets/       # {roomId}.sock per active room
+    └── sockets/       # {cellId}.sock per active cell
 ```
 
 ### 6. Observability
 
 - **Proxy Logs** – routing decisions, peer health, cold‑start timings
 - **Subprocess Logs** – `console.*` from JS code
-- **Future** – OpenTelemetry, per-room metrics, dashboards
+- **Future** – OpenTelemetry, per-cell metrics, dashboards
 
 ### 7. Inspirations & Aspirations
 
@@ -141,10 +141,10 @@ export default {
 2. **Backpressure & Error Handling** – graceful degradation under load
 3. **Durable Storage** – integrated KV or database for persisted state
 4. **Testing Strategy** – unit/integration tests for proxy, mesh, and shim
-5. **Shard Rebalancing** – migrating rooms when peers change
+5. **Shard Rebalancing** – migrating cells when peers change
 6. **Developer UX** – CLI design and dashboard mockups
 
-- Details on how rooms persist state or recover after failure (e.g., cold‑start
+- Details on how cells persist state or recover after failure (e.g., cold‑start
   rehydration)
 - Examples of real-world workflows (e.g., multiplayer games, collaborative
   editing)

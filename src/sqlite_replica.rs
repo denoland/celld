@@ -1,12 +1,12 @@
 //! SqliteReplica abstraction for managing SQLite WAL replication to S3/MinIO via Litestream
 //!
 //! This module defines the **SqliteReplica** abstraction that encapsulates the full lifecycle
-//! of durable state replication for a single Deno room isolate. It is designed to:
+//! of durable state replication for a single Deno cell isolate. It is designed to:
 //!
-//! 1. generate and write a per-room Litestream configuration file (`<room_id>.yml`),
+//! 1. generate and write a per-cell Litestream configuration file (`<cell_id>.yml`),
 //! 2. perform a **cold-start restore** from S3 or MinIO when no local database exists,
 //! 3. spawn a long-running `litestream replicate` process in a **non-blocking** manner,
-//! 4. trigger one-off `litestream backup` snapshots on room shutdown or parent exit,
+//! 4. trigger one-off `litestream backup` snapshots on cell shutdown or parent exit,
 //! 5. manage replication processes that may **outlive** the Deno isolate, tracking
 //!    their execution and completion to ensure final backups finish.
 //!
@@ -17,7 +17,7 @@
 //! - verify configuration file creation,
 //! - validate `restore`, `replicate`, and `backup` commands against the live MinIO,
 //! - cleanly shut down MinIO and replication processes,
-//! - simulate empty-state (new room) and existing-state scenarios.
+//! - simulate empty-state (new cell) and existing-state scenarios.
 //!
 //! # Directory layout
 //!
@@ -27,9 +27,9 @@
 //!     ├── static/        # static assets
 //!     ├── code/          # user-provided TypeScript hooks (main.ts)
 //!     ├── sockets/       # runtime-generated Unix sockets
-//!     └── sqlite/        # per-room state and config
-//!         ├── <room_id>.db    # SQLite database file
-//!         ├── <room_id>.yml   # Litestream YAML config for this room
+//!     └── sqlite/        # per-cell state and config
+//!         ├── <cell_id>.db    # SQLite database file
+//!         ├── <cell_id>.yml   # Litestream YAML config for this cell
 //!         └── ...
 //! ```
 //!
@@ -125,9 +125,9 @@ struct LitestreamConfig {
 pub struct SqliteReplica {
   /// Tenant identifier
   tenant: String,
-  /// Room identifier
-  room_id: String,
-  /// Base data directory for all tenants and rooms
+  /// Cell identifier
+  cell_id: String,
+  /// Base data directory for all tenants and cells
   data_dir: PathBuf,
   /// S3/MinIO configuration for replication
   s3_config: S3Config,
@@ -146,7 +146,7 @@ impl SqliteReplica {
   pub async fn initialize(
     data_dir: &Path,
     tenant: &str,
-    room_id: &str,
+    cell_id: &str,
     s3_config: Option<S3Config>,
   ) -> Result<Option<Self>> {
     // If S3 is not configured, return None (no replication)
@@ -161,7 +161,7 @@ impl SqliteReplica {
     let db_path = Path::new(data_dir)
       .join(tenant)
       .join("sqlite")
-      .join(format!("{}.db", room_id));
+      .join(format!("{}.db", cell_id));
 
     let data_dir = Path::new(data_dir).to_path_buf();
 
@@ -171,12 +171,12 @@ impl SqliteReplica {
       .context("Failed to create sqlite directory")?;
 
     // Create a unique config file name for this replica
-    let config_file = config_dir.join(format!("{}.yml", room_id));
+    let config_file = config_dir.join(format!("{}.yml", cell_id));
 
     // Create SqliteReplica instance (without running restore yet)
     let replica = Self {
       tenant: tenant.to_string(),
-      room_id: room_id.to_string(),
+      cell_id: cell_id.to_string(),
       data_dir: data_dir.clone(),
       db_path: db_path.clone(),
       s3_config: s3_config.clone(),
@@ -188,7 +188,7 @@ impl SqliteReplica {
     if let Err(err) = replica.write_config() {
       warn!(
         tenant = %tenant,
-        room_id = %room_id,
+        cell_id = %cell_id,
         error = %err,
         "Failed to write litestream config"
       );
@@ -207,7 +207,7 @@ impl SqliteReplica {
     if self.db_path.exists() {
       debug!(
         tenant = %self.tenant,
-        room_id = %self.room_id,
+        cell_id = %self.cell_id,
         db_path = %self.db_path.display(),
         "Database already exists, skipping restore"
       );
@@ -222,7 +222,7 @@ impl SqliteReplica {
 
     info!(
       tenant = %self.tenant,
-      room_id = %self.room_id,
+      cell_id = %self.cell_id,
       db_path = %self.db_path.display(),
       config_path = %self.config_path.display(),
       "Attempting to restore database from S3"
@@ -232,7 +232,7 @@ impl SqliteReplica {
     if !self.config_path.exists() {
       info!(
         tenant = %self.tenant,
-        room_id = %self.room_id,
+        cell_id = %self.cell_id,
         config_path = %self.config_path.display(),
         "Config file doesn't exist, generating it"
       );
@@ -240,7 +240,7 @@ impl SqliteReplica {
       if let Err(e) = self.write_config() {
         warn!(
           tenant = %self.tenant,
-          room_id = %self.room_id,
+          cell_id = %self.cell_id,
           error = %e,
           "Failed to write config file for restore"
         );
@@ -273,7 +273,7 @@ impl SqliteReplica {
       {
         info!(
           tenant = %self.tenant,
-          room_id = %self.room_id,
+          cell_id = %self.cell_id,
           stdout = %stdout,
           stderr = %stderr,
           "No existing backup found in S3, creating new database"
@@ -283,7 +283,7 @@ impl SqliteReplica {
         if let Err(e) = create_empty_database(&self.db_path) {
           error!(
             tenant = %self.tenant,
-            room_id = %self.room_id,
+            cell_id = %self.cell_id,
             error = %e,
             db_path = %self.db_path.display(),
             "Failed to create empty database after restore found no backups"
@@ -298,7 +298,7 @@ impl SqliteReplica {
       // Any other error is unexpected
       warn!(
         tenant = %self.tenant,
-        room_id = %self.room_id,
+        cell_id = %self.cell_id,
         status = ?output.status,
         stdout = %stdout,
         stderr = %stderr,
@@ -310,7 +310,7 @@ impl SqliteReplica {
 
     info!(
       tenant = %self.tenant,
-      room_id = %self.room_id,
+      cell_id = %self.cell_id,
       "Successfully restored database from S3"
     );
 
@@ -332,19 +332,19 @@ impl SqliteReplica {
     if self.db_path.exists() {
       debug!(
         tenant = %self.tenant,
-        room_id = %self.room_id,
+        cell_id = %self.cell_id,
         "Database already exists locally, no restore needed"
       );
       return Ok(RestoreState::Complete(false));
     }
 
-    // Create a lock name based on tenant and room_id
-    let lock_name = format!("{}:{}", self.tenant, self.room_id);
+    // Create a lock name based on tenant and cell_id
+    let lock_name = format!("{}:{}", self.tenant, self.cell_id);
 
     // Try to acquire the distributed lock
     debug!(
       tenant = %self.tenant,
-      room_id = %self.room_id,
+      cell_id = %self.cell_id,
       node_id = %self_node_id,
       "Attempting to acquire distributed lock for restore"
     );
@@ -358,7 +358,7 @@ impl SqliteReplica {
         // We got the lock, proceed with restore
         info!(
           tenant = %self.tenant,
-          room_id = %self.room_id,
+          cell_id = %self.cell_id,
           "Lock acquired, proceeding with database restore"
         );
 
@@ -368,7 +368,7 @@ impl SqliteReplica {
             // Restore succeeded
             info!(
               tenant = %self.tenant,
-              room_id = %self.room_id,
+              cell_id = %self.cell_id,
               "Database restore completed successfully (restored = {})",
               restored
             );
@@ -380,7 +380,7 @@ impl SqliteReplica {
             // Restore failed
             error!(
               tenant = %self.tenant,
-              room_id = %self.room_id,
+              cell_id = %self.cell_id,
               error = %e,
               "Database restore failed"
             );
@@ -394,7 +394,7 @@ impl SqliteReplica {
         if let Err(e) = lock_guard.release().await {
           warn!(
             tenant = %self.tenant,
-            room_id = %self.room_id,
+            cell_id = %self.cell_id,
             error = %e,
             "Failed to release distributed lock after restore"
           );
@@ -402,7 +402,7 @@ impl SqliteReplica {
         } else {
           debug!(
             tenant = %self.tenant,
-            room_id = %self.room_id,
+            cell_id = %self.cell_id,
             "Successfully released distributed lock after restore"
           );
         }
@@ -415,7 +415,7 @@ impl SqliteReplica {
         if let Some(info) = lock_info {
           info!(
             tenant = %self.tenant,
-            room_id = %self.room_id,
+            cell_id = %self.cell_id,
             owner_node_id = %info.node_id,
             acquired_at = %info.timestamp,
             "Distributed lock already held by another node"
@@ -423,7 +423,7 @@ impl SqliteReplica {
         } else {
           info!(
             tenant = %self.tenant,
-            room_id = %self.room_id,
+            cell_id = %self.cell_id,
             "Distributed lock already held by unknown node"
           );
         }
@@ -435,7 +435,7 @@ impl SqliteReplica {
         // Unexpected error acquiring lock
         error!(
           tenant = %self.tenant,
-          room_id = %self.room_id,
+          cell_id = %self.cell_id,
           error = %e,
           "Failed to acquire distributed lock for restore"
         );
@@ -475,14 +475,14 @@ impl SqliteReplica {
     }
 
     assert!(!self.tenant.contains('/'));
-    assert!(!self.room_id.contains('/'));
+    assert!(!self.cell_id.contains('/'));
     let path = self
       .s3_config
-      .subpath(&format!("sqlite/{}/{}", self.tenant, self.room_id));
+      .subpath(&format!("sqlite/{}/{}", self.tenant, self.cell_id));
 
     let replica = LitestreamS3Replica {
       replica_type: "s3".to_string(),
-      name: Some(format!("{}-replica", self.room_id)),
+      name: Some(format!("{}-replica", self.cell_id)),
       bucket: self.s3_config.bucket.clone(),
       path,
       region: self.s3_config.region.clone(),
@@ -676,7 +676,7 @@ pub mod tests {
       endpoint: minio.endpoint.clone(),
       region: "us-east-1".to_string(),
       bucket: test_name.to_string(),
-      path: Some(format!("roomd-test-{}", test_name)),
+      path: Some(format!("celld-test-{}", test_name)),
       access_key_id: minio.access_key_id.clone(),
       secret_access_key: minio.secret_access_key.clone(),
     }
@@ -708,14 +708,14 @@ pub mod tests {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let data_dir = temp_dir.path();
 
-    let room_id = "basic-replica-lifecycle";
-    let s3_config = create_test_s3_config(room_id, &minio_guard);
+    let cell_id = "basic-replica-lifecycle";
+    let s3_config = create_test_s3_config(cell_id, &minio_guard);
 
     // Initialize the SqliteReplica with the new API
     let replica = SqliteReplica::initialize(
       data_dir,
       "test-tenant",
-      room_id,
+      cell_id,
       Some(s3_config),
     )
     .await
@@ -726,7 +726,7 @@ pub mod tests {
     let config_path = data_dir
       .join("test-tenant")
       .join("sqlite")
-      .join(format!("{}.yml", room_id));
+      .join(format!("{}.yml", cell_id));
     assert!(config_path.exists(), "Config file should exist");
 
     // On first run, restore should return false (no restoration)
@@ -780,7 +780,7 @@ pub mod tests {
     );
 
     // Check MinIO to ensure data was replicated
-    assert!(minio_guard.has_files_for_room(room_id, room_id));
+    assert!(minio_guard.has_files_for_cell(cell_id, cell_id));
 
     println!("Basic replica lifecycle test completed successfully");
   }

@@ -17,23 +17,23 @@ use uuid::Uuid;
 
 use common::test_env::TestEnv;
 
-/// Tests that we can connect to a room through any node in the mesh
+/// Tests that we can connect to a cell through any node in the mesh
 #[tokio::test]
-async fn test_mesh_room_connection() {
+async fn test_mesh_cell_connection() {
   // Start 3 server instances with auto-allocated ports
   let test_env = TestEnv::new(3);
 
   // Servers are already initialized with the TCP health checks
 
-  // Create a room ID that should be consistently owned by one node
-  let room_id = "test-mesh-room";
+  // Create a cell ID that should be consistently owned by one node
+  let cell_id = "test-mesh-cell";
 
-  // Connect to the room through each server
+  // Connect to the cell through each server
   let mut connections = Vec::new();
   let mut usernames = Vec::new();
 
   for &port in &test_env.public_ports {
-    let (conn, username) = connect_to_room(port, room_id).await;
+    let (conn, username) = connect_to_cell(port, cell_id).await;
     connections.push(conn);
     usernames.push(username);
   }
@@ -76,29 +76,29 @@ async fn test_mesh_message_broadcast() {
 
   // Servers are already initialized with the TCP health checks
 
-  // Create a room ID
-  let room_id = "broadcast-mesh-test";
+  // Create a cell ID
+  let cell_id = "broadcast-mesh-test";
 
-  // Connect two clients to the room through different servers
+  // Connect two clients to the cell through different servers
   let (mut client1, username1) =
-    connect_to_room(test_env.public_ports[0], room_id).await;
+    connect_to_cell(test_env.public_ports[0], cell_id).await;
 
   // The second client connection will now wait until it gets proper welcome messages
   let (mut client2, _) =
-    connect_to_room(test_env.public_ports[1], room_id).await;
+    connect_to_cell(test_env.public_ports[1], cell_id).await;
 
   // Client 1 should receive system message about client 2 joining
   let system_data = read_message_of_type(&mut client1, "system", 5000).await;
   assert!(system_data["message"]
     .as_str()
     .unwrap()
-    .contains("has joined the room"));
+    .contains("has joined the cell"));
 
   // Client 1 should receive an updated userlist
   let userlist_data =
     read_message_of_type(&mut client1, "userlist", 5000).await;
   let users = userlist_data["users"].as_array().unwrap();
-  assert_eq!(users.len(), 2, "Should have 2 users in the room");
+  assert_eq!(users.len(), 2, "Should have 2 users in the cell");
 
   // Send a chat message from client 1
   let chat_message = "Hello from the mesh test!";
@@ -146,7 +146,7 @@ async fn test_mesh_dynamic_membership() {
     .collect();
 
   println!("killing stopping the second node...");
-  test_env.kill_roomd_instance(1);
+  test_env.kill_celld_instance(1);
 
   // Wait for heartbeat interval (shorter for tests)
   println!("Waiting for heartbeat interval to expire...");
@@ -166,7 +166,7 @@ async fn test_mesh_dynamic_membership() {
   // Start a new node
   println!("Starting a new node...");
   let new_port = 7044;
-  test_env.spawn_roomd_instance(new_port);
+  test_env.spawn_celld_instance(new_port);
   TestEnv::wait_for_server_ready(new_port);
 
   // Wait for peer exchange
@@ -200,54 +200,54 @@ async fn test_mesh_dynamic_membership() {
   );
 }
 
-/// Tests that room isolation works properly in the mesh
+/// Tests that cell isolation works properly in the mesh
 #[tokio::test]
-async fn test_mesh_room_isolation() {
+async fn test_mesh_cell_isolation() {
   // Start 3 server instances with auto-allocated ports
   let test_env = TestEnv::new(3);
 
   // Servers are already initialized with the TCP health checks
 
-  // Connect to two different rooms through different servers
+  // Connect to two different cells through different servers
   let (mut client1, username1) =
-    connect_to_room(test_env.public_ports[0], "room-a").await;
+    connect_to_cell(test_env.public_ports[0], "cell-a").await;
   let (mut client2, username2) =
-    connect_to_room(test_env.public_ports[1], "room-b").await;
+    connect_to_cell(test_env.public_ports[1], "cell-b").await;
 
-  // Send a message in room-a
-  let message_room1 = "This message should only be in room-a";
+  // Send a message in cell-a
+  let message_cell1 = "This message should only be in cell-a";
   client1
-    .send(Message::Text(message_room1.to_string().into()))
+    .send(Message::Text(message_cell1.to_string().into()))
     .await
     .unwrap();
 
-  // Client in room-a should receive the message
+  // Client in cell-a should receive the message
   let msg_data1 = read_message_of_type(&mut client1, "chat", 5000).await;
-  assert_eq!(msg_data1["message"].as_str().unwrap(), message_room1);
+  assert_eq!(msg_data1["message"].as_str().unwrap(), message_cell1);
   assert_eq!(msg_data1["username"].as_str().unwrap(), username1);
 
-  // Send a message in room-b
-  let message_room2 = "This message should only be in room-b";
+  // Send a message in cell-b
+  let message_cell2 = "This message should only be in cell-b";
   client2
-    .send(Message::Text(message_room2.to_string().into()))
+    .send(Message::Text(message_cell2.to_string().into()))
     .await
     .unwrap();
 
-  // Client in room-b should receive the message
+  // Client in cell-b should receive the message
   let msg_data2 = read_message_of_type(&mut client2, "chat", 5000).await;
-  assert_eq!(msg_data2["message"].as_str().unwrap(), message_room2);
+  assert_eq!(msg_data2["message"].as_str().unwrap(), message_cell2);
   assert_eq!(msg_data2["username"].as_str().unwrap(), username2);
 
-  // Verify isolation: room-a should not receive messages sent to room-b
+  // Verify isolation: cell-a should not receive messages sent to cell-b
   let timeout_duration = Duration::from_millis(300);
   tokio::select! {
       maybe_msg = tokio::time::timeout(timeout_duration, client1.next()) => {
           if let Ok(Some(Ok(_))) = maybe_msg {
-              panic!("Room isolation failure: room-a received a message from room-b");
+              panic!("Cell isolation failure: cell-a received a message from cell-b");
           }
       }
       _ = tokio::time::sleep(timeout_duration) => {
-          // Expected case: timeout without receiving cross-room message
+          // Expected case: timeout without receiving cross-cell message
       }
   }
 
@@ -256,18 +256,18 @@ async fn test_mesh_room_isolation() {
   client2.close(None).await.unwrap();
 }
 
-/// Tests the node failure scenario - when the primary node for a room fails,
-/// another node automatically takes over responsibility for the room (Durability Test 2)
+/// Tests the node failure scenario - when the primary node for a cell fails,
+/// another node automatically takes over responsibility for the cell (Durability Test 2)
 #[tokio::test]
 async fn test_node_failure_takeover() {
   // Setup three nodes in the mesh with auto-allocated ports
   let mut test_env = TestEnv::new(3);
 
-  // Use unique room ID to avoid conflicts with other tests
-  let test_room_id = format!("failover-test-{}", Uuid::new_v4().simple());
-  println!("Testing failover with room ID: {}", test_room_id);
+  // Use unique cell ID to avoid conflicts with other tests
+  let test_cell_id = format!("failover-test-{}", Uuid::new_v4().simple());
+  println!("Testing failover with cell ID: {}", test_cell_id);
 
-  // Find which node is the primary owner for this room
+  // Find which node is the primary owner for this cell
   let mut primary_owner_port = 0;
   let mut secondary_owners = Vec::new();
 
@@ -276,7 +276,7 @@ async fn test_node_failure_takeover() {
     let internal_port = test_env.internal_ports[i];
     let owner_url = format!(
       "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
-      internal_port, test_room_id
+      internal_port, test_cell_id
     );
     let owner_resp = reqwest::get(&owner_url)
       .await
@@ -297,11 +297,11 @@ async fn test_node_failure_takeover() {
 
   assert_ne!(
     primary_owner_port, 0,
-    "Failed to find primary owner for test room"
+    "Failed to find primary owner for test cell"
   );
   assert!(
     !secondary_owners.is_empty(),
-    "Failed to find secondary owners for test room"
+    "Failed to find secondary owners for test cell"
   );
 
   println!("Primary owner is on port: {}", primary_owner_port);
@@ -314,14 +314,14 @@ async fn test_node_failure_takeover() {
     .position(|&p| p == primary_owner_port)
     .unwrap();
 
-  // Send request to the primary node to create data in the room
+  // Send request to the primary node to create data in the cell
   let url = format!(
-    "http://basic-db.localhost:{}/room/{}",
-    primary_owner_port, test_room_id
+    "http://basic-db.localhost:{}/cell/{}",
+    primary_owner_port, test_cell_id
   );
   let client = reqwest::Client::builder().build().unwrap();
 
-  // Make the first request to create the room
+  // Make the first request to create the cell
   let response = client.get(&url).send().await.unwrap();
   assert_eq!(response.status(), 200);
   let content = response.text().await.unwrap();
@@ -340,18 +340,18 @@ async fn test_node_failure_takeover() {
   // Abruptly kill the primary node (simulate node failure)
   println!("Killing primary node on port {}...", primary_owner_port);
   // We already found the primary_index earlier
-  test_env.kill_roomd_instance(primary_index);
+  test_env.kill_celld_instance(primary_index);
 
   // Wait for node failure to be detected (heartbeat timeout)
-  // ROOMD_STALENESS_THRESHOLD_SECS is set to 6 seconds in TestEnv::spawn_roomd_instance
+  // CELLD_STALENESS_THRESHOLD_SECS is set to 6 seconds in TestEnv::spawn_celld_instance
   println!("Waiting for primary node failure to be detected...");
   sleep(Duration::from_secs(8)).await;
 
-  // Try to access the room through a secondary node
+  // Try to access the cell through a secondary node
   let secondary_port = secondary_owners[0];
   let secondary_url = format!(
-    "http://basic-db.localhost:{}/room/{}",
-    secondary_port, test_room_id
+    "http://basic-db.localhost:{}/cell/{}",
+    secondary_port, test_cell_id
   );
 
   // This request should trigger takeover if not already happened
@@ -364,13 +364,13 @@ async fn test_node_failure_takeover() {
   let content3 = resp.text().await.unwrap();
   assert_eq!(content3.trim(), "3");
 
-  // Make another request to confirm the room is still operational
+  // Make another request to confirm the cell is still operational
   let response4 = client.get(&secondary_url).send().await.unwrap();
   assert_eq!(response4.status(), 200);
   let content4 = response4.text().await.unwrap();
   assert_eq!(content4.trim(), "4");
 
-  // Check which node owns the room now (should be one of the secondary nodes)
+  // Check which node owns the cell now (should be one of the secondary nodes)
   let mut new_owner_found = false;
   for &public_port in &secondary_owners {
     // Find the matching internal port for this public port
@@ -389,7 +389,7 @@ async fn test_node_failure_takeover() {
 
     let owner_url = format!(
       "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
-      internal_port, test_room_id
+      internal_port, test_cell_id
     );
     let owner_resp = reqwest::get(&owner_url)
       .await
@@ -424,11 +424,11 @@ async fn test_concurrent_takeover_locking() {
   // Setup three nodes in the mesh with auto-allocated ports
   let mut test_env = TestEnv::new(3);
 
-  // Use unique room ID to avoid conflicts with other tests
-  let test_room_id = format!("takeover-lock-test-{}", Uuid::new_v4().simple());
-  println!("Testing concurrent takeover with room ID: {}", test_room_id);
+  // Use unique cell ID to avoid conflicts with other tests
+  let test_cell_id = format!("takeover-lock-test-{}", Uuid::new_v4().simple());
+  println!("Testing concurrent takeover with cell ID: {}", test_cell_id);
 
-  // Find which node is the primary owner for this room
+  // Find which node is the primary owner for this cell
   let mut primary_owner_port = 0;
   let mut secondary_owners = Vec::new();
 
@@ -437,7 +437,7 @@ async fn test_concurrent_takeover_locking() {
     let internal_port = test_env.internal_ports[i];
     let owner_url = format!(
       "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
-      internal_port, test_room_id
+      internal_port, test_cell_id
     );
     let owner_resp = reqwest::get(&owner_url)
       .await
@@ -458,7 +458,7 @@ async fn test_concurrent_takeover_locking() {
 
   assert_ne!(
     primary_owner_port, 0,
-    "Failed to find primary owner for test room"
+    "Failed to find primary owner for test cell"
   );
   assert!(
     secondary_owners.len() >= 2,
@@ -470,8 +470,8 @@ async fn test_concurrent_takeover_locking() {
 
   // Create initial data on the primary node
   let url = format!(
-    "http://basic-db.localhost:{}/room/{}",
-    primary_owner_port, test_room_id
+    "http://basic-db.localhost:{}/cell/{}",
+    primary_owner_port, test_cell_id
   );
   let client = reqwest::Client::builder().build().unwrap();
   let response = client.get(&url).send().await.unwrap();
@@ -492,7 +492,7 @@ async fn test_concurrent_takeover_locking() {
     .iter()
     .position(|&p| p == primary_owner_port)
     .unwrap();
-  test_env.kill_roomd_instance(primary_index);
+  test_env.kill_celld_instance(primary_index);
 
   // Sleep to ensure the primary node has fully shutdown
   sleep(Duration::from_secs(10)).await;
@@ -502,8 +502,8 @@ async fn test_concurrent_takeover_locking() {
     .iter()
     .map(|&public_port| {
       format!(
-        "http://basic-db.localhost:{}/room/{}",
-        public_port, test_room_id
+        "http://basic-db.localhost:{}/cell/{}",
+        public_port, test_cell_id
       )
     })
     .collect();
@@ -548,14 +548,14 @@ async fn test_concurrent_takeover_locking() {
 
   // Send another request to whichever node succeeded - they should all route to the same place now
   println!(
-    "Sending another request to verify room stability after takeover..."
+    "Sending another request to verify cell stability after takeover..."
   );
   let stabilized_url = &secondary_urls[0];
   let final_response = client.get(stabilized_url).send().await.unwrap();
   assert_eq!(final_response.status(), 200);
   assert_eq!(final_response.text().await.unwrap().trim(), "4");
 
-  // Check which node owns the room now (only one should claim ownership)
+  // Check which node owns the cell now (only one should claim ownership)
   let mut owner_count = 0;
   for &public_port in &secondary_owners {
     // Find the matching internal port
@@ -575,7 +575,7 @@ async fn test_concurrent_takeover_locking() {
 
     let owner_url = format!(
       "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
-      internal_port, test_room_id
+      internal_port, test_cell_id
     );
     let owner_resp = reqwest::get(&owner_url)
       .await
@@ -607,18 +607,18 @@ async fn test_proxy_forwarding_retry() {
   // Setup three nodes in the mesh with auto-allocated ports
   let mut test_env = TestEnv::new(3);
 
-  // Use unique room ID to avoid conflicts with other tests
-  let test_room_id = format!("proxy-retry-test-{}", Uuid::new_v4().simple());
-  println!("Testing proxy forwarding with room ID: {}", test_room_id);
+  // Use unique cell ID to avoid conflicts with other tests
+  let test_cell_id = format!("proxy-retry-test-{}", Uuid::new_v4().simple());
+  println!("Testing proxy forwarding with cell ID: {}", test_cell_id);
 
-  // Find which node is the primary owner for this room
+  // Find which node is the primary owner for this cell
   let mut owner_info = Vec::new();
   for i in 0..test_env.public_ports.len() {
     let public_port = test_env.public_ports[i];
     let internal_port = test_env.internal_ports[i];
     let owner_url = format!(
       "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
-      internal_port, test_room_id
+      internal_port, test_cell_id
     );
     let owner_resp = reqwest::get(&owner_url)
       .await
@@ -651,8 +651,8 @@ async fn test_proxy_forwarding_retry() {
 
   // Create initial data by sending request to a non-owner node (should forward to primary)
   let url = format!(
-    "http://basic-db.localhost:{}/room/{}",
-    non_owner_port, test_room_id
+    "http://basic-db.localhost:{}/cell/{}",
+    non_owner_port, test_cell_id
   );
   let client = reqwest::Client::builder().build().unwrap();
   let response1 = client.get(&url).send().await.unwrap();
@@ -671,7 +671,7 @@ async fn test_proxy_forwarding_retry() {
     .iter()
     .position(|&p| p == primary_owner_port)
     .unwrap();
-  test_env.kill_roomd_instance(primary_index);
+  test_env.kill_celld_instance(primary_index);
 
   // Wait for heartbeat timeout to detect node failure
   println!("Waiting for primary node failure to be detected...");
@@ -735,7 +735,7 @@ async fn test_proxy_forwarding_retry() {
   // Get the new owner info
   let new_owner_url = format!(
     "http://localhost:{}/_mesh/owner/{}",
-    non_owner_port, test_room_id
+    non_owner_port, test_cell_id
   );
   let new_owner_resp = reqwest::get(&new_owner_url)
     .await
@@ -757,17 +757,17 @@ async fn test_proxy_forwarding_retry() {
 /// Tests that database restore coordination works properly across nodes
 #[tokio::test]
 async fn test_restore_coordination() {
-  // Use unique room ID to avoid conflicts with other tests
-  let test_room_id = format!("restore-coord-{}", Uuid::new_v4().simple());
-  println!("test_restore_coordination with room ID: {}", test_room_id);
+  // Use unique cell ID to avoid conflicts with other tests
+  let test_cell_id = format!("restore-coord-{}", Uuid::new_v4().simple());
+  println!("test_restore_coordination with cell ID: {}", test_cell_id);
 
   // Create a single-node environment
   let mut test_env = TestEnv::new(1);
   let port_a = test_env.public_ports[0];
 
-  // Send request to Node A to create data in the room
+  // Send request to Node A to create data in the cell
   let url_a =
-    format!("http://basic-db.localhost:{}/room/{}", port_a, test_room_id);
+    format!("http://basic-db.localhost:{}/cell/{}", port_a, test_cell_id);
   let client = reqwest::Client::builder().build().unwrap();
 
   let response_a = client.get(&url_a).send().await.unwrap();
@@ -782,7 +782,7 @@ async fn test_restore_coordination() {
   assert_eq!(content_a2.trim(), "2");
 
   // Verify SQLite database exists
-  let db_path = format!("data/basic-db.localhost/sqlite/{}.db", test_room_id);
+  let db_path = format!("data/basic-db.localhost/sqlite/{}.db", test_cell_id);
   assert!(std::path::Path::new(&db_path).exists());
 
   println!("Waiting for Litestream to replicate data to S3...");
@@ -790,7 +790,7 @@ async fn test_restore_coordination() {
 
   // Stop Node A
   println!("Stopping Node A...");
-  test_env.kill_roomd_instance(0);
+  test_env.kill_celld_instance(0);
 
   // Wait for Node A to fully terminate and release resources
   sleep(Duration::from_secs(2)).await;
@@ -809,25 +809,25 @@ async fn test_restore_coordination() {
   let port_c = TestEnv::allocate_ports(7610, 1, 2)[0];
 
   println!("Starting Node B on port {}", port_b);
-  test_env.spawn_roomd_instance(port_b);
+  test_env.spawn_celld_instance(port_b);
   println!("Starting Node C on port {}", port_c);
-  test_env.spawn_roomd_instance(port_c);
+  test_env.spawn_celld_instance(port_c);
 
   // Wait for both nodes to be ready
   TestEnv::wait_for_server_ready(port_b);
   TestEnv::wait_for_server_ready(port_c);
   sleep(Duration::from_secs(8)).await;
 
-  // Determine which node is responsible for the room by querying both
+  // Determine which node is responsible for the cell by querying both
   let owner_url_b = format!(
     "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
     port_b + 1,
-    test_room_id
+    test_cell_id
   );
   let owner_url_c = format!(
     "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
     port_c + 1,
-    test_room_id
+    test_cell_id
   );
 
   let owner_resp_b = reqwest::get(&owner_url_b)
@@ -846,19 +846,19 @@ async fn test_restore_coordination() {
   println!("Node B owner info: {}", owner_resp_b);
   println!("Node C owner info: {}", owner_resp_c);
 
-  // Get the owner for the test room
+  // Get the owner for the test cell
   let is_b_owner = owner_resp_b["is_local"].as_bool().unwrap();
   let is_c_owner = owner_resp_c["is_local"].as_bool().unwrap();
   assert!(
     is_b_owner != is_c_owner,
-    "Only one node should be the owner of the room"
+    "Only one node should be the owner of the cell"
   );
 
   // Create URLs for both nodes
   let url_b =
-    format!("http://basic-db.localhost:{}/room/{}", port_b, test_room_id);
+    format!("http://basic-db.localhost:{}/cell/{}", port_b, test_cell_id);
   let url_c =
-    format!("http://basic-db.localhost:{}/room/{}", port_c, test_room_id);
+    format!("http://basic-db.localhost:{}/cell/{}", port_c, test_cell_id);
 
   // First, try the node that should be the owner (more likely to succeed first)
   let (first_url, second_url) = if is_b_owner {
@@ -881,17 +881,17 @@ async fn test_restore_coordination() {
   // capturing for that level of verification.
 }
 
-/// Tests that replication and restore works correctly within a single room
+/// Tests that replication and restore works correctly within a single cell
 #[tokio::test]
 async fn test_restore_single() {
   // Create a single-node environment
   let mut test_env = TestEnv::new(1);
   let port = test_env.public_ports[0];
 
-  let test_room_id = "test-restore";
-  clean_room_workspace(test_room_id, &test_env);
+  let test_cell_id = "test-restore";
+  clean_cell_workspace(test_cell_id, &test_env);
 
-  let url = format!("http://basic-db.localhost:{}/room/{}", port, test_room_id);
+  let url = format!("http://basic-db.localhost:{}/cell/{}", port, test_cell_id);
   let client = reqwest::Client::builder().build().unwrap();
 
   let response1 = client.get(&url).send().await.unwrap();
@@ -901,21 +901,21 @@ async fn test_restore_single() {
 
   sleep(Duration::from_secs(2)).await;
 
-  println!("Shutting down roomd instance...");
-  test_env.kill_roomd_instance(0);
+  println!("Shutting down celld instance...");
+  test_env.kill_celld_instance(0);
 
   println!("Removing local database files...");
-  clean_room_workspace(test_room_id, &test_env);
+  clean_cell_workspace(test_cell_id, &test_env);
 
   let new_port = TestEnv::allocate_ports(7620, 1, 2)[0];
-  test_env.spawn_roomd_instance(new_port);
+  test_env.spawn_celld_instance(new_port);
   TestEnv::wait_for_server_ready(new_port);
 
   sleep(Duration::from_secs(8)).await;
 
   let new_url = format!(
-    "http://basic-db.localhost:{}/room/{}",
-    new_port, test_room_id
+    "http://basic-db.localhost:{}/cell/{}",
+    new_port, test_cell_id
   );
   let response2 = client.get(&new_url).send().await.unwrap();
   assert_eq!(response2.status(), 200);
@@ -932,19 +932,19 @@ async fn test_restore_single() {
   assert_eq!(content3.trim(), "3", "Third request should return 3");
 }
 
-/// Helper function to clean up all files related to a room
-fn clean_room_workspace(room_id: &str, test_env: &TestEnv) {
+/// Helper function to clean up all files related to a cell
+fn clean_cell_workspace(cell_id: &str, test_env: &TestEnv) {
   let tenant = "basic-db.localhost";
   let base_path = format!("data/{}/sqlite", tenant);
 
   // Regular database files
-  let db_path = format!("{}/{}.db", base_path, room_id);
+  let db_path = format!("{}/{}.db", base_path, cell_id);
   let db_path_wal = format!("{}-wal", db_path);
   let db_path_shm = format!("{}-shm", db_path);
-  let db_yml = format!("{}/{}.yml", base_path, room_id);
+  let db_yml = format!("{}/{}.yml", base_path, cell_id);
 
   // Litestream metadata directory
-  let litestream_dir = format!("{}/.{}.db-litestream", base_path, room_id);
+  let litestream_dir = format!("{}/.{}.db-litestream", base_path, cell_id);
 
   // Remove all files
   let _ = std::fs::remove_file(&db_path);
@@ -956,10 +956,10 @@ fn clean_room_workspace(room_id: &str, test_env: &TestEnv) {
   // Also clear bucket contents
   let _ = test_env.minio_server.clear_bucket_files(
     "test-mesh-bucket",
-    &format!("sqlite/{}/{}", tenant, room_id),
+    &format!("sqlite/{}/{}", tenant, cell_id),
   );
 
-  println!("Cleaned workspace for room: {}", room_id);
+  println!("Cleaned workspace for cell: {}", cell_id);
 }
 
 /// Helper function to read a message of a specific type from a WebSocket stream
@@ -997,10 +997,10 @@ async fn read_message_of_type(
   panic!("Timeout waiting for message of type: {}", msg_type);
 }
 
-/// Helper function to connect to a WebSocket room and handle initial messages
-async fn connect_to_room(
+/// Helper function to connect to a WebSocket cell and handle initial messages
+async fn connect_to_cell(
   port: u16,
-  room_id: &str,
+  cell_id: &str,
 ) -> (
   tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -1009,7 +1009,7 @@ async fn connect_to_room(
 ) {
   // Use the hostname directly with the test port
   let url =
-    Url::parse(&format!("ws://ws-echo.localhost:{}/room/{}", port, room_id))
+    Url::parse(&format!("ws://ws-echo.localhost:{}/cell/{}", port, cell_id))
       .unwrap();
 
   println!("Connecting to WebSocket at {}", url);
@@ -1017,7 +1017,7 @@ async fn connect_to_room(
   let (mut ws_stream, _) = tokio_tungstenite::connect_async(url.to_string())
     .await
     .unwrap_or_else(|_| {
-      panic!("Failed to connect to room {} on port {}", room_id, port)
+      panic!("Failed to connect to cell {} on port {}", cell_id, port)
     });
 
   // Read welcome message
@@ -1030,6 +1030,6 @@ async fn connect_to_room(
   let _userlist_data =
     read_message_of_type(&mut ws_stream, "userlist", 5000).await;
 
-  println!("Connected to room {} as {}", room_id, username);
+  println!("Connected to cell {} as {}", cell_id, username);
   (ws_stream, username)
 }

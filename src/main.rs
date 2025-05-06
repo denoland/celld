@@ -35,7 +35,7 @@ fn start_server(config: config::Config) -> Server {
   let mut pingora_config = ServerConf::new().unwrap();
   //pingora_config.graceful_shutdown_timeout_seconds = Some(1);
   pingora_config.grace_period_seconds =
-    std::env::var("ROOMD_GRACE_PERIOD_SECONDS")
+    std::env::var("CELLD_GRACE_PERIOD_SECONDS")
       .ok()
       .and_then(|s| s.parse().ok());
 
@@ -172,8 +172,8 @@ mod tests {
     std::env::set_var("LISTEN_ADDR", "127.0.0.1:6146"); // Set listen address
     std::env::set_var("INTERNAL_LISTEN_ADDR", "127.0.0.1:6147"); // Set internal address
     std::env::set_var("DATA", "./data"); // Set data directory
-    std::env::set_var("ROOMD_HEARTBEAT_INTERVAL", "2"); // Fast heartbeat for tests
-    std::env::set_var("ROOMD_GRACE_PERIOD_SECONDS", "0");
+    std::env::set_var("CELLD_HEARTBEAT_INTERVAL", "2"); // Fast heartbeat for tests
+    std::env::set_var("CELLD_GRACE_PERIOD_SECONDS", "0");
 
     let h = std::thread::spawn(|| {
       // Create config from environment variables
@@ -199,7 +199,7 @@ mod tests {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let response = reqwest::Client::new()
-      .get("http://127.0.0.1:6146/room/foo")
+      .get("http://127.0.0.1:6146/cell/foo")
       .header("Host", "hello.localhost")
       .timeout(Duration::from_secs(5)) // Add a timeout to prevent hanging
       .send()
@@ -234,8 +234,8 @@ mod tests {
   async fn basic_db() {
     init();
 
-    // Use a unique room name for this test
-    let room_name = format!(
+    // Use a unique cell name for this test
+    let cell_name = format!(
       "test-db-{}",
       std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -243,9 +243,9 @@ mod tests {
         .as_secs()
     );
 
-    // Make first request to room
+    // Make first request to cell
     let first_response = reqwest::Client::new()
-      .get(format!("http://127.0.0.1:6146/room/{}", room_name))
+      .get(format!("http://127.0.0.1:6146/cell/{}", cell_name))
       .header("Host", "basic-db.localhost")
       .send()
       .await
@@ -256,7 +256,7 @@ mod tests {
     assert_eq!(first_response.trim(), "1");
 
     // Verify SQLite database exists and has correct record count
-    let db_path = format!("data/basic-db.localhost/sqlite/{}.db", room_name);
+    let db_path = format!("data/basic-db.localhost/sqlite/{}.db", cell_name);
     assert!(std::path::Path::new(&db_path).exists());
 
     let output = std::process::Command::new("sqlite3")
@@ -271,9 +271,9 @@ mod tests {
       "Database should have 1 record after first request"
     );
 
-    // Make second request to same room
+    // Make second request to same cell
     let second_response = reqwest::Client::new()
-      .get(format!("http://127.0.0.1:6146/room/{}", room_name))
+      .get(format!("http://127.0.0.1:6146/cell/{}", cell_name))
       .header("Host", "basic-db.localhost")
       .send()
       .await
@@ -297,9 +297,9 @@ mod tests {
     );
   }
 
-  /// Helper function to connect to a WebSocket room and handle initial messages
-  async fn connect_to_room(
-    room_id: &str,
+  /// Helper function to connect to a WebSocket cell and handle initial messages
+  async fn connect_to_cell(
+    cell_id: &str,
   ) -> (
     tokio_tungstenite::WebSocketStream<
       tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -307,14 +307,14 @@ mod tests {
     String, // username
   ) {
     // Create URL with proper host header in the URL
-    let url = format!("ws://ws-echo.localhost:6146/room/{}", room_id);
+    let url = format!("ws://ws-echo.localhost:6146/cell/{}", cell_id);
 
     // Add a small delay before connecting to ensure the server is ready
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let (mut ws_stream, _) = tokio_tungstenite::connect_async(url)
       .await
-      .unwrap_or_else(|_| panic!("Failed to connect to room {}", room_id));
+      .unwrap_or_else(|_| panic!("Failed to connect to cell {}", cell_id));
 
     // Read welcome message
     let welcome_msg = ws_stream.next().await.unwrap().unwrap();
@@ -336,8 +336,8 @@ mod tests {
   async fn test_websocket_echo() {
     init();
 
-    // Connect to room
-    let (mut ws_stream, _) = connect_to_room("test-room").await;
+    // Connect to cell
+    let (mut ws_stream, _) = connect_to_cell("test-cell").await;
 
     // Send a test message
     let test_message = "Hello WebSocket";
@@ -366,14 +366,14 @@ mod tests {
   async fn test_websocket_broadcast() {
     init();
 
-    // Connect first client to the room
-    let (mut client1, username1) = connect_to_room("broadcast-test").await;
+    // Connect first client to the cell
+    let (mut client1, username1) = connect_to_cell("broadcast-test").await;
 
     // Add a small delay to ensure the first client is fully registered
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Connect second client to the same room
-    let (mut client2, _) = connect_to_room("broadcast-test").await;
+    // Connect second client to the same cell
+    let (mut client2, _) = connect_to_cell("broadcast-test").await;
 
     // Client 1 should receive join notification and updated user list
     for _ in 0..2 {
@@ -383,10 +383,10 @@ mod tests {
         "system" => assert!(data["message"]
           .as_str()
           .unwrap()
-          .contains("has joined the room")),
+          .contains("has joined the cell")),
         "userlist" => {
           let users = data["users"].as_array().unwrap();
-          assert_eq!(users.len(), 2, "Should have 2 users in the room");
+          assert_eq!(users.len(), 2, "Should have 2 users in the cell");
         }
         _ => {}
       }
@@ -416,51 +416,51 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_separate_isolates_per_room() {
+  async fn test_separate_isolates_per_cell() {
     init();
 
-    // Connect to two different rooms
-    let (mut client1, username1) = connect_to_room("room-1").await;
-    let (mut client2, username2) = connect_to_room("room-2").await;
+    // Connect to two different cells
+    let (mut client1, username1) = connect_to_cell("cell-1").await;
+    let (mut client2, username2) = connect_to_cell("cell-2").await;
 
-    // Send a message in room-1
-    let message_room1 = "This message should only be in room-1";
+    // Send a message in cell-1
+    let message_cell1 = "This message should only be in cell-1";
     client1
-      .send(Message::Text(message_room1.to_string().into()))
+      .send(Message::Text(message_cell1.to_string().into()))
       .await
       .unwrap();
 
-    // Client in room-1 should receive the message
+    // Client in cell-1 should receive the message
     let msg1 = client1.next().await.unwrap().unwrap();
     let msg_data1: Value = serde_json::from_str(&msg1.to_string()).unwrap();
     assert_eq!(msg_data1["type"], "chat");
-    assert_eq!(msg_data1["message"], message_room1);
+    assert_eq!(msg_data1["message"], message_cell1);
     assert_eq!(msg_data1["username"], username1);
 
-    // Send a message in room-2
-    let message_room2 = "This message should only be in room-2";
+    // Send a message in cell-2
+    let message_cell2 = "This message should only be in cell-2";
     client2
-      .send(Message::Text(message_room2.to_string().into()))
+      .send(Message::Text(message_cell2.to_string().into()))
       .await
       .unwrap();
 
-    // Client in room-2 should receive the message
+    // Client in cell-2 should receive the message
     let msg2 = client2.next().await.unwrap().unwrap();
     let msg_data2: Value = serde_json::from_str(&msg2.to_string()).unwrap();
     assert_eq!(msg_data2["type"], "chat");
-    assert_eq!(msg_data2["message"], message_room2);
+    assert_eq!(msg_data2["message"], message_cell2);
     assert_eq!(msg_data2["username"], username2);
 
-    // Verify isolation: room-1 should not receive messages sent to room-2
+    // Verify isolation: cell-1 should not receive messages sent to cell-2
     let timeout_duration = Duration::from_millis(300);
     tokio::select! {
       maybe_msg = tokio::time::timeout(timeout_duration, client1.next()) => {
         if let Ok(Some(Ok(_))) = maybe_msg {
-          panic!("Room isolation failure: room-1 received a message from room-2");
+          panic!("Cell isolation failure: cell-1 received a message from cell-2");
         }
       }
       _ = tokio::time::sleep(timeout_duration) => {
-        // Expected case: timeout without receiving cross-room message
+        // Expected case: timeout without receiving cross-cell message
       }
     }
 
@@ -472,7 +472,7 @@ mod tests {
   async fn env_test() {
     init();
     let response = reqwest::Client::new()
-      .get("http://127.0.0.1:6146/room/test-room")
+      .get("http://127.0.0.1:6146/cell/test-cell")
       .header("Host", "env-test.localhost")
       .send()
       .await
@@ -482,7 +482,7 @@ mod tests {
     let env_obj = env_vars.as_object().unwrap();
     assert_eq!(env_obj["TEST_ENV_VAR"], "test_value");
     assert_eq!(env_obj["ANOTHER_TEST_VAR"], "another_value");
-    assert_eq!(env_obj["X-Room-Id"], "test-room");
+    assert_eq!(env_obj["X-Cell-Id"], "test-cell");
     assert_eq!(env_obj.len(), 3, "Expected exactly 4 environment variables");
   }
 }

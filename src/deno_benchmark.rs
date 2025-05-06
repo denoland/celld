@@ -35,9 +35,9 @@ pub async fn benchmark_deno_coldstart(iterations: usize) -> Result<()> {
   // Record the startup time for each iteration
   let mut results = Vec::with_capacity(iterations);
 
-  // The host and room to use for testing
+  // The host and cell to use for testing
   let host = "hello.localhost";
-  let room_id = "benchmark";
+  let cell_id = "benchmark";
 
   // Perform the benchmark
   println!(
@@ -51,7 +51,7 @@ pub async fn benchmark_deno_coldstart(iterations: usize) -> Result<()> {
     // Use single_use isolate to ensure a new process each time
     let (_socket_path, _stream) = node_state
       .process_manager
-      .get_or_spawn_process(host, room_id, true, node_state.clone())
+      .get_or_spawn_process(host, cell_id, true, node_state.clone())
       .await?;
     let elapsed = start.elapsed();
 

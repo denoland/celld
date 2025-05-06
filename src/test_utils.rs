@@ -97,7 +97,7 @@ impl MinioTestServer {
 
   #[cfg(test)]
   #[allow(dead_code)]
-  pub fn has_files_for_room(&self, bucket: &str, room_id: &str) -> bool {
+  pub fn has_files_for_cell(&self, bucket: &str, cell_id: &str) -> bool {
     let output = Command::new("docker")
       .args([
         "run",
@@ -119,7 +119,7 @@ impl MinioTestServer {
     let stdout = String::from_utf8_lossy(&output.stdout);
     println!("MinIO bucket contents: {}", stdout);
 
-    stdout.contains(room_id)
+    stdout.contains(cell_id)
   }
 
   pub fn clear_bucket_files(

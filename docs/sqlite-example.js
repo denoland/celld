@@ -5,7 +5,7 @@ export default {
     ctx.db.exec(`
       CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY,
-        room_id TEXT,
+        cell_id TEXT,
         text TEXT,
         created_at TEXT
       )
@@ -16,16 +16,15 @@ export default {
     const timestamp = new Date().toISOString();
 
     ctx.db.exec(
-      "INSERT INTO messages (room_id, text, created_at) VALUES (?, ?, ?)",
-      [ctx.roomId, text, timestamp]
+      "INSERT INTO messages (cell_id, text, created_at) VALUES (?, ?, ?)",
+      [ctx.cellId, text, timestamp],
     );
 
     const history = ctx.db.query(
-      "SELECT text, created_at FROM messages WHERE room_id = ? ORDER BY id DESC LIMIT 10",
-      [ctx.roomId]
+      "SELECT text, created_at FROM messages WHERE cell_id = ? ORDER BY id DESC LIMIT 10",
+      [ctx.cellId],
     );
 
     ws.send(JSON.stringify({ type: "history", messages: history }));
   },
 };
-

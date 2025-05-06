@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::child_on_parent_exit::ChildOnParentExit;
 use crate::distributed_lock::LockAcquireError::LockHeld;
 use crate::distributed_lock::LockGuard;
-use crate::peer_manager::room_hash_key;
+use crate::peer_manager::cell_hash_key;
 use crate::router::ProxyError;
 use crate::sqlite_replica::{create_empty_database, SqliteReplica};
 use crate::NodeState;
@@ -74,9 +74,9 @@ impl ProcessManager {
   pub async fn increment_connection_count(
     &self,
     host: &str,
-    room_id: &str,
+    cell_id: &str,
   ) -> bool {
-    let process_key = room_hash_key(host, room_id);
+    let process_key = cell_hash_key(host, cell_id);
 
     let mut processes = self.processes.lock().unwrap();
     if let Some(entry) = processes.get_mut(&process_key) {
@@ -92,9 +92,9 @@ impl ProcessManager {
   pub async fn decrement_connection_count(
     &self,
     host: &str,
-    room_id: &str,
+    cell_id: &str,
   ) -> bool {
-    let process_key = room_hash_key(host, room_id);
+    let process_key = cell_hash_key(host, cell_id);
 
     let mut processes = self.processes.lock().unwrap();
     if let Some(entry) = processes.get_mut(&process_key) {
@@ -108,16 +108,16 @@ impl ProcessManager {
     false
   }
 
-  #[instrument(skip(self, node_state), fields(host = %host, room_id = %room_id))]
+  #[instrument(skip(self, node_state), fields(host = %host, cell_id = %cell_id))]
   pub async fn get_or_spawn_process(
     &self,
     host: &str,
-    room_id: &str,
+    cell_id: &str,
     single_use: bool,
     node_state: Arc<NodeState>,
   ) -> Result<(PathBuf, UnixStream), ProxyError> {
-    // Create a combined key for host and room to ensure one isolate per room
-    let process_key = room_hash_key(host, room_id);
+    // Create a combined key for host and cell to ensure one isolate per cell
+    let process_key = cell_hash_key(host, cell_id);
 
     // For single_use requests, always spawn a new process
     // TODO: This should not be supported in production
@@ -170,7 +170,7 @@ impl ProcessManager {
     }
 
     let maybe_lock_guard =
-      takeover_check(node_state.clone(), host, room_id).await?;
+      takeover_check(node_state.clone(), host, cell_id).await?;
 
     // Create a temporary directory for the socket
     // This will be automatically cleaned up when dropped
@@ -191,13 +191,13 @@ impl ProcessManager {
     });
 
     // Configure SQLite replication if S3 is configured
-    let db_path = sqlite_dir.join(format!("{}.db", room_id));
+    let db_path = sqlite_dir.join(format!("{}.db", cell_id));
 
     // Try to initialize the SqliteReplica with the S3 config
     let replica = match SqliteReplica::initialize(
       &self.data_dir,
       host,
-      room_id,
+      cell_id,
       node_state.config.to_s3_config(),
     )
     .await
@@ -206,7 +206,7 @@ impl ProcessManager {
         if replica_opt.is_some() {
           debug!(
             tenant = %host,
-            room_id = %room_id,
+            cell_id = %cell_id,
             "S3 replication initialized successfully"
           );
         }
@@ -215,7 +215,7 @@ impl ProcessManager {
       Err(e) => {
         warn!(
           tenant = %host,
-          room_id = %room_id,
+          cell_id = %cell_id,
           error = %e,
           "Fatal error initializing replica"
         );
@@ -237,7 +237,7 @@ impl ProcessManager {
 
       info!(
         tenant = %host,
-        room_id = %room_id,
+        cell_id = %cell_id,
         "Starting coordinated database restore process"
       );
 
@@ -260,7 +260,7 @@ impl ProcessManager {
         state @ RestoreState::Complete(_) => {
           info!(
             tenant = %host,
-            room_id = %room_id,
+            cell_id = %cell_id,
             restored = match &state {
               RestoreState::Complete(restored) => *restored,
               _ => false
@@ -273,7 +273,7 @@ impl ProcessManager {
         RestoreState::WaitingForLock => {
           info!(
             tenant = %host,
-            room_id = %room_id,
+            cell_id = %cell_id,
             "Database restore lock held by another node"
           );
           // Update state and return error
@@ -288,7 +288,7 @@ impl ProcessManager {
           };
           error!(
             tenant = %host,
-            room_id = %room_id,
+            cell_id = %cell_id,
             error = %err_msg,
             "Database restore failed"
           );
@@ -302,7 +302,7 @@ impl ProcessManager {
           // Unexpected state
           error!(
             tenant = %host,
-            room_id = %room_id,
+            cell_id = %cell_id,
             "Unexpected database restore state"
           );
           // Update state and return error
@@ -322,7 +322,7 @@ impl ProcessManager {
       // No replica, but we still need a database - create an empty one
       info!(
         tenant = %host,
-        room_id = %room_id,
+        cell_id = %cell_id,
         "No S3 replication, creating empty database"
       );
 
@@ -336,7 +336,7 @@ impl ProcessManager {
       // No replica and the database already exists
       info!(
         tenant = %host,
-        room_id = %room_id,
+        cell_id = %cell_id,
         db_path = %db_path.display(),
         "No replica and database already exists, using existing database"
       );
@@ -347,7 +347,7 @@ impl ProcessManager {
 
     debug!(
       tenant = %host,
-      room_id = %room_id,
+      cell_id = %cell_id,
       socket_path = %socket_path.display(),
       main_script = %main_script.display(),
       "About to spawn Deno process"
@@ -357,7 +357,7 @@ impl ProcessManager {
     let child_guard = spawn_deno_process(
       &self.data_dir,
       host,
-      room_id,
+      cell_id,
       &tenant_dir,
       &socket_path,
       &main_script,
@@ -365,7 +365,7 @@ impl ProcessManager {
 
     debug!(
       tenant = %host,
-      room_id = %room_id,
+      cell_id = %cell_id,
       pid = child_guard.pid().unwrap_or(0),
       "Deno process spawned successfully"
     );
@@ -408,7 +408,7 @@ impl ProcessManager {
           pid = pid,
           socket = %socket_.display(),
           tenant = %host,
-          room_id = %room_id,
+          cell_id = %cell_id,
           "Timeout waiting for Deno process socket"
         );
 
@@ -429,7 +429,7 @@ impl ProcessManager {
         pid = pid,
         socket = %socket_.display(),
         tenant = %host,
-        room_id = %room_id,
+        cell_id = %cell_id,
         elapsed = ?wait_start.elapsed(),
         "Attempting to connect to Deno socket"
       );
@@ -440,7 +440,7 @@ impl ProcessManager {
             pid = pid,
             socket = %socket_.display(),
             tenant = %host,
-            room_id = %room_id,
+            cell_id = %cell_id,
             socket_wait_duration = ?wait_start.elapsed(),
             total_startup_duration = ?spawn_start.elapsed(),
             "Socket connected!"
@@ -456,7 +456,7 @@ impl ProcessManager {
             pid = pid,
             socket = %socket_.display(),
             tenant = %host,
-            room_id = %room_id,
+            cell_id = %cell_id,
             error = %e,
             error_kind = ?e.kind(),
             "Socket not yet available, retrying after delay"
@@ -494,10 +494,10 @@ impl ProcessManager {
     };
 
     // For single-use isolates, use a unique key with a UUID suffix
-    // This allows multiple single-use isolates for the same host+room combination
+    // This allows multiple single-use isolates for the same host+cell combination
     if single_use {
       let unique_key =
-        format!("{}/{}", room_hash_key(host, room_id), Uuid::new_v4());
+        format!("{}/{}", cell_hash_key(host, cell_id), Uuid::new_v4());
 
       // Move the entry to a unique key
       let mut processes = self.processes.lock().unwrap();
@@ -553,12 +553,12 @@ fn parse_env_vars(content: &str) -> HashMap<String, String> {
   env_vars
 }
 
-/// Spawn a Deno process for the given host and room
-#[instrument(skip(data_dir, socket_path, room_id), fields(host = %host, room_id = %room_id))]
+/// Spawn a Deno process for the given host and cell
+#[instrument(skip(data_dir, socket_path, cell_id), fields(host = %host, cell_id = %cell_id))]
 fn spawn_deno_process(
   data_dir: &Path,
   host: &str,
-  room_id: &str,
+  cell_id: &str,
   tenant_dir: &PathBuf,
   socket_path: &Path,
   main_script: &PathBuf,
@@ -574,7 +574,7 @@ fn spawn_deno_process(
       "DENO_SERVE_ADDRESS",
       format!("unix:{}", socket_path.display()),
     )
-    .env("X-Room-Id", room_id); // Pass room ID to bootstrap.ts
+    .env("X-Cell-Id", cell_id); // Pass cell ID to bootstrap.ts
 
   // Load environment variables from prod.env file
   let env_file_path = tenant_dir.join("prod.env");
@@ -603,12 +603,12 @@ fn spawn_deno_process(
     }
   }
 
-  // Add X-Room-Id to allowed env vars
-  env_vars.push("X-Room-Id".to_string());
+  // Add X-Cell-Id to allowed env vars
+  env_vars.push("X-Cell-Id".to_string());
 
   debug!(
     host = %host,
-    room_id = %room_id,
+    cell_id = %cell_id,
     socket_path = %socket_path.display(),
     bootstrap_script = ?bootstrap_script.display(),
     main_script = %main_script.display(),
@@ -628,7 +628,7 @@ fn spawn_deno_process(
   if !env_vars.is_empty() {
     cmd.arg(format!("--allow-env={}", env_vars.join(",")));
   } else {
-    cmd.arg("--allow-env=X-Room-Id"); // Default minimum permission
+    cmd.arg("--allow-env=X-Cell-Id"); // Default minimum permission
   }
 
   cmd
@@ -647,11 +647,11 @@ fn spawn_deno_process(
 async fn takeover_check(
   node_state: Arc<NodeState>,
   host: &str,
-  room_id: &str,
+  cell_id: &str,
 ) -> Result<Option<LockGuard>, ProxyError> {
   if let Some(distributed_lock) = node_state.distributed_lock.as_ref() {
-    let owners = node_state.peer_manager.get_room_owners(host, room_id);
-    if !node_state.peer_manager.is_local_owner(host, room_id) {
+    let owners = node_state.peer_manager.get_cell_owners(host, cell_id);
+    if !node_state.peer_manager.is_local_owner(host, cell_id) {
       // - Check if the first owner is still active
       //   (`peer_manager.is_peer_active`). _Initially, rely on `is_peer_active`
       //   Future optimization: check `status.json` if implemented._
@@ -666,7 +666,7 @@ async fn takeover_check(
       }
     }
     // Acquire lock attempt
-    let lock_name = room_hash_key(host, room_id); // specific enough?
+    let lock_name = cell_hash_key(host, cell_id); // specific enough?
     match distributed_lock
       .clone()
       .try_acquire(
@@ -681,7 +681,7 @@ async fn takeover_check(
         if i.node_id == node_state.peer_manager.get_local_node_id() {
           warn!(
             tenant = %host,
-            room_id = %room_id,
+            cell_id = %cell_id,
             lock_name = %lock_name,
             "This node already holds the lock for {}: {:?}", lock_name, i
           );
@@ -689,7 +689,7 @@ async fn takeover_check(
         } else {
           warn!(
             tenant = %host,
-            room_id = %room_id,
+            cell_id = %cell_id,
             lock_name = %lock_name,
             "Another node holds the lock for {}: {:?}", lock_name, i
           );
@@ -700,9 +700,9 @@ async fn takeover_check(
       Err(e) => {
         error!(
           tenant = %host,
-          room_id = %room_id,
+          cell_id = %cell_id,
           lock_name = %lock_name,
-          "Error acquiring room lock {:?}", e
+          "Error acquiring cell lock {:?}", e
         );
         Err(ProxyError::LockContention)
       }

@@ -1,5 +1,5 @@
-// Import the Connection and Room types from our bootstrap.ts
-import { Connection, Room } from "../../../src/bootstrap.ts";
+// Import the Connection and Cell types from our bootstrap.ts
+import { Cell, Connection } from "../../../src/bootstrap.ts";
 import { DatabaseSync } from "node:sqlite";
 
 interface Message {
@@ -30,12 +30,12 @@ function initializeDatabase(db: DatabaseSync) {
       timestamp TEXT NOT NULL
     )
   `);
-  
+
   // Add a system message if the table is empty
   const count = db.prepare("SELECT COUNT(*) as count FROM messages").get();
   if (count.count === 0) {
     db.prepare(
-      "INSERT INTO messages (role, content, timestamp) VALUES (?, ?, ?)"
+      "INSERT INTO messages (role, content, timestamp) VALUES (?, ?, ?)",
     ).run("system", "You are a helpful assistant.", new Date().toISOString());
   }
 }
@@ -43,9 +43,9 @@ function initializeDatabase(db: DatabaseSync) {
 // Get all messages from the database
 function getMessages(db: DatabaseSync): Message[] {
   const rows = db.prepare(
-    "SELECT role, content, timestamp FROM messages ORDER BY id ASC"
+    "SELECT role, content, timestamp FROM messages ORDER BY id ASC",
   ).all();
-  
+
   return rows.map((row) => ({
     role: row.role as "user" | "assistant" | "system",
     content: row.content,
@@ -56,11 +56,11 @@ function getMessages(db: DatabaseSync): Message[] {
 // Save a message to the database
 function saveMessage(
   db: DatabaseSync,
-  role: "user" | "assistant" | "system", 
-  content: string
+  role: "user" | "assistant" | "system",
+  content: string,
 ): void {
   db.prepare(
-    "INSERT INTO messages (role, content, timestamp) VALUES (?, ?, ?)"
+    "INSERT INTO messages (role, content, timestamp) VALUES (?, ?, ?)",
   ).run(role, content, new Date().toISOString());
 }
 
@@ -71,7 +71,7 @@ function clearMessages(db: DatabaseSync): void {
 
 // Get assistant response from OpenAI API
 async function getAssistantResponse(
-  messages: Message[]
+  messages: Message[],
 ): Promise<string> {
   try {
     const apiKey = Deno.env.get("OPENAI_API_KEY");
@@ -88,7 +88,7 @@ async function getAssistantResponse(
       },
       body: JSON.stringify({
         model: "gpt-3.5-turbo",
-        messages: messages.map(msg => ({
+        messages: messages.map((msg) => ({
           role: msg.role,
           content: msg.content,
         })),
@@ -112,32 +112,36 @@ async function getAssistantResponse(
 
 export default {
   // Called when the server starts, before accepting connections
-  onStart(ctx: { roomId: string; room: Room; db: DatabaseSync }) {
-    console.log("Chat server started for room", { roomId: ctx.roomId });
+  onStart(ctx: { cellId: string; cell: Cell; db: DatabaseSync }) {
+    console.log("Chat server started for cell", { cellId: ctx.cellId });
     initializeDatabase(ctx.db);
   },
 
   // Called when a new WebSocket connection is established
-  onConnect(connection: Connection, ctx: { roomId: string; room: Room; db: DatabaseSync }) {
+  onConnect(
+    connection: Connection,
+    ctx: { cellId: string; cell: Cell; db: DatabaseSync },
+  ) {
     try {
       // Get all messages from the database
       const messages = getMessages(ctx.db);
-      
+
       // Filter out system messages for the client
-      const clientMessages = messages.filter(msg => msg.role !== "system");
-      
+      const clientMessages = messages.filter((msg) => msg.role !== "system");
+
       // Send history to the new connection
       connection.send(
         createMessage("history", {
           messages: clientMessages,
-        })
+        }),
       );
     } catch (error) {
       console.error("Error in onConnect:", error);
       connection.send(
         createMessage("error", {
-          message: "Failed to load chat history. Please try refreshing the page.",
-        })
+          message:
+            "Failed to load chat history. Please try refreshing the page.",
+        }),
       );
     }
   },
@@ -146,44 +150,44 @@ export default {
   async onMessage(
     data: string,
     sender: Connection,
-    ctx: { roomId: string; room: Room; db: DatabaseSync },
+    ctx: { cellId: string; cell: Cell; db: DatabaseSync },
   ) {
     try {
       const message = JSON.parse(data);
-      
+
       switch (message.type) {
         case "message":
           // Save user message to database
           saveMessage(ctx.db, "user", message.content);
-          
+
           // Get all messages for context
           const allMessages = getMessages(ctx.db);
-          
+
           // Get response from OpenAI
           const responseContent = await getAssistantResponse(allMessages);
-          
+
           // Save assistant response to database
           saveMessage(ctx.db, "assistant", responseContent);
-          
+
           // Send response to all clients
-          ctx.room.broadcast(
+          ctx.cell.broadcast(
             createMessage("message", {
               role: "assistant",
               content: responseContent,
-            })
+            }),
           );
           break;
-          
+
         case "clear":
           // Clear messages from database
           clearMessages(ctx.db);
           break;
-          
+
         default:
           sender.send(
             createMessage("error", {
               message: "Unknown message type",
-            })
+            }),
           );
       }
     } catch (error) {
@@ -191,13 +195,16 @@ export default {
       sender.send(
         createMessage("error", {
           message: "Error processing your message",
-        })
+        }),
       );
     }
   },
 
   // Called when a WebSocket connection is closed
-  onClose(connection: Connection, ctx: { roomId: string; room: Room; db: DatabaseSync }) {
+  onClose(
+    connection: Connection,
+    ctx: { cellId: string; cell: Cell; db: DatabaseSync },
+  ) {
     console.log("Connection closed", { connectionId: connection.id });
   },
 
@@ -205,23 +212,26 @@ export default {
   onError(
     connection: Connection,
     error: Event,
-    ctx: { roomId: string; room: Room; db: DatabaseSync },
+    ctx: { cellId: string; cell: Cell; db: DatabaseSync },
   ) {
     console.error("WebSocket error:", error);
   },
 
   // Called for HTTP requests
-  onRequest(request: Request, ctx: { roomId: string; room: Room; db: DatabaseSync }) {
+  onRequest(
+    request: Request,
+    ctx: { cellId: string; cell: Cell; db: DatabaseSync },
+  ) {
     const url = new URL(request.url);
-    
+
     if (url.pathname === "/stats") {
-      // Return chat room stats
-      const connectionCount = ctx.room.connections.size;
+      // Return chat cell stats
+      const connectionCount = ctx.cell.connections.size;
       const messageCount = getMessages(ctx.db).length;
-      
+
       return new Response(
         JSON.stringify({
-          roomId: ctx.roomId,
+          cellId: ctx.cellId,
           connections: connectionCount,
           messages: messageCount,
         }),
@@ -229,10 +239,10 @@ export default {
           headers: {
             "Content-Type": "application/json",
           },
-        }
+        },
       );
     }
-    
+
     return new Response("Chat server is running");
   },
 };

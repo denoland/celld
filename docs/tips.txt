@@ -5,7 +5,7 @@ docker run --rm -p 9000:9000 minio/minio server /data
 docker run --network=host --rm -e MC_HOST_minio=http://minioadmin:minioadmin@127.0.0.1:9000 minio/mc mb minio/test
 ```
 
-Run roomd connected to minio
+Run celld connected to minio
 ```
-ROOMD_S3_ENDPOINT=http://localhost:9000 ROOMD_S3_BUCKET=test ROOMD_S3_REGION=us-east-1 ROOMD_S3_ACCESS_KEY_ID=minioadmin ROOMD_S3_SECRET_ACCESS_KEY=minioadmin ROOMD_S3_PREFIX=x cargo run
+CELLD_S3_ENDPOINT=http://localhost:9000 CELLD_S3_BUCKET=test CELLD_S3_REGION=us-east-1 CELLD_S3_ACCESS_KEY_ID=minioadmin CELLD_S3_SECRET_ACCESS_KEY=minioadmin CELLD_S3_PREFIX=x cargo run
 ```

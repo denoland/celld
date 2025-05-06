@@ -85,7 +85,7 @@ impl TestEnv {
     };
 
     for &port in ports.iter() {
-      test_env.spawn_roomd_instance(port);
+      test_env.spawn_celld_instance(port);
     }
 
     // Wait for servers to be ready by probing TCP connections
@@ -101,7 +101,7 @@ impl TestEnv {
     test_env
   }
 
-  pub fn kill_roomd_instance(&mut self, index: usize) {
+  pub fn kill_celld_instance(&mut self, index: usize) {
     let server = self.servers.remove(index);
     let _ = self.ports.remove(index);
     let pid = Pid::from_raw(server.id() as i32);
@@ -109,27 +109,27 @@ impl TestEnv {
     kill(pid, Signal::SIGKILL).unwrap();
   }
 
-  pub fn spawn_roomd_instance(&mut self, port: u16) {
+  pub fn spawn_celld_instance(&mut self, port: u16) {
     let advertise_addr = format!("127.0.0.1:{}", port);
     let internal_addr = format!("127.0.0.1:{}", port + 1);
-    let server = Command::new(env!("CARGO_BIN_EXE_roomd"))
+    let server = Command::new(env!("CARGO_BIN_EXE_celld"))
       .env("ADVERTISE_ADDR", &advertise_addr)
       .env("INTERNAL_LISTEN_ADDR", &internal_addr)
       .env("DATA", "./data")
-      .env("ROOMD_HEARTBEAT_INTERVAL", "2")
-      .env("ROOMD_GRACE_PERIOD_SECONDS", "0")
+      .env("CELLD_HEARTBEAT_INTERVAL", "2")
+      .env("CELLD_GRACE_PERIOD_SECONDS", "0")
       // Use a shorter staleness threshold for tests to detect failures faster
-      .env("ROOMD_STALENESS_THRESHOLD_SECS", "6")
+      .env("CELLD_STALENESS_THRESHOLD_SECS", "6")
       .env(
-        "ROOMD_S3_ENDPOINT",
+        "CELLD_S3_ENDPOINT",
         format!("http://localhost:{}", self.minio_server.port),
       )
-      .env("ROOMD_S3_BUCKET", &self.bucket_name)
-      .env("ROOMD_S3_REGION", "us-east-1")
-      .env("ROOMD_S3_PREFIX", format!("roomd-test-{}", self.test_id))
-      .env("ROOMD_S3_ACCESS_KEY_ID", &self.minio_server.access_key_id)
+      .env("CELLD_S3_BUCKET", &self.bucket_name)
+      .env("CELLD_S3_REGION", "us-east-1")
+      .env("CELLD_S3_PREFIX", format!("celld-test-{}", self.test_id))
+      .env("CELLD_S3_ACCESS_KEY_ID", &self.minio_server.access_key_id)
       .env(
-        "ROOMD_S3_SECRET_ACCESS_KEY",
+        "CELLD_S3_SECRET_ACCESS_KEY",
         &self.minio_server.secret_access_key,
       )
       //.env("RUST_LOG", "debug")
@@ -181,7 +181,7 @@ impl Drop for TestEnv {
   fn drop(&mut self) {
     // Kill all server instances
     for _i in 0..self.servers.len() {
-      self.kill_roomd_instance(0);
+      self.kill_celld_instance(0);
     }
 
     // Release all ports

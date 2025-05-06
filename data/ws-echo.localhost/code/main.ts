@@ -1,5 +1,5 @@
-// Import the Connection and Room types from our bootstrap.ts
-import { Connection, Room } from "../../../src/bootstrap.ts";
+// Import the Connection and Cell types from our bootstrap.ts
+import { Cell, Connection } from "../../../src/bootstrap.ts";
 
 // Define user state
 interface UserState {
@@ -12,24 +12,24 @@ interface UserState {
 function createMessage(
   type: string,
   data: Record<string, unknown>,
-  roomId: string,
+  cellId: string,
 ) {
   return JSON.stringify({
     type,
     ...data,
     timestamp: new Date().toISOString(),
-    roomId,
+    cellId,
   });
 }
 
 export default {
   // Called when the server starts, before accepting connections
-  async onStart(ctx: { roomId: string; room: Room }) {
-    console.log("Chat server started for room", { roomId: ctx.roomId });
+  async onStart(ctx: { cellId: string; cell: Cell }) {
+    console.log("Chat server started for cell", { cellId: ctx.cellId });
   },
 
   // Called when a new WebSocket connection is established
-  async onConnect(connection: Connection, ctx: { roomId: string; room: Room }) {
+  async onConnect(connection: Connection, ctx: { cellId: string; cell: Cell }) {
     // Initialize user with a guest name
     const guestName = `Guest${Math.floor(Math.random() * 1000)}`;
     connection.setState({
@@ -40,26 +40,26 @@ export default {
     // Send a welcome message to the new user with their username
     connection.send(
       createMessage("welcome", {
-        message: `Welcome to the chat room, ${guestName}!`,
+        message: `Welcome to the chat cell, ${guestName}!`,
         username: guestName,
-      }, ctx.roomId),
+      }, ctx.cellId),
     );
 
-    // Announce the new user to the room
-    ctx.room.broadcast(
+    // Announce the new user to the cell
+    ctx.cell.broadcast(
       createMessage("system", {
-        message: `${guestName} has joined the room`,
-      }, ctx.roomId),
+        message: `${guestName} has joined the cell`,
+      }, ctx.cellId),
       [connection.id], // Don't send to the new user
     );
 
     // Send the current user list to everyone
-    this.broadcastUserList(ctx.room, ctx.roomId);
+    this.broadcastUserList(ctx.cell, ctx.cellId);
   },
 
   // Helper to broadcast the current user list
-  broadcastUserList(room: Room, roomId: string) {
-    const userList = Array.from(room.getConnections()).map((conn) => {
+  broadcastUserList(cell: Cell, cellId: string) {
+    const userList = Array.from(cell.getConnections()).map((conn) => {
       const state = conn.state as UserState;
       return {
         id: conn.id,
@@ -68,8 +68,8 @@ export default {
     });
 
     // Broadcast to everyone
-    room.broadcast(
-      createMessage("userlist", { users: userList }, roomId),
+    cell.broadcast(
+      createMessage("userlist", { users: userList }, cellId),
     );
   },
 
@@ -77,7 +77,7 @@ export default {
   async onMessage(
     data: string,
     sender: Connection,
-    ctx: { roomId: string; room: Room },
+    ctx: { cellId: string; cell: Cell },
   ) {
     if (!sender.state) return;
 
@@ -97,11 +97,11 @@ export default {
       switch (message.type) {
         case "chat":
           // Broadcast the message to all users
-          ctx.room.broadcast(
+          ctx.cell.broadcast(
             createMessage("chat", {
               username: senderState.username,
               message: message.content || data,
-            }, ctx.roomId),
+            }, ctx.cellId),
           );
           break;
 
@@ -122,14 +122,14 @@ export default {
           sender.send(
             createMessage("echo", {
               originalMessage: data,
-            }, ctx.roomId),
+            }, ctx.cellId),
           );
       }
     } catch (error) {
       sender.send(
         createMessage("error", {
           message: "Error processing your message",
-        }, ctx.roomId),
+        }, ctx.cellId),
       );
     }
   },
@@ -139,7 +139,7 @@ export default {
     message: any,
     sender: Connection,
     senderState: UserState,
-    ctx: { roomId: string; room: Room },
+    ctx: { cellId: string; cell: Cell },
   ) {
     if (message.username && typeof message.username === "string") {
       const oldUsername = senderState.username;
@@ -152,14 +152,14 @@ export default {
       });
 
       // Notify everyone of the name change
-      ctx.room.broadcast(
+      ctx.cell.broadcast(
         createMessage("system", {
           message: `${oldUsername} is now known as ${newUsername}`,
-        }, ctx.roomId),
+        }, ctx.cellId),
       );
 
       // Update the user list
-      this.broadcastUserList(ctx.room, ctx.roomId);
+      this.broadcastUserList(ctx.cell, ctx.cellId);
     }
   },
 
@@ -168,7 +168,7 @@ export default {
     message: any,
     sender: Connection,
     senderState: UserState,
-    ctx: { roomId: string; room: Room },
+    ctx: { cellId: string; cell: Cell },
   ) {
     // Update user's typing status
     sender.setState({
@@ -177,11 +177,11 @@ export default {
     });
 
     // Broadcast typing status to others
-    ctx.room.broadcast(
+    ctx.cell.broadcast(
       createMessage("typing", {
         username: senderState.username,
         isTyping: message.isTyping === true,
-      }, ctx.roomId),
+      }, ctx.cellId),
       [sender.id], // Don't send back to the sender
     );
   },
@@ -191,11 +191,11 @@ export default {
     message: any,
     sender: Connection,
     senderState: UserState,
-    ctx: { roomId: string; room: Room },
+    ctx: { cellId: string; cell: Cell },
   ) {
     if (message.to && message.content) {
       // Find the recipient by username
-      const recipient = Array.from(ctx.room.getConnections()).find(
+      const recipient = Array.from(ctx.cell.getConnections()).find(
         (conn) => {
           const state = conn.state as UserState;
           return state.username === message.to;
@@ -208,7 +208,7 @@ export default {
           createMessage("private", {
             username: senderState.username,
             message: message.content,
-          }, ctx.roomId),
+          }, ctx.cellId),
         );
 
         // Also send confirmation to the sender
@@ -216,34 +216,34 @@ export default {
           createMessage("private", {
             to: message.to,
             message: message.content,
-          }, ctx.roomId),
+          }, ctx.cellId),
         );
       } else {
         // User not found
         sender.send(
           createMessage("error", {
             message: `User '${message.to}' not found`,
-          }, ctx.roomId),
+          }, ctx.cellId),
         );
       }
     }
   },
 
   // Called when a WebSocket connection is closed
-  async onClose(connection: Connection, ctx: { roomId: string; room: Room }) {
+  async onClose(connection: Connection, ctx: { cellId: string; cell: Cell }) {
     const state = connection.state as UserState;
     const username = state?.username || "A user";
 
     // Announce that the user has left
-    ctx.room.broadcast(
+    ctx.cell.broadcast(
       createMessage("system", {
-        message: `${username} has left the room`,
-      }, ctx.roomId),
+        message: `${username} has left the cell`,
+      }, ctx.cellId),
     );
 
     // Update the user list for everyone
     setTimeout(() => {
-      this.broadcastUserList(ctx.room, ctx.roomId);
+      this.broadcastUserList(ctx.cell, ctx.cellId);
     }, 50);
   },
 
@@ -251,24 +251,24 @@ export default {
   async onError(
     connection: Connection,
     error: Event,
-    ctx: { roomId: string; room: Room },
+    ctx: { cellId: string; cell: Cell },
   ) {
     // Log errors, but don't take action
     console.error("WebSocket error:", error);
   },
 
   // Called for HTTP requests
-  async onRequest(request: Request, ctx: { roomId: string; room: Room }) {
+  async onRequest(request: Request, ctx: { cellId: string; cell: Cell }) {
     const url = new URL(request.url);
 
     if (url.pathname === "/stats") {
-      // Return chat room stats
-      const connectionCount = ctx.room.connections.size;
+      // Return chat cell stats
+      const connectionCount = ctx.cell.connections.size;
       return new Response(
         JSON.stringify({
-          roomId: ctx.roomId,
+          cellId: ctx.cellId,
           connections: connectionCount,
-          users: Array.from(ctx.room.getConnections()).map((conn) => {
+          users: Array.from(ctx.cell.getConnections()).map((conn) => {
             const state = conn.state as UserState;
             return state.username;
           }),

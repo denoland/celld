@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Chat Room</title>
+    <title>Chat Cell</title>
     <style>
       body {
         font-family: system-ui, -apple-system, sans-serif;
@@ -155,13 +155,13 @@
     </style>
   </head>
   <body>
-    <h1>Chat Room</h1>
+    <h1>Chat Cell</h1>
 
     <div class="connection-controls">
       <input
         type="text"
         id="url"
-        value="ws://ws-echo.localhost:3000/room/test"
+        value="ws://ws-echo.localhost:3000/cell/test"
         placeholder="WebSocket URL"
       >
       <input
@@ -189,7 +189,7 @@
     </div>
 
     <div class="user-list-container">
-      <div class="user-list-title">Users in Room</div>
+      <div class="user-list-title">Users in Cell</div>
       <div id="user-list"></div>
     </div>
 
@@ -308,7 +308,7 @@
             messageInput.disabled = false;
             sendBtn.disabled = false;
 
-            addToChatLog(`Connected to the chat room`, "system");
+            addToChatLog(`Connected to the chat cell`, "system");
 
             // If user provided a nickname, send it and store it locally
             const nickname = nicknameInput.value.trim();

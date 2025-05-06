@@ -9,7 +9,7 @@ pkill -f "deno run" || true
 sleep 1
 
 echo "Starting server with timing info enabled..."
-RUST_LOG=info ./target/release/roomd &
+RUST_LOG=info ./target/release/celld &
 SERVER_PID=$!
 
 # Give server time to start
@@ -21,7 +21,7 @@ echo "Running coldstart benchmark..."
 hey -cpus 1 -n 1000 -c 10 \
   -host hello.localhost \
   -H "x-single-use-isolate: true" \
-  http://127.0.0.1:3000/room/foo
+  http://127.0.0.1:3000/cell/foo
 
 echo "Cleaning up..."
 kill -9 $SERVER_PID
