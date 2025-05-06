@@ -2,7 +2,7 @@
 
 A containerized, multi‑tenant Deno runtime delivered via Docker. It combines
 **PartyKit‑style cells**, **Erlang‑inspired mesh routing**, **real‑time
-WebSocket hooks**, and **sub‑50 ms cold starts**, with secure per‑tenant
+WebSocket hooks**, and **sub‑50 ms cold starts**, with secure per‑tenant
 isolation and fast static asset serving.
 
 ### 1. Quickstart Demo
@@ -28,13 +28,13 @@ Type in one tab and see the message appear in the other—across containers.
 ### 2. High‑Level Goals
 
 - **Cell API**\
-  First‑class `/cells/{cellId}` endpoint with hooks\
-  `onConnect`, `onMessage`, `onDisconnect`, and optional `onRequest`
+  First‑class `/cells/{cellId}` endpoint with handlers\
+  `cell.request`, `cell.connect`, `cell.message`, `cell.close`, and `cell.error`
 - **Peer Mesh**\
   Containers read `KNOWN_PEERS`, form an Erlang‑style mesh, and shard cells by
   consistent hashing
 - **Ultra‑Fast Cold‑Start**\
-  TCP header peek + Deno subprocess reuse → first byte in < 50 ms
+  TCP header peek + Deno subprocess reuse → first byte in < 50 ms
 - **Static Asset Offload**\
   Proxy serves `/index.html`, `/client.js`, etc. directly from disk
 - **Strict Isolation**\
@@ -44,7 +44,7 @@ Type in one tab and see the message appear in the other—across containers.
 
 ### 3. Core Components
 
-#### 3.1 Proxy Router (Port 3000)
+#### 3.1 Proxy Router (Port 3000)
 
 - **Technology**: Pingora (Rust) for HTTP/1.x, WebSocket, future TLS
 - **Pipeline**:
@@ -66,8 +66,8 @@ Type in one tab and see the message appear in the other—across containers.
 
 #### 3.3 Subprocess Manager
 
-- **Bootstrap Shim** – `/opt/bootstrap.ts` loads each tenant’s `user_code.ts`
-  via `Deno.serve`
+- **Bootstrap Shim** – `jsr:@ry/cells` provides the `cell` singleton with
+  implicit API
 - **Permissions** – Deno CLI flags (`--allow-net`, `--allow-read`, etc.)
 - **Resource Limits** – Linux cgroups v2 for CPU & memory
 - **Lifecycle** – reuse warm processes, scale to zero on idle, spawn single‑use
@@ -75,33 +75,45 @@ Type in one tab and see the message appear in the other—across containers.
 
 ### 4. Developer API
 
-Drop `data/<tenant>/code/user_code.ts` exporting:
+Drop `data/<tenant>/code/main.ts` using the cell API:
 
 ```ts
-export default {
-  async onConnect(ws: WebSocket, ctx: { cellId: string }) {
-    // called once when a client connects
-  },
+import { cell } from "jsr:@ry/cells";
 
-  async onMessage(ws: WebSocket, message: string, ctx: { cellId: string }) {
-    // called on each message
-  },
+console.log(`[${cell.id}] Initializing...`);
 
-  async onDisconnect(ws: WebSocket, ctx: { cellId: string }) {
-    // called when the connection closes
-  },
+// Handle HTTP requests
+cell.request((req: Request): Response => {
+  return new Response(`Cell ${cell.id} got ${req.method}`, {
+    status: 200,
+  });
+});
 
-  // Optional HTTP handler for non‑WebSocket requests to /cells/{cellId}
-  async onRequest(req: Request, ctx: { cellId: string }): Promise<Response> {
-    return new Response(`Cell ${ctx.cellId} got ${req.method}`, {
-      status: 200,
-    });
-  },
-};
+// Handle WebSocket connections
+cell.connect((socket: WebSocket, id: string) => {
+  console.log(`[${cell.id}] Client connected: ${id}`);
+  socket.send(`Welcome to cell ${cell.id}!`);
+});
+
+// Handle WebSocket messages
+cell.message((event: MessageEvent, socket: WebSocket, id: string) => {
+  console.log(`[${cell.id}] Message from ${id}: ${event.data}`);
+  // Echo to all connected clients
+  cell.broadcast(`${id}: ${event.data}`);
+});
+
+// Handle WebSocket disconnections
+cell.close((socket: WebSocket, id: string) => {
+  console.log(`[${cell.id}] Client disconnected: ${id}`);
+});
+
+// Handle WebSocket errors
+cell.error((error: Error | ErrorEvent | Event) => {
+  console.error(`[${cell.id}] WebSocket error:`, error);
+});
 ```
 
-- **No manual `Deno.serve`** – shim takes care of HTTP & WS
-- Hooks named for PartyKit familiarity
+- **No manual `Deno.serve`** – the `cell` singleton takes care of HTTP & WS
 - All dynamic behavior lives under `/cells/{cellId}`
 
 ### 5. Storage & Layout
@@ -110,7 +122,7 @@ export default {
 /data/
 └── <tenant>/
     ├── static/        # index.html, client.js, assets
-    ├── code/          # user_code.ts only
+    ├── code/          # main.ts only
     └── sockets/       # {cellId}.sock per active cell
 ```
 
@@ -129,13 +141,13 @@ export default {
 ### 8. Future Enhancements
 
 - **Central Control Plane** (`app.deno.com`) for orchestration & config
-- **Automated TLS** – certificate management via Let’s Encrypt
+- **Automated TLS** – certificate management via Let's Encrypt
 - **Metering & Billing** – per-tenant usage tracking (CPU, memory, bandwidth)
 - **Background Jobs & Cron** – scheduled tasks
 - **Multi‑Region & Geo‑Routing** – global distribution
 - **CLI & Dashboard** – user-friendly deploys, logs, and metrics
 
-## What’s Missing?
+## What's Missing?
 
 1. **Authentication & ACLs** – secure per-tenant access control (JWT, API keys)
 2. **Backpressure & Error Handling** – graceful degradation under load
