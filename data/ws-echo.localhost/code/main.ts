@@ -1,5 +1,6 @@
-// Import the Connection and Cell types from our bootstrap.ts
-import { Cell, Connection } from "../../../src/bootstrap.ts";
+import { cell } from "jsr:@ry/cells";
+
+console.log(`[${cell.id}] Initializing WebSocket echo server...`);
 
 // Define user state
 interface UserState {
@@ -8,279 +9,269 @@ interface UserState {
   isTyping?: boolean;
 }
 
+// Map to store user states by connection ID
+const users = new Map<string, UserState>();
+
 // Helper function to create a message payload
 function createMessage(
   type: string,
   data: Record<string, unknown>,
-  cellId: string,
 ) {
   return JSON.stringify({
     type,
     ...data,
     timestamp: new Date().toISOString(),
-    cellId,
+    cellId: cell.id,
   });
 }
 
-export default {
-  // Called when the server starts, before accepting connections
-  async onStart(ctx: { cellId: string; cell: Cell }) {
-    console.log("Chat server started for cell", { cellId: ctx.cellId });
-  },
+// Helper to broadcast the current user list
+function broadcastUserList() {
+  const userList = Array.from(users.entries()).map(([id, state]) => {
+    return {
+      id,
+      username: state.username,
+    };
+  });
 
-  // Called when a new WebSocket connection is established
-  async onConnect(connection: Connection, ctx: { cellId: string; cell: Cell }) {
-    // Initialize user with a guest name
-    const guestName = `Guest${Math.floor(Math.random() * 1000)}`;
-    connection.setState({
+  // Broadcast to everyone
+  cell.broadcast(
+    createMessage("userlist", { users: userList }),
+  );
+}
+
+// Handle HTTP requests
+cell.request((request: Request): Response => {
+  const url = new URL(request.url);
+
+  if (url.pathname === "/stats") {
+    // Return chat cell stats
+    return new Response(
+      JSON.stringify({
+        cellId: cell.id,
+        connections: users.size,
+        users: Array.from(users.values()).map((state) => state.username),
+      }),
+      {
+        headers: {
+          "Content-Type": "application/json",
+        },
+      },
+    );
+  }
+
+  return new Response("Chat server is running");
+});
+
+// Handle new connections
+cell.connect((socket: WebSocket, id: string) => {
+  // Initialize user with a guest name
+  const guestName = `Guest${Math.floor(Math.random() * 1000)}`;
+
+  // Store the user state
+  users.set(id, {
+    username: guestName,
+    joinedAt: new Date().toISOString(),
+  });
+
+  // Send a welcome message to the new user
+  socket.send(
+    createMessage("welcome", {
+      message: `Welcome to the chat cell, ${guestName}!`,
       username: guestName,
-      joinedAt: new Date().toISOString(),
-    });
+    }),
+  );
 
-    // Send a welcome message to the new user with their username
-    connection.send(
-      createMessage("welcome", {
-        message: `Welcome to the chat cell, ${guestName}!`,
-        username: guestName,
-      }, ctx.cellId),
-    );
+  // Announce the new user to the cell
+  cell.broadcast(
+    createMessage("system", {
+      message: `${guestName} has joined the cell`,
+    }),
+    [id], // Don't send to the new user
+  );
 
-    // Announce the new user to the cell
-    ctx.cell.broadcast(
-      createMessage("system", {
-        message: `${guestName} has joined the cell`,
-      }, ctx.cellId),
-      [connection.id], // Don't send to the new user
-    );
+  // Send the current user list to everyone
+  broadcastUserList();
+});
 
-    // Send the current user list to everyone
-    this.broadcastUserList(ctx.cell, ctx.cellId);
-  },
+// Handle message reception
+cell.message((event: MessageEvent, socket: WebSocket, id: string) => {
+  const senderState = users.get(id);
+  if (!senderState) return;
 
-  // Helper to broadcast the current user list
-  broadcastUserList(cell: Cell, cellId: string) {
-    const userList = Array.from(cell.getConnections()).map((conn) => {
-      const state = conn.state as UserState;
-      return {
-        id: conn.id,
-        username: state.username,
-      };
-    });
-
-    // Broadcast to everyone
-    cell.broadcast(
-      createMessage("userlist", { users: userList }, cellId),
-    );
-  },
-
-  // Called when a WebSocket message is received
-  async onMessage(
-    data: string,
-    sender: Connection,
-    ctx: { cellId: string; cell: Cell },
-  ) {
-    if (!sender.state) return;
-
-    const senderState = sender.state as UserState;
-
+  try {
+    // Try to parse as JSON command
+    let message: any;
     try {
-      // Try to parse as JSON command
-      let message: any;
-      try {
-        message = JSON.parse(data);
-      } catch (e) {
-        // If not JSON, treat as a regular chat message
-        message = { type: "chat", content: data };
-      }
-
-      // Handle different command types
-      switch (message.type) {
-        case "chat":
-          // Broadcast the message to all users
-          ctx.cell.broadcast(
-            createMessage("chat", {
-              username: senderState.username,
-              message: message.content || data,
-            }, ctx.cellId),
-          );
-          break;
-
-        case "nickname":
-          this.handleNicknameChange(message, sender, senderState, ctx);
-          break;
-
-        case "typing":
-          this.handleTypingStatus(message, sender, senderState, ctx);
-          break;
-
-        case "private":
-          this.handlePrivateMessage(message, sender, senderState, ctx);
-          break;
-
-        default:
-          // Unknown command, echo it back
-          sender.send(
-            createMessage("echo", {
-              originalMessage: data,
-            }, ctx.cellId),
-          );
-      }
-    } catch (error) {
-      sender.send(
-        createMessage("error", {
-          message: "Error processing your message",
-        }, ctx.cellId),
-      );
+      message = JSON.parse(event.data.toString());
+    } catch (e) {
+      // If not JSON, treat as a regular chat message
+      message = { type: "chat", content: event.data.toString() };
     }
-  },
 
-  // Handle nickname changes
-  handleNicknameChange(
-    message: any,
-    sender: Connection,
-    senderState: UserState,
-    ctx: { cellId: string; cell: Cell },
-  ) {
-    if (message.username && typeof message.username === "string") {
-      const oldUsername = senderState.username;
-      const newUsername = message.username.trim().substring(0, 20); // Limit length
+    // Handle different command types
+    switch (message.type) {
+      case "chat":
+        // Broadcast the message to all users
+        cell.broadcast(
+          createMessage("chat", {
+            username: senderState.username,
+            message: message.content || event.data.toString(),
+          }),
+        );
+        break;
 
-      // Update the user's state
-      sender.setState({
-        ...senderState,
-        username: newUsername,
-      });
+      case "nickname":
+        handleNicknameChange(message, socket, id, senderState);
+        break;
 
-      // Notify everyone of the name change
-      ctx.cell.broadcast(
-        createMessage("system", {
-          message: `${oldUsername} is now known as ${newUsername}`,
-        }, ctx.cellId),
-      );
+      case "typing":
+        handleTypingStatus(message, socket, id, senderState);
+        break;
 
-      // Update the user list
-      this.broadcastUserList(ctx.cell, ctx.cellId);
+      case "private":
+        handlePrivateMessage(message, socket, id, senderState);
+        break;
+
+      default:
+        // Unknown command, echo it back
+        socket.send(
+          createMessage("echo", {
+            originalMessage: event.data.toString(),
+          }),
+        );
     }
-  },
+  } catch (error) {
+    socket.send(
+      createMessage("error", {
+        message: "Error processing your message",
+      }),
+    );
+  }
+});
 
-  // Handle typing status updates
-  handleTypingStatus(
-    message: any,
-    sender: Connection,
-    senderState: UserState,
-    ctx: { cellId: string; cell: Cell },
-  ) {
-    // Update user's typing status
-    sender.setState({
+// Handle nickname changes
+function handleNicknameChange(
+  message: any,
+  socket: WebSocket,
+  id: string,
+  senderState: UserState,
+) {
+  if (message.username && typeof message.username === "string") {
+    const oldUsername = senderState.username;
+    const newUsername = message.username.trim().substring(0, 20); // Limit length
+
+    // Update the user's state
+    users.set(id, {
       ...senderState,
-      isTyping: message.isTyping === true,
+      username: newUsername,
     });
 
-    // Broadcast typing status to others
-    ctx.cell.broadcast(
-      createMessage("typing", {
-        username: senderState.username,
-        isTyping: message.isTyping === true,
-      }, ctx.cellId),
-      [sender.id], // Don't send back to the sender
+    // Notify everyone of the name change
+    cell.broadcast(
+      createMessage("system", {
+        message: `${oldUsername} is now known as ${newUsername}`,
+      }),
     );
-  },
 
-  // Handle private messages
-  handlePrivateMessage(
-    message: any,
-    sender: Connection,
-    senderState: UserState,
-    ctx: { cellId: string; cell: Cell },
-  ) {
-    if (message.to && message.content) {
-      // Find the recipient by username
-      const recipient = Array.from(ctx.cell.getConnections()).find(
-        (conn) => {
-          const state = conn.state as UserState;
-          return state.username === message.to;
-        },
-      );
+    // Update the user list
+    broadcastUserList();
+  }
+}
 
-      if (recipient) {
-        // Send the private message to the recipient
-        recipient.send(
-          createMessage("private", {
-            username: senderState.username,
-            message: message.content,
-          }, ctx.cellId),
-        );
+// Handle typing status updates
+function handleTypingStatus(
+  message: any,
+  socket: WebSocket,
+  id: string,
+  senderState: UserState,
+) {
+  // Update user's typing status
+  users.set(id, {
+    ...senderState,
+    isTyping: message.isTyping === true,
+  });
 
-        // Also send confirmation to the sender
-        sender.send(
-          createMessage("private", {
-            to: message.to,
-            message: message.content,
-          }, ctx.cellId),
-        );
-      } else {
-        // User not found
-        sender.send(
-          createMessage("error", {
-            message: `User '${message.to}' not found`,
-          }, ctx.cellId),
-        );
+  // Broadcast typing status to others
+  cell.broadcast(
+    createMessage("typing", {
+      username: senderState.username,
+      isTyping: message.isTyping === true,
+    }),
+    [id], // Don't send back to the sender
+  );
+}
+
+// Handle private messages
+function handlePrivateMessage(
+  message: any,
+  socket: WebSocket,
+  id: string,
+  senderState: UserState,
+) {
+  if (message.to && message.content) {
+    // Find the recipient by username
+    let recipientId: string | undefined;
+    let recipientSocket: WebSocket | undefined;
+
+    for (const [userId, userState] of users.entries()) {
+      if (userState.username === message.to) {
+        recipientId = userId;
+        recipientSocket = cell.getWebSocket(userId);
+        break;
       }
     }
-  },
 
-  // Called when a WebSocket connection is closed
-  async onClose(connection: Connection, ctx: { cellId: string; cell: Cell }) {
-    const state = connection.state as UserState;
-    const username = state?.username || "A user";
-
-    // Announce that the user has left
-    ctx.cell.broadcast(
-      createMessage("system", {
-        message: `${username} has left the cell`,
-      }, ctx.cellId),
-    );
-
-    // Update the user list for everyone
-    setTimeout(() => {
-      this.broadcastUserList(ctx.cell, ctx.cellId);
-    }, 50);
-  },
-
-  // Called when a WebSocket error occurs
-  async onError(
-    connection: Connection,
-    error: Event,
-    ctx: { cellId: string; cell: Cell },
-  ) {
-    // Log errors, but don't take action
-    console.error("WebSocket error:", error);
-  },
-
-  // Called for HTTP requests
-  async onRequest(request: Request, ctx: { cellId: string; cell: Cell }) {
-    const url = new URL(request.url);
-
-    if (url.pathname === "/stats") {
-      // Return chat cell stats
-      const connectionCount = ctx.cell.connections.size;
-      return new Response(
-        JSON.stringify({
-          cellId: ctx.cellId,
-          connections: connectionCount,
-          users: Array.from(ctx.cell.getConnections()).map((conn) => {
-            const state = conn.state as UserState;
-            return state.username;
-          }),
+    if (recipientSocket && recipientId) {
+      // Send the private message to the recipient
+      recipientSocket.send(
+        createMessage("private", {
+          username: senderState.username,
+          message: message.content,
         }),
-        {
-          headers: {
-            "Content-Type": "application/json",
-          },
-        },
+      );
+
+      // Also send confirmation to the sender
+      socket.send(
+        createMessage("private", {
+          to: message.to,
+          message: message.content,
+        }),
+      );
+    } else {
+      // User not found
+      socket.send(
+        createMessage("error", {
+          message: `User '${message.to}' not found`,
+        }),
       );
     }
+  }
+}
 
-    return new Response("Chat server is running");
-  },
-};
+// Handle connection closures
+cell.close((socket: WebSocket, id: string) => {
+  const state = users.get(id);
+  const username = state?.username || "A user";
+
+  // Remove user from our map
+  users.delete(id);
+
+  // Announce that the user has left
+  cell.broadcast(
+    createMessage("system", {
+      message: `${username} has left the cell`,
+    }),
+  );
+
+  // Update the user list for everyone
+  setTimeout(() => {
+    broadcastUserList();
+  }, 50);
+});
+
+// Handle WebSocket errors
+cell.error((error: Error | ErrorEvent | Event) => {
+  // Log errors, but don't take action
+  console.error("WebSocket error:", error);
+});

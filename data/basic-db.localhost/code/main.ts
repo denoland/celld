@@ -1,32 +1,31 @@
-export default {
-  onStart(ctx) {
-    ctx.db.exec(`
-      CREATE TABLE IF NOT EXISTS requests (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        method TEXT,
-        url TEXT,
-        user_agent TEXT,
-        timestamp TEXT
-      );
+import { cell } from "jsr:@ry/cells";
 
-      CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests (timestamp);
-    `);
-  },
+console.log(`[${cell.id}] Initializing...`);
 
-  async onRequest(req: Request, ctx: { cell: Cell }): Promise<Response> {
-    const userAgent = req.headers.get("user-agent");
-    const timestamp = new Date().toISOString();
+cell.db.exec(`
+	CREATE TABLE IF NOT EXISTS requests (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		method TEXT,
+		url TEXT,
+		user_agent TEXT,
+		timestamp TEXT DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests (timestamp);
+`);
 
-    const insert = ctx.db.prepare(
-      "INSERT INTO requests (method, url, user_agent, timestamp) VALUES (?, ?, ?, ?)",
-    );
-    insert.run(req.method, req.url, userAgent, timestamp);
+cell.request((req: Request): Response => {
+  const userAgent = req.headers.get("user-agent");
+  const timestamp = new Date().toISOString();
 
-    const countRow = ctx.db
-      .prepare("SELECT COUNT(*) AS count FROM requests")
-      .get();
-    const count = countRow?.count;
+  const insert = cell.db.prepare(
+    "INSERT INTO requests (method, url, user_agent, timestamp) VALUES (?, ?, ?, ?)",
+  );
 
-    return new Response(String(count), { status: 200 });
-  },
-};
+  insert.run(req.method, req.url, userAgent, timestamp);
+
+  const countRow = cell.db
+    .prepare("SELECT COUNT(*) AS count FROM requests")
+    .get() as { count: number };
+  const count = countRow?.count;
+  return new Response(String(count) + "\n", { status: 200 });
+});

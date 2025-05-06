@@ -1,6 +1,5 @@
-export default {
-  async onRequest(_request: Request, ctx: { cellId: string }) {
-    //console.log("Handling request", { cellId: ctx.cellId });
-    return new Response("hello from hello.localhost\n");
-  },
-};
+import { cell } from "jsr:@ry/cells";
+
+console.log(`[${cell.id}] Initializing...`);
+
+cell.request((_) => new Response("hello\n"));

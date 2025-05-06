@@ -563,10 +563,6 @@ fn spawn_deno_process(
   socket_path: &Path,
   main_script: &PathBuf,
 ) -> Result<ChildOnParentExit> {
-  // Path to bootstrap.ts script
-  let bootstrap_script =
-    data_dir.parent().unwrap().join("src").join("bootstrap.ts");
-
   let mut cmd = std::process::Command::new("deno");
   cmd
     .current_dir(tenant_dir)
@@ -610,7 +606,6 @@ fn spawn_deno_process(
     host = %host,
     cell_id = %cell_id,
     socket_path = %socket_path.display(),
-    bootstrap_script = ?bootstrap_script.display(),
     main_script = %main_script.display(),
     "Preparing deno command"
   );
@@ -631,9 +626,7 @@ fn spawn_deno_process(
     cmd.arg("--allow-env=X-Cell-Id"); // Default minimum permission
   }
 
-  cmd
-    .arg(&bootstrap_script) // Use bootstrap.ts instead of main.ts directly
-    .arg(main_script); // Pass main.ts as argument to bootstrap.ts
+  cmd.arg(main_script);
 
   // Spawn with ChildOnParentExit for automatic termination when parent exits
   ChildOnParentExit::spawn(cmd).with_context(|| {

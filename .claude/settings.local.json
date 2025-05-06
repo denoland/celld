@@ -14,7 +14,9 @@
       "Bash(cargo test:*)",
       "Bash(cargo test:*)",
       "Bash(cargo fmt:*)",
-      "Bash(cargo fmt:*)"
+      "Bash(cargo fmt:*)",
+      "Bash(deno check:*)",
+      "Bash(deno fmt:*)"
     ],
     "deny": []
   }
