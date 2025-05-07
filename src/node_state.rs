@@ -2,6 +2,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
+
 use crate::cluster_membership::{ClusterMembership, S3ClusterMembership};
 use crate::config;
 use crate::distributed_lock::{DistributedLock, S3DistributedLock};
