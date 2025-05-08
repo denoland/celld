@@ -141,3 +141,17 @@ In-Progress / Next:
 - Workflow API (Like inngest)
 - Developer Experience
 - Advanced Demos
+
+## Local Development
+
+### Prerequisites
+
+- Deno v2.3+ (to use `DENO_SERVE_ADDRESS` env var)
+- Configure `*.localhost` to be resolved to the local loopback address (if not
+  configured by default)
+
+### Commands
+
+- Build: `cargo build`
+- Run: `cargo run`
+- Test All: `cargo test`
