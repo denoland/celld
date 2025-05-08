@@ -6,6 +6,10 @@ use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::io::AsRawFd;
 use std::process::Command;
+use tracing::info;
+
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
 
 /// A child process that will be terminated if its parent dies.
 ///
@@ -27,9 +31,9 @@ impl ChildOnParentExit {
   pub fn spawn(mut cmd: Command) -> io::Result<Self> {
     #[cfg(target_os = "linux")]
     {
-      use nix::sys::prctl::set_death_signal;
+      use nix::sys::prctl::set_pdeathsig;
       cmd.before_exec(|| {
-        set_death_signal(Some(Signal::SIGTERM))
+        set_pdeathsig(Some(Signal::SIGTERM))
           .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         Ok(())
       });
