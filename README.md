@@ -147,6 +147,7 @@ In-Progress / Next:
 ### Prerequisites
 
 - Deno v2.3+ (to use `DENO_SERVE_ADDRESS` env var)
+- [litestream](https://litestream.io/install/)
 - Configure `*.localhost` to be resolved to the local loopback address (if not
   configured by default)
 
