@@ -421,7 +421,7 @@ async fn test_node_failure_takeover() {
 #[tokio::test]
 #[ignore] // Flaky mostly working but needs more investigation.
 async fn test_concurrent_takeover_locking() {
-  // Setup three nodes in the mesh with auto-allocated ports
+  // Setup three celld nodes in the mesh with auto-allocated ports
   let mut test_env = TestEnv::new(3);
 
   // Use unique cell ID to avoid conflicts with other tests
@@ -518,12 +518,12 @@ async fn test_concurrent_takeover_locking() {
         .build()
         .unwrap();
       let url = url.clone();
-      tokio::spawn(async move {
+      async move {
         let resp = client.get(&url).send().await.unwrap();
         assert_eq!(resp.status(), 200);
         let body = resp.text().await.unwrap_or_default();
         body
-      })
+      }
     })
     .collect::<Vec<_>>();
 
@@ -532,8 +532,7 @@ async fn test_concurrent_takeover_locking() {
 
   // Analyze the results
   let mut success_count = 0;
-  for result in results {
-    let body = result.unwrap();
+  for body in results {
     success_count += 1;
     let value = body.trim();
     assert!(
@@ -1016,8 +1015,11 @@ async fn connect_to_cell(
 
   let (mut ws_stream, _) = tokio_tungstenite::connect_async(url.to_string())
     .await
-    .unwrap_or_else(|_| {
-      panic!("Failed to connect to cell {} on port {}", cell_id, port)
+    .unwrap_or_else(|e| {
+      panic!(
+        "Failed to connect to cell {} on port {}: {}",
+        cell_id, port, e
+      )
     });
 
   // Read welcome message
