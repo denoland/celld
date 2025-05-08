@@ -34,6 +34,14 @@ RUN apt-get update && apt-get install -y \
 ENV DENO_INSTALL=/usr/local
 RUN curl -fsSL https://deno.land/install.sh | sh
 
+# Download and install Litestream
+FROM  debian:bookworm-slim AS litestream
+ARG TARGETARCH
+WORKDIR /download
+RUN apt update -y && apt install -y wget tar
+RUN wget https://github.com/benbjohnson/litestream/releases/download/v0.3.9/litestream-v0.3.9-linux-${TARGETARCH}.tar.gz; \
+  tar -zxf litestream-v0.3.9-linux-${TARGETARCH}.tar.gz;
+
 # Final stage
 FROM debian:bookworm-slim
 
@@ -55,6 +63,7 @@ WORKDIR /app
 # Copy the binary from the builder stage
 COPY --from=builder /build/target/release/celld /usr/local/bin/
 COPY --from=runtime /usr/local/bin/deno /usr/local/bin/deno
+COPY --from=litestream /download/litestream /usr/local/bin/litestream
 
 # Switch to non-root user
 USER celld
