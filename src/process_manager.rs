@@ -42,7 +42,8 @@ pub struct ProcessEntry {
   pub socket_path: PathBuf,
   pub last_used: Instant,
   pub parent_exit_guard: ChildOnParentExit, // Guard for automatic termination on parent exit
-  pub single_use: bool,                     // Flag for single-use isolates
+  lock_guard: LockGuard, // Guard for ensuring the uniqueness of the tenant/cellId in the cluster
+  pub single_use: bool,  // Flag for single-use isolates
   pub active_connections: u32, // Counter for active connections (including WebSockets)
   pub _socket_tempdir: TempDir, // Keep tempdir alive as long as process exists
   pub replica: Option<SqliteReplica>, // SQLite replication to S3/MinIO
@@ -169,8 +170,26 @@ impl ProcessManager {
       return Err(ProxyError::AppNotFound(host.to_string()));
     }
 
-    let maybe_lock_guard =
-      takeover_check(node_state.clone(), host, cell_id).await?;
+    // Acquire a lock on the cell to declare ownership of the combination of
+    // tenant and cellId. This lock's lifetime should match that of the Deno
+    // process we will create later.
+    let lock_name = cell_hash_key(host, cell_id);
+    let node_id = node_state.peer_manager.get_local_node_id();
+    let ttl = Duration::from_secs(30);
+    let lock_guard = node_state
+      .distributed_lock
+      .clone()
+      .try_acquire(&lock_name, node_id, ttl)
+      .await
+      .map_err(|e| {
+        tracing::warn!(
+          tenant = host,
+          cell_id,
+          lock_name,
+          node_id,
+          error = ?e, "Failed to acquire lock on cell");
+        ProxyError::LockContention
+      })?;
 
     // Create a temporary directory for the socket
     // This will be automatically cleaned up when dropped
@@ -228,13 +247,6 @@ impl ProcessManager {
 
     // Handle database restoration if necessary
     if let Some(ref replica) = replica {
-      // Only attempt coordinated restore if we have a distributed lock manager
-      let lock_manager = node_state.distributed_lock.clone();
-      let node_id = node_state.peer_manager.get_local_node_id();
-
-      // Use a reasonable lock TTL (e.g., 30 seconds)
-      let lock_ttl = std::time::Duration::from_secs(30);
-
       info!(
         tenant = %host,
         cell_id = %cell_id,
@@ -242,18 +254,7 @@ impl ProcessManager {
       );
 
       // Call ensure_restored to perform the restore with distributed locking
-      let restore_result = match replica
-        .ensure_restored(lock_manager, node_id, lock_ttl)
-        .await
-      {
-        Ok(r) => r,
-        Err(e) => {
-          if let Some(lock_guard) = maybe_lock_guard {
-            lock_guard.release().await?;
-          }
-          return Err(e.into());
-        }
-      };
+      let restore_result = replica.ensure_restored(&lock_guard).await;
 
       // Update the restore state based on the result
       match restore_result {
@@ -312,12 +313,7 @@ impl ProcessManager {
         }
       }
 
-      if let Err(e) = replica.start_replication().await {
-        if let Some(lock_guard) = maybe_lock_guard {
-          lock_guard.release().await?;
-        }
-        return Err(e.into());
-      }
+      replica.start_replication().await?;
     } else if !db_path.exists() {
       // No replica, but we still need a database - create an empty one
       info!(
@@ -379,6 +375,7 @@ impl ProcessManager {
       socket_path: socket_path.clone(),
       last_used: Instant::now(),
       parent_exit_guard: child_guard,
+      lock_guard,
       single_use,
       active_connections: 0,
       _socket_tempdir: socket_tempdir,
@@ -474,10 +471,6 @@ impl ProcessManager {
             "Error connecting to socket during startup"
           );
 
-          if let Some(lock_guard) = maybe_lock_guard {
-            lock_guard.release().await?;
-          }
-
           // Remove the entry from the map to avoid stale entries
           let mut processes = self.processes.lock().unwrap();
           if let Some(entry) = processes.remove(&process_key) {
@@ -504,10 +497,6 @@ impl ProcessManager {
       if let Some(entry) = processes.remove(&process_key) {
         processes.insert(unique_key, entry);
       }
-    }
-
-    if let Some(lock_guard) = maybe_lock_guard {
-      lock_guard.release().await?;
     }
 
     Ok((socket_path, stream))
