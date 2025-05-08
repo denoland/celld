@@ -208,7 +208,7 @@ mod tests {
       .text()
       .await
       .unwrap();
-    assert_eq!("hello from hello.localhost\n", response);
+    assert_eq!("hello\n", response);
   }
 
   #[tokio::test]

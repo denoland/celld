@@ -1,69 +1,195 @@
-celld 0.1.0
-Self-hosted real-time runtime for isolated JavaScript cells.
+celld <version> - Simple, Stateful, Self-Hostable Compute.
+
+celld runs "Cells": Deno isolates for your JS/TS code, each with a private,
+synchronous SQLite database. S3 is its sole dependency, used for durable
+state persistence (via Litestream replication), service discovery, and locking,
+enabling a resilient cluster of celld nodes.
+
+OPERATION:
+  A celld project ('celld.toml' config) serves "tenant" applications.
+
+  Tenant folders (e.g., 'myapp.com') in 'tenants_dir' (default: ".") contain:
+    main.js (or .ts)   # Cell logic for this tenant
+    static/            # Static assets (served from http://<tenant_host>/)
+    .celld-data/       # Runtime data (SQLite DBs) - add to .gitignore
+      sqlite/<cell_id>.db
+
+  Routing:
+    http://<tenant_host>/cell/<cell_id> (Activates Cell)
+    ws://<tenant_host>/cell/<cell_id>   (Activates Cell)
+    http://<tenant_host>/<path>         (Serves static file)
+
+  Each unique '/cell/<cell_id>' gets a dedicated Deno isolate. Clustered
+  celld nodes use consistent hashing to distribute Cells.
+
+JS API (starting at main.js or main.ts):
+	import { cell } from "jsr:@ry/cells";
+  cell.id: string                     // Current Cell's unique ID
+  cell.db.exec(sql)                   // Executes SQL
+  cell.db.prepare(sql)                // Returns Statement; run(), get(), all()
+  cell.request((req,info) => Resp)    // Handles HTTP requests
+  cell.connect((sock,id) => void)     // Handles new WebSocket connections
+  cell.message((evt,sock,id) => void) // Handles WebSocket messages
+  cell.broadcast(data, ?opts)         // Sends to all WebSockets in this Cell
+  // Soon Durable workflows: jsr:@ry/cells/workflows
+
+Example: Incrementing Counter ('main.js')
+  import { cell } from "jsr:@ry/cells";
+  cell.db.exec(`CREATE TABLE IF NOT EXISTS c (id TEXT PRIMARY KEY, v INTEGER)`);
+  cell.db.exec(`INSERT OR IGNORE INTO c (id, v) VALUES ('hits', 0)`);
+  cell.request((req) => {
+    cell.db.prepare(`UPDATE c SET v = v + 1 WHERE id = 'hits'`).run();
+    const r = cell.db.prepare(`SELECT v FROM c WHERE id = 'hits'`).get();
+    return new Response(`${r.v} (${cell.id})\\n`);
+  });
+
+LIMITATIONS:
+  - Durability: SQLite writes are sync locally. S3 replication is async;
+    very recent writes (secs) may be lost on catastrophic node failure.
+  - Consistency: Strong for active Cell operations (single owner). S3 state
+    is eventually consistent with the last successful replication.
+  - Cell DB Size: Best for small DBs (<500MB) for fast S3 hydration.
+  - Scaling: Individual Cells are single Deno isolates (no auto-scale).
+    System scales by adding celld nodes.
 
 USAGE:
-    celld [OPTIONS]
+    celld [OPTIONS] [COMMAND]
 
 OPTIONS:
-    -p, --port <PORT>           Port to bind the HTTP/WebSocket server [default: 3000]
-    -d, --data-dir <DIR>        Root data directory [default: ./data]
-    -n, --known-peers <PEERS>   Comma-separated list of peer addresses (host:port)
-    -h, --help                  Print help information
-    --version                   Print version info
+    -c, --config <FILE>    Path to 'celld.toml' [Default: auto-detects]
+    -L, --log-level <LVL>  [error|warn|info|debug|trace] [Default: info]
+    -h, --help             Show this help message
+    -V, --version          Show version
 
-DESCRIPTION:
-    Celld is a lightweight runtime inspired by Durable Objects and Deno Deploy.
-    It runs tenant-isolated JavaScript logic in per-cell Deno subprocesses,
-    supports real-time WebSocket connections, and serves static files per tenant.
+COMMANDS:
+    run                    Start server (default). Config: CLI > ENV > TOML.
+    init                   Scaffold new celld project.
+    validate               Check celld.toml, structure, and deno check tenants.
+    help <CMD>             Show help for a command.
 
-    Routing is based on the request Host and cell ID:
+Runtime options in 'celld run --help' or 'celld.toml'.
+Full Documentation: https://github.com/denoland/celld
 
-        http://myapp.localhost:3000/cells/chat1
-              └──────────┬────────┘ └────┬────┘
-                   tenant domain        cell ID
 
-    Each cell runs in an isolated subprocess with its own state and lifecycle.
 
-DATA LAYOUT:
-    The data directory contains one folder per tenant domain:
 
-        <data-dir>/
-        └── myapp.localhost/
-            ├── static/          # Served at /
-            │   └── index.html, client.js, etc.
-            ├── code/            # Cell logic
-            │   └── main.ts      # Exports onConnect, onMessage, etc.
-            └── sockets/         # Internal cell sockets (created at runtime)
 
-EXAMPLE:
-    Run celld with two peers:
-        celld --port 3000 --data-dir ./data --known-peers localhost:3000,localhost:4000
 
-    Open:
-        http://myapp.localhost:3000/cells/chat1
 
-MORE:
-    - /cells/{cellId} connections are upgraded to WebSockets
-    - Each tenant's code is hot-reloaded when the cell starts
-    - Durable state and cold-start recovery with SQLite + S3/MinIO
 
-S3 REPLICATION:
-    Configure SQLite replication to S3/MinIO via these environment variables:
 
-    CELLD_S3_ENDPOINT           S3 endpoint URL (e.g., http://localhost:9000)
-    CELLD_S3_BUCKET             Bucket name for storing cell databases
-    CELLD_S3_REGION             S3 region (defaults to us-east-1 if not specified)
-    CELLD_S3_PREFIX             Path prefix within bucket (defaults to "celld")
-    CELLD_S3_ACCESS_KEY_ID      S3 access key ID
-    CELLD_S3_SECRET_ACCESS_KEY  S3 secret access key
 
-    When these variables are set, celld will automatically:
-    - Restore cell databases from S3 on cold start
-    - Continuously replicate changes to S3
-    - Gracefully flush and snapshot on shutdown
 
-    s3://$CELLD_S3_BUCKET/$CELLD_S3_PREFIX/<tenant>/<cellId>
 
-PROJECT:
-    https://github.com/denoland/celld
+celld run --help
+##################################################
 
+celld run - Start the celld server.
+
+Starts the celld server, discovering and serving tenant applications based
+on the current project configuration ('celld.toml', environment variables,
+and any command-line overrides specified here).
+
+USAGE:
+    celld run [OPTIONS]
+
+OPTIONS:
+    --tenants-dir <PATH>
+        Root directory containing your tenant application folders.
+        Each subdirectory is a tenant (e.g., 'myapp.com/').
+        Overrides 'tenants_dir' in 'celld.toml'.
+        [env: CELLD_TENANTS_DIR]
+        [Default: "." (relative to 'celld.toml' location, or current directory)]
+
+    --runtime-subdir <NAME>
+        Name of the subdirectory within each tenant folder for celld's
+        runtime data (SQLite databases, internal sockets, etc.).
+        Overrides 'tenant_runtime_subdir' in 'celld.toml'.
+        [env: CELLD_TENANT_RUNTIME_SUBDIR]
+        [Default: ".celld-data"]
+
+    --listen-addr <IP:PORT>
+        Public IP:Port for celld's main server to listen on.
+        Overrides 'listen_addr' in 'celld.toml'.
+        [env: CELLD_LISTEN_ADDR]
+        [Default: "0.0.0.0:8000" or as per 'celld.toml']
+
+    --advertise-addr <IP:PORT>
+        Public IP:Port this celld node advertises to other peers in the cluster
+        for inter-node communication and request forwarding. Must be reachable
+        by other celld nodes.
+        Overrides 'advertise_addr' in 'celld.toml'.
+        [env: CELLD_ADVERTISE_ADDR]
+        [Default: "127.0.0.1:8000" or as per 'celld.toml']
+
+    --internal-listen-addr <IP:PORT>
+        IP:Port for celld's internal control plane server. Used for intra-cluster
+        operations like cell takeovers and state queries.
+        Overrides 'internal_listen_addr' in 'celld.toml'.
+        [env: CELLD_INTERNAL_LISTEN_ADDR]
+        [Default: Derived from advertise_addr (e.g., port+1) or as per 'celld.toml']
+
+    --s3-endpoint-url <URL>
+        S3 endpoint URL for Litestream replication and cluster services.
+        Overrides 'endpoint_url' in '[s3]' table of 'celld.toml'.
+        [env: AWS_ENDPOINT_URL or CELLD_S3_ENDPOINT]
+
+    --s3-bucket <NAME>
+        S3 bucket name for Litestream and cluster services.
+        Overrides 'bucket' in '[s3]' table of 'celld.toml'.
+        [env: CELLD_S3_BUCKET]
+
+    --s3-region <REGION>
+        AWS Region for the S3 bucket.
+        Overrides 'region' in '[s3]' table of 'celld.toml'.
+        [env: AWS_DEFAULT_REGION or AWS_REGION or CELLD_S3_REGION]
+
+    --s3-access-key-id <KEY_ID>
+        S3 Access Key ID.
+        Overrides 'access_key_id' in '[s3]' table of 'celld.toml'.
+        [env: AWS_ACCESS_KEY_ID or CELLD_S3_ACCESS_KEY_ID]
+
+    --s3-secret-access-key <SECRET_KEY>
+        S3 Secret Access Key.
+        Overrides 'secret_access_key' in '[s3]' table of 'celld.toml'.
+        [env: AWS_SECRET_ACCESS_KEY or CELLD_S3_SECRET_ACCESS_KEY]
+
+    --s3-prefix <PREFIX>
+        Optional S3 path prefix within the bucket for all celld data.
+        Overrides 'prefix' in '[s3]' table of 'celld.toml'.
+        [env: CELLD_S3_PREFIX]
+
+    --heartbeat-interval <SECONDS>
+        Interval in seconds for cluster heartbeat to S3.
+        Overrides 'heartbeat_interval' in '[cluster]' table of 'celld.toml'.
+        [env: CELLD_HEARTBEAT_INTERVAL]
+        [Default: 30]
+
+    --staleness-threshold <SECONDS>
+        Interval in seconds after which an inactive cluster node is considered stale.
+        Overrides 'staleness_threshold' in '[cluster]' table of 'celld.toml'.
+        [env: CELLD_STALENESS_THRESHOLD_SECS]
+        [Default: 90]
+
+    --grace-period <SECONDS>
+        Grace period in seconds for server shutdown.
+        Overrides 'grace_period_seconds' in 'celld.toml'.
+        [env: CELLD_GRACE_PERIOD_SECONDS]
+
+    -c, --config <FILE>
+        Path to the 'celld.toml' configuration file.
+        (This is a global option but shown here for completeness if 'run' is invoked directly)
+        [Default: Auto-detects 'celld.toml' in current or parent directories]
+
+    -L, --log-level <LEVEL>
+        Set the logging level. [error|warn|info|debug|trace]
+        (Global option) [Default: info]
+
+    -h, --help
+        Show this help message.
+
+CONFIGURATION ORDER:
+  1. Command-Line Options (these flags)
+  2. Environment Variables (CELLD_* prefixed, then standard AWS_*)
+  3. 'celld.toml' file
+  4. Built-in defaults
