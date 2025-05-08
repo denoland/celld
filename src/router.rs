@@ -122,10 +122,13 @@ impl ProxyHttp for InternalAPI {
             self.node_state.peer_manager.is_local_owner(tenant, cell_id);
 
           // Return a simple JSON response with owner information
-          let response = format!(
-            "{{\"tenant\":\"{}\",\"cell_id\":\"{}\",\"owner\":\"{}\",\"is_local\":{}}}",
-            tenant, cell_id, owner, is_local
-          );
+          let response = serde_json::to_string(&serde_json::json!({
+            "tenant": tenant,
+            "cell_id": cell_id,
+            "owner": owner,
+            "is_local": is_local
+          }))
+          .unwrap();
 
           let content_length = response.len();
           let mut resp =
