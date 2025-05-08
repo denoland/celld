@@ -54,6 +54,8 @@ impl NodeState {
       rt.block_on(async {
         // Try to get S3 membership config from configuration
         if config.has_s3_config() {
+          info!("S3 cluster membership configured, initializing...");
+          debug!("S3 cluster membership config: {:?}", config);
           let s3_config = config.to_s3_config().unwrap();
 
           // Create membership using from_config with configured staleness threshold
@@ -62,7 +64,9 @@ impl NodeState {
             config.advertise_addr.clone(),
             Some(node_id.clone()),
             Some(config.staleness_threshold),
-          ) {
+          )
+          .await
+          {
             Ok(membership) => {
               info!(
                 "Initializing S3 cluster membership with bucket {}",
@@ -89,20 +93,17 @@ impl NodeState {
             .load()
             .await;
 
-          // Create S3 client with path style config for MinIO compatibility
-          let s3_client = aws_sdk_s3::Client::from_conf(
+          let mut s3_client_builder =
             aws_sdk_s3::config::Builder::from(&aws_config)
-              .endpoint_url(s3_config.endpoint.clone())
-              .credentials_provider(aws_sdk_s3::config::Credentials::new(
-                s3_config.access_key_id.clone(),
-                s3_config.secret_access_key.clone(),
-                None,
-                None,
-                "manual-minio",
-              ))
-              .force_path_style(true)
-              .build(),
-          );
+              .force_path_style(true);
+
+          if let Some(endpoint) = s3_config.endpoint.as_ref() {
+            s3_client_builder = s3_client_builder.endpoint_url(endpoint);
+          }
+
+          let cfg = s3_client_builder.build();
+
+          let s3_client = aws_sdk_s3::Client::from_conf(cfg);
 
           // Create lock prefix (locks/restore/ by default)
           let lock_prefix = s3_config.subpath("locks/restore");
