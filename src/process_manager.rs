@@ -229,7 +229,7 @@ impl ProcessManager {
     // Handle database restoration if necessary
     if let Some(ref replica) = replica {
       // Only attempt coordinated restore if we have a distributed lock manager
-      let lock_manager = node_state.distributed_lock.as_ref().unwrap();
+      let lock_manager = node_state.distributed_lock.clone();
       let node_id = node_state.peer_manager.get_local_node_id();
 
       // Use a reasonable lock TTL (e.g., 30 seconds)
@@ -243,7 +243,7 @@ impl ProcessManager {
 
       // Call ensure_restored to perform the restore with distributed locking
       let restore_result = match replica
-        .ensure_restored(lock_manager.clone(), node_id, lock_ttl)
+        .ensure_restored(lock_manager, node_id, lock_ttl)
         .await
       {
         Ok(r) => r,
@@ -642,66 +642,63 @@ async fn takeover_check(
   host: &str,
   cell_id: &str,
 ) -> Result<Option<LockGuard>, ProxyError> {
-  if let Some(distributed_lock) = node_state.distributed_lock.as_ref() {
-    let owners = node_state.peer_manager.get_cell_owners(host, cell_id);
-    if !node_state.peer_manager.is_local_owner(host, cell_id) {
-      // - Check if the first owner is still active
-      //   (`peer_manager.is_peer_active`). _Initially, rely on `is_peer_active`
-      //   Future optimization: check `status.json` if implemented._
-      // - If the first owner is _inactive_: Proceed to attempt lock acquisition
-      // - If the first owner is _active_: This node should _not_ take over.
-      //   Return an error or state indicating it's not the owner/candidate
-      //   responsible for startup.
-      if node_state.peer_manager.is_peer_active(&owners[0]) {
-        // TODO: This node should _not_ take over. Return an error or state indicating it's not the
-        // owner/candidate responsible for startup.
-        todo!("This node should not take over, as the first owner is active.");
-      }
+  let owners = node_state.peer_manager.get_cell_owners(host, cell_id);
+  if !node_state.peer_manager.is_local_owner(host, cell_id) {
+    // - Check if the first owner is still active
+    //   (`peer_manager.is_peer_active`). _Initially, rely on `is_peer_active`
+    //   Future optimization: check `status.json` if implemented._
+    // - If the first owner is _inactive_: Proceed to attempt lock acquisition
+    // - If the first owner is _active_: This node should _not_ take over.
+    //   Return an error or state indicating it's not the owner/candidate
+    //   responsible for startup.
+    if node_state.peer_manager.is_peer_active(&owners[0]) {
+      // TODO: This node should _not_ take over. Return an error or state indicating it's not the
+      // owner/candidate responsible for startup.
+      todo!("This node should not take over, as the first owner is active.");
     }
-    // Acquire lock attempt
-    let lock_name = cell_hash_key(host, cell_id); // specific enough?
-    match distributed_lock
-      .clone()
-      .try_acquire(
-        &lock_name,
-        node_state.peer_manager.get_local_node_id(),
-        Duration::from_secs(30),
-      )
-      .await
-    {
-      Ok(lock_handle) => Ok(Some(lock_handle)),
-      Err(LockHeld(Some(i))) => {
-        if i.node_id == node_state.peer_manager.get_local_node_id() {
-          warn!(
-            tenant = %host,
-            cell_id = %cell_id,
-            lock_name = %lock_name,
-            "This node already holds the lock for {}: {:?}", lock_name, i
-          );
-          Ok(None)
-        } else {
-          warn!(
-            tenant = %host,
-            cell_id = %cell_id,
-            lock_name = %lock_name,
-            "Another node holds the lock for {}: {:?}", lock_name, i
-          );
-          Err(ProxyError::LockContention)
-        }
-      }
-      Err(LockHeld(None)) => Err(ProxyError::LockContention),
-      Err(e) => {
-        error!(
+  }
+  // Acquire lock attempt
+  let lock_name = cell_hash_key(host, cell_id); // specific enough?
+  match node_state
+    .distributed_lock
+    .clone()
+    .try_acquire(
+      &lock_name,
+      node_state.peer_manager.get_local_node_id(),
+      Duration::from_secs(30),
+    )
+    .await
+  {
+    Ok(lock_handle) => Ok(Some(lock_handle)),
+    Err(LockHeld(Some(i))) => {
+      if i.node_id == node_state.peer_manager.get_local_node_id() {
+        warn!(
           tenant = %host,
           cell_id = %cell_id,
           lock_name = %lock_name,
-          "Error acquiring cell lock {:?}", e
+          "This node already holds the lock for {}: {:?}", lock_name, i
+        );
+        Ok(None)
+      } else {
+        warn!(
+          tenant = %host,
+          cell_id = %cell_id,
+          lock_name = %lock_name,
+          "Another node holds the lock for {}: {:?}", lock_name, i
         );
         Err(ProxyError::LockContention)
       }
     }
-  } else {
-    Ok(None)
+    Err(LockHeld(None)) => Err(ProxyError::LockContention),
+    Err(e) => {
+      error!(
+        tenant = %host,
+        cell_id = %cell_id,
+        lock_name = %lock_name,
+        "Error acquiring cell lock {:?}", e
+      );
+      Err(ProxyError::LockContention)
+    }
   }
 }
 

@@ -84,20 +84,15 @@ fn start_server(config: config::Config) -> Server {
     ),
   ));
 
-  // Add a background service for S3 heartbeat and peer discovery if cluster membership is enabled
-  if let Some(cm) = &node_state.cluster_membership {
-    let cm_clone = cm.clone();
-    let peer_manager_clone = node_state.peer_manager.clone();
-
-    server.add_service(background_service(
-      "s3_heartbeat",
-      heartbeat_service::HeartbeatService {
-        cluster_membership: cm_clone,
-        peer_manager: peer_manager_clone,
-        interval: node_state.config.heartbeat_interval,
-      },
-    ));
-  }
+  // Add a background service for S3 heartbeat and peer discovery
+  server.add_service(background_service(
+    "s3_heartbeat",
+    heartbeat_service::HeartbeatService {
+      cluster_membership: node_state.cluster_membership.clone(),
+      peer_manager: node_state.peer_manager.clone(),
+      interval: node_state.config.heartbeat_interval,
+    },
+  ));
 
   // Add the public proxy service to the server
   server.add_service(proxy_service);

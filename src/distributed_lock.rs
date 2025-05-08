@@ -703,6 +703,37 @@ impl DistributedLock for S3DistributedLock {
   }
 }
 
+pub struct StandaloneDistributedLock;
+
+#[async_trait]
+impl DistributedLock for StandaloneDistributedLock {
+  async fn try_acquire(
+    self: Arc<Self>,
+    lock_name: &str,
+    node_id: &str,
+    _ttl: Duration,
+  ) -> Result<LockGuard, LockAcquireError> {
+    Ok(LockGuard {
+      lock_key: lock_name.to_string(),
+      node_id: node_id.to_string(),
+      lock_manager: self,
+      released: false,
+    })
+  }
+
+  async fn release(&self, _handle: LockHandle) -> Result<(), AnyhowError> {
+    Ok(())
+  }
+
+  async fn renew(
+    &self,
+    handle: LockHandle,
+    _new_ttl: Duration,
+  ) -> Result<LockHandle, LockAcquireError> {
+    Ok(handle)
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
