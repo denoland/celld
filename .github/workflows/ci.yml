@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Caching configuration
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libsqlite3-dev
+
+    - name: Install SQLite3 (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew update
+        brew install sqlite3
+
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.x
+
+    - name: Install Litestream (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        curl -L -o litestream.deb "https://github.com/benbjohnson/litestream/releases/latest/download/litestream-linux-amd64.deb"
+        sudo dpkg -i litestream.deb
+
+    - name: Install Litestream (macOS)
+      if: runner.os == 'macOS'
+      run: brew install benbjohnson/litestream/litestream
+
+    - name: Set up Rust cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+
+    - name: Build
+      run: cargo build --verbose
+
+    - name: Run tests
+      run: cargo test --verbose
+
+  lint:
+    name: Linting and Formatting
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Rust cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-lint-
+
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+        components: rustfmt, clippy
+
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+
+    - name: Run clippy
+      run: cargo clippy -- -D warnings
+
+  docker:
+    name: Docker Integration Test
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Build Docker image
+      run: docker build -t cells:test .
+
+    - name: Run Docker container
+      run: |
+        docker run -d --name cells-test \
+          -p 8000:8000 \
+          -v $(pwd)/data:/data \
+          cells:test
+        # Wait for container to start
+        sleep 5
+
+    - name: Test HTTP endpoint
+      run: |
+        response=$(curl -s -H "Host: basic-db.localhost" http://127.0.0.1:8000/cell/foo)
+        echo "Response: $response"
+        # Check if response is not empty
+        if [[ -z "$response" ]]; then
+          echo "Test failed: Empty response from server"
+          exit 1
+        fi
