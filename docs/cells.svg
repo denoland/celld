@@ -1,0 +1,41 @@
+<svg width="850" height="850" viewBox="0 0 850 850" xmlns="http://www.w3.org/2000/svg" aria-label="A 2x2 grid of four identical stylized symbols on an 850x850 canvas. Symbol placements are aligned to a 50-unit grid. Each symbol features a central green circle surrounded by a green frame with rounded outer corners and concave rounded inner corners.">
+  <title>2x2 Grid of Stylized Green Symbols (850x850, Snapped)</title>
+  <desc>Four identical green symbols arranged in a square grid on an 850x850 canvas. Symbol placement coordinates are rounded to the nearest 50. This results in approximately 90 units of padding around the grid, and a 30-unit gap between symbols. Each symbol has a central dot and a surrounding frame with rounded outer and inner corners. The fill color is #577B63.</desc>
+
+  <defs>
+    <g id="stylizedSymbol">
+      <defs>
+        <mask id="innerCornersMask">
+          <rect x="-160" y="-160" width="320" height="320" fill="white" />
+          <circle cx="50" cy="50" r="50" fill="black" />
+          <circle cx="-50" cy="50" r="50" fill="black" />
+          <circle cx="-50" cy="-50" r="50" fill="black" />
+          <circle cx="50" cy="-50" r="50" fill="black" />
+        </mask>
+      </defs>
+
+      <g id="symbol-outer-frame" mask="url(#innerCornersMask)" fill="#577B63">
+        <rect x="-100" y="100" width="200" height="50" />
+        <rect x="100" y="-100" width="50" height="200" />
+        <rect x="-150" y="-100" width="50" height="200" />
+        <rect x="-100" y="-150" width="200" height="50" />
+        <circle cx="100" cy="100" r="50" />
+        <circle cx="-100" cy="100" r="50" />
+        <circle cx="-100" cy="-100" r="50" />
+        <circle cx="100" cy="-100" r="50" />
+      </g>
+
+      <circle id="symbol-central-circle" cx="0" cy="0" r="50" fill="#577B63" />
+    </g>
+  </defs>
+
+  <use href="#stylizedSymbol" x="250" y="250" />
+
+  <use href="#stylizedSymbol" x="600" y="250" />
+
+  <use href="#stylizedSymbol" x="250" y="600" />
+
+  <use href="#stylizedSymbol" x="600" y="600" />
+
+</svg>
+

@@ -1,7 +1,7 @@
 # Deno Cells
 
 <div align="center">
-  <img src="docs/cells.png" alt="Deno Cells Logo" width="220">
+  <img src="docs/cells.svg" alt="Deno Cells Logo" width="220">
 </div>
 
 ## Simple, Stateful, Scalable Compute Units
