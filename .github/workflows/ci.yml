@@ -43,12 +43,15 @@ jobs:
     - name: Install Litestream (Linux)
       if: runner.os == 'Linux'
       run: |
-        curl -L -o litestream.deb "https://github.com/benbjohnson/litestream/releases/latest/download/litestream-linux-amd64.deb"
+        curl -L -o litestream.deb "https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.deb"
         sudo dpkg -i litestream.deb
 
     - name: Install Litestream (macOS)
       if: runner.os == 'macOS'
-      run: brew install benbjohnson/litestream/litestream
+      run: |
+        curl -L -o litestream.tar.gz "https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-darwin-amd64.tar.gz"
+        tar -xzf litestream.tar.gz
+        sudo install -m 755 litestream /usr/local/bin/litestream
 
     - name: Set up Rust cache
       uses: actions/cache@v3
