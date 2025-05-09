@@ -80,10 +80,10 @@ struct LitestreamS3Replica {
   pub endpoint: Option<String>,
   /// AWS access key
   #[serde(rename = "access-key-id")]
-  pub access_key_id: String,
+  pub access_key_id: Option<String>,
   /// AWS secret key
   #[serde(rename = "secret-access-key")]
-  pub secret_access_key: String,
+  pub secret_access_key: Option<String>,
   /// Use path style for S3 URLs (automatically enabled when endpoint is set)
   #[serde(
     rename = "force-path-style",
@@ -486,7 +486,7 @@ impl SqliteReplica {
       bucket: self.s3_config.bucket.clone(),
       path,
       region: self.s3_config.region.clone(),
-      endpoint: Some(self.s3_config.endpoint.clone()),
+      endpoint: self.s3_config.endpoint.clone(),
       access_key_id: self.s3_config.access_key_id.clone(),
       secret_access_key: self.s3_config.secret_access_key.clone(),
       force_path_style: Some(true), // Needed for MinIO
@@ -650,7 +650,7 @@ pub fn create_empty_database(db_path: &Path) -> Result<()> {
   // Verify file was created
   if !db_path.exists() {
     return Err(anyhow!(
-      "sqlite3 command appeared to succeed but database file wasn't created at {}", 
+      "sqlite3 command appeared to succeed but database file wasn't created at {}",
       db_path.display()
     ));
   }
@@ -673,12 +673,12 @@ pub mod tests {
   ) -> S3Config {
     minio.create_bucket(test_name).unwrap();
     S3Config {
-      endpoint: minio.endpoint.clone(),
+      endpoint: Some(minio.endpoint.clone()),
       region: "us-east-1".to_string(),
       bucket: test_name.to_string(),
       path: Some(format!("celld-test-{}", test_name)),
-      access_key_id: minio.access_key_id.clone(),
-      secret_access_key: minio.secret_access_key.clone(),
+      access_key_id: Some(minio.access_key_id.clone()),
+      secret_access_key: Some(minio.secret_access_key.clone()),
     }
   }
 

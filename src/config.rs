@@ -37,13 +37,13 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3Config {
   /// S3 endpoint URL (e.g., http://localhost:9000)
-  pub endpoint: String,
+  pub endpoint: Option<String>,
   /// S3 bucket name
   pub bucket: String,
   /// AWS access key
-  pub access_key_id: String,
+  pub access_key_id: Option<String>,
   /// AWS secret key
-  pub secret_access_key: String,
+  pub secret_access_key: Option<String>,
   /// S3 path prefix within the bucket
   pub path: Option<String>,
   /// AWS region (often 'us-east-1' for MinIO)
@@ -145,10 +145,10 @@ impl Config {
     // Get optional S3 configuration
     let s3_endpoint = var("CELLD_S3_ENDPOINT").ok();
     let s3_bucket = var("CELLD_S3_BUCKET").ok();
-    let s3_region = var("CELLD_S3_REGION").ok();
+    let s3_region = var("AWS_REGION").ok();
     let s3_path = var("CELLD_S3_PREFIX").ok();
-    let s3_access_key_id = var("CELLD_S3_ACCESS_KEY_ID").ok();
-    let s3_secret_access_key = var("CELLD_S3_SECRET_ACCESS_KEY").ok();
+    let s3_access_key_id = var("AWS_ACCESS_KEY_ID").ok();
+    let s3_secret_access_key = var("AWS_SECRET_ACCESS_KEY").ok();
 
     Ok(Config {
       listen_addr,
@@ -167,18 +167,15 @@ impl Config {
   }
 
   pub fn has_s3_config(&self) -> bool {
-    self.s3_endpoint.is_some()
-      && self.s3_bucket.is_some()
-      && self.s3_access_key_id.is_some()
-      && self.s3_secret_access_key.is_some()
+    self.s3_bucket.is_some()
   }
 
   pub fn to_s3_config(&self) -> Option<S3Config> {
     Some(S3Config {
-      endpoint: self.s3_endpoint.as_ref()?.clone(),
+      endpoint: self.s3_endpoint.clone(),
       bucket: self.s3_bucket.as_ref()?.clone(),
-      access_key_id: self.s3_access_key_id.as_ref()?.clone(),
-      secret_access_key: self.s3_secret_access_key.as_ref()?.clone(),
+      access_key_id: self.s3_access_key_id.clone(),
+      secret_access_key: self.s3_secret_access_key.clone(),
       path: self.s3_path.clone(),
       region: self
         .s3_region
