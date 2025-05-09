@@ -143,12 +143,17 @@ impl Config {
     let staleness_threshold = Duration::from_secs(staleness_secs);
 
     // Get optional S3 configuration
+    // Prioritize CELLD_S3 specific variables over standard AWS variables
     let s3_endpoint = var("CELLD_S3_ENDPOINT").ok();
     let s3_bucket = var("CELLD_S3_BUCKET").ok();
-    let s3_region = var("AWS_REGION").ok();
+    let s3_region = var("CELLD_S3_REGION").or_else(|_| var("AWS_REGION")).ok();
     let s3_path = var("CELLD_S3_PREFIX").ok();
-    let s3_access_key_id = var("AWS_ACCESS_KEY_ID").ok();
-    let s3_secret_access_key = var("AWS_SECRET_ACCESS_KEY").ok();
+    let s3_access_key_id = var("CELLD_S3_ACCESS_KEY_ID")
+      .or_else(|_| var("AWS_ACCESS_KEY_ID"))
+      .ok();
+    let s3_secret_access_key = var("CELLD_S3_SECRET_ACCESS_KEY")
+      .or_else(|_| var("AWS_SECRET_ACCESS_KEY"))
+      .ok();
 
     Ok(Config {
       listen_addr,

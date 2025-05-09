@@ -4,7 +4,7 @@ mod test_utils;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::collections::HashSet;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::Duration;
 use test_utils::MinioTestServer;
@@ -134,8 +134,8 @@ impl TestEnv {
         &self.minio_server.secret_access_key,
       )
       //.env("RUST_LOG", "debug")
-      .stdout(Stdio::null())
-      .stderr(Stdio::null())
+      //.stdout(std::process::Stdio::null())
+      //.stderr(std::process::Stdio::null())
       .spawn()
       .unwrap_or_else(|_| panic!("Failed to start server on port {}", port));
 
