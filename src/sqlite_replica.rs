@@ -127,8 +127,6 @@ pub struct SqliteReplica {
   tenant: String,
   /// Cell identifier
   cell_id: String,
-  /// Base data directory for all tenants and cells
-  data_dir: PathBuf,
   /// S3/MinIO configuration for replication
   s3_config: S3Config,
   /// Path to the SQLite database file
@@ -177,7 +175,6 @@ impl SqliteReplica {
     let replica = Self {
       tenant: tenant.to_string(),
       cell_id: cell_id.to_string(),
-      data_dir: data_dir.clone(),
       db_path: db_path.clone(),
       s3_config: s3_config.clone(),
       config_path: config_file.clone(),
@@ -449,11 +446,6 @@ impl SqliteReplica {
     }
   }
 
-  /// Returns the path to the SQLite database file
-  pub fn db_path(&self) -> &Path {
-    &self.db_path
-  }
-
   /// Checks if the database file exists
   pub fn db_exists(&self) -> bool {
     self.db_path.exists() && self.db_path.is_file()
@@ -552,24 +544,6 @@ impl SqliteReplica {
     drop(process_guard);
 
     debug!("Litestream replication started");
-    Ok(())
-  }
-
-  /// Waits for replication to flush writes with a timeout
-  pub async fn wait_for_flush(
-    &self,
-    timeout: std::time::Duration,
-  ) -> Result<()> {
-    info!("Waiting for replication flush for {:?}", self.db_path);
-
-    // For clean shutdown, we'll just pause briefly to allow replication to flush
-    // The SIGTERM to the replication process will cause it to flush WAL segments
-    tokio::time::sleep(timeout).await;
-
-    debug!(
-      "Waited {:?} for replication flush for {:?}",
-      timeout, self.db_path
-    );
     Ok(())
   }
 
@@ -735,7 +709,7 @@ pub mod tests {
     assert!(!restored, "No data should be restored on first run");
 
     // Make sure DB exists after restore operation
-    let db_path = replica.db_path().to_string_lossy().to_string();
+    let db_path = replica.db_path.to_string_lossy().to_string();
     assert!(
       std::fs::metadata(&db_path).is_ok(),
       "DB file should exist after restore"
@@ -766,10 +740,6 @@ pub mod tests {
     // Give the replication process time to run and create snapshots
     println!("Waiting for replication to complete...");
     tokio::time::sleep(Duration::from_secs(5)).await;
-
-    // Test that wait_for_flush works
-    let flush_result = replica.wait_for_flush(Duration::from_millis(500)).await;
-    assert!(flush_result.is_ok(), "Wait for flush should succeed");
 
     // Stop replication cleanly
     let shutdown_result = replica.shutdown().await;

@@ -97,7 +97,7 @@ impl S3ClusterMembership {
             None,
             None,
             "static-credentials",
-          ).into()
+          )
         } else {
           // Use the default credentials provider if access keys are not explicitly provided
           debug!("No explicit S3 credentials provided, using default credentials provider");

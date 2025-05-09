@@ -6,7 +6,6 @@ use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::io::AsRawFd;
 use std::process::Command;
-use tracing::info;
 
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
@@ -94,6 +93,7 @@ impl ChildOnParentExit {
   }
 
   /// Close the pipe (triggering kill on macOS) and wait for the watcher.
+  #[allow(dead_code)]
   pub fn wait(mut self) {
     if let Some(w) = self.death_pipe_w.take() {
       drop(w); // Close the pipe by dropping OwnedFd

@@ -88,10 +88,11 @@ impl NodeState {
           }
 
           // Initialize the S3 client for distributed lock
-          let aws_config = aws_config::from_env()
-            .region(aws_config::Region::new(s3_config.region.clone()))
-            .load()
-            .await;
+          let aws_config =
+            aws_config::defaults(aws_config::BehaviorVersion::latest())
+              .region(aws_config::Region::new(s3_config.region.clone()))
+              .load()
+              .await;
 
           let mut s3_client_builder =
             aws_sdk_s3::config::Builder::from(&aws_config)
