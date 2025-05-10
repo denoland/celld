@@ -4,9 +4,10 @@ use pingora::prelude::*;
 use pingora::upstreams::peer::HttpPeer;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 use crate::node_state::NodeState;
+use crate::process_manager::ProcessManagerError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
@@ -411,7 +412,8 @@ impl ProxyHttp for Proxy {
         .peer_manager
         .get_cell_owners(&ctx.tenant, cell_id);
       if let Some(primary_owner_addr) = owners.first() {
-        debug!(
+        info!(
+            my_node_id = %self.node_state.node_id,
             host = %ctx.tenant,
             cell_id = %cell_id,
             responsible_peer = %primary_owner_addr,
@@ -437,13 +439,20 @@ impl ProxyHttp for Proxy {
     }
 
     // We are the responsible peer, so handle the request locally
-    debug!(
+    info!(
+      my_node_id = %self.node_state.node_id,
       host = %ctx.tenant,
       cell_id = %cell_id,
       "This instance is responsible for handling the request"
     );
 
-    let socket_path: PathBuf = {
+    const RETRY_COUNT: u32 = 10;
+    const RETRY_INTERVAL: std::time::Duration =
+      std::time::Duration::from_millis(500);
+
+    let mut socket_path = None;
+
+    for _ in 0..RETRY_COUNT {
       match self
         .node_state
         .process_manager
@@ -465,23 +474,44 @@ impl ProxyHttp for Proxy {
             .process_manager
             .increment_connection_count(&ctx.tenant, cell_id)
             .await;
-          path
+          socket_path = Some(path);
+          break;
         }
-        Err(ProxyError::AppNotFound(host_not_found)) => {
-          debug!("Application not found for host: {}", host_not_found);
+        Err(ProcessManagerError::ProcessCreationInProgress) => {
+          info!(
+            node_id = %self.node_state.node_id,
+            "Lock is held by this node, meaning a deno process creation is already in progress. Retry in {:?}",
+            RETRY_INTERVAL
+          );
+          tokio::time::sleep(RETRY_INTERVAL).await;
+          continue;
+        }
+        Err(ProcessManagerError::LockContention) => {
+          debug!(
+            "Lock is held by another node that is responsible for this cell"
+          );
+          // TODO: forward the request to the lock holder?
+          tokio::time::sleep(RETRY_INTERVAL).await;
           return Err(pingora::Error::explain(
-            ErrorType::HTTPStatus(StatusCode::NOT_FOUND.into()),
-            format!("App not found: {}", host_not_found),
+            ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
+            "Cell is being handled by another node",
           ));
         }
-        Err(ProxyError::InvalidHost) => {
-          debug!("Invalid hostname format: {}", ctx.tenant);
+        Err(ProcessManagerError::S3(e)) => {
+          debug!("S3 operation failed: {}", e);
           return Err(pingora::Error::explain(
-            ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
-            "Invalid hostname format provided",
+            ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
+            "S3 operation failed",
           ));
         }
-        Err(e) => {
+        Err(ProcessManagerError::Serde(e)) => {
+          debug!("Failed to serialize or deserialize lock data: {}", e);
+          return Err(pingora::Error::explain(
+            ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
+            "Failed to serialize or deserialize lock data",
+          ));
+        }
+        Err(ProcessManagerError::Internal(e)) => {
           error!("Error getting or spawning process: {:?}", e);
           return Err(pingora::Error::explain(
             ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
@@ -489,7 +519,14 @@ impl ProxyHttp for Proxy {
           ));
         }
       }
-    }; // Mutex guard dropped here
+    }
+
+    let Some(socket_path) = socket_path else {
+      return Err(pingora::Error::explain(
+        ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
+        "Failed to get or spawn process",
+      ));
+    };
 
     // Configure backend using the Unix Domain Socket
     debug!(

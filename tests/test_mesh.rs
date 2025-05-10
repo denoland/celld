@@ -419,7 +419,6 @@ async fn test_node_failure_takeover() {
 
 /// Tests concurrent takeover attempts to verify only one node succeeds via locking
 #[tokio::test]
-#[ignore] // Flaky mostly working but needs more investigation.
 async fn test_concurrent_takeover_locking() {
   // Setup three celld nodes in the mesh with auto-allocated ports
   let mut test_env = TestEnv::new(3);
@@ -492,7 +491,7 @@ async fn test_concurrent_takeover_locking() {
     .iter()
     .position(|&p| p == primary_owner_port)
     .unwrap();
-  test_env.kill_celld_instance(primary_index);
+  test_env.graceful_shutdown_celld_instance(primary_index);
 
   // Sleep to ensure the primary node has fully shutdown
   sleep(Duration::from_secs(10)).await;

@@ -95,10 +95,8 @@ pub enum LockAcquireError {
   LockHeld(Option<LockInfo>),
   #[error("S3 operation failed: {0}")]
   S3Error(String),
-  #[error("Failed to serialize lock data: {0}")]
-  SerializationError(String),
-  #[error("Failed to deserialize lock data: {0}")]
-  BadLockData(String),
+  #[error("Failed to serialize or deserialize lock data: {0}")]
+  SerdeError(#[from] serde_json::Error),
 }
 
 #[derive(Debug)]
@@ -125,10 +123,7 @@ impl LockGuard {
   /// If renewal fails (e.g., the lock was lost or stolen), this method
   /// returns an error, and the guard should be considered invalid
   /// (it will be marked as released internally to prevent Drop warnings).
-  pub async fn renew(
-    &mut self,
-    new_ttl: Duration,
-  ) -> Result<(), anyhow::Error> {
+  pub async fn renew(&self, new_ttl: Duration) -> Result<(), anyhow::Error> {
     // Create the simple handle needed by the manager's renew method
     let handle = LockHandle {
       lock_key: self.lock_key.clone(),
@@ -180,13 +175,25 @@ impl Drop for LockGuard {
     let lock_manager = self.lock_manager.clone();
     let release_notifier = self.release_notifier.take();
 
+    tracing::info!(
+      lock_key = %self.lock_key,
+      node_id = %self.node_id,
+      "Dropping LockGuard, releasing lock"
+    );
+
     // It's okay not even to catch any errors with the release here since the
     // lock will time out by itself eventually after the TTL expires.
     tokio::spawn(async move {
       let release_result = lock_manager.release(handle).await;
       if let Some(notifier) = release_notifier {
-        let _ = notifier.send(release_result);
+        if let Err(e) = notifier.send(release_result) {
+          tracing::error!(
+            error = ?e,
+            "Error sending release notification",
+          );
+        }
       }
+      tracing::info!("LockGuard dropped, lock released");
     });
   }
 }
@@ -264,10 +271,7 @@ impl DistributedLock for S3DistributedLock {
       Ok(bytes) => bytes,
       Err(e) => {
         warn!(error = %e, lock_key, "Failed to serialize lock info");
-        return Err(LockAcquireError::SerializationError(format!(
-          "Failed to serialize lock info for key '{}': {}",
-          lock_key, e
-        )));
+        return Err(LockAcquireError::SerdeError(e));
       }
     };
 
@@ -321,10 +325,7 @@ impl DistributedLock for S3DistributedLock {
                 Ok(info) => info,
                 Err(e) => {
                   warn!(error = ?e, lock_key, "Failed to deserialize existing lock data");
-                  return Err(LockAcquireError::BadLockData(format!(
-                    "Failed to deserialize lock data for key '{}': {}",
-                    lock_key, e
-                  )));
+                  return Err(LockAcquireError::SerdeError(e));
                 }
               };
 
@@ -568,10 +569,7 @@ impl DistributedLock for S3DistributedLock {
           Ok(info) => info,
           Err(e) => {
             warn!(error = ?e, lock_key, "Failed to deserialize existing lock data during renewal");
-            return Err(LockAcquireError::BadLockData(format!(
-              "Failed to deserialize lock data for key '{}' during renewal: {}",
-              lock_key, e
-            )));
+            return Err(LockAcquireError::SerdeError(e));
           }
         };
 
@@ -598,10 +596,7 @@ impl DistributedLock for S3DistributedLock {
           Ok(bytes) => bytes,
           Err(e) => {
             warn!(error = %e, lock_key, "Failed to serialize updated lock info during renewal");
-            return Err(LockAcquireError::SerializationError(format!(
-              "Failed to serialize updated lock info for key '{}' during renewal: {}",
-              lock_key, e
-            )));
+            return Err(LockAcquireError::SerdeError(e));
           }
         };
 

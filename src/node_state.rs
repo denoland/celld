@@ -17,6 +17,9 @@ use crate::process_manager::ProcessManager;
 /// This struct serves as a container for various components and services
 /// that need to be accessed from different parts of the application.
 pub struct NodeState {
+  /// Unique identifier for the node
+  pub node_id: String,
+
   /// Manager for Deno processes running in the system
   pub process_manager: Arc<ProcessManager>,
 
@@ -148,6 +151,7 @@ impl NodeState {
 
     // Create NodeState container with cluster membership if available
     let node_state = Arc::new(NodeState {
+      node_id,
       process_manager: Arc::new(process_manager),
       peer_manager: Arc::new(peer_manager),
       cluster_membership,
@@ -170,6 +174,7 @@ impl NodeState {
     );
 
     Arc::new(NodeState {
+      node_id: "benchmark-node".to_string(),
       process_manager: Arc::new(process_manager),
       peer_manager: Arc::new(peer_manager),
       cluster_membership: Arc::new(StandaloneClusterMembership::new(

@@ -4,6 +4,7 @@ mod config;
 mod deno_benchmark;
 mod distributed_lock;
 mod heartbeat_service;
+mod lock_guard_ttl_updater;
 mod node_state;
 mod peer_manager;
 mod process_manager;
@@ -82,6 +83,15 @@ fn start_server(config: config::Config) -> Server {
       DEFAULT_IDLE_TIMEOUT,
       DEFAULT_REAPER_INTERVAL,
     ),
+  ));
+
+  server.add_service(background_service(
+    "process_guard_lock_ttl_updater",
+    lock_guard_ttl_updater::LockGuardTTLUpdater {
+      interval: node_state.config.lock_guard_ttl / 3,
+      process_manager: node_state.process_manager.clone(),
+      ttl: node_state.config.lock_guard_ttl,
+    },
   ));
 
   // Add a background service for S3 heartbeat and peer discovery
