@@ -22,6 +22,7 @@ use crate::NodeState;
 
 /// Represents the current state of a database restore operation
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum RestoreState {
   /// Initial state, no restore has been attempted
   Idle,
@@ -47,6 +48,7 @@ pub struct ProcessEntry {
   pub _socket_tempdir: TempDir, // Keep tempdir alive as long as process exists
   pub replica: Option<SqliteReplica>, // SQLite replication to S3/MinIO
   /// State of the database restore operation
+  #[allow(dead_code)]
   pub restore_state: RestoreState,
 }
 
@@ -355,7 +357,6 @@ impl ProcessManager {
 
     // Spawn the Deno process
     let child_guard = spawn_deno_process(
-      &self.data_dir,
       host,
       cell_id,
       &tenant_dir,
@@ -554,9 +555,8 @@ fn parse_env_vars(content: &str) -> HashMap<String, String> {
 }
 
 /// Spawn a Deno process for the given host and cell
-#[instrument(skip(data_dir, socket_path, cell_id), fields(host = %host, cell_id = %cell_id))]
+#[instrument(skip(socket_path, cell_id), fields(host = %host, cell_id = %cell_id))]
 fn spawn_deno_process(
-  data_dir: &Path,
   host: &str,
   cell_id: &str,
   tenant_dir: &PathBuf,

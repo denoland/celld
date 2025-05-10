@@ -3,6 +3,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 // Simple wrapper to manage the MinIO test server for tests
+#[allow(dead_code)]
 pub struct MinioTestServer {
   pub access_key_id: String,
   pub secret_access_key: String,
@@ -11,6 +12,7 @@ pub struct MinioTestServer {
   pub docker_name: String,
 }
 
+#[allow(dead_code)]
 impl MinioTestServer {
   pub fn start() -> Self {
     let access_key = "adminadmin";
