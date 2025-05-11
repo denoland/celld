@@ -211,11 +211,10 @@ impl ProcessManager {
     // process we will create later.
     let lock_name = cell_hash_key(host, cell_id);
     let node_id = node_state.peer_manager.get_local_node_id();
-    let ttl = Duration::from_secs(30);
     let lock_guard = node_state
       .distributed_lock
       .clone()
-      .try_acquire(&lock_name, node_id, ttl)
+      .try_acquire(&lock_name, node_id, node_state.config.lock_guard_ttl)
       .await
       .map_err(|e| {
         tracing::warn!(
