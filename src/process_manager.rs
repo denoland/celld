@@ -84,20 +84,30 @@ impl ProcessManager {
     Ok(())
   }
 
-  pub async fn wait_until_process_cleanup_complete(
-    &self,
-  ) -> anyhow::Result<()> {
-    let mut processes = self.processes.lock().await;
-    let mut processes = std::mem::take(&mut *processes);
-    let mut release_notifiers = Vec::new();
-    for (_, process) in &mut processes {
-      let (tx, rx) = tokio::sync::oneshot::channel();
-      process.lock_guard.set_release_notifier(tx);
-      release_notifiers.push(rx);
+  pub async fn wait_until_process_cleanup_complete(&self) {
+    info!("👺👺👺👺👺👺👺👺👺 Waiting for process cleanup to complete");
+    let processes = {
+      let mut lock = self.processes.lock().await;
+      std::mem::take(&mut *lock)
+    };
+    info!("👺👺👺👺👺👺👺👺👺 Releasing locks");
+    // Ensure all locks are released
+    for (k, process) in processes {
+      info!(
+        process_key = %k,
+        "👺👺👺👺👺👺👺👺👺 Releasing LockGuard"
+      );
+      process.lock_guard.release().await;
     }
-    drop(processes);
-    futures::future::try_join_all(release_notifiers).await?;
-    Ok(())
+    // futures::future::join_all(processes.into_iter().map(|(k, p)| async move {
+    //   info!(
+    //     process_key = %k,
+    //     "👺👺👺👺👺👺👺👺👺 Releasing LockGuard"
+    //   );
+    //   p.lock_guard.release().await;
+    // }))
+    // .await;
+    info!("👺👺👺👺👺👺👺👺👺 Process cleanup complete");
   }
 
   /// Track a new connection to the process

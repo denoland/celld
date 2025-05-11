@@ -25,9 +25,7 @@ impl BackgroundService for LockGuardTTLUpdater {
       tokio::select! {
           _ = shutdown.changed() => {
               info!("Lock guard TTL updater received shutdown signal");
-              if let Err(e) = self.process_manager.wait_until_process_cleanup_complete().await {
-                tracing::error!(error = ?e, "Error waiting for process cleanup to complete");
-              }
+              self.process_manager.wait_until_process_cleanup_complete().await;
               break;
           }
           _ = interval.tick() => {
