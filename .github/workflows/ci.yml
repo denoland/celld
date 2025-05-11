@@ -46,12 +46,20 @@ jobs:
         curl -L -o litestream.deb "https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.deb"
         sudo dpkg -i litestream.deb
 
+    - name: Set up Docker (Linux)
+      if: runner.os == 'Linux'
+      uses: docker/setup-buildx-action@v2
+
     - name: Install Litestream (macOS)
       if: runner.os == 'macOS'
       run: |
         curl -L -o litestream.zip "https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-darwin-amd64.zip"
         unzip litestream.zip
         sudo install -m 755 litestream /usr/local/bin/litestream
+
+    - name: Set up Docker (macOS)
+      if: runner.os == 'macOS'
+      uses: docker/setup-buildx-action@v2
 
     - name: Set up Rust cache
       uses: actions/cache@v3
@@ -71,6 +79,17 @@ jobs:
       with:
         toolchain: stable
         override: true
+
+    - name: Setup hosts file
+      run: |
+        echo "Adding localhost entries to /etc/hosts"
+        sudo bash -c 'cat >> /etc/hosts << EOF
+        127.0.0.1 basic-db.localhost
+        127.0.0.1 env-test.localhost
+        127.0.0.1 hello.localhost
+        127.0.0.1 llm-chat.localhost
+        127.0.0.1 ws-echo.localhost
+        EOF'
 
     - name: Build
       run: cargo build --verbose
