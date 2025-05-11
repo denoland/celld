@@ -91,17 +91,18 @@ impl ProcessManager {
     };
 
     // Ensure all locks are released
-    for (k, mut process) in processes {
+    // NOTE: Awaiting all notifiers at once with futures::future::join_all
+    // somehow causes hangs. So we process each one sequentially.
+    for (_, mut process) in processes {
       let (tx, rx) = tokio::sync::oneshot::channel();
       process.lock_guard.set_release_notifier(tx);
+      // `drop(process)` would not invoke the Drop impl of LockGuard immediately
+      // for unknown reasons. Specifying `.lock_guard` directly is needed.
       drop(process.lock_guard);
       if let Err(e) = rx.await {
         tracing::error!(error = ?e, "Error waiting for process cleanup to complete");
       }
     }
-
-    // Awaiting all notifiers at once with futures::future::join_all somehow
-    // causes hangs. So we process each one sequentially.
   }
 
   /// Track a new connection to the process
