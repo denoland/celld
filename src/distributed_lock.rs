@@ -128,7 +128,6 @@ impl LockGuard {
   ///
   /// If renewal fails (e.g., the lock was lost or stolen), this method
   /// returns an error, and the guard should be considered invalid
-  /// (it will be marked as released internally to prevent Drop warnings).
   pub async fn renew(&self, new_ttl: Duration) -> Result<(), anyhow::Error> {
     // Create the simple handle needed by the manager's renew method
     let handle = LockHandle {
@@ -146,7 +145,10 @@ impl LockGuard {
       }
       Err(lock_err) => {
         // Renewal failed. The lock might be lost.
-        warn!("Failed to renew lock key '{}': {:?}. Marking guard as invalid/released.", self.lock_key, lock_err);
+        warn!(
+          "Failed to renew lock key '{}': {:?}",
+          self.lock_key, lock_err
+        );
         // Return an error indicating renewal failure.
         Err(anyhow::anyhow!("Failed to renew lock: {:?}", lock_err))
       }
