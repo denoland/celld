@@ -4,16 +4,17 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::child_on_parent_exit::ChildOnParentExit;
-use crate::distributed_lock::LockAcquireError::LockHeld;
+use crate::distributed_lock::LockAcquireError;
 use crate::distributed_lock::LockGuard;
 use crate::peer_manager::cell_hash_key;
 use crate::router::ProxyError;
@@ -24,14 +25,6 @@ use crate::NodeState;
 #[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)]
 pub enum RestoreState {
-  /// Initial state, no restore has been attempted
-  Idle,
-  /// Attempting to acquire a distributed lock
-  AcquiringLock,
-  /// Another node holds the lock, waiting for it to complete
-  WaitingForLock,
-  /// Actively restoring from backup
-  Restoring,
   /// Restore process completed (bool indicates if data was actually restored)
   Complete(bool),
   /// Restore failed with the specified error message
@@ -43,13 +36,20 @@ pub struct ProcessEntry {
   pub socket_path: PathBuf,
   pub last_used: Instant,
   pub parent_exit_guard: ChildOnParentExit, // Guard for automatic termination on parent exit
-  pub single_use: bool,                     // Flag for single-use isolates
+  pub lock_guard: LockGuard, // Guard for ensuring the uniqueness of the tenant/cellId in the cluster
+  pub single_use: bool,      // Flag for single-use isolates
   pub active_connections: u32, // Counter for active connections (including WebSockets)
   pub _socket_tempdir: TempDir, // Keep tempdir alive as long as process exists
   pub replica: Option<SqliteReplica>, // SQLite replication to S3/MinIO
   /// State of the database restore operation
   #[allow(dead_code)]
   pub restore_state: RestoreState,
+}
+
+impl ProcessEntry {
+  async fn renew_lock_ttl(&self, new_ttl: Duration) -> anyhow::Result<()> {
+    self.lock_guard.renew(new_ttl).await
+  }
 }
 
 pub struct ProcessManager {
@@ -72,6 +72,39 @@ impl ProcessManager {
     }
   }
 
+  pub async fn renew_all_lock_ttls(
+    &self,
+    new_ttl: Duration,
+  ) -> anyhow::Result<()> {
+    let processes = self.processes.lock().await;
+    futures::future::try_join_all(
+      processes.values().map(|p| p.renew_lock_ttl(new_ttl)),
+    )
+    .await?;
+    Ok(())
+  }
+
+  pub async fn wait_until_process_cleanup_complete(&self) {
+    let processes = {
+      let mut lock = self.processes.lock().await;
+      std::mem::take(&mut *lock)
+    };
+
+    // Ensure all locks are released
+    // NOTE: Awaiting all notifiers at once with futures::future::join_all
+    // somehow causes hangs. So we process each one sequentially.
+    for (_, mut process) in processes {
+      let (tx, rx) = tokio::sync::oneshot::channel();
+      process.lock_guard.set_release_notifier(tx);
+      // `drop(process)` would not invoke the Drop impl of LockGuard immediately
+      // for unknown reasons. Specifying `.lock_guard` directly is needed.
+      drop(process.lock_guard);
+      if let Err(e) = rx.await {
+        tracing::error!(error = ?e, "Error waiting for process cleanup to complete");
+      }
+    }
+  }
+
   /// Track a new connection to the process
   pub async fn increment_connection_count(
     &self,
@@ -80,7 +113,7 @@ impl ProcessManager {
   ) -> bool {
     let process_key = cell_hash_key(host, cell_id);
 
-    let mut processes = self.processes.lock().unwrap();
+    let mut processes = self.processes.lock().await;
     if let Some(entry) = processes.get_mut(&process_key) {
       entry.active_connections += 1;
       entry.last_used = Instant::now();
@@ -98,7 +131,7 @@ impl ProcessManager {
   ) -> bool {
     let process_key = cell_hash_key(host, cell_id);
 
-    let mut processes = self.processes.lock().unwrap();
+    let mut processes = self.processes.lock().await;
     if let Some(entry) = processes.get_mut(&process_key) {
       if entry.active_connections > 0 {
         entry.active_connections -= 1;
@@ -117,7 +150,7 @@ impl ProcessManager {
     cell_id: &str,
     single_use: bool,
     node_state: Arc<NodeState>,
-  ) -> Result<(PathBuf, UnixStream), ProxyError> {
+  ) -> Result<(PathBuf, UnixStream), ProcessManagerError> {
     // Create a combined key for host and cell to ensure one isolate per cell
     let process_key = cell_hash_key(host, cell_id);
 
@@ -126,7 +159,7 @@ impl ProcessManager {
     if !single_use {
       // First, try to find and connect to an existing process, keeping the lock time minimal
       let socket_path_opt = {
-        let processes = self.processes.lock().unwrap();
+        let processes = self.processes.lock().await;
         if let Some(entry) = processes.get(&process_key) {
           // Skip single-use entries when looking for a regular process
           if !entry.single_use {
@@ -168,11 +201,45 @@ impl ProcessManager {
     let main_script = app_code_dir.join("main.ts");
     if !main_script.exists() {
       warn!("Application code not found at {}", main_script.display());
-      return Err(ProxyError::AppNotFound(host.to_string()));
+      return Err(ProcessManagerError::Internal(
+        ProxyError::AppNotFound(host.to_string()).into(),
+      ));
     }
 
-    let maybe_lock_guard =
-      takeover_check(node_state.clone(), host, cell_id).await?;
+    // Acquire a lock on the cell to declare ownership of the combination of
+    // tenant and cellId. This lock's lifetime should match that of the Deno
+    // process we will create later.
+    let lock_name = cell_hash_key(host, cell_id);
+    let node_id = node_state.peer_manager.get_local_node_id();
+    let lock_guard = node_state
+      .distributed_lock
+      .clone()
+      .try_acquire(&lock_name, node_id, node_state.config.lock_guard_ttl)
+      .await
+      .map_err(|e| {
+        tracing::warn!(
+          tenant = host,
+          cell_id,
+          lock_name,
+          node_id,
+          error = ?e,
+          "Failed to acquire lock on cell"
+        );
+        match e {
+          LockAcquireError::LockHeld(maybe_lock_info) => {
+            match maybe_lock_info {
+              Some(lock_info) if lock_info.node_id == node_id => {
+                ProcessManagerError::ProcessCreationInProgress
+              }
+              _ => ProcessManagerError::LockContention,
+            }
+          }
+          LockAcquireError::S3Error(e) => {
+            ProcessManagerError::S3(e.to_string())
+          }
+          LockAcquireError::SerdeError(e) => ProcessManagerError::Serde(e),
+        }
+      })?;
 
     // Create a temporary directory for the socket
     // This will be automatically cleaned up when dropped
@@ -230,13 +297,6 @@ impl ProcessManager {
 
     // Handle database restoration if necessary
     if let Some(ref replica) = replica {
-      // Only attempt coordinated restore if we have a distributed lock manager
-      let lock_manager = node_state.distributed_lock.as_ref().unwrap();
-      let node_id = node_state.peer_manager.get_local_node_id();
-
-      // Use a reasonable lock TTL (e.g., 30 seconds)
-      let lock_ttl = std::time::Duration::from_secs(30);
-
       info!(
         tenant = %host,
         cell_id = %cell_id,
@@ -244,18 +304,7 @@ impl ProcessManager {
       );
 
       // Call ensure_restored to perform the restore with distributed locking
-      let restore_result = match replica
-        .ensure_restored(lock_manager.clone(), node_id, lock_ttl)
-        .await
-      {
-        Ok(r) => r,
-        Err(e) => {
-          if let Some(lock_guard) = maybe_lock_guard {
-            lock_guard.release().await?;
-          }
-          return Err(e.into());
-        }
-      };
+      let restore_result = replica.ensure_restored(&lock_guard).await;
 
       // Update the restore state based on the result
       match restore_result {
@@ -272,17 +321,6 @@ impl ProcessManager {
           // Update state and continue to spawn Deno
           restore_state = state;
         }
-        RestoreState::WaitingForLock => {
-          info!(
-            tenant = %host,
-            cell_id = %cell_id,
-            "Database restore lock held by another node"
-          );
-          // Update state and return error
-          return Err(ProxyError::InternalError(anyhow!(
-              "Database restore lock held by another node, please try again later"
-            )));
-        }
         state @ RestoreState::Failed(_) => {
           let err_msg = match &state {
             RestoreState::Failed(msg) => msg.clone(),
@@ -295,31 +333,14 @@ impl ProcessManager {
             "Database restore failed"
           );
           // Update state and return error
-          return Err(ProxyError::InternalError(anyhow!(
+          return Err(ProcessManagerError::Internal(anyhow!(
             "Database restore failed: {}",
             err_msg
           )));
         }
-        _ => {
-          // Unexpected state
-          error!(
-            tenant = %host,
-            cell_id = %cell_id,
-            "Unexpected database restore state"
-          );
-          // Update state and return error
-          return Err(ProxyError::InternalError(anyhow!(
-            "Unexpected database restore state"
-          )));
-        }
       }
 
-      if let Err(e) = replica.start_replication().await {
-        if let Some(lock_guard) = maybe_lock_guard {
-          lock_guard.release().await?;
-        }
-        return Err(e.into());
-      }
+      replica.start_replication().await?;
     } else if !db_path.exists() {
       // No replica, but we still need a database - create an empty one
       info!(
@@ -380,6 +401,7 @@ impl ProcessManager {
       socket_path: socket_path.clone(),
       last_used: Instant::now(),
       parent_exit_guard: child_guard,
+      lock_guard,
       single_use,
       active_connections: 0,
       _socket_tempdir: socket_tempdir,
@@ -389,7 +411,7 @@ impl ProcessManager {
 
     // Insert the entry into the processes map using a short-lived lock
     {
-      let mut processes = self.processes.lock().unwrap();
+      let mut processes = self.processes.lock().await;
       processes.insert(process_key.clone(), entry);
     }
 
@@ -414,7 +436,7 @@ impl ProcessManager {
         );
 
         // Remove the entry from the map to avoid stale entries
-        let mut processes = self.processes.lock().unwrap();
+        let mut processes = self.processes.lock().await;
         if let Some(entry) = processes.remove(&process_key) {
           // Kill the process to avoid zombies
           entry.parent_exit_guard.kill(Signal::SIGTERM);
@@ -475,12 +497,8 @@ impl ProcessManager {
             "Error connecting to socket during startup"
           );
 
-          if let Some(lock_guard) = maybe_lock_guard {
-            lock_guard.release().await?;
-          }
-
           // Remove the entry from the map to avoid stale entries
-          let mut processes = self.processes.lock().unwrap();
+          let mut processes = self.processes.lock().await;
           if let Some(entry) = processes.remove(&process_key) {
             // Kill the process to avoid zombies
             entry.parent_exit_guard.kill(Signal::SIGTERM);
@@ -501,14 +519,10 @@ impl ProcessManager {
         format!("{}/{}", cell_hash_key(host, cell_id), Uuid::new_v4());
 
       // Move the entry to a unique key
-      let mut processes = self.processes.lock().unwrap();
+      let mut processes = self.processes.lock().await;
       if let Some(entry) = processes.remove(&process_key) {
         processes.insert(unique_key, entry);
       }
-    }
-
-    if let Some(lock_guard) = maybe_lock_guard {
-      lock_guard.release().await?;
     }
 
     Ok((socket_path, stream))
@@ -517,7 +531,7 @@ impl ProcessManager {
   pub async fn kill_all(&self) {
     // Move all entries into a local collection to minimize lock duration
     let entries: Vec<_> = {
-      let mut processes = self.processes.lock().unwrap();
+      let mut processes = self.processes.lock().await;
       processes.drain().collect()
     };
 
@@ -526,6 +540,20 @@ impl ProcessManager {
       entry.parent_exit_guard.kill(Signal::SIGTERM);
     }
   }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProcessManagerError {
+  #[error("Process creation in progress; retry later")]
+  ProcessCreationInProgress,
+  #[error("Cell lock held by another node")]
+  LockContention,
+  #[error("S3 operation failed: {0}")]
+  S3(String),
+  #[error(transparent)]
+  Serde(serde_json::Error),
+  #[error("Internal error: {0}")]
+  Internal(#[from] anyhow::Error),
 }
 
 fn parse_env_vars(content: &str) -> HashMap<String, String> {
@@ -635,74 +663,6 @@ fn spawn_deno_process(
       host
     )
   })
-}
-
-async fn takeover_check(
-  node_state: Arc<NodeState>,
-  host: &str,
-  cell_id: &str,
-) -> Result<Option<LockGuard>, ProxyError> {
-  if let Some(distributed_lock) = node_state.distributed_lock.as_ref() {
-    let owners = node_state.peer_manager.get_cell_owners(host, cell_id);
-    if !node_state.peer_manager.is_local_owner(host, cell_id) {
-      // - Check if the first owner is still active
-      //   (`peer_manager.is_peer_active`). _Initially, rely on `is_peer_active`
-      //   Future optimization: check `status.json` if implemented._
-      // - If the first owner is _inactive_: Proceed to attempt lock acquisition
-      // - If the first owner is _active_: This node should _not_ take over.
-      //   Return an error or state indicating it's not the owner/candidate
-      //   responsible for startup.
-      if node_state.peer_manager.is_peer_active(&owners[0]) {
-        // TODO: This node should _not_ take over. Return an error or state indicating it's not the
-        // owner/candidate responsible for startup.
-        todo!("This node should not take over, as the first owner is active.");
-      }
-    }
-    // Acquire lock attempt
-    let lock_name = cell_hash_key(host, cell_id); // specific enough?
-    match distributed_lock
-      .clone()
-      .try_acquire(
-        &lock_name,
-        node_state.peer_manager.get_local_node_id(),
-        Duration::from_secs(30),
-      )
-      .await
-    {
-      Ok(lock_handle) => Ok(Some(lock_handle)),
-      Err(LockHeld(Some(i))) => {
-        if i.node_id == node_state.peer_manager.get_local_node_id() {
-          warn!(
-            tenant = %host,
-            cell_id = %cell_id,
-            lock_name = %lock_name,
-            "This node already holds the lock for {}: {:?}", lock_name, i
-          );
-          Ok(None)
-        } else {
-          warn!(
-            tenant = %host,
-            cell_id = %cell_id,
-            lock_name = %lock_name,
-            "Another node holds the lock for {}: {:?}", lock_name, i
-          );
-          Err(ProxyError::LockContention)
-        }
-      }
-      Err(LockHeld(None)) => Err(ProxyError::LockContention),
-      Err(e) => {
-        error!(
-          tenant = %host,
-          cell_id = %cell_id,
-          lock_name = %lock_name,
-          "Error acquiring cell lock {:?}", e
-        );
-        Err(ProxyError::LockContention)
-      }
-    }
-  } else {
-    Ok(None)
-  }
 }
 
 #[cfg(test)]

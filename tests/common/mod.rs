@@ -15,13 +15,17 @@ lazy_static::lazy_static! {
 }
 
 pub struct TestEnv {
+  /// Celld servers
   servers: Vec<Child>,
+  /// Celld server ports (external ports)
   ports: Vec<u16>,
   pub minio_server: MinioTestServer,
   test_id: String,
   bucket_name: String,
-  // Make public_ports public for tests that need to access them
+  /// Make public_ports public for tests that need to access them
+  /// TODO(magurotuna): this is identical to `ports` . Maybe remove one of them?
   pub public_ports: Vec<u16>,
+  /// Celld server ports (internal ports)
   pub internal_ports: Vec<u16>,
 }
 
@@ -110,6 +114,14 @@ impl TestEnv {
     server.wait().unwrap();
   }
 
+  pub fn graceful_shutdown_celld_instance(&mut self, index: usize) {
+    let mut server = self.servers.remove(index);
+    let _ = self.ports.remove(index);
+    let pid = Pid::from_raw(server.id() as i32);
+    kill(pid, Signal::SIGTERM).unwrap();
+    server.wait().unwrap();
+  }
+
   pub fn spawn_celld_instance(&mut self, port: u16) {
     let advertise_addr = format!("127.0.0.1:{}", port);
     let internal_addr = format!("127.0.0.1:{}", port + 1);
@@ -118,7 +130,7 @@ impl TestEnv {
       .env("INTERNAL_LISTEN_ADDR", &internal_addr)
       .env("DATA", "./data")
       .env("CELLD_HEARTBEAT_INTERVAL", "2")
-      .env("CELLD_GRACE_PERIOD_SECONDS", "0")
+      .env("CELLD_GRACE_PERIOD_SECONDS", "5")
       // Use a shorter staleness threshold for tests to detect failures faster
       .env("CELLD_STALENESS_THRESHOLD_SECS", "6")
       .env(

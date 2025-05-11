@@ -302,6 +302,40 @@ impl ClusterMembership for S3ClusterMembership {
   }
 }
 
+pub struct StandaloneClusterMembership {
+  node_info: NodeInfo,
+}
+
+impl StandaloneClusterMembership {
+  pub fn new(node_id: String, advertise_addr: String) -> Self {
+    let node_info = NodeInfo {
+      node_id,
+      advertise_addr,
+      heartbeat_timestamp: Utc::now(),
+    };
+    Self { node_info }
+  }
+}
+
+#[async_trait]
+impl ClusterMembership for StandaloneClusterMembership {
+  async fn register(&self) -> anyhow::Result<()> {
+    Ok(())
+  }
+
+  async fn heartbeat(&self) -> anyhow::Result<()> {
+    Ok(())
+  }
+
+  async fn get_active_nodes(&self) -> anyhow::Result<Vec<NodeInfo>> {
+    Ok(vec![self.node_info.clone()])
+  }
+
+  async fn unregister(&self) -> anyhow::Result<()> {
+    Ok(())
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
