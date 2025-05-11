@@ -57,67 +57,87 @@ jobs:
         unzip litestream.zip
         sudo install -m 755 litestream /usr/local/bin/litestream
 
-    - name: Add Docker CLI to PATH (macOS)
+# (Steps: checkout, install sqlite3 (macOS), install Deno, install Litestream (macOS) ... remain the same)
+
+    # ---- START: Revised Docker Setup for macOS ----
+    - name: Install and Prepare Docker Desktop (macOS)
       if: runner.os == 'macOS'
       run: |
-        echo "Current PATH: $PATH"
-        # Ensure /usr/local/bin (common for symlinks from Docker Desktop) is in PATH
-        if [[ ":$PATH:" != *":/usr/local/bin:"* ]]; then
-          echo "/usr/local/bin" >> $GITHUB_PATH
-          export PATH="/usr/local/bin:$PATH" # For current script's context
-          echo "Added /usr/local/bin to PATH."
-        fi
-
-        # Ensure Docker.app's own bin directory is in PATH
-        # This is often /Applications/Docker.app/Contents/Resources/bin
-        DOCKER_APP_RESOURCES_BIN="/Applications/Docker.app/Contents/Resources/bin"
-        if [ -d "$DOCKER_APP_RESOURCES_BIN" ]; then
-          if [[ ":$PATH:" != *":$DOCKER_APP_RESOURCES_BIN:"* ]]; then
-            echo "$DOCKER_APP_RESOURCES_BIN" >> $GITHUB_PATH
-            export PATH="$DOCKER_APP_RESOURCES_BIN:$PATH" # For current script's context
-            echo "Added $DOCKER_APP_RESOURCES_BIN to PATH."
+        echo "Checking for Docker Desktop..."
+        if [ -d "/Applications/Docker.app" ]; then
+          echo "Docker Desktop found at /Applications/Docker.app."
+          # Even if App is found, CLI might be missing from PATH as per your logs
+          if ! command -v docker &> /dev/null; then
+             echo "WARN: Docker.app exists, but 'docker' CLI was not initially in PATH or standard symlinks are missing from /usr/local/bin."
+             echo "The Docker Desktop installation might be incomplete or symlinks not created. Proceeding with PATH setup."
           fi
         else
-          echo "INFO: Docker.app resources bin directory not found at $DOCKER_APP_RESOURCES_BIN. This is okay if symlinks in /usr/local/bin exist and work."
-        fi
-        
-        echo "Updated PATH for subsequent steps will include additions made via GITHUB_PATH."
-        echo "Effective PATH for this script: $PATH"
-        
-        if ! command -v docker &> /dev/null; then
-            echo "ERROR: 'docker' command still not found in PATH after modifications."
-            echo "Listing /usr/local/bin and Docker.app bin for diagnostics:"
-            ls -la /usr/local/bin || echo "/usr/local/bin not found or no permissions."
-            if [ -d "$DOCKER_APP_RESOURCES_BIN" ]; then
-              ls -la "$DOCKER_APP_RESOURCES_BIN" || echo "$DOCKER_APP_RESOURCES_BIN not found or no permissions."
-            fi
+          echo "Docker Desktop not found at /Applications/Docker.app."
+          echo "Attempting to install Docker Desktop via Homebrew Cask..."
+          # This will take some time as it downloads and installs Docker Desktop.
+          brew install --cask docker
+          if [ ! -d "/Applications/Docker.app" ]; then
+            echo "ERROR: Docker Desktop installation via Homebrew failed or it's still not at /Applications/Docker.app."
             exit 1
+          fi
+          echo "Docker Desktop installed successfully."
         fi
-        echo "Docker CLI found at: $(which docker)"
-        echo "Attempting to get Docker version (daemon might not be responsive yet): $(docker --version || echo 'Docker CLI found, but daemon not yet responsive or other issue.')"
 
-    - name: Start Docker Desktop (macOS)
-      if: runner.os == 'macOS'
-      run: |
-        echo "Starting Docker Desktop..."
-        # Check if Docker.app exists
-        if [ ! -d "/Applications/Docker.app" ]; then
-          echo "ERROR: Docker.app not found at /Applications/Docker.app. Cannot start Docker."
+        echo "Ensuring Docker CLI is in PATH..."
+        # Docker Desktop should install symlinks to /usr/local/bin
+        # Ensure /usr/local/bin is in GITHUB_PATH
+        if [[ ":$PATH:" != *":/usr/local/bin:"* ]]; then
+          echo "/usr/local/bin" >> $GITHUB_PATH
+        fi
+        
+        # Also ensure the direct path within Docker.app bundle is in GITHUB_PATH
+        # This is a fallback and good for robustness.
+        DOCKER_APP_CLI_PATH="/Applications/Docker.app/Contents/Resources/bin"
+        if [ -d "$DOCKER_APP_CLI_PATH" ]; then
+          if [[ ":$PATH:" != *":$DOCKER_APP_CLI_PATH:"* ]]; then
+             echo "$DOCKER_APP_CLI_PATH" >> $GITHUB_PATH
+          fi
+        else
+          # If we just installed it, this path MUST exist.
+          echo "ERROR: Critical Docker CLI path $DOCKER_APP_CLI_PATH not found even after installation."
+          echo "The Docker Desktop installation may be corrupted."
           exit 1
         fi
         
-        open -g -a /Applications/Docker.app # Open Docker.app in the background
+        # For the current script step, make sure PATH is updated to find docker for verification
+        export PATH="/usr/local/bin:$DOCKER_APP_CLI_PATH:$PATH"
+        
+        if ! command -v docker &> /dev/null; then
+            echo "ERROR: 'docker' command still not findable after installation and PATH setup."
+            echo "Listing /usr/local/bin:"
+            ls -la /usr/local/bin
+            echo "Listing $DOCKER_APP_CLI_PATH:"
+            ls -la "$DOCKER_APP_CLI_PATH"
+            exit 1
+        fi
+        echo "Docker CLI found at: $(which docker)"
+        echo "Docker version (daemon may not be running yet): $(docker --version || echo 'CLI found, daemon not responsive')"
+
+    - name: Start Docker Desktop and Wait for Daemon (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        if [ ! -d "/Applications/Docker.app" ]; then
+          echo "ERROR: Docker.app not found, cannot start. The installation step might have failed."
+          exit 1
+        fi
+        echo "Starting Docker Desktop..."
+        open -g -a /Applications/Docker.app
         
         echo "Waiting for Docker daemon to start..."
-        max_retries=60 # Wait for up to 120 seconds (60 retries * 2 seconds)
+        max_retries=90 # Increased to 3 minutes (90 retries * 2 seconds) as first launch after install can be slow
         count=0
         while ! docker system info > /dev/null 2>&1; do
           sleep 2
           count=$((count+1))
           if [ $count -ge $max_retries ]; then
             echo "ERROR: Docker daemon failed to start after $(($max_retries * 2)) seconds."
-            echo "Attempting to get Docker system info for diagnostics:"
-            docker system info # This will print the error from Docker itself
+            echo "Attempting to get Docker system info for diagnostics (this may also fail):"
+            docker system info
             exit 1
           fi
           echo -n "." # Progress indicator
@@ -125,6 +145,11 @@ jobs:
         echo "Docker daemon is running."
         docker --version # Confirm CLI and daemon are responsive
 
+    # This is your original step for setting up Buildx, should now work
+    - name: Set up Docker Buildx (macOS) 
+      if: runner.os == 'macOS'
+      uses: docker/setup-buildx-action@v2
+    # ---- END: Revised Docker Setup for macOS ----
 
     - name: Set up Rust cache
       uses: actions/cache@v3
