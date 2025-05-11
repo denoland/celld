@@ -80,10 +80,10 @@ struct LitestreamS3Replica {
   pub endpoint: Option<String>,
   /// AWS access key
   #[serde(rename = "access-key-id")]
-  pub access_key_id: String,
+  pub access_key_id: Option<String>,
   /// AWS secret key
   #[serde(rename = "secret-access-key")]
-  pub secret_access_key: String,
+  pub secret_access_key: Option<String>,
   /// Use path style for S3 URLs (automatically enabled when endpoint is set)
   #[serde(
     rename = "force-path-style",
@@ -127,8 +127,6 @@ pub struct SqliteReplica {
   tenant: String,
   /// Cell identifier
   cell_id: String,
-  /// Base data directory for all tenants and cells
-  data_dir: PathBuf,
   /// S3/MinIO configuration for replication
   s3_config: S3Config,
   /// Path to the SQLite database file
@@ -177,7 +175,6 @@ impl SqliteReplica {
     let replica = Self {
       tenant: tenant.to_string(),
       cell_id: cell_id.to_string(),
-      data_dir: data_dir.clone(),
       db_path: db_path.clone(),
       s3_config: s3_config.clone(),
       config_path: config_file.clone(),
@@ -376,11 +373,6 @@ impl SqliteReplica {
     restore_result
   }
 
-  /// Returns the path to the SQLite database file
-  pub fn db_path(&self) -> &Path {
-    &self.db_path
-  }
-
   /// Checks if the database file exists
   pub fn db_exists(&self) -> bool {
     self.db_path.exists() && self.db_path.is_file()
@@ -413,7 +405,7 @@ impl SqliteReplica {
       bucket: self.s3_config.bucket.clone(),
       path,
       region: self.s3_config.region.clone(),
-      endpoint: Some(self.s3_config.endpoint.clone()),
+      endpoint: self.s3_config.endpoint.clone(),
       access_key_id: self.s3_config.access_key_id.clone(),
       secret_access_key: self.s3_config.secret_access_key.clone(),
       force_path_style: Some(true), // Needed for MinIO
@@ -479,24 +471,6 @@ impl SqliteReplica {
     drop(process_guard);
 
     debug!("Litestream replication started");
-    Ok(())
-  }
-
-  /// Waits for replication to flush writes with a timeout
-  pub async fn wait_for_flush(
-    &self,
-    timeout: std::time::Duration,
-  ) -> Result<()> {
-    info!("Waiting for replication flush for {:?}", self.db_path);
-
-    // For clean shutdown, we'll just pause briefly to allow replication to flush
-    // The SIGTERM to the replication process will cause it to flush WAL segments
-    tokio::time::sleep(timeout).await;
-
-    debug!(
-      "Waited {:?} for replication flush for {:?}",
-      timeout, self.db_path
-    );
     Ok(())
   }
 
@@ -577,7 +551,7 @@ pub fn create_empty_database(db_path: &Path) -> Result<()> {
   // Verify file was created
   if !db_path.exists() {
     return Err(anyhow!(
-      "sqlite3 command appeared to succeed but database file wasn't created at {}", 
+      "sqlite3 command appeared to succeed but database file wasn't created at {}",
       db_path.display()
     ));
   }
@@ -600,12 +574,12 @@ pub mod tests {
   ) -> S3Config {
     minio.create_bucket(test_name).unwrap();
     S3Config {
-      endpoint: minio.endpoint.clone(),
+      endpoint: Some(minio.endpoint.clone()),
       region: "us-east-1".to_string(),
       bucket: test_name.to_string(),
       path: Some(format!("celld-test-{}", test_name)),
-      access_key_id: minio.access_key_id.clone(),
-      secret_access_key: minio.secret_access_key.clone(),
+      access_key_id: Some(minio.access_key_id.clone()),
+      secret_access_key: Some(minio.secret_access_key.clone()),
     }
   }
 
@@ -662,7 +636,7 @@ pub mod tests {
     assert!(!restored, "No data should be restored on first run");
 
     // Make sure DB exists after restore operation
-    let db_path = replica.db_path().to_string_lossy().to_string();
+    let db_path = replica.db_path.to_string_lossy().to_string();
     assert!(
       std::fs::metadata(&db_path).is_ok(),
       "DB file should exist after restore"
@@ -693,10 +667,6 @@ pub mod tests {
     // Give the replication process time to run and create snapshots
     println!("Waiting for replication to complete...");
     tokio::time::sleep(Duration::from_secs(5)).await;
-
-    // Test that wait_for_flush works
-    let flush_result = replica.wait_for_flush(Duration::from_millis(500)).await;
-    assert!(flush_result.is_ok(), "Wait for flush should succeed");
 
     // Stop replication cleanly
     let shutdown_result = replica.shutdown().await;

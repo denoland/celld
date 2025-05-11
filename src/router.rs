@@ -1,4 +1,3 @@
-use http;
 use pingora::http::StatusCode;
 use pingora::prelude::*;
 use pingora::upstreams::peer::HttpPeer;
@@ -11,6 +10,7 @@ use crate::process_manager::ProcessManagerError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
+  #[allow(dead_code)]
   #[error("Invalid hostname format")]
   InvalidHost,
   #[error("Application not found for host: {0}")]

@@ -15,17 +15,19 @@
 //! as a coordination point. It uses S3 objects as "lock files":
 //!
 //! 1.  **Atomic Acquisition:** A lock is acquired by attempting to create a
-//!     specific S3 object using a conditional `PutObject` request (`If-None-Match:
-//!     *`). This ensures that only the first node to successfully create the object
-//!     acquires the lock.
-//! 2.  **Lock Information:** The content of the lock object (`LockInfo`) stores metadata
-//!     about the lock holder, including the holding `node_id`, a `timestamp` of acquisition,
-//!     and a Time-To-Live (`ttl_secs`).
-//! 3.  **Lease/Expiry:** Locks have a TTL. If a node attempts to acquire a lock that already
-//!     exists, it checks the lock object's timestamp and TTL. If the lock has expired
-//!     (presumably because the previous holder crashed or failed), the attempting node
-//!     can try to delete the stale lock and acquire it.
-//! 4.  **Release:** The lock is explicitly released by deleting the corresponding S3 object.
+//!     specific S3 object using a conditional `PutObject` request
+//!     (`If-None-Match: *`). This ensures that only the first node to
+//!     successfully create the object acquires the lock.
+//! 2.  **Lock Information:** The content of the lock object (`LockInfo`) stores
+//!     metadata about the lock holder, including the holding `node_id`, a
+//!     `timestamp` of acquisition, and a Time-To-Live (`ttl_secs`).
+//! 3.  **Lease/Expiry:** Locks have a TTL. If a node attempts to acquire a lock
+//!     that already exists, it checks the lock object's timestamp and TTL. If
+//!     the lock has expired (presumably because the previous holder crashed or
+//!     failed), the attempting node can try to delete the stale lock and
+//!     acquire it.
+//! 4.  **Release:** The lock is explicitly released by deleting the
+//!     corresponding S3 object.
 //!
 //! ## Context in `celld`: Coordinating SQLite Restores
 //!
@@ -35,27 +37,31 @@
 //! database (e.g., on cold start or node takeover), it must first acquire the
 //! distributed lock for that specific database.
 //!
-//! - **Prevents Conflicts:** This ensures that only one node actively restores a given
-//!   database at any time, preventing multiple nodes from writing to the same local
-//!   database file simultaneously or performing redundant restore operations.
-//! - **Failure Handling:** The lock TTL helps recover from scenarios where a node acquires
-//!   a lock but crashes before releasing it.
+//! - **Prevents Conflicts:** This ensures that only one node actively restores
+//!   a given database at any time, preventing multiple nodes from writing to the
+//!   same local database file simultaneously or performing redundant restore
+//!   operations.
+//! - **Failure Handling:** The lock TTL helps recover from scenarios where a
+//!   node acquires a lock but crashes before releasing it.
 //!
 //! ### Example S3 Lock Path
 //!
-//! The specific S3 key for a lock is determined by a configured prefix and a hash of the
-//! unique resource being locked (typically the tenant and cell ID combined).
+//! The specific S3 key for a lock is determined by a configured prefix and a
+//! hash of the unique resource being locked (typically the tenant and cell ID
+//! combined).
 //!
-//! For example, if the S3 bucket is `my-celld-state` and the lock prefix is configured as
-//! `cluster_state/locks/restore/`, acquiring a lock for the database corresponding to
-//! tenant `my-app.localhost` and cell `user-session-abc` might result in an attempt
-//! to atomically create an S3 object like:
+//! For example, if the S3 bucket is `my-celld-state` and the lock prefix is
+//! configured as `cluster_state/locks/restore/`, acquiring a lock for the
+//! database corresponding to tenant `my-app.localhost` and cell
+//! `user-session-abc` might result in an attempt to atomically create an S3
+//! object like:
 //!
 //! ```text
 //! s3://my-celld-state/cluster_state/locks/restore/f8a3b1e4c9d0...{hash_of_"my-app.localhost/user-session-abc"}...e5f6a7b8.lock
 //! ```
 //!
-//! The content of this object would be a JSON representation of the `LockInfo` struct.
+//! The content of this object would be a JSON representation of the `LockInfo`
+//! struct.
 //!
 //! ## Usage
 //!
@@ -65,7 +71,7 @@
 //! injected via `NodeState`) to acquire and release locks before performing
 //! operations like `litestream restore`.
 
-use anyhow::{anyhow, Context, Error as AnyhowError};
+use anyhow::{Context, Error as AnyhowError};
 use async_trait::async_trait;
 use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::error::SdkError;
@@ -142,16 +148,36 @@ impl LockGuard {
         // Renewal failed. The lock might be lost.
         warn!("Failed to renew lock key '{}': {:?}. Marking guard as invalid/released.", self.lock_key, lock_err);
         // Return an error indicating renewal failure.
-        Err(anyhow!("Failed to renew lock: {:?}", lock_err))
+        Err(anyhow::anyhow!("Failed to renew lock: {:?}", lock_err))
       }
     }
   }
 
+  /// Set a notifier that will be notified when the lock is released.
   pub fn set_release_notifier(
     &mut self,
     notifier: tokio::sync::oneshot::Sender<Result<(), anyhow::Error>>,
   ) {
     self.release_notifier = Some(notifier);
+  }
+
+  pub async fn release(mut self) {
+    let handle = LockHandle {
+      lock_key: self.lock_key.clone(),
+      node_id: self.node_id.clone(),
+    };
+    info!(lock_key = %handle.lock_key, node_id = %handle.node_id, "Releasing LockGuard");
+    let release_result = self.lock_manager.release(handle).await;
+    info!(lock_key = %self.lock_key.clone(), node_id = %self.node_id.clone(), "LockGuard released");
+
+    if let Some(notifier) = self.release_notifier.take() {
+      if let Err(e) = notifier.send(release_result) {
+        tracing::error!(
+          error = ?e,
+          "Error sending release notification",
+        );
+      }
+    }
   }
 }
 
@@ -166,6 +192,7 @@ impl fmt::Debug for LockGuard {
   }
 }
 
+/// Release the lock in the background task on drop.
 impl Drop for LockGuard {
   fn drop(&mut self) {
     let handle = LockHandle {
@@ -216,6 +243,7 @@ pub trait DistributedLock: Send + Sync {
   ///
   /// Returns a new LockHandle with the updated information on success.
   /// Fails if the lock doesn't exist or is held by a different node.
+  #[allow(dead_code)]
   async fn renew(
     &self,
     handle: LockHandle,

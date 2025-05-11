@@ -1,21 +1,14 @@
 mod common;
-#[path = "../src/test_utils.rs"]
-mod test_utils;
 
 use futures_util::{SinkExt, StreamExt};
-use nix::sys::signal::{kill, Signal};
-use nix::unistd::Pid;
 use serde_json::Value;
-use std::collections::HashSet;
-use std::process::{Child, Command, Stdio};
 use std::time::Duration;
-use test_utils::MinioTestServer;
 use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use url::Url;
 use uuid::Uuid;
 
-use common::test_env::TestEnv;
+use common::TestEnv;
 
 /// Tests that we can connect to a cell through any node in the mesh
 #[tokio::test]
@@ -520,8 +513,7 @@ async fn test_concurrent_takeover_locking() {
       async move {
         let resp = client.get(&url).send().await.unwrap();
         assert_eq!(resp.status(), 200);
-        let body = resp.text().await.unwrap_or_default();
-        body
+        resp.text().await.unwrap_or_default()
       }
     })
     .collect::<Vec<_>>();
@@ -544,7 +536,8 @@ async fn test_concurrent_takeover_locking() {
   // At least one request should succeed (the one that got the lock)
   assert_eq!(success_count, 2);
 
-  // Send another request to whichever node succeeded - they should all route to the same place now
+  // Send another request to whichever node succeeded - they should all route to
+  // the same place now
   println!(
     "Sending another request to verify cell stability after takeover..."
   );

@@ -58,6 +58,8 @@ impl NodeState {
       rt.block_on(async {
         // Try to get S3 membership config from configuration
         if config.has_s3_config() {
+          info!("S3 cluster membership configured, initializing...");
+          debug!("S3 cluster membership config: {:?}", config);
           let s3_config = config.to_s3_config().unwrap();
 
           // Create membership using from_config with configured staleness threshold
@@ -66,7 +68,9 @@ impl NodeState {
             config.advertise_addr.clone(),
             Some(node_id.clone()),
             Some(config.staleness_threshold),
-          ) {
+          )
+          .await
+          {
             Ok(membership) => {
               info!(
                 "Initializing S3 cluster membership with bucket {}",
@@ -88,25 +92,43 @@ impl NodeState {
           }
 
           // Initialize the S3 client for distributed lock
-          let aws_config = aws_config::from_env()
-            .region(aws_config::Region::new(s3_config.region.clone()))
-            .load()
-            .await;
+          // Configure builder with region
+          let builder =
+            aws_config::defaults(aws_config::BehaviorVersion::latest())
+              .region(aws_config::Region::new(s3_config.region.clone()));
 
-          // Create S3 client with path style config for MinIO compatibility
-          let s3_client = aws_sdk_s3::Client::from_conf(
+          // Load the AWS config
+          let aws_config = builder.load().await;
+
+          // Start with basic S3 client builder
+          let mut s3_client_builder =
             aws_sdk_s3::config::Builder::from(&aws_config)
-              .endpoint_url(s3_config.endpoint.clone())
-              .credentials_provider(aws_sdk_s3::config::Credentials::new(
-                s3_config.access_key_id.clone(),
-                s3_config.secret_access_key.clone(),
+              .force_path_style(true);
+
+          // Set S3 endpoint if configured
+          if let Some(endpoint) = s3_config.endpoint.as_ref() {
+            s3_client_builder = s3_client_builder.endpoint_url(endpoint);
+          }
+
+          // Set explicit credentials if available in S3Config
+          if let (Some(access_key), Some(secret_key)) =
+            (&s3_config.access_key_id, &s3_config.secret_access_key)
+          {
+            debug!("Using explicit S3 credentials for distributed lock");
+            s3_client_builder = s3_client_builder.credentials_provider(
+              aws_sdk_s3::config::Credentials::new(
+                access_key,
+                secret_key,
                 None,
                 None,
-                "manual-minio",
-              ))
-              .force_path_style(true)
-              .build(),
-          );
+                "static-distributed-lock-credentials",
+              ),
+            );
+          }
+
+          let cfg = s3_client_builder.build();
+
+          let s3_client = aws_sdk_s3::Client::from_conf(cfg);
 
           // Create lock prefix (locks/restore/ by default)
           let lock_prefix = s3_config.subpath("locks/restore");

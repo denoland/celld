@@ -1,11 +1,12 @@
-use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::waitpid;
-use nix::unistd::{fork, pipe, read, ForkResult, Pid};
+use nix::unistd::Pid;
 use std::io;
 use std::os::fd::OwnedFd;
-use std::os::unix::io::AsRawFd;
 use std::process::Command;
+
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
 
 /// A child process that will be terminated if its parent dies.
 ///
@@ -27,12 +28,14 @@ impl ChildOnParentExit {
   pub fn spawn(mut cmd: Command) -> io::Result<Self> {
     #[cfg(target_os = "linux")]
     {
-      use nix::sys::prctl::set_death_signal;
-      cmd.before_exec(|| {
-        set_death_signal(Some(Signal::SIGTERM))
-          .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        Ok(())
-      });
+      use nix::sys::prctl::set_pdeathsig;
+      unsafe {
+        cmd.pre_exec(|| {
+          set_pdeathsig(Some(Signal::SIGTERM))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+          Ok(())
+        });
+      }
 
       let child = cmd.spawn()?;
       Ok(ChildOnParentExit {
@@ -43,6 +46,10 @@ impl ChildOnParentExit {
 
     #[cfg(all(unix, not(target_os = "linux")))]
     {
+      use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+      use nix::unistd::{fork, pipe, read, ForkResult};
+      use std::os::unix::io::AsRawFd;
+
       // create a pipe; parent holds w, watcher holds r
       let (r, w) =
         pipe().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
@@ -90,6 +97,7 @@ impl ChildOnParentExit {
   }
 
   /// Close the pipe (triggering kill on macOS) and wait for the watcher.
+  #[allow(dead_code)]
   pub fn wait(mut self) {
     if let Some(w) = self.death_pipe_w.take() {
       drop(w); // Close the pipe by dropping OwnedFd

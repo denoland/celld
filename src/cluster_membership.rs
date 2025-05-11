@@ -1,7 +1,11 @@
 use crate::config::S3Config;
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
-use aws_sdk_s3::{config::Credentials, primitives::ByteStream, Client};
+use aws_sdk_s3::{
+  config::{Credentials, ProvideCredentials},
+  primitives::ByteStream,
+  Client,
+};
 use aws_smithy_types::timeout::TimeoutConfig;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -57,7 +61,7 @@ pub struct S3ClusterMembership {
 
 impl S3ClusterMembership {
   /// Create a new S3ClusterMembership instance from Config
-  pub fn from_config(
+  pub async fn from_config(
     cfg: S3Config,
     advertise_addr: String,
     node_id: Option<String>,
@@ -75,27 +79,37 @@ impl S3ClusterMembership {
 
     // Create the client with the path style config for MinIO compatibility
 
-    let s3_client = Client::from_conf(
-      aws_sdk_s3::config::Builder::new()
-        .behavior_version(BehaviorVersion::latest())
-        .credentials_provider(Credentials::new(
-          cfg.access_key_id,
-          cfg.secret_access_key,
-          None,
-          None,
-          "minio-credentials",
-        ))
-        .endpoint_url(cfg.endpoint)
-        .region(aws_config::Region::new(cfg.region))
-        .force_path_style(true)
-        // Add timeout configuration to avoid hanging in tests
-        .timeout_config(
-          TimeoutConfig::builder()
-            .operation_timeout(Duration::from_secs(10))
-            .build(),
-        )
-        .build(),
-    );
+    let mut s3_builder = aws_sdk_s3::config::Builder::new()
+      .behavior_version(BehaviorVersion::latest())
+      .region(aws_config::Region::new(cfg.region))
+      .force_path_style(true)
+      // Add timeout configuration to avoid hanging in tests
+      .timeout_config(
+        TimeoutConfig::builder()
+          .operation_timeout(Duration::from_secs(10))
+          .build(),
+      ).credentials_provider(
+        if cfg.access_key_id.is_some() && cfg.secret_access_key.is_some() {
+          debug!("Using explicit S3 credentials");
+          Credentials::new(
+            cfg.access_key_id.unwrap(),
+            cfg.secret_access_key.unwrap(),
+            None,
+            None,
+            "static-credentials",
+          )
+        } else {
+          // Use the default credentials provider if access keys are not explicitly provided
+          debug!("No explicit S3 credentials provided, using default credentials provider");
+          aws_config::default_provider::credentials::default_provider().await.provide_credentials().await.expect("No valid credentials provider found")
+        }
+      );
+
+    if let Some(endpoint) = cfg.endpoint {
+      s3_builder = s3_builder.endpoint_url(endpoint);
+    }
+
+    let s3_client = Client::from_conf(s3_builder.build());
 
     Ok(Self {
       s3_client,
@@ -137,6 +151,9 @@ impl ClusterMembership for S3ClusterMembership {
     debug!(
       node_id = %self.node_info.node_id,
       addr = %self.node_info.advertise_addr,
+      node = %node_key,
+      bucket = %self.bucket,
+      region = ?self.s3_client.config().region(),
       "Registering node in S3"
     );
 
@@ -325,7 +342,7 @@ mod tests {
   use crate::test_utils::MinioTestServer;
   use tokio::time::sleep;
 
-  fn setup_test_membership(
+  async fn setup_test_membership(
     minio: &MinioTestServer,
     node_id: Option<String>,
     advertise_addr: &str,
@@ -335,12 +352,12 @@ mod tests {
 
     // Create with a short staleness threshold for tests (2 seconds)
     let cfg = S3Config {
-      endpoint: format!("http://127.0.0.1:{}", minio.port),
+      endpoint: Some(format!("http://127.0.0.1:{}", minio.port)),
       bucket,
       region: "us-east-1".to_string(),
       path: Some("cluster_state/nodes/".to_string()),
-      access_key_id: minio.access_key_id.clone(),
-      secret_access_key: minio.secret_access_key.clone(),
+      access_key_id: Some(minio.access_key_id.clone()),
+      secret_access_key: Some(minio.secret_access_key.clone()),
     };
 
     S3ClusterMembership::from_config(
@@ -349,6 +366,7 @@ mod tests {
       node_id,
       Some(Duration::from_secs(2)), // Custom short threshold for tests
     )
+    .await
     .unwrap()
   }
 
@@ -357,7 +375,8 @@ mod tests {
     let minio = MinioTestServer::start();
     let node_id = Uuid::new_v4().to_string();
     let membership =
-      setup_test_membership(&minio, Some(node_id.clone()), "127.0.0.1:8080");
+      setup_test_membership(&minio, Some(node_id.clone()), "127.0.0.1:8080")
+        .await;
 
     // Register the node
     let register_result = membership.register().await;
@@ -407,7 +426,8 @@ mod tests {
     let minio = MinioTestServer::start();
     let node_id = Uuid::new_v4().to_string();
     let membership =
-      setup_test_membership(&minio, Some(node_id.clone()), "127.0.0.1:8080");
+      setup_test_membership(&minio, Some(node_id.clone()), "127.0.0.1:8080")
+        .await;
 
     // Register the node
     let register_result = membership.register().await;
@@ -473,7 +493,8 @@ mod tests {
       &minio,
       Some(stale_node_id.clone()),
       "127.0.0.1:8081",
-    );
+    )
+    .await;
 
     // Register the first node
     stale_membership.register().await.unwrap();
@@ -488,7 +509,8 @@ mod tests {
       &minio,
       Some(active_node_id.clone()),
       "127.0.0.1:8082",
-    );
+    )
+    .await;
 
     // Register the active node
     active_membership.register().await.unwrap();
@@ -505,7 +527,8 @@ mod tests {
       &minio,
       Some(third_node_id.clone()),
       "127.0.0.1:8083",
-    );
+    )
+    .await;
 
     third_membership.register().await.unwrap();
 
@@ -519,7 +542,8 @@ mod tests {
     let minio = MinioTestServer::start();
     let node_id = Uuid::new_v4().to_string();
     let membership =
-      setup_test_membership(&minio, Some(node_id.clone()), "127.0.0.1:8080");
+      setup_test_membership(&minio, Some(node_id.clone()), "127.0.0.1:8080")
+        .await;
 
     // Register the node
     let register_result = membership.register().await;
