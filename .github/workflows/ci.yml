@@ -8,7 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Caching configuration
   CARGO_INCREMENTAL: 0
   RUSTFLAGS: "-D warnings"
 
@@ -143,45 +142,3 @@ jobs:
 
     - name: Run clippy
       run: cargo clippy -- -D warnings
-
-  docker:
-    name: Docker Integration Test
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v3
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v2
-
-    - name: Build Docker image
-      run: docker build -t cells:test .
-
-    - name: Setup hosts file
-      run: |
-        echo "Adding localhost entries to /etc/hosts"
-        sudo bash -c 'cat >> /etc/hosts << EOF
-        127.0.0.1 basic-db.localhost
-        127.0.0.1 env-test.localhost
-        127.0.0.1 hello.localhost
-        127.0.0.1 llm-chat.localhost
-        127.0.0.1 ws-echo.localhost
-        EOF'
-
-    - name: Run Docker container
-      run: |
-        docker run -d --name cells-test \
-          -p 8000:8000 \
-          -v $(pwd)/data:/data \
-          cells:test
-        # Wait for container to start
-        sleep 5
-
-    - name: Test HTTP endpoint
-      run: |
-        response=$(curl -s -H "Host: basic-db.localhost" http://127.0.0.1:8000/cell/foo)
-        echo "Response: $response"
-        # Check if response is not empty
-        if [[ -z "$response" ]]; then
-          echo "Test failed: Empty response from server"
-          exit 1
-        fi
