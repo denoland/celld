@@ -160,25 +160,6 @@ impl LockGuard {
   ) {
     self.release_notifier = Some(notifier);
   }
-
-  pub async fn release(mut self) {
-    let handle = LockHandle {
-      lock_key: self.lock_key.clone(),
-      node_id: self.node_id.clone(),
-    };
-    info!(lock_key = %handle.lock_key, node_id = %handle.node_id, "Releasing LockGuard");
-    let release_result = self.lock_manager.release(handle).await;
-    info!(lock_key = %self.lock_key.clone(), node_id = %self.node_id.clone(), "LockGuard released");
-
-    if let Some(notifier) = self.release_notifier.take() {
-      if let Err(e) = notifier.send(release_result) {
-        tracing::error!(
-          error = ?e,
-          "Error sending release notification",
-        );
-      }
-    }
-  }
 }
 
 impl fmt::Debug for LockGuard {
