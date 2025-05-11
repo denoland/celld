@@ -146,6 +146,8 @@ In-Progress / Next:
 
 - Deno v2.3+ (to use `DENO_SERVE_ADDRESS` env var)
 - [litestream](https://litestream.io/install/)
+- MinIO for testing: `brew install minio`
+- MinIO client for testing: `brew install minio/stable/mc`
 - Configure `*.localhost` to be resolved to the local loopback address (if not
   configured by default)
 
