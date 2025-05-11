@@ -613,10 +613,16 @@ fn spawn_deno_process(
   cmd
     .arg("run")
     .arg("--no-prompt")
-    .arg(format!("--allow-read={}", tenant_dir.display()))
-    .arg(format!("--allow-write={}", tenant_dir.display()))
-    .arg(format!("--allow-read={}", socket_path.display()))
-    .arg(format!("--allow-write={}", socket_path.display()))
+    .arg(format!(
+      "--allow-read={},{}",
+      tenant_dir.display(),
+      socket_path.display()
+    ))
+    .arg(format!(
+      "--allow-write={},{}",
+      tenant_dir.display(),
+      socket_path.display()
+    ))
     .arg("--allow-net");
 
   // Only allow specifically named environment variables
