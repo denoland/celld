@@ -122,6 +122,17 @@ jobs:
     - name: Build Docker image
       run: docker build -t cells:test .
 
+    - name: Setup hosts file
+      run: |
+        echo "Adding localhost entries to /etc/hosts"
+        sudo bash -c 'cat >> /etc/hosts << EOF
+127.0.0.1 basic-db.localhost
+127.0.0.1 env-test.localhost
+127.0.0.1 hello.localhost
+127.0.0.1 llm-chat.localhost
+127.0.0.1 ws-echo.localhost
+EOF'
+
     - name: Run Docker container
       run: |
         docker run -d --name cells-test \
