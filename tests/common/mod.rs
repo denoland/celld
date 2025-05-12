@@ -133,6 +133,7 @@ impl TestEnv {
       .env("CELLD_GRACE_PERIOD_SECONDS", "5")
       // Use a shorter staleness threshold for tests to detect failures faster
       .env("CELLD_STALENESS_THRESHOLD_SECS", "6")
+      .env("CELLD_LOCK_GUARD_TTL_SECS", "6")
       .env(
         "CELLD_S3_ENDPOINT",
         format!("http://localhost:{}", self.minio_server.port),

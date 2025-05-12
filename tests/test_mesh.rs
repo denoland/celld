@@ -330,13 +330,17 @@ async fn test_node_failure_takeover() {
   println!("Waiting for Litestream to replicate data to S3...");
   sleep(Duration::from_secs(5)).await;
 
-  // Abruptly kill the primary node (simulate node failure)
+  // Abruptly kill the primary node instead of gracefully shutting down
+  // (simulate node failure)
   println!("Killing primary node on port {}...", primary_owner_port);
   // We already found the primary_index earlier
   test_env.kill_celld_instance(primary_index);
 
   // Wait for node failure to be detected (heartbeat timeout)
   // CELLD_STALENESS_THRESHOLD_SECS is set to 6 seconds in TestEnv::spawn_celld_instance
+  // Also CELLD_LOCK_GUARD_TTL_SECS is set to 6 seconds in TestEnv::spawn_celld_instance,
+  // meaning that the lock on the cell ("basic-db.localhost", test_cell_id)
+  // should expire 6 seconds after the primary node is killed.
   println!("Waiting for primary node failure to be detected...");
   sleep(Duration::from_secs(8)).await;
 
