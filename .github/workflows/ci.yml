@@ -20,7 +20,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Install dependencies (Linux)
       if: runner.os == 'Linux'
@@ -76,7 +76,7 @@ jobs:
         sudo install -m 755 litestream /usr/local/bin/litestream
 
     - name: Set up Rust cache
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           ~/.cargo/bin/
@@ -89,10 +89,7 @@ jobs:
           ${{ runner.os }}-cargo-
 
     - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        override: true
+      uses: dtolnay/rust-toolchain@stable
 
     - name: Setup hosts file
       run: |
@@ -115,10 +112,10 @@ jobs:
     name: Linting and Formatting
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Set up Rust cache
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           ~/.cargo/bin/
@@ -131,11 +128,8 @@ jobs:
           ${{ runner.os }}-cargo-lint-
 
     - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        override: true
-        components: rustfmt, clippy
+      uses: dtolnay/rust-toolchain@stable
+
 
     - name: Check formatting
       run: cargo fmt --all -- --check
