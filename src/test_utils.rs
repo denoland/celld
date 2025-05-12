@@ -58,8 +58,6 @@ impl MinioTestServer {
 
     let port = port_rx.recv().unwrap();
 
-    std::thread::sleep(std::time::Duration::from_secs(5)); // Wait for MinIO to start
-
     MinioTestServer {
       access_key_id: access_key.to_string(),
       secret_access_key: secret_key.to_string(),
