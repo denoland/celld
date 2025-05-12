@@ -29,13 +29,34 @@ impl MinioTestServer {
       .env("MINIO_REGION_NAME", "us-east-1")
       .env("MINIO_CI_CD", "on") // Enable in-memory storage mode
       .current_dir(tempdir.path()) // Set working directory for logs
+      .stdout(std::process::Stdio::piped())
       .stderr(std::process::Stdio::piped())
       .spawn()
       .expect("Failed to start minio server");
 
+    let stdout = process.stdout.take().unwrap();
+    let reader = BufReader::new(stdout);
+    std::thread::spawn(move || {
+      for line in reader.lines() {
+        let line = line.unwrap();
+        eprintln!("[minio] {line}");
+      }
+    });
+
     let stderr = process.stderr.take().unwrap();
-    let mut reader = BufReader::new(stderr);
-    let port = parse_minio_api_port(&mut reader).unwrap().unwrap();
+    let reader = BufReader::new(stderr);
+    let (port_tx, port_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+      for line in reader.lines() {
+        let line = line.unwrap();
+        eprintln!("[minio] {line}");
+        if let Some(port) = extract_minio_api_port(&line) {
+          port_tx.send(port).unwrap();
+        }
+      }
+    });
+
+    let port = port_rx.recv().unwrap();
 
     MinioTestServer {
       access_key_id: access_key.to_string(),
@@ -137,36 +158,46 @@ impl Drop for MinioTestServer {
   }
 }
 
-/// Parses MinIO stdout lines from a BufRead source to find the API port
-pub fn parse_minio_api_port<R: BufRead + ?Sized>(
-  reader: &mut R,
-) -> io::Result<Option<u16>> {
-  for line_result in reader.lines() {
-    let line = line_result?;
-    if line.contains("API:") {
-      for part in line.split_whitespace() {
-        if let Some(port_candidate_str) = part.strip_prefix("http://127.0.0.1:")
-        {
-          let port_numeric_part: String = port_candidate_str
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-          if !port_numeric_part.is_empty() {
-            if let Ok(port_num) = port_numeric_part.parse::<u16>() {
-              return Ok(Some(port_num));
-            }
-          }
+/// Parses MinIO stderr line to find the API port
+fn extract_minio_api_port(line: &str) -> Option<u16> {
+  if !line.contains("API:") {
+    return None;
+  }
+
+  for part in line.split_whitespace() {
+    if let Some(port_candidate_str) = part.strip_prefix("http://127.0.0.1:") {
+      let port_numeric_part: String = port_candidate_str
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+      if !port_numeric_part.is_empty() {
+        if let Ok(port_num) = port_numeric_part.parse::<u16>() {
+          return Some(port_num);
         }
       }
     }
   }
-  Ok(None)
+
+  None
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
   use std::io::Cursor; // To simulate a readable stream from a byte slice.
+
+  // Utility function to call extract_minio_api_port on a BufRead source
+  fn parse_minio_api_port<R: BufRead + ?Sized>(
+    reader: &mut R,
+  ) -> io::Result<Option<u16>> {
+    for line_result in reader.lines() {
+      let line = line_result?;
+      if let Some(port) = extract_minio_api_port(&line) {
+        return Ok(Some(port));
+      }
+    }
+    Ok(None)
+  }
 
   #[test]
   fn test_parse_minio_output() {
