@@ -330,13 +330,17 @@ async fn test_node_failure_takeover() {
   println!("Waiting for Litestream to replicate data to S3...");
   sleep(Duration::from_secs(5)).await;
 
-  // Abruptly kill the primary node (simulate node failure)
+  // Abruptly kill the primary node instead of gracefully shutting down
+  // (simulate node failure)
   println!("Killing primary node on port {}...", primary_owner_port);
   // We already found the primary_index earlier
   test_env.kill_celld_instance(primary_index);
 
   // Wait for node failure to be detected (heartbeat timeout)
   // CELLD_STALENESS_THRESHOLD_SECS is set to 6 seconds in TestEnv::spawn_celld_instance
+  // Also CELLD_LOCK_GUARD_TTL_SECS is set to 6 seconds in TestEnv::spawn_celld_instance,
+  // meaning that the lock on the cell ("basic-db.localhost", test_cell_id)
+  // should expire 6 seconds after the primary node is killed.
   println!("Waiting for primary node failure to be detected...");
   sleep(Duration::from_secs(8)).await;
 
@@ -779,12 +783,9 @@ async fn test_restore_coordination() {
   println!("Waiting for Litestream to replicate data to S3...");
   sleep(Duration::from_secs(5)).await;
 
-  // Stop Node A
+  // Stop Node A gracefully
   println!("Stopping Node A...");
-  test_env.kill_celld_instance(0);
-
-  // Wait for Node A to fully terminate and release resources
-  sleep(Duration::from_secs(2)).await;
+  test_env.graceful_shutdown_celld_instance(0);
 
   // Remove the local database file to force restore from S3
   std::fs::remove_file(&db_path).unwrap();
@@ -807,6 +808,7 @@ async fn test_restore_coordination() {
   // Wait for both nodes to be ready
   TestEnv::wait_for_server_ready(port_b);
   TestEnv::wait_for_server_ready(port_c);
+  // Give time for the started nodes to settle on the latest view of the cluster
   sleep(Duration::from_secs(8)).await;
 
   // Determine which node is responsible for the cell by querying both
@@ -893,7 +895,7 @@ async fn test_restore_single() {
   sleep(Duration::from_secs(2)).await;
 
   println!("Shutting down celld instance...");
-  test_env.kill_celld_instance(0);
+  test_env.graceful_shutdown_celld_instance(0);
 
   println!("Removing local database files...");
   clean_cell_workspace(test_cell_id, &test_env);
@@ -901,8 +903,6 @@ async fn test_restore_single() {
   let new_port = TestEnv::allocate_ports(7620, 1, 2)[0];
   test_env.spawn_celld_instance(new_port);
   TestEnv::wait_for_server_ready(new_port);
-
-  sleep(Duration::from_secs(8)).await;
 
   let new_url = format!(
     "http://basic-db.localhost:{}/cell/{}",

@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-D warnings"
+  LITESTREAM_VERSION: v0.3.13
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          libsqlite3-dev \
+          curl \
+          wget
+
+        echo "Installing MinIO and mc for Linux..."
+        wget https://dl.min.io/server/minio/release/linux-amd64/minio -O minio
+        chmod +x minio
+        sudo mv minio /usr/local/bin/
+        wget https://dl.min.io/client/mc/release/linux-amd64/mc -O mc
+        chmod +x mc
+        sudo mv mc /usr/local/bin/
+        minio --version
+        mc --version
+
+        echo "Installing Litestream for Linux..."
+        curl -L -o litestream.deb "https://github.com/benbjohnson/litestream/releases/download/${LITESTREAM_VERSION}/litestream-${LITESTREAM_VERSION}-linux-amd64.deb"
+        sudo dpkg -i litestream.deb
+        litestream version
+
+    - name: Install dependencies (Mac)
+      if: runner.os == 'macOS'
+      run: |
+        brew update
+        brew install sqlite3
+        echo "Installing MinIO and mc for macOS..."
+        brew install minio/stable/minio
+        brew install minio/stable/mc
+        minio --version
+        mc --version
+
+        echo "Installing Litestream for macOS..."
+        curl -L -o litestream.zip "https://github.com/benbjohnson/litestream/releases/download/${LITESTREAM_VERSION}/litestream-${LITESTREAM_VERSION}-darwin-amd64.zip"
+        unzip litestream.zip
+        sudo install -m 755 litestream /usr/local/bin/litestream
+        litestream version
+
+    - name: Install Deno
+      uses: denoland/setup-deno@v2
+      with:
+        deno-version: v2.x
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Setup Rust cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-test-
+
+    - name: Setup hosts file
+      run: |
+        echo "Adding localhost entries to /etc/hosts"
+        sudo bash -c 'cat >> /etc/hosts << EOF
+        127.0.0.1 basic-db.localhost
+        127.0.0.1 env-test.localhost
+        127.0.0.1 hello.localhost
+        127.0.0.1 llm-chat.localhost
+        127.0.0.1 ws-echo.localhost
+        EOF'
+
+    - name: Build
+      run: cargo build --verbose
+
+    - name: Run tests
+      run: cargo test --verbose
+
+  lint:
+    name: Linting and Formatting
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust toolchain (for linting)
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Setup Rust cache (for linting)
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-lint-
+
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+
+    - name: Run clippy
+      run: cargo clippy --all-targets --all-features -- -D warnings
