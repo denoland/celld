@@ -1,3 +1,4 @@
+mod alarm_processor;
 mod child_on_parent_exit;
 mod cluster_membership;
 mod config;
@@ -11,6 +12,7 @@ mod process_manager;
 mod process_reaper;
 mod router;
 mod sqlite_replica;
+mod system_cell;
 #[cfg(test)]
 pub mod test_utils;
 
