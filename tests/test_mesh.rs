@@ -783,12 +783,9 @@ async fn test_restore_coordination() {
   println!("Waiting for Litestream to replicate data to S3...");
   sleep(Duration::from_secs(5)).await;
 
-  // Stop Node A
+  // Stop Node A gracefully
   println!("Stopping Node A...");
-  test_env.kill_celld_instance(0);
-
-  // Wait for Node A to fully terminate and release resources
-  sleep(Duration::from_secs(2)).await;
+  test_env.graceful_shutdown_celld_instance(0);
 
   // Remove the local database file to force restore from S3
   std::fs::remove_file(&db_path).unwrap();
@@ -811,7 +808,6 @@ async fn test_restore_coordination() {
   // Wait for both nodes to be ready
   TestEnv::wait_for_server_ready(port_b);
   TestEnv::wait_for_server_ready(port_c);
-  sleep(Duration::from_secs(8)).await;
 
   // Determine which node is responsible for the cell by querying both
   let owner_url_b = format!(
@@ -897,7 +893,7 @@ async fn test_restore_single() {
   sleep(Duration::from_secs(2)).await;
 
   println!("Shutting down celld instance...");
-  test_env.kill_celld_instance(0);
+  test_env.graceful_shutdown_celld_instance(0);
 
   println!("Removing local database files...");
   clean_cell_workspace(test_cell_id, &test_env);
