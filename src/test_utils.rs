@@ -37,6 +37,8 @@ impl MinioTestServer {
     let mut reader = BufReader::new(stderr);
     let port = parse_minio_api_port(&mut reader).unwrap().unwrap();
 
+    std::thread::sleep(std::time::Duration::from_secs(5)); // Wait for MinIO to start
+
     MinioTestServer {
       access_key_id: access_key.to_string(),
       secret_access_key: secret_key.to_string(),
