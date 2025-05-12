@@ -10,6 +10,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUSTFLAGS: "-D warnings"
+  LITESTREAM_VERSION: v0.3.13
 
 jobs:
   test:
@@ -26,56 +27,57 @@ jobs:
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential libsqlite3-dev curl wget
+        sudo apt-get install -y \
+          build-essential \
+          libsqlite3-dev \
+          curl \
+          wget
 
-    - name: Install MinIO and MinIO Client (Linux)
-      if: runner.os == 'Linux'
-      run: |
-        # Install MinIO server
-        wget https://dl.min.io/server/minio/release/linux-amd64/minio
+        echo "Installing MinIO and mc for Linux..."
+        wget https://dl.min.io/server/minio/release/linux-amd64/minio -O minio
         chmod +x minio
         sudo mv minio /usr/local/bin/
-
-        # Install MinIO client (mc)
-        wget https://dl.min.io/client/mc/release/linux-amd64/mc
+        wget https://dl.min.io/client/mc/release/linux-amd64/mc -O mc
         chmod +x mc
         sudo mv mc /usr/local/bin/
-
-        # Verify installations
         minio --version
         mc --version
 
-    - name: Install SQLite3 and MinIO (macOS)
+        echo "Installing Litestream for Linux..."
+        curl -L -o litestream.deb "https://github.com/benbjohnson/litestream/releases/download/${LITESTREAM_VERSION}/litestream-${LITESTREAM_VERSION}-linux-amd64.deb"
+        sudo dpkg -i litestream.deb
+        litestream version
+
+    - name: Install dependencies (Mac)
       if: runner.os == 'macOS'
       run: |
         brew update
         brew install sqlite3
+        echo "Installing MinIO and mc for macOS..."
         brew install minio/stable/minio
         brew install minio/stable/mc
-
-        # Verify installations
         minio --version
         mc --version
+
+        echo "Installing Litestream for macOS..."
+        curl -L -o litestream.zip "https://github.com/benbjohnson/litestream/releases/download/${LITESTREAM_VERSION}/litestream-${LITESTREAM_VERSION}-darwin-amd64.zip"
+        unzip litestream.zip
+        sudo install -m 755 litestream /usr/local/bin/litestream
+        litestream version
 
     - name: Install Deno
       uses: denoland/setup-deno@v2
       with:
         deno-version: v2.x
 
-    - name: Install Litestream (Linux)
-      if: runner.os == 'Linux'
-      run: |
-        curl -L -o litestream.deb "https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.deb"
-        sudo dpkg -i litestream.deb
+    - name: Install Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        profile: minimal
+        override: true
 
-    - name: Install Litestream (macOS)
-      if: runner.os == 'macOS'
-      run: |
-        curl -L -o litestream.zip "https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-darwin-amd64.zip"
-        unzip litestream.zip
-        sudo install -m 755 litestream /usr/local/bin/litestream
-
-    - name: Set up Rust cache
+    - name: Setup Rust cache
       uses: actions/cache@v4
       with:
         path: |
@@ -84,12 +86,9 @@ jobs:
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
           target/
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-cargo-
-
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+          ${{ runner.os }}-cargo-test-
 
     - name: Setup hosts file
       run: |
@@ -114,7 +113,15 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Set up Rust cache
+    - name: Install Rust toolchain (for linting)
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        profile: minimal
+        override: true
+        components: rustfmt, clippy
+
+    - name: Setup Rust cache (for linting)
       uses: actions/cache@v4
       with:
         path: |
@@ -127,12 +134,8 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-cargo-lint-
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-
-
     - name: Check formatting
       run: cargo fmt --all -- --check
 
     - name: Run clippy
-      run: cargo clippy -- -D warnings
+      run: cargo clippy --all-targets --all-features -- -D warnings
