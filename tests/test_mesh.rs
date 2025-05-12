@@ -808,6 +808,8 @@ async fn test_restore_coordination() {
   // Wait for both nodes to be ready
   TestEnv::wait_for_server_ready(port_b);
   TestEnv::wait_for_server_ready(port_c);
+  // Give time for the started nodes to settle on the latest view of the cluster
+  sleep(Duration::from_secs(8)).await;
 
   // Determine which node is responsible for the cell by querying both
   let owner_url_b = format!(
