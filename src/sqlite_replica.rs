@@ -342,7 +342,7 @@ impl SqliteReplica {
     );
 
     // Run the actual restore operation
-    let restore_result = match self.run_restore().await {
+    match self.run_restore().await {
       Ok(restored) => {
         // Restore succeeded
         info!(
@@ -367,10 +367,7 @@ impl SqliteReplica {
         // Return Failed state with error message
         RestoreState::Failed(e.to_string())
       }
-    };
-
-    // Return the final state
-    restore_result
+    }
   }
 
   /// Checks if the database file exists

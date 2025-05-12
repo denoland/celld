@@ -1,7 +1,6 @@
 use pingora::http::StatusCode;
 use pingora::prelude::*;
 use pingora::upstreams::peer::HttpPeer;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
@@ -17,8 +16,6 @@ pub enum ProxyError {
   AppNotFound(String),
   #[error("Internal Server Error: {0}")]
   InternalError(#[from] anyhow::Error),
-  #[error("Cell lock held by another node or takeover in progress")]
-  LockContention,
 }
 
 pub struct Proxy {
