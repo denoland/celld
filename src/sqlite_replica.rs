@@ -315,14 +315,13 @@ impl SqliteReplica {
     Ok(true)
   }
 
-  /// Ensure the database is restored, coordinating with other nodes using distributed lock
-  #[instrument(skip(self, lock_manager), fields(node_id = %self_node_id, lock_ttl_secs = %lock_ttl.as_secs()))]
+  /// Ensure the database is restored, coordinating with other nodes using distributed lock.
+  /// This takes reference to a lock guard to make sure that the caller did acquire a lock.
+  #[instrument(skip(self, _lock_guard))]
   pub async fn ensure_restored(
     &self,
-    lock_manager: Arc<dyn distributed_lock::DistributedLock>,
-    self_node_id: &str,
-    lock_ttl: std::time::Duration,
-  ) -> Result<crate::process_manager::RestoreState, anyhow::Error> {
+    _lock_guard: &distributed_lock::LockGuard,
+  ) -> crate::process_manager::RestoreState {
     use crate::process_manager::RestoreState;
 
     // Check if database already exists locally
@@ -332,118 +331,46 @@ impl SqliteReplica {
         cell_id = %self.cell_id,
         "Database already exists locally, no restore needed"
       );
-      return Ok(RestoreState::Complete(false));
+      return RestoreState::Complete(false);
     }
 
-    // Create a lock name based on tenant and cell_id
-    let lock_name = format!("{}:{}", self.tenant, self.cell_id);
-
-    // Try to acquire the distributed lock
-    debug!(
+    // We got the lock, proceed with restore
+    info!(
       tenant = %self.tenant,
       cell_id = %self.cell_id,
-      node_id = %self_node_id,
-      "Attempting to acquire distributed lock for restore"
+      "Lock acquired, proceeding with database restore"
     );
 
-    // Attempt to acquire the lock
-    match lock_manager
-      .try_acquire(&lock_name, self_node_id, lock_ttl)
-      .await
-    {
-      Ok(lock_guard) => {
-        // We got the lock, proceed with restore
+    // Run the actual restore operation
+    let restore_result = match self.run_restore().await {
+      Ok(restored) => {
+        // Restore succeeded
         info!(
           tenant = %self.tenant,
           cell_id = %self.cell_id,
-          "Lock acquired, proceeding with database restore"
+          "Database restore completed successfully (restored = {})",
+          restored
         );
 
-        // Run the actual restore operation
-        let restore_result = match self.run_restore().await {
-          Ok(restored) => {
-            // Restore succeeded
-            info!(
-              tenant = %self.tenant,
-              cell_id = %self.cell_id,
-              "Database restore completed successfully (restored = {})",
-              restored
-            );
-
-            // Return Complete state with whether data was actually restored
-            RestoreState::Complete(restored)
-          }
-          Err(e) => {
-            // Restore failed
-            error!(
-              tenant = %self.tenant,
-              cell_id = %self.cell_id,
-              error = %e,
-              "Database restore failed"
-            );
-
-            // Return Failed state with error message
-            RestoreState::Failed(e.to_string())
-          }
-        };
-
-        // Release the lock regardless of restore outcome
-        if let Err(e) = lock_guard.release().await {
-          warn!(
-            tenant = %self.tenant,
-            cell_id = %self.cell_id,
-            error = %e,
-            "Failed to release distributed lock after restore"
-          );
-          // Continue anyway, the lock will expire on its own
-        } else {
-          debug!(
-            tenant = %self.tenant,
-            cell_id = %self.cell_id,
-            "Successfully released distributed lock after restore"
-          );
-        }
-
-        // Return the final state
-        Ok(restore_result)
-      }
-      Err(distributed_lock::LockAcquireError::LockHeld(lock_info)) => {
-        // Another node holds the lock
-        if let Some(info) = lock_info {
-          info!(
-            tenant = %self.tenant,
-            cell_id = %self.cell_id,
-            owner_node_id = %info.node_id,
-            acquired_at = %info.timestamp,
-            "Distributed lock already held by another node"
-          );
-        } else {
-          info!(
-            tenant = %self.tenant,
-            cell_id = %self.cell_id,
-            "Distributed lock already held by unknown node"
-          );
-        }
-
-        // Return WaitingForLock state
-        Ok(RestoreState::WaitingForLock)
+        // Return Complete state with whether data was actually restored
+        RestoreState::Complete(restored)
       }
       Err(e) => {
-        // Unexpected error acquiring lock
+        // Restore failed
         error!(
           tenant = %self.tenant,
           cell_id = %self.cell_id,
           error = %e,
-          "Failed to acquire distributed lock for restore"
+          "Database restore failed"
         );
 
         // Return Failed state with error message
-        Ok(RestoreState::Failed(format!(
-          "Lock acquisition failed: {}",
-          e
-        )))
+        RestoreState::Failed(e.to_string())
       }
-    }
+    };
+
+    // Return the final state
+    restore_result
   }
 
   /// Checks if the database file exists

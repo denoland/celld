@@ -2,9 +2,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
-use crate::cluster_membership::{ClusterMembership, S3ClusterMembership};
+use crate::cluster_membership::{
+  ClusterMembership, S3ClusterMembership, StandaloneClusterMembership,
+};
 use crate::config;
-use crate::distributed_lock::{DistributedLock, S3DistributedLock};
+use crate::distributed_lock::{
+  DistributedLock, S3DistributedLock, StandaloneDistributedLock,
+};
 use crate::peer_manager::PeerManager;
 use crate::process_manager::ProcessManager;
 
@@ -13,17 +17,20 @@ use crate::process_manager::ProcessManager;
 /// This struct serves as a container for various components and services
 /// that need to be accessed from different parts of the application.
 pub struct NodeState {
+  /// Unique identifier for the node
+  pub node_id: String,
+
   /// Manager for Deno processes running in the system
   pub process_manager: Arc<ProcessManager>,
 
   /// Manager for peer node information and coordination
   pub peer_manager: Arc<PeerManager>,
 
-  /// Cluster membership service (empty in standalone mode)
-  pub cluster_membership: Option<Arc<dyn ClusterMembership>>,
+  /// Cluster membership service
+  pub cluster_membership: Arc<dyn ClusterMembership>,
 
-  /// Distributed lock for coordinating operations (empty in standalone mode)
-  pub distributed_lock: Option<Arc<dyn DistributedLock>>,
+  /// Distributed lock for coordinating operations
+  pub distributed_lock: Arc<dyn DistributedLock>,
 
   /// Application configuration
   pub config: Arc<config::Config>,
@@ -138,14 +145,20 @@ impl NodeState {
           ));
 
           (
-            Some(Arc::new(membership) as Arc<dyn ClusterMembership>),
-            Some(lock_manager as Arc<dyn DistributedLock>),
+            Arc::new(membership) as Arc<dyn ClusterMembership>,
+            lock_manager as Arc<dyn DistributedLock>,
           )
         } else {
           info!(
             "S3 cluster membership not configured, running in standalone mode"
           );
-          (None, None)
+          (
+            Arc::new(StandaloneClusterMembership::new(
+              node_id.clone(),
+              config.advertise_addr.clone(),
+            )) as Arc<dyn ClusterMembership>,
+            Arc::new(StandaloneDistributedLock) as Arc<dyn DistributedLock>,
+          )
         }
       })
     };
@@ -160,6 +173,7 @@ impl NodeState {
 
     // Create NodeState container with cluster membership if available
     let node_state = Arc::new(NodeState {
+      node_id,
       process_manager: Arc::new(process_manager),
       peer_manager: Arc::new(peer_manager),
       cluster_membership,
@@ -182,10 +196,14 @@ impl NodeState {
     );
 
     Arc::new(NodeState {
+      node_id: "benchmark-node".to_string(),
       process_manager: Arc::new(process_manager),
       peer_manager: Arc::new(peer_manager),
-      cluster_membership: None,
-      distributed_lock: None,
+      cluster_membership: Arc::new(StandaloneClusterMembership::new(
+        "benchmark-node".to_string(),
+        "127.0.0.1:8000".to_string(),
+      )),
+      distributed_lock: Arc::new(StandaloneDistributedLock),
       config: Arc::new(config),
     })
   }

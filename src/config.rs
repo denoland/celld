@@ -31,6 +31,11 @@ pub struct Config {
   pub heartbeat_interval: Duration,
   /// Staleness threshold in seconds for detecting inactive nodes
   pub staleness_threshold: Duration,
+  /// TTL for the lock guard. As long as a Deno process is up and running,
+  /// the lock guard will be renewed at the interval of one third of this value.
+  /// For example, if the value is 30 seconds, the lock guard will be renewed
+  /// every 10 seconds.
+  pub lock_guard_ttl: Duration,
 }
 
 /// Configuration for a MinIO or S3 replica target
@@ -142,6 +147,12 @@ impl Config {
       .unwrap_or(90);
     let staleness_threshold = Duration::from_secs(staleness_secs);
 
+    let lock_guard_ttl_secs = var("CELLD_LOCK_GUARD_TTL_SECS")
+      .ok()
+      .and_then(|s| s.parse::<u64>().ok())
+      .unwrap_or(30);
+    let lock_guard_ttl = Duration::from_secs(lock_guard_ttl_secs);
+
     // Get optional S3 configuration
     // Prioritize CELLD_S3 specific variables over standard AWS variables
     let s3_endpoint = var("CELLD_S3_ENDPOINT").ok();
@@ -162,6 +173,7 @@ impl Config {
       data_dir,
       heartbeat_interval,
       staleness_threshold,
+      lock_guard_ttl,
       s3_endpoint,
       s3_bucket,
       s3_region,

@@ -101,10 +101,8 @@ pub enum LockAcquireError {
   LockHeld(Option<LockInfo>),
   #[error("S3 operation failed: {0}")]
   S3Error(String),
-  #[error("Failed to serialize lock data: {0}")]
-  SerializationError(String),
-  #[error("Failed to deserialize lock data: {0}")]
-  BadLockData(String),
+  #[error("Failed to serialize or deserialize lock data: {0}")]
+  SerdeError(#[from] serde_json::Error),
 }
 
 #[derive(Debug)]
@@ -117,49 +115,20 @@ pub struct LockHandle {
 pub struct LockGuard {
   lock_key: String,
   node_id: String,
-  // Reference back to the manager to call release
-  // Use Arc if the manager itself is shared via Arc
+  /// Reference back to the manager to call release
+  /// Use Arc if the manager itself is shared via Arc
   lock_manager: Arc<dyn DistributedLock>,
-  released: bool, // Prevent double-release
+  /// If present, this guard will notify the given channel when the lock is released.
+  release_notifier:
+    Option<tokio::sync::oneshot::Sender<Result<(), anyhow::Error>>>,
 }
 
 impl LockGuard {
-  /// Explicitly releases the distributed lock.
-  /// Consumes the guard to prevent further attempts to release.
-  pub async fn release(mut self) -> Result<(), anyhow::Error> {
-    if !self.released {
-      self.released = true;
-      // Create the simple handle needed by the manager's release method
-      let handle = LockHandle {
-        lock_key: self.lock_key.clone(),
-        node_id: self.node_id.clone(),
-      };
-      // Call the manager's release function
-      self.lock_manager.release(handle).await?;
-      // Ensure the guard is dropped now that release is done
-      drop(self);
-    }
-    Ok(())
-  }
-
   /// Renews the lock lease asynchronously, extending its TTL.
   ///
   /// If renewal fails (e.g., the lock was lost or stolen), this method
   /// returns an error, and the guard should be considered invalid
-  /// (it will be marked as released internally to prevent Drop warnings).
-  #[cfg(test)] // only used in tests so far
-  pub async fn renew(
-    &mut self,
-    new_ttl: Duration,
-  ) -> Result<(), anyhow::Error> {
-    if self.released {
-      // Or return Ok(()), depending on desired semantics for renewing an
-      // already released guard
-      return Err(anyhow::anyhow!(
-        "Cannot renew a LockGuard that has already been released"
-      ));
-    }
-
+  pub async fn renew(&self, new_ttl: Duration) -> Result<(), anyhow::Error> {
     // Create the simple handle needed by the manager's renew method
     let handle = LockHandle {
       lock_key: self.lock_key.clone(),
@@ -176,19 +145,22 @@ impl LockGuard {
       }
       Err(lock_err) => {
         // Renewal failed. The lock might be lost.
-        // Mark this guard as released to prevent Drop warnings/panics,
-        // as we can no longer guarantee we hold the lock.
         warn!(
-          "Failed to renew lock key '{}': {:?}. Marking guard as invalid/released.",
-           self.lock_key,
-           lock_err
+          "Failed to renew lock key '{}': {:?}",
+          self.lock_key, lock_err
         );
-        self.released = true; // Prevent Drop side-effects
-
         // Return an error indicating renewal failure.
         Err(anyhow::anyhow!("Failed to renew lock: {:?}", lock_err))
       }
     }
+  }
+
+  /// Set a notifier that will be notified when the lock is released.
+  pub fn set_release_notifier(
+    &mut self,
+    notifier: tokio::sync::oneshot::Sender<Result<(), anyhow::Error>>,
+  ) {
+    self.release_notifier = Some(notifier);
   }
 }
 
@@ -199,24 +171,40 @@ impl fmt::Debug for LockGuard {
       .field("node_id", &self.node_id)
       // Since Arc<dyn DistributedLock> isn't Debug, provide a placeholder
       .field("lock_manager", &"<DistributedLock Manager>")
-      .field("released", &self.released)
       .finish() // Complete the struct formatting
   }
 }
 
+/// Release the lock in the background task on drop.
 impl Drop for LockGuard {
   fn drop(&mut self) {
-    if !self.released {
-      warn!(
-              "LockGuard dropped without explicit async release for lock key: {}. Lock will time out via TTL.",
-              self.lock_key
+    let handle = LockHandle {
+      lock_key: self.lock_key.clone(),
+      node_id: self.node_id.clone(),
+    };
+    let lock_manager = self.lock_manager.clone();
+    let release_notifier = self.release_notifier.take();
+
+    tracing::info!(
+      lock_key = %self.lock_key,
+      node_id = %self.node_id,
+      "Dropping LockGuard, releasing lock"
+    );
+
+    // It's okay not even to catch any errors with the release here since the
+    // lock will time out by itself eventually after the TTL expires.
+    tokio::spawn(async move {
+      let release_result = lock_manager.release(handle).await;
+      if let Some(notifier) = release_notifier {
+        if let Err(e) = notifier.send(release_result) {
+          tracing::error!(
+            error = ?e,
+            "Error sending release notification",
           );
-      #[cfg(debug_assertions)]
-      panic!(
-        "LockGuard dropped without explicit async release for lock key: {}",
-        self.lock_key
-      );
-    }
+        }
+      }
+      tracing::info!("LockGuard dropped, lock released");
+    });
   }
 }
 
@@ -294,10 +282,7 @@ impl DistributedLock for S3DistributedLock {
       Ok(bytes) => bytes,
       Err(e) => {
         warn!(error = %e, lock_key, "Failed to serialize lock info");
-        return Err(LockAcquireError::SerializationError(format!(
-          "Failed to serialize lock info for key '{}': {}",
-          lock_key, e
-        )));
+        return Err(LockAcquireError::SerdeError(e));
       }
     };
 
@@ -318,7 +303,7 @@ impl DistributedLock for S3DistributedLock {
           lock_key,
           node_id: node_id.to_string(),
           lock_manager: self,
-          released: false,
+          release_notifier: None,
         })
       }
       Err(SdkError::ServiceError(service_err)) => {
@@ -351,10 +336,7 @@ impl DistributedLock for S3DistributedLock {
                 Ok(info) => info,
                 Err(e) => {
                   warn!(error = ?e, lock_key, "Failed to deserialize existing lock data");
-                  return Err(LockAcquireError::BadLockData(format!(
-                    "Failed to deserialize lock data for key '{}': {}",
-                    lock_key, e
-                  )));
+                  return Err(LockAcquireError::SerdeError(e));
                 }
               };
 
@@ -414,7 +396,7 @@ impl DistributedLock for S3DistributedLock {
                       lock_key,
                       node_id: node_id.to_string(),
                       lock_manager: self,
-                      released: false,
+                      release_notifier: None,
                     })
                   }
                   Err(SdkError::ServiceError(retry_service_err)) => {
@@ -470,7 +452,7 @@ impl DistributedLock for S3DistributedLock {
                       lock_key,
                       node_id: node_id.to_string(),
                       lock_manager: self,
-                      released: false,
+                      release_notifier: None,
                     })
                   }
                   Err(SdkError::ServiceError(retry_service_err)) => {
@@ -598,10 +580,7 @@ impl DistributedLock for S3DistributedLock {
           Ok(info) => info,
           Err(e) => {
             warn!(error = ?e, lock_key, "Failed to deserialize existing lock data during renewal");
-            return Err(LockAcquireError::BadLockData(format!(
-              "Failed to deserialize lock data for key '{}' during renewal: {}",
-              lock_key, e
-            )));
+            return Err(LockAcquireError::SerdeError(e));
           }
         };
 
@@ -628,10 +607,7 @@ impl DistributedLock for S3DistributedLock {
           Ok(bytes) => bytes,
           Err(e) => {
             warn!(error = %e, lock_key, "Failed to serialize updated lock info during renewal");
-            return Err(LockAcquireError::SerializationError(format!(
-              "Failed to serialize updated lock info for key '{}' during renewal: {}",
-              lock_key, e
-            )));
+            return Err(LockAcquireError::SerdeError(e));
           }
         };
 
@@ -716,6 +692,37 @@ impl DistributedLock for S3DistributedLock {
   }
 }
 
+pub struct StandaloneDistributedLock;
+
+#[async_trait]
+impl DistributedLock for StandaloneDistributedLock {
+  async fn try_acquire(
+    self: Arc<Self>,
+    lock_name: &str,
+    node_id: &str,
+    _ttl: Duration,
+  ) -> Result<LockGuard, LockAcquireError> {
+    Ok(LockGuard {
+      lock_key: lock_name.to_string(),
+      node_id: node_id.to_string(),
+      lock_manager: self,
+      release_notifier: None,
+    })
+  }
+
+  async fn release(&self, _handle: LockHandle) -> Result<(), AnyhowError> {
+    Ok(())
+  }
+
+  async fn renew(
+    &self,
+    handle: LockHandle,
+    _new_ttl: Duration,
+  ) -> Result<LockHandle, LockAcquireError> {
+    Ok(handle)
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -789,7 +796,7 @@ mod tests {
     let node_id = "node_a";
     let ttl = Duration::from_secs(60);
 
-    let guard = lock_manager
+    let mut guard = lock_manager
       .clone()
       .try_acquire(lock_name, node_id, ttl)
       .await
@@ -800,7 +807,13 @@ mod tests {
       "Lock object should exist after acquire"
     );
 
-    guard.release().await.expect("Failed to release lock");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    guard.set_release_notifier(tx);
+
+    drop(guard);
+
+    // Wait until the release is complete
+    rx.await.unwrap().unwrap();
 
     let lock_key_after_release = lock_manager.get_lock_key(lock_name);
     assert!(
@@ -823,11 +836,14 @@ mod tests {
     let node_b = "node_b";
     let ttl = Duration::from_secs(60);
 
-    let guard_a = lock_manager
+    let mut guard_a = lock_manager
       .clone()
       .try_acquire(lock_name, node_a, ttl)
       .await
       .expect("Node A failed to acquire lock");
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    guard_a.set_release_notifier(tx);
 
     let guard_b = lock_manager
       .clone()
@@ -841,20 +857,24 @@ mod tests {
       _ => panic!("Node B should have failed with LockHeld, got {:?}", guard_b),
     }
 
-    guard_a
-      .release()
-      .await
-      .expect("Node A failed to release lock");
+    drop(guard_a);
 
-    let guard_b = lock_manager
+    // Wait until the release is complete
+    rx.await.unwrap().unwrap();
+
+    // Now node B should be able to acquire the lock
+    let mut guard_b = lock_manager
       .try_acquire(lock_name, node_b, ttl)
       .await
       .expect("Node B failed to acquire lock after release");
 
-    guard_b
-      .release()
-      .await
-      .expect("Node B failed to release lock");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    guard_b.set_release_notifier(tx);
+
+    drop(guard_b);
+
+    // Wait until the release is complete and ensure it succeeded
+    rx.await.unwrap().unwrap();
   }
 
   #[tokio::test]
@@ -867,31 +887,39 @@ mod tests {
     let short_ttl = Duration::from_secs(2);
     let long_ttl = Duration::from_secs(60);
 
-    let guard_a = lock_manager
+    let mut guard_a = lock_manager
       .clone()
       .try_acquire(lock_name, node_a, short_ttl)
       .await
       .expect("Node A failed to acquire lock with short TTL");
 
+    let (tx_guard_a, rx_guard_a) = tokio::sync::oneshot::channel();
+    guard_a.set_release_notifier(tx_guard_a);
+
     sleep(short_ttl + Duration::from_secs(1)).await;
 
-    let guard_b = lock_manager
+    let mut guard_b = lock_manager
       .try_acquire(lock_name, node_b, long_ttl)
       .await
       .expect("Node B failed to acquire expired lock");
 
+    let (tx_guard_b, rx_guard_b) = tokio::sync::oneshot::channel();
+    guard_b.set_release_notifier(tx_guard_b);
+
     assert_eq!(guard_b.node_id, node_b);
 
-    let release_a_result = guard_a.release().await;
+    drop(guard_a);
+    // Wait until the release of guard_a is complete
+    let release_a_result = rx_guard_a.await.unwrap();
+
     assert!(
       release_a_result.is_ok(),
       "Releasing stale handle should be okay (lock already gone or owned by B)"
     );
 
-    guard_b
-      .release()
-      .await
-      .expect("Node B failed to release lock");
+    drop(guard_b);
+    // Wait until the release of guard_b is complete and ensure it succeeded
+    rx_guard_b.await.unwrap().unwrap();
   }
 
   #[tokio::test]
@@ -937,11 +965,16 @@ mod tests {
     let mut success_count = 0;
     let mut held_count = 0;
     let mut acquired_guard: Option<LockGuard> = None;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut tx = Some(tx);
 
     for result in results {
       match result {
-        Ok(Ok(guard)) => {
+        Ok(Ok(mut guard)) => {
           success_count += 1;
+          if let Some(tx) = tx.take() {
+            guard.set_release_notifier(tx);
+          }
           acquired_guard = Some(guard);
         }
         Ok(Err(LockAcquireError::LockHeld(_))) => {
@@ -964,10 +997,9 @@ mod tests {
     );
 
     if let Some(guard) = acquired_guard {
-      guard
-        .release()
-        .await
-        .expect("Failed to release lock after concurrent test");
+      drop(guard);
+      // Wait until the release is complete and ensure it succeeded
+      rx.await.unwrap().unwrap();
     }
   }
 
@@ -986,6 +1018,9 @@ mod tests {
       .try_acquire(lock_name, node_id, initial_ttl)
       .await
       .expect("Failed to acquire lock initially");
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    guard.set_release_notifier(tx);
 
     // Check lock exists
     assert!(
@@ -1057,11 +1092,9 @@ mod tests {
       other => panic!("Expected LockHeld error, got {:?}", other),
     }
 
-    // Clean up - release the lock
-    guard
-      .release()
-      .await
-      .expect("Failed to release lock after renewal test");
+    // Wait until the release is complete and ensure it succeeded
+    drop(guard);
+    rx.await.unwrap().unwrap();
   }
 
   // Helper function to get lock info from S3
