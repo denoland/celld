@@ -902,8 +902,6 @@ async fn test_restore_single() {
   test_env.spawn_celld_instance(new_port);
   TestEnv::wait_for_server_ready(new_port);
 
-  sleep(Duration::from_secs(8)).await;
-
   let new_url = format!(
     "http://basic-db.localhost:{}/cell/{}",
     new_port, test_cell_id
