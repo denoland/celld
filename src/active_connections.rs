@@ -189,7 +189,7 @@ mod macos {
     // Exclude:
     // - FIN_WAIT_1/2, CLOSING, LAST_ACK: teardown in progress, no useful I/O
     // - TIME_WAIT: fully closed, waiting for socket reuse
-    println!("lsof output:\n{}", s);
+    // println!("lsof output:\n{}", s);
     s.lines()
       .filter(|line| {
         line.contains("TCP")
@@ -202,20 +202,17 @@ mod macos {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::io::Read;
   use std::io::Write;
+  use std::net::TcpListener;
+  use std::net::TcpStream;
+  use std::process::Command;
+  use std::process::Stdio;
+  use std::thread::sleep;
+  use std::time::Duration;
 
-  // Relies on `nc` (netcat) being available in PATH.
-  // 1. Spawn `nc` in server-listen mode (no established connections yet).
-  // 2. Verify watcher reports 0 active connections.
-  // 3. Open a client TcpStream from the test process to that server.
-  // 4. Verify watcher reports 1 active connection for the nc process.
   #[test]
-  fn test_count() {
-    use std::net::TcpStream;
-    use std::process::Command;
-    use std::thread::sleep;
-    use std::time::Duration;
-
+  fn test_count_server() {
     // Pick an OS-assigned port via a temp listener, then close it.
     let port = {
       use std::net::TcpListener;
@@ -257,5 +254,40 @@ mod tests {
     // Cleanup
     let _ = server.kill();
     let _ = server.wait();
+  }
+
+  #[test]
+  fn test_count_client() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // Start accepting connections in another thread
+    let _handle = std::thread::spawn(move || {
+      let (mut stream, _) = listener.accept().unwrap();
+      let mut buf = Vec::new();
+      let _ = stream.read_to_end(&mut buf);
+    });
+
+    // Give nc time to connect, then wait for confirmation from server
+    sleep(Duration::from_millis(300));
+
+    let mut client = Command::new("nc")
+      .arg("127.0.0.1")
+      .arg(addr.port().to_string())
+      .stdin(Stdio::piped())
+      .spawn()
+      .expect("spawn nc client");
+
+    // Not sure if this is needed, but it seems to help
+    if let Some(ref mut stdin) = client.stdin {
+      stdin.write_all(b"keep connection active\n").unwrap();
+    }
+
+    // Should have exactly one active connection for the client process
+    assert_eq!(count(client.id()), 1);
+
+    // Cleanup
+    let _ = client.kill();
+    let _ = client.wait();
   }
 }
