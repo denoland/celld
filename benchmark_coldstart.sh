@@ -21,7 +21,7 @@ echo "Running coldstart benchmark..."
 hey -cpus 1 -n 1000 -c 10 \
   -host hello.localhost \
   -H "x-single-use-isolate: true" \
-  http://127.0.0.1:3000/cell/foo
+  http://127.0.0.1:8000/cell/foo
 
 echo "Cleaning up..."
 kill -9 $SERVER_PID
