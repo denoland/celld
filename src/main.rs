@@ -122,7 +122,7 @@ fn main() {
   tracing_subscriber::fmt::init();
 
   // see benchmark_deno_startup.sh
-  if std::env::var("BENCHMARK_DENO_STARTUP").unwrap_or_default() == "1" {
+  if std::env::var("BENCHMARK_DENO_STARTUP").is_ok() {
     let iterations = 100;
     println!(
       "Running Deno startup time benchmark (iterations: {})...",
