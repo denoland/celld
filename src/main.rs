@@ -1,3 +1,4 @@
+mod active_connections;
 mod child_on_parent_exit;
 mod cluster_membership;
 mod config;

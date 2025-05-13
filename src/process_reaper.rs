@@ -35,8 +35,9 @@ impl ProcessReaper {
       let mut to_reap = Vec::new();
 
       for (host, entry) in processes.iter() {
-        if now.duration_since(entry.last_used) > self.idle_timeout
-          && entry.active_connections == 0
+        let has_active_connections = entry.has_active_connections();
+        if !has_active_connections
+          && now.duration_since(entry.last_used) > self.idle_timeout
         {
           info!(
             host = %host,
@@ -45,11 +46,11 @@ impl ProcessReaper {
             "Process marked for reaping due to inactivity"
           );
           to_reap.push(host.clone());
-        } else if entry.active_connections > 0 {
+        } else if has_active_connections {
           trace!(
             host = %host,
             pid = entry.pid,
-            active_connections = entry.active_connections,
+            active_connections = has_active_connections,
             "Skipping reap for process with active connections"
           );
         }

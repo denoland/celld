@@ -20,7 +20,9 @@ OPERATION:
     http://<tenant_host>/<path>         (Serves static file)
 
   Each unique '/cell/<cell_id>' gets a dedicated Deno isolate. Clustered
-  celld nodes use consistent hashing to distribute Cells.
+  celld nodes use consistent hashing to distribute Cells. Cells with active
+  WebSocket connections or outbound TCP connections remain alive, and
+  automatically terminate after becoming idle.
 
 JS API (starting at main.js or main.ts):
 	import { cell } from "jsr:@ry/cells";
