@@ -368,7 +368,7 @@ impl ProcessManager {
       restore_state = RestoreState::Complete(false);
     } else {
       // No replica and the database already exists
-      info!(
+      debug!(
         tenant = %host,
         cell_id = %cell_id,
         db_path = %db_path.display(),

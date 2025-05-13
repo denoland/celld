@@ -1,8 +1,8 @@
 mod active_connections;
+mod benchmark_deno_startup;
 mod child_on_parent_exit;
 mod cluster_membership;
 mod config;
-mod deno_benchmark;
 mod distributed_lock;
 mod heartbeat_service;
 mod lock_guard_ttl_updater;
@@ -121,25 +121,18 @@ fn start_server(config: config::Config) -> Server {
 fn main() {
   tracing_subscriber::fmt::init();
 
-  // Check if we should run the benchmark
-  if std::env::var("DENO_BENCH").unwrap_or_default() == "1" {
-    // Get iteration count from environment variable
-    let iterations = std::env::var("BENCH_ITERATIONS")
-      .unwrap_or_else(|_| "100".to_string())
-      .parse::<usize>()
-      .unwrap_or(100);
-
+  // see benchmark_deno_startup.sh
+  if std::env::var("BENCHMARK_DENO_STARTUP").unwrap_or_default() == "1" {
+    let iterations = 100;
     println!(
-      "Running Deno coldstart benchmark (iterations: {})...",
+      "Running Deno startup time benchmark (iterations: {})...",
       iterations
     );
 
     // Create a tokio runtime for the benchmark
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-      deno_benchmark::benchmark_deno_coldstart(iterations)
-        .await
-        .unwrap();
+      benchmark_deno_startup::run(iterations).await.unwrap();
     });
     return;
   }
