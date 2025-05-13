@@ -230,6 +230,7 @@ mod tests {
       .arg("-l")
       .arg("127.0.0.1")
       .arg(port.to_string())
+      .stdout(Stdio::piped())
       .spawn()
     {
       Ok(c) => c,
@@ -246,6 +247,10 @@ mod tests {
     let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
 
     client.write_all(b"keep connection active\n").unwrap();
+
+    // Read byte from server.stdout to prevent race.
+    let mut buf = [0u8; 1];
+    let _ = server.stdout.as_mut().unwrap().read_exact(&mut buf);
 
     // Should have exactly one active connection
     assert_eq!(count(server.id()), 1);
