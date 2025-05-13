@@ -25,58 +25,92 @@ pub fn count(pid: u32) -> usize {
 #[cfg(target_os = "linux")]
 mod linux {
   use std::{
-    fs::File,
+    collections::HashSet,
+    fs::{self, File},
     io::{self, BufRead, BufReader},
+    os::unix::fs::MetadataExt,
     path::PathBuf,
   };
 
-  const TCP_FILES: [&str; 2] = ["tcp", "tcp6"];
-
+  /// Returns the number of TCP connections in ESTABLISHED or CLOSE_WAIT state
+  /// that are actively held open by the given PID.
   pub fn count(pid: u32) -> usize {
+    let inode_set = match list_socket_inodes(pid) {
+      Ok(set) => set,
+      Err(_) => return 0,
+    };
+
+    let tcp_files = ["tcp", "tcp6"];
     let mut total_count = 0;
 
-    for entry in TCP_FILES.iter() {
+    for entry in tcp_files.iter() {
       let mut p = PathBuf::from("/proc");
       p.push(pid.to_string());
       p.push("net");
       p.push(entry);
 
-      // Try to open the file, handle ENOENT gracefully
       let f = match File::open(&p) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
         Err(e) => panic!("Failed to open {}: {}", p.display(), e),
       };
 
-      total_count += count_connections(f);
+      total_count += count_filtered_connections(BufReader::new(f), &inode_set);
     }
+
     total_count
   }
 
-  /// Parses a `/proc/<pid>/net/tcp*` file and counts active connections.
-  ///
-  /// Count only meaningful connection states:
-  /// - 01: ESTABLISHED - fully active, data can flow in/out
-  /// - 08: CLOSE_WAIT - peer closed, local side may still read
-  pub fn count_connections<R: BufRead>(reader: R) -> usize {
+  /// Collects socket inodes currently open in `/proc/<pid>/fd`
+  fn list_socket_inodes(pid: u32) -> io::Result<HashSet<u64>> {
+    let mut inodes = HashSet::new();
+    let fd_path = format!("/proc/{}/fd", pid);
+    for entry in fs::read_dir(fd_path)? {
+      let path = entry?.path();
+      if let Ok(target) = fs::read_link(&path) {
+        if let Some(s) = target.to_str() {
+          if let Some(inode_str) =
+            s.strip_prefix("socket:[").and_then(|s| s.strip_suffix("]"))
+          {
+            if let Ok(inode) = inode_str.parse::<u64>() {
+              inodes.insert(inode);
+            }
+          }
+        }
+      }
+    }
+    Ok(inodes)
+  }
+
+  /// Parses `/proc/<pid>/net/tcp*` and counts only entries in state 01 (ESTABLISHED) or 08 (CLOSE_WAIT)
+  /// *and* whose inode is actively held by the process (present in `fd/`).
+  fn count_filtered_connections<R: BufRead>(
+    reader: R,
+    inode_set: &HashSet<u64>,
+  ) -> usize {
     let mut count = 0;
 
     for (idx, line) in reader.lines().enumerate() {
       let l = match line {
         Ok(l) => l,
-        Err(e) => panic!("Failed to read line from /proc tcp file: {}", e),
+        Err(_) => continue,
       };
 
       if idx == 0 {
-        // Header
+        continue; // header
+      }
+
+      let fields: Vec<&str> = l.split_whitespace().collect();
+      if fields.len() < 10 {
         continue;
       }
 
-      // Get the connection state from the 4th column
-      let state = l.split_whitespace().nth(3);
+      let state = fields[3];
+      let inode = fields[9].parse::<u64>().ok();
 
-      // Count ESTABLISHED (01) and CLOSE_WAIT (08) states
-      if state == Some("01") || state == Some("08") {
+      if (state == "01" || state == "08")
+        && inode.map_or(false, |i| inode_set.contains(&i))
+      {
         count += 1;
       }
     }
@@ -84,15 +118,38 @@ mod linux {
   }
 
   #[test]
-  fn test_linux_count_connections() {
-    // Test file with:
-    // - 2 ESTABLISHED connections (state 01)
-    // - 1 CLOSE_WAIT connection (state 08)
-    // - 1 FIN_WAIT connection (state 04) which should be ignored
-    let sample = b"  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   46: 010310AC:91D5 020310AC:01BB 01 00000000:00000000 00:00000000 00000000   1000        0 123456789 1 0000000000000000 100 0 0 10 0\n   47: 010310AC:91D6 020310AC:01BC 01 00000000:00000000 00:00000000 00000000   1000        0 123456790 1 0000000000000000 100 0 0 10 0\n   48: 010310AC:91D7 020310AC:01BD 08 00000000:00000000 00:00000000 00000000   1000        0 123456791 1 0000000000000000 100 0 0 10 0\n   49: 010310AC:91D8 020310AC:01BE 04 00000000:00000000 00:00000000 00000000   1000        0 123456792 1 0000000000000000 100 0 0 10 0\n";
+  fn test_count_filtered_connections_empty() {
+    let sample = b" sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 3600007F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000   991        0 6423 1 0000000000000000 100 0 0 10 5
+   1: 0100007F:B179 00000000:0000 0A 00000000:00000000 00:00000000 00000000   501        0 9493 1 0000000000000000 100 0 0 10 0
+   2: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 29920 1 0000000000000000 100 0 0 10 0
+   3: 00000000:15B3 00000000:0000 0A 00000000:00000000 00:00000000 00000000   501        0 509276 1 0000000000000000 100 0 0 10 0
+   4: 0100007F:80A1 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 40493 1 0000000000000000 100 0 0 10 0
+   5: 3500007F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000   991        0 6421 1 0000000000000000 100 0 0 10 5
+   6: 0F05A8C0:0016 0205A8C0:7148 01 00000000:00000000 02:00012903 00000000     0        0 7151 3 0000000000000000 20 5 31 10 -1";
     let cursor = std::io::Cursor::new(sample);
-    // Should count 2 ESTABLISHED + 1 CLOSE_WAIT = 3 active connections
-    assert_eq!(linux::count_connections(cursor), 3);
+    let mut inode_set = HashSet::new();
+    inode_set.insert(509276); // server socket
+    assert_eq!(count_filtered_connections(cursor, &inode_set), 0);
+  }
+
+  #[test]
+  fn test_count_filtered_connections_one() {
+    let sample = b"  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+       0: 3600007F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000   991        0 6423 1 0000000000000000 100 0 0 10 5
+          1: 0100007F:B179 00000000:0000 0A 00000000:00000000 00:00000000 00000000   501        0 9493 1 0000000000000000 100 0 0 10 0
+             2: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 29920 1 0000000000000000 100 0 0 10 0
+                3: 00000000:15B3 00000000:0000 0A 00000000:00000000 00:00000000 00000000   501        0 511703 1 0000000000000000 100 0 0 10 0
+                   4: 0100007F:80A1 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 40493 1 0000000000000000 100 0 0 10 0
+                      5: 3500007F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000   991        0 6421 1 0000000000000000 100 0 0 10 5
+                         6: 0F05A8C0:0016 0205A8C0:7148 01 00000000:00000000 02:000AF11E 00000000     0        0 7151 4 0000000000000000 20 4 31 10 -1
+                            7: 0100007F:AC86 0100007F:15B3 01 00000000:00000000 00:00000000 00000000   501        0 510773 1 0000000000000000 20 0 0 10 -1
+                               8: 0100007F:15B3 0100007F:AC86 01 00000000:00000006 00:00000000 00000000   501        0 511704 1 0000000000000000 20 4 30 10 -1";
+    let cursor = std::io::Cursor::new(sample);
+    let mut inode_set = HashSet::new();
+    inode_set.insert(511703);
+    inode_set.insert(511704);
+    assert_eq!(count_filtered_connections(cursor, &inode_set), 1);
   }
 }
 
@@ -159,11 +216,6 @@ mod tests {
     use std::thread::sleep;
     use std::time::Duration;
 
-    // Check if nc is available
-    if Command::new("nc").arg("-h").output().is_err() {
-      panic!("netcat (nc) command not found. Please install netcat to run this test.");
-    }
-
     // Pick an OS-assigned port via a temp listener, then close it.
     let port = {
       use std::net::TcpListener;
@@ -173,12 +225,20 @@ mod tests {
 
     // Start nc server: `nc -l 127.0.0.1 <port>`
     // Inherit stdio from parent process to prevent early FIN
-    let mut server = Command::new("nc")
+    let mut server = match Command::new("nc")
       .arg("-l")
       .arg("127.0.0.1")
       .arg(port.to_string())
       .spawn()
-      .expect("Failed to start netcat server");
+    {
+      Ok(c) => c,
+      Err(e) => {
+        if e.kind() == std::io::ErrorKind::NotFound {
+          panic!("netcat (nc) command not found. Please install netcat to run this test.");
+        }
+        panic!("could not spawn nc: {}", e);
+      }
+    };
 
     // Give nc time to bind
     sleep(Duration::from_millis(100));
