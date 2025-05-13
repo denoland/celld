@@ -31,10 +31,10 @@ by a single leader node.
     operations on the leader node. _[Note: Currently assuming these operations
     are fast enough not to require `spawn_blocking`, as the service runs in its
     own background task. Re-evaluate if performance issues arise.]_
-  - **Table (`globalalarms`):**
+  - **Table (`global_alarms`):**
     `scheduled_time_unix_ms INTEGER NOT NULL, tenant TEXT NOT NULL, cell_id TEXT NOT NULL, PRIMARY KEY (scheduled_time_unix_ms, tenant, cell_id)`.
   - **Index:**
-    `idx_globalalarms_scheduled_time ON globalalarms (scheduled_time_unix_ms)`.
+    `idx_global_alarms_scheduled_time ON global_alarms (scheduled_time_unix_ms)`.
 - **Durability (Litestream):** This central DB (`main.db` for the `_system`
   tenant) uses its _own_ `SqliteReplica` instance for Litestream replication to
   S3.
@@ -119,7 +119,7 @@ socket uses raw HTTP formatting.
      }
      ```
    - **Leader Action:**
-     `INSERT OR REPLACE INTO globalalarms (scheduled_time_unix_ms, tenant, cell_id) VALUES (?, ?, ?)`
+     `INSERT OR REPLACE INTO global_alarms (scheduled_time_unix_ms, tenant, cell_id) VALUES (?, ?, ?)`
      using `rusqlite`.
    - **Response (Success):** `200 OK` with `{"status": "success"}`.
 
@@ -135,7 +135,7 @@ socket uses raw HTTP formatting.
      }
      ```
    - **Leader Action:**
-     `DELETE FROM globalalarms WHERE tenant = ? AND cell_id = ?` using
+     `DELETE FROM global_alarms WHERE tenant = ? AND cell_id = ?` using
      `rusqlite`.
    - **Response (Success):** `200 OK` with
      `{"status": "success", "deleted_count": 1}` (or 0).
@@ -145,7 +145,7 @@ socket uses raw HTTP formatting.
    - **Forwarding:** Request must be forwarded to the current scheduler leader
      node.
    - **Leader Action:**
-     `SELECT scheduled_time_unix_ms FROM globalalarms WHERE tenant = ? AND cell_id = ?`
+     `SELECT scheduled_time_unix_ms FROM global_alarms WHERE tenant = ? AND cell_id = ?`
      using `rusqlite`.
    - **Response (Success):** `200 OK` with JSON matching
      `struct GetAlarmResponse { tenant: String, cell_id: String, scheduled_time_unix_ms: Option<i64> }`
@@ -245,8 +245,8 @@ _Stub implementations using `unimplemented!()` are acceptable initially._
        `rusqlite::Connection::open()` and `conn.execute_batch()` _[Note:
        spawn_blocking recommended here if schema creation could be slow, but
        proceeding without for now]_ to run
-       `CREATE TABLE IF NOT EXISTS globalalarms (...)` and
-       `CREATE INDEX IF NOT EXISTS idx_globalalarms_scheduled_time ON globalalarms (...)`.
+       `CREATE TABLE IF NOT EXISTS global_alarms (...)` and
+       `CREATE INDEX IF NOT EXISTS idx_global_alarms_scheduled_time ON global_alarms (...)`.
    - **Checkpoint:** `cargo check` passes. Scheduler leader can acquire lock,
      restore system DB, start its replication, and create schema.
 
@@ -256,10 +256,10 @@ _Stub implementations using `unimplemented!()` are acceptable initially._
      - Open `rusqlite::Connection`. _[Note: DB queries here are blocking. Run in
        spawn_blocking if they cause performance issues.]_
      - Perform
-       `SELECT tenant, cell_id FROM globalalarms WHERE scheduled_time_unix_ms <= ? ORDER BY scheduled_time_unix_ms LIMIT 100`
+       `SELECT tenant, cell_id FROM global_alarms WHERE scheduled_time_unix_ms <= ? ORDER BY scheduled_time_unix_ms LIMIT 100`
        (get current time in ms).
      - For each due alarm (`tenant`, `cell_id`):
-       - `DELETE FROM globalalarms WHERE tenant = ? AND cell_id = ?`.
+       - `DELETE FROM global_alarms WHERE tenant = ? AND cell_id = ?`.
        - Find target node address:
          `node_state.peer_manager.get_cell_owners(tenant, cell_id)`. Pick the
          first owner.
