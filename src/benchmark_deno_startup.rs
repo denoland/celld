@@ -6,7 +6,7 @@ use crate::config::Config;
 use crate::node_state::NodeState;
 
 /// Benchmark function to measure Deno process coldstart performance
-pub async fn benchmark_deno_coldstart(iterations: usize) -> Result<()> {
+pub async fn run(iterations: usize) -> Result<()> {
   // Create a mock configuration and process manager
   let config = match Config::from_env() {
     Ok(config) => config,
@@ -84,7 +84,7 @@ pub async fn benchmark_deno_coldstart(iterations: usize) -> Result<()> {
     let total: Duration = results.iter().sum();
     let avg = total / results.len() as u32;
 
-    println!("\nDeno Coldstart Statistics:");
+    println!("\nDeno Startup Statistics:");
     println!("Min: {} ms", min.as_millis());
     println!("Max: {} ms", max.as_millis());
     println!("Avg: {} ms", avg.as_millis());

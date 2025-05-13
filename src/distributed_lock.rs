@@ -185,7 +185,7 @@ impl Drop for LockGuard {
     let lock_manager = self.lock_manager.clone();
     let release_notifier = self.release_notifier.take();
 
-    tracing::info!(
+    tracing::debug!(
       lock_key = %self.lock_key,
       node_id = %self.node_id,
       "Dropping LockGuard, releasing lock"
@@ -203,7 +203,7 @@ impl Drop for LockGuard {
           );
         }
       }
-      tracing::info!("LockGuard dropped, lock released");
+      tracing::debug!("LockGuard dropped, lock released");
     });
   }
 }
