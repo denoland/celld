@@ -28,7 +28,6 @@ mod linux {
     collections::HashSet,
     fs::{self, File},
     io::{self, BufRead, BufReader},
-    os::unix::fs::MetadataExt,
     path::PathBuf,
   };
 
@@ -107,6 +106,11 @@ mod linux {
 
       let state = fields[3];
       let inode = fields[9].parse::<u64>().ok();
+
+      println!(
+        "count_filtered_connections state = {}, inode = {:?}",
+        state, inode
+      );
 
       if (state == "01" || state == "08")
         && inode.map_or(false, |i| inode_set.contains(&i))
@@ -211,6 +215,13 @@ mod tests {
   use std::thread::sleep;
   use std::time::Duration;
 
+  fn nc_error(e: std::io::Error) -> ! {
+    if e.kind() == std::io::ErrorKind::NotFound {
+      panic!("netcat (nc) command not found. Please install netcat to run this test.");
+    }
+    panic!("could not spawn nc: {}", e);
+  }
+
   #[test]
   fn test_count_server() {
     // Pick an OS-assigned port via a temp listener, then close it.
@@ -229,12 +240,7 @@ mod tests {
       .spawn()
     {
       Ok(c) => c,
-      Err(e) => {
-        if e.kind() == std::io::ErrorKind::NotFound {
-          panic!("netcat (nc) command not found. Please install netcat to run this test.");
-        }
-        panic!("could not spawn nc: {}", e);
-      }
+      Err(e) => nc_error(e),
     };
 
     // Give nc time to bind
@@ -261,27 +267,37 @@ mod tests {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
 
+    let (tx, rx) = std::sync::mpsc::channel();
+
     // Start accepting connections in another thread
     let _handle = std::thread::spawn(move || {
       let (mut stream, _) = listener.accept().unwrap();
-      let mut buf = Vec::new();
-      let _ = stream.read_to_end(&mut buf);
+      let mut buf = [0u8; 1];
+      let _ = stream.read_exact(&mut buf); // read one byte
+      let _ = tx.send(()); // notify main thread
+      let _ = stream.read_to_end(&mut Vec::new()); // continue draining
     });
 
-    // Give nc time to connect, then wait for confirmation from server
     sleep(Duration::from_millis(300));
 
-    let mut client = Command::new("nc")
+    let mut client = match Command::new("nc")
       .arg("127.0.0.1")
       .arg(addr.port().to_string())
       .stdin(Stdio::piped())
       .spawn()
-      .expect("spawn nc client");
+    {
+      Ok(c) => c,
+      Err(e) => nc_error(e),
+    };
 
     // Not sure if this is needed, but it seems to help
     if let Some(ref mut stdin) = client.stdin {
       stdin.write_all(b"keep connection active\n").unwrap();
     }
+
+    // Wait until the server confirms it has accepted and read
+    rx.recv_timeout(Duration::from_secs(2))
+      .expect("server did not confirm accept/read");
 
     // Should have exactly one active connection for the client process
     assert_eq!(count(client.id()), 1);
