@@ -219,8 +219,7 @@ mod tests {
   fn test_count_server() {
     // Pick an OS-assigned port via a temp listener, then close it.
     let port = {
-      use std::net::TcpListener;
-      let l = TcpListener::bind("127.0.0.1:0").expect("bind temp");
+      let l = TcpListener::bind("127.0.0.1:0").unwrap();
       l.local_addr().unwrap().port()
     };
 
@@ -259,6 +258,7 @@ mod tests {
     assert_eq!(count(server.id()), 1);
 
     // Cleanup
+    drop(client); // keep alive until end
     let _ = server.kill();
     let _ = server.wait();
   }
