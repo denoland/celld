@@ -139,7 +139,7 @@ async fn test_mesh_dynamic_membership() {
     .collect();
 
   println!("killing stopping the second node...");
-  test_env.kill_celld_instance(1);
+  test_env.kill_cell_instance(1);
 
   // Wait for heartbeat interval (shorter for tests)
   println!("Waiting for heartbeat interval to expire...");
@@ -159,7 +159,7 @@ async fn test_mesh_dynamic_membership() {
   // Start a new node
   println!("Starting a new node...");
   let new_port = 7044;
-  test_env.spawn_celld_instance(new_port);
+  test_env.spawn_cell_instance(new_port);
   TestEnv::wait_for_server_ready(new_port);
 
   // Wait for peer exchange
@@ -334,11 +334,11 @@ async fn test_node_failure_takeover() {
   // (simulate node failure)
   println!("Killing primary node on port {}...", primary_owner_port);
   // We already found the primary_index earlier
-  test_env.kill_celld_instance(primary_index);
+  test_env.kill_cell_instance(primary_index);
 
   // Wait for node failure to be detected (heartbeat timeout)
-  // CELLD_STALENESS_THRESHOLD_SECS is set to 6 seconds in TestEnv::spawn_celld_instance
-  // Also CELLD_LOCK_GUARD_TTL_SECS is set to 6 seconds in TestEnv::spawn_celld_instance,
+  // CELL_STALENESS_THRESHOLD_SECS is set to 6 seconds in TestEnv::spawn_cell_instance
+  // Also CELL_LOCK_GUARD_TTL_SECS is set to 6 seconds in TestEnv::spawn_cell_instance,
   // meaning that the lock on the cell ("basic-db.localhost", test_cell_id)
   // should expire 6 seconds after the primary node is killed.
   println!("Waiting for primary node failure to be detected...");
@@ -488,7 +488,7 @@ async fn test_concurrent_takeover_locking() {
     .iter()
     .position(|&p| p == primary_owner_port)
     .unwrap();
-  test_env.graceful_shutdown_celld_instance(primary_index);
+  test_env.graceful_shutdown_cell_instance(primary_index);
 
   // Sleep to ensure the primary node has fully shutdown
   sleep(Duration::from_secs(10)).await;
@@ -666,7 +666,7 @@ async fn test_proxy_forwarding_retry() {
     .iter()
     .position(|&p| p == primary_owner_port)
     .unwrap();
-  test_env.kill_celld_instance(primary_index);
+  test_env.kill_cell_instance(primary_index);
 
   // Wait for heartbeat timeout to detect node failure
   println!("Waiting for primary node failure to be detected...");
@@ -785,7 +785,7 @@ async fn test_restore_coordination() {
 
   // Stop Node A gracefully
   println!("Stopping Node A...");
-  test_env.graceful_shutdown_celld_instance(0);
+  test_env.graceful_shutdown_cell_instance(0);
 
   // Remove the local database file to force restore from S3
   std::fs::remove_file(&db_path).unwrap();
@@ -801,9 +801,9 @@ async fn test_restore_coordination() {
   let port_c = TestEnv::allocate_ports(7610, 1, 2)[0];
 
   println!("Starting Node B on port {}", port_b);
-  test_env.spawn_celld_instance(port_b);
+  test_env.spawn_cell_instance(port_b);
   println!("Starting Node C on port {}", port_c);
-  test_env.spawn_celld_instance(port_c);
+  test_env.spawn_cell_instance(port_c);
 
   // Wait for both nodes to be ready
   TestEnv::wait_for_server_ready(port_b);
@@ -895,13 +895,13 @@ async fn test_restore_single() {
   sleep(Duration::from_secs(2)).await;
 
   println!("Shutting down celld instance...");
-  test_env.graceful_shutdown_celld_instance(0);
+  test_env.graceful_shutdown_cell_instance(0);
 
   println!("Removing local database files...");
   clean_cell_workspace(test_cell_id, &test_env);
 
   let new_port = TestEnv::allocate_ports(7620, 1, 2)[0];
-  test_env.spawn_celld_instance(new_port);
+  test_env.spawn_cell_instance(new_port);
   TestEnv::wait_for_server_ready(new_port);
 
   let new_url = format!(

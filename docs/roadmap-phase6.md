@@ -56,11 +56,11 @@ by a single leader node.
   - **Control Socket (`control.sock`):** Deno connects -> Rust listens
     (`tokio::net::UnixListener`). Used for Deno sending `set/delete/getAlarm`
     commands back to Rust using **manually constructed HTTP requests over UDS**.
-    Path passed via `CELLD_CONTROL_SOCKET`.
+    Path passed via `CELL_CONTROL_SOCKET`.
 - **API Call Flow (`set/delete/getAlarm` via Control Socket):**
   - User code calls `ctx.setAlarm(timestamp)`.
   - `bootstrap.ts` connects to the `control.sock` UDS path specified by
-    `CELLD_CONTROL_SOCKET`.
+    `CELL_CONTROL_SOCKET`.
   - `bootstrap.ts` **manually constructs a raw HTTP request string** (e.g.,
     `POST /_internal/alarms HTTP/1.1\r\nHost: control\r\nContent-Type: application/json\r\nContent-Length: N\r\n\r\n{"scheduled_time_unix_ms": ...}`),
     encodes it to bytes, and writes it to the Control Socket `Deno.UnixConn`.
@@ -331,7 +331,7 @@ _Stub implementations using `unimplemented!()` are acceptable initially._
 6. **Rust Host UDS Handling (Control Socket - Manual HTTP Parsing):**
    - [ ] **Modify `process_manager.rs::spawn_deno_process`:**
      - Create `main.sock` (primary) and `control.sock` paths.
-     - Pass paths via `DENO_SERVE_ADDRESS` and `CELLD_CONTROL_SOCKET`.
+     - Pass paths via `DENO_SERVE_ADDRESS` and `CELL_CONTROL_SOCKET`.
      - **Bind and Listen:** After spawn, `tokio::net::UnixListener::bind` to
        `control.sock`.
    - [ ] **Modify `ProcessEntry`:** Add a field to hold the
@@ -384,7 +384,7 @@ _Stub implementations using `unimplemented!()` are acceptable initially._
 
 7. **Deno Integration (`bootstrap.ts` - Manual HTTP over UDS):**
    - [ ] **Establish Control Connection:**
-     - Read `CELLD_CONTROL_SOCKET` env var.
+     - Read `CELL_CONTROL_SOCKET` env var.
      - `await Deno.connect(...)` to the control socket path. Store the
        `Deno.UnixConn` (e.g., `controlConn`).
    - [ ] **Implement Manual HTTP-over-UDS Helpers:**

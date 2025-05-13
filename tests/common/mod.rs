@@ -89,7 +89,7 @@ impl TestEnv {
     };
 
     for &port in ports.iter() {
-      test_env.spawn_celld_instance(port);
+      test_env.spawn_cell_instance(port);
     }
 
     // Wait for servers to be ready by probing TCP connections
@@ -105,7 +105,7 @@ impl TestEnv {
     test_env
   }
 
-  pub fn kill_celld_instance(&mut self, index: usize) {
+  pub fn kill_cell_instance(&mut self, index: usize) {
     let mut server = self.servers.remove(index);
     let _ = self.ports.remove(index);
     let pid = Pid::from_raw(server.id() as i32);
@@ -114,7 +114,7 @@ impl TestEnv {
     server.wait().unwrap();
   }
 
-  pub fn graceful_shutdown_celld_instance(&mut self, index: usize) {
+  pub fn graceful_shutdown_cell_instance(&mut self, index: usize) {
     let mut server = self.servers.remove(index);
     let _ = self.ports.remove(index);
     let pid = Pid::from_raw(server.id() as i32);
@@ -122,28 +122,28 @@ impl TestEnv {
     server.wait().unwrap();
   }
 
-  pub fn spawn_celld_instance(&mut self, port: u16) {
+  pub fn spawn_cell_instance(&mut self, port: u16) {
     let advertise_addr = format!("127.0.0.1:{}", port);
     let internal_addr = format!("127.0.0.1:{}", port + 1);
     let server = Command::new(env!("CARGO_BIN_EXE_celld"))
       .env("ADVERTISE_ADDR", &advertise_addr)
       .env("INTERNAL_LISTEN_ADDR", &internal_addr)
       .env("DATA", "./data")
-      .env("CELLD_HEARTBEAT_INTERVAL", "2")
-      .env("CELLD_GRACE_PERIOD_SECONDS", "5")
+      .env("CELL_HEARTBEAT_INTERVAL", "2")
+      .env("CELL_GRACE_PERIOD_SECONDS", "5")
       // Use a shorter staleness threshold for tests to detect failures faster
-      .env("CELLD_STALENESS_THRESHOLD_SECS", "6")
-      .env("CELLD_LOCK_GUARD_TTL_SECS", "6")
+      .env("CELL_STALENESS_THRESHOLD_SECS", "6")
+      .env("CELL_LOCK_GUARD_TTL_SECS", "6")
       .env(
-        "CELLD_S3_ENDPOINT",
+        "CELL_S3_ENDPOINT",
         format!("http://localhost:{}", self.minio_server.port),
       )
-      .env("CELLD_S3_BUCKET", &self.bucket_name)
-      .env("CELLD_S3_REGION", "us-east-1")
-      .env("CELLD_S3_PREFIX", format!("celld-test-{}", self.test_id))
-      .env("CELLD_S3_ACCESS_KEY_ID", &self.minio_server.access_key_id)
+      .env("CELL_S3_BUCKET", &self.bucket_name)
+      .env("CELL_S3_REGION", "us-east-1")
+      .env("CELL_S3_PREFIX", format!("celld-test-{}", self.test_id))
+      .env("CELL_S3_ACCESS_KEY_ID", &self.minio_server.access_key_id)
       .env(
-        "CELLD_S3_SECRET_ACCESS_KEY",
+        "CELL_S3_SECRET_ACCESS_KEY",
         &self.minio_server.secret_access_key,
       )
       //.env("RUST_LOG", "debug")
@@ -195,7 +195,7 @@ impl Drop for TestEnv {
   fn drop(&mut self) {
     // Kill all server instances
     for _i in 0..self.servers.len() {
-      self.kill_celld_instance(0);
+      self.kill_cell_instance(0);
     }
 
     // Release all ports

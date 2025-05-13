@@ -134,35 +134,35 @@ impl Config {
     }
 
     // Get heartbeat interval with fallback to 30 seconds
-    let heartbeat_secs = var("CELLD_HEARTBEAT_INTERVAL")
+    let heartbeat_secs = var("CELL_HEARTBEAT_INTERVAL")
       .ok()
       .and_then(|s| s.parse::<u64>().ok())
       .unwrap_or(30);
     let heartbeat_interval = Duration::from_secs(heartbeat_secs);
 
     // Get staleness threshold with fallback to 90 seconds
-    let staleness_secs = var("CELLD_STALENESS_THRESHOLD_SECS")
+    let staleness_secs = var("CELL_STALENESS_THRESHOLD_SECS")
       .ok()
       .and_then(|s| s.parse::<u64>().ok())
       .unwrap_or(90);
     let staleness_threshold = Duration::from_secs(staleness_secs);
 
-    let lock_guard_ttl_secs = var("CELLD_LOCK_GUARD_TTL_SECS")
+    let lock_guard_ttl_secs = var("CELL_LOCK_GUARD_TTL_SECS")
       .ok()
       .and_then(|s| s.parse::<u64>().ok())
       .unwrap_or(30);
     let lock_guard_ttl = Duration::from_secs(lock_guard_ttl_secs);
 
     // Get optional S3 configuration
-    // Prioritize CELLD_S3 specific variables over standard AWS variables
-    let s3_endpoint = var("CELLD_S3_ENDPOINT").ok();
-    let s3_bucket = var("CELLD_S3_BUCKET").ok();
-    let s3_region = var("CELLD_S3_REGION").or_else(|_| var("AWS_REGION")).ok();
-    let s3_path = var("CELLD_S3_PREFIX").ok();
-    let s3_access_key_id = var("CELLD_S3_ACCESS_KEY_ID")
+    // Prioritize CELL_S3 specific variables over standard AWS variables
+    let s3_endpoint = var("CELL_S3_ENDPOINT").ok();
+    let s3_bucket = var("CELL_S3_BUCKET").ok();
+    let s3_region = var("CELL_S3_REGION").or_else(|_| var("AWS_REGION")).ok();
+    let s3_path = var("CELL_S3_PREFIX").ok();
+    let s3_access_key_id = var("CELL_S3_ACCESS_KEY_ID")
       .or_else(|_| var("AWS_ACCESS_KEY_ID"))
       .ok();
-    let s3_secret_access_key = var("CELLD_S3_SECRET_ACCESS_KEY")
+    let s3_secret_access_key = var("CELL_S3_SECRET_ACCESS_KEY")
       .or_else(|_| var("AWS_SECRET_ACCESS_KEY"))
       .ok();
 
