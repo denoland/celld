@@ -13,6 +13,7 @@ use tokio::time::sleep;
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
+use crate::active_connections;
 use crate::child_on_parent_exit::ChildOnParentExit;
 use crate::distributed_lock::LockAcquireError;
 use crate::distributed_lock::LockGuard;
@@ -38,7 +39,6 @@ pub struct ProcessEntry {
   pub parent_exit_guard: ChildOnParentExit, // Guard for automatic termination on parent exit
   pub lock_guard: LockGuard, // Guard for ensuring the uniqueness of the tenant/cellId in the cluster
   pub single_use: bool,      // Flag for single-use isolates
-  pub active_connections: u32, // Counter for active connections (including WebSockets)
   pub _socket_tempdir: TempDir, // Keep tempdir alive as long as process exists
   pub replica: Option<SqliteReplica>, // SQLite replication to S3/MinIO
   /// State of the database restore operation
@@ -49,6 +49,10 @@ pub struct ProcessEntry {
 impl ProcessEntry {
   async fn renew_lock_ttl(&self, new_ttl: Duration) -> anyhow::Result<()> {
     self.lock_guard.renew(new_ttl).await
+  }
+
+  pub fn active_connections(&self) -> usize {
+    active_connections::count(self.pid)
   }
 }
 
@@ -115,7 +119,6 @@ impl ProcessManager {
 
     let mut processes = self.processes.lock().await;
     if let Some(entry) = processes.get_mut(&process_key) {
-      entry.active_connections += 1;
       entry.last_used = Instant::now();
       return true;
     }
@@ -133,9 +136,6 @@ impl ProcessManager {
 
     let mut processes = self.processes.lock().await;
     if let Some(entry) = processes.get_mut(&process_key) {
-      if entry.active_connections > 0 {
-        entry.active_connections -= 1;
-      }
       entry.last_used = Instant::now();
       return true;
     }
@@ -403,7 +403,6 @@ impl ProcessManager {
       parent_exit_guard: child_guard,
       lock_guard,
       single_use,
-      active_connections: 0,
       _socket_tempdir: socket_tempdir,
       replica: replica.clone(),
       restore_state,
