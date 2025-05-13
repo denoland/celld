@@ -238,7 +238,7 @@ mod tests {
     };
 
     // Give nc time to bind
-    sleep(Duration::from_millis(100));
+    sleep(Duration::from_secs(1));
 
     // No established connections yet
     assert_eq!(count(server.id()), 0);
@@ -251,8 +251,9 @@ mod tests {
     // Read byte from server.stdout to prevent race.
     let mut buf = [0u8; 1];
     let _ = server.stdout.as_mut().unwrap().read_exact(&mut buf);
+    assert_eq!(buf[0], b'k');
 
-    sleep(Duration::from_millis(300));
+    sleep(Duration::from_secs(1));
 
     // Should have exactly one active connection
     assert_eq!(count(server.id()), 1);
