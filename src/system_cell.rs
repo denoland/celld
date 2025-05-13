@@ -1,3 +1,6 @@
+use std::{fs, path::Path};
+
+use anyhow::Context as _;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
@@ -6,6 +9,9 @@ use crate::{
   distributed_lock::LockGuard,
   sqlite_replica::SqliteReplica,
 };
+
+pub const SYSTEM_TENANT: &str = "_system";
+pub const SYSTEM_CELL_ID: &str = "main";
 
 /// The system cell is a special cell that is used to store global state for the
 /// cluster. It has a unique tenant name `_system` and a unique cell id `main`.
@@ -61,7 +67,34 @@ impl AlarmProcessor for S3SystemCell {
 
 /// [`SystemCell`] for a single-node cluster.
 pub struct StandaloneSystemCell {
-  // TODO: add sqlite client
+  conn: rusqlite::Connection,
+}
+
+impl StandaloneSystemCell {
+  pub fn new(data_dir: &Path) -> anyhow::Result<Self> {
+    let sqlite_dir = data_dir.join(SYSTEM_TENANT).join("sqlite");
+    fs::create_dir_all(&sqlite_dir)
+      .context("Failed to create sqlite directory")?;
+    let db_path = sqlite_dir.join(format!("{SYSTEM_CELL_ID}.db"));
+    let conn = rusqlite::Connection::open(db_path)?;
+
+    conn.execute(
+      "CREATE TABLE IF NOT EXISTS global_alarms (
+        tenant TEXT NOT NULL,
+        cell_id TEXT NOT NULL,
+        scheduled_time_unix_ms INTEGER NOT NULL,
+        PRIMARY KEY (tenant, cell_id)
+      )",
+      (),
+    )?;
+
+    conn.execute(
+      "CREATE INDEX IF NOT EXISTS idx_global_alarms_schedule_time ON global_alarms (scheduled_time_unix_ms)",
+      (),
+    )?;
+
+    Ok(Self { conn })
+  }
 }
 
 impl SystemCell for StandaloneSystemCell {}
