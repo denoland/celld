@@ -60,7 +60,9 @@ http://myapp.localhost:3000/cell/chat1
            tenant domain      cell ID
 ```
 
-Each cell runs in an isolated subprocess with its own state and lifecycle.
+Each cell runs in an isolated subprocess with its own state and lifecycle. Cells
+with active WebSocket connections or outbound TCP connections remain alive,
+automatically terminating when idle.
 
 ## Data layout
 
