@@ -36,6 +36,9 @@ pub struct ProcessEntry {
   pub pid: u32,
   pub socket_path: PathBuf,
   pub last_used: Instant,
+  /// Number of current websocket connections to this process
+  /// This is used to determine if the process should be kept alive
+  incoming_connections: usize,
   pub parent_exit_guard: ChildOnParentExit, // Guard for automatic termination on parent exit
   pub lock_guard: LockGuard, // Guard for ensuring the uniqueness of the tenant/cellId in the cluster
   pub single_use: bool,      // Flag for single-use isolates
@@ -51,8 +54,13 @@ impl ProcessEntry {
     self.lock_guard.renew(new_ttl).await
   }
 
-  pub fn active_connections(&self) -> usize {
-    active_connections::count(self.pid)
+  /// Check if the process has any active connections. We measure this two ways:
+  /// - we manually track the number of ongoing requests/websocket connections
+  ///   with self.incoming_connections
+  /// - if incoming_connections is 0, we check the number of active TCP outbound
+  ///   connections using /proc or lsof.
+  pub fn has_active_connections(&self) -> bool {
+    self.incoming_connections > 0 || active_connections::count(self.pid) > 0
   }
 }
 
@@ -119,6 +127,7 @@ impl ProcessManager {
 
     let mut processes = self.processes.lock().await;
     if let Some(entry) = processes.get_mut(&process_key) {
+      entry.incoming_connections += 1;
       entry.last_used = Instant::now();
       return true;
     }
@@ -136,6 +145,8 @@ impl ProcessManager {
 
     let mut processes = self.processes.lock().await;
     if let Some(entry) = processes.get_mut(&process_key) {
+      debug_assert!(entry.incoming_connections > 0);
+      entry.incoming_connections -= 1;
       entry.last_used = Instant::now();
       return true;
     }
@@ -400,6 +411,7 @@ impl ProcessManager {
       pid,
       socket_path: socket_path.clone(),
       last_used: Instant::now(),
+      incoming_connections: 0,
       parent_exit_guard: child_guard,
       lock_guard,
       single_use,

@@ -186,7 +186,7 @@ mod macos {
     // Exclude:
     // - FIN_WAIT_1/2, CLOSING, LAST_ACK: teardown in progress, no useful I/O
     // - TIME_WAIT: fully closed, waiting for socket reuse
-    println!("lsof output:\n{}", s);
+    // println!("lsof output:\n{}", s);
     s.lines()
       .filter(|line| {
         line.contains("TCP")
