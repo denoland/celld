@@ -229,6 +229,7 @@ mod tests {
       .arg("-l")
       .arg("127.0.0.1")
       .arg(port.to_string())
+      .stdin(std::process::Stdio::piped())
       .stdout(Stdio::piped())
       .spawn()
     {
@@ -245,12 +246,12 @@ mod tests {
     // Connect from this process and keep the connection active with writes
     let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
 
-    client.write_all(b"keep connection active\n").unwrap();
+    client.write_all(b"ping").unwrap();
 
-    // Read byte from server.stdout to prevent race.
-    let mut buf = [0u8; 1];
+    // ensure server received something
+    let mut buf = [0u8; 4];
     let _ = server.stdout.as_mut().unwrap().read_exact(&mut buf);
-    assert_eq!(buf[0], b'k');
+    assert_eq!(&buf, b"ping");
 
     // Should have exactly one active connection
     assert_eq!(count(server.id()), 1);
