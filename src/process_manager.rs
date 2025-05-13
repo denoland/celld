@@ -145,7 +145,7 @@ impl ProcessManager {
 
     let mut processes = self.processes.lock().await;
     if let Some(entry) = processes.get_mut(&process_key) {
-      debug_assert!(entry.incoming_connections > 0);
+      assert!(entry.incoming_connections > 0);
       entry.incoming_connections -= 1;
       entry.last_used = Instant::now();
       return true;
