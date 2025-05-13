@@ -252,6 +252,8 @@ mod tests {
     let mut buf = [0u8; 1];
     let _ = server.stdout.as_mut().unwrap().read_exact(&mut buf);
 
+    sleep(Duration::from_millis(300));
+
     // Should have exactly one active connection
     assert_eq!(count(server.id()), 1);
 
