@@ -45,7 +45,7 @@ docker run --rm -it -p 8000:8000 -v "./cell-data:/data" \
   denoland/cell:latest
 ```
 
-Create `./cell-data/<hostname>/code/main.ts` for your Cell logic.
+Create `./cell-data/<hostname>/src/main.ts` for your Cell logic.
 
 ## Accessing Cells
 
@@ -71,7 +71,7 @@ The data directory contains one folder per tenant domain:
 └── myapp.localhost/
     ├── static/          # Served at /
     │   └── index.html, client.js, etc.
-    ├── code/
+    ├── src/
     │   └── main.ts      # logic for all cells
     ├── sqlite/          # sqlite per room
     │   └── A.db

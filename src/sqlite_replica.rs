@@ -25,7 +25,7 @@
 //! <data-dir>/
 //! └── <tenant>/
 //!     ├── static/        # static assets
-//!     ├── code/          # user-provided TypeScript hooks (main.ts)
+//!     ├── src/          # user-provided TypeScript hooks (main.ts)
 //!     ├── sockets/       # runtime-generated Unix sockets
 //!     └── sqlite/        # per-cell state and config
 //!         ├── <cell_id>.db    # SQLite database file

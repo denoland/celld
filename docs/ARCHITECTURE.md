@@ -75,7 +75,7 @@ Type in one tab and see the message appear in the other—across containers.
 
 ### 4. Developer API
 
-Drop `data/<tenant>/code/main.ts` using the cell API:
+Drop `data/<tenant>/src/main.ts` using the cell API:
 
 ```ts
 import { cell } from "jsr:@ry/cells";
@@ -122,7 +122,7 @@ cell.error((error: Error | ErrorEvent | Event) => {
 /data/
 └── <tenant>/
     ├── static/        # index.html, client.js, assets
-    ├── code/          # main.ts only
+    ├── src/          # main.ts only
     └── sockets/       # {cellId}.sock per active cell
 ```
 
