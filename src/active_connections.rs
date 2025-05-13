@@ -105,16 +105,9 @@ mod linux {
       }
 
       let state = fields[3];
-      let inode = fields[9].parse::<u64>().ok();
+      let inode = fields[9].parse::<u64>().unwrap();
 
-      println!(
-        "count_filtered_connections state = {}, inode = {:?}",
-        state, inode
-      );
-
-      if (state == "01" || state == "08")
-        && inode.map_or(false, |i| inode_set.contains(&i))
-      {
+      if (state == "01" || state == "08") && inode_set.contains(&inode) {
         count += 1;
       }
     }
