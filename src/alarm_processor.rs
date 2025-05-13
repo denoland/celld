@@ -3,6 +3,8 @@ use chrono::{DateTime, Utc};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AlarmError {
+  #[error("SQLite error: {0}")]
+  SQLiteError(#[from] rusqlite::Error),
   #[error("alarm not found")]
   AlarmNotFound,
 }
@@ -14,22 +16,17 @@ pub struct Alarm {
   pub scheduled_time_unix_ms: u64,
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 pub trait AlarmProcessor {
   /// Get an alarm set for the given tenant and cell id.
-  async fn get(&self, tenant: &str, cell_id: &str)
-    -> Result<Alarm, AlarmError>;
+  fn get(&self, tenant: &str, cell_id: &str) -> Result<Alarm, AlarmError>;
 
   /// Delete an alarm set for the given tenant and cell id.
-  async fn delete(
-    &self,
-    tenant: &str,
-    cell_id: &str,
-  ) -> Result<Alarm, AlarmError>;
+  fn delete(&self, tenant: &str, cell_id: &str) -> Result<(), AlarmError>;
 
   /// Set an alarm for the given tenant and cell id.
   /// If there is already an alarm for the cell, it will be overwritten.
-  async fn set(
+  fn set(
     &self,
     tenant: &str,
     cell_id: &str,
@@ -39,7 +36,8 @@ pub trait AlarmProcessor {
   /// Dispatch all alarms that are due at the given timestamp. Dispatched alarms
   /// are deleted from the internal datastore.
   async fn dispatch(
-    &self,
+    &mut self,
     current_timestamp: DateTime<Utc>,
+    limit: u32,
   ) -> Result<(), AlarmError>;
 }
