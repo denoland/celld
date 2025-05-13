@@ -21,7 +21,7 @@ celld/
 │       ├── static/            ← built output of Vite
 │       │   ├── index.html
 │       │   └── assets/...
-│       └── code/
+│       └── src/
 │           └── main.ts        ← backend (already written)
 ```
 
@@ -48,7 +48,7 @@ After each check stop to let me verify progress before continuing.
 
 ### Build SQLite persistence + OpenAI backend
 
-- [x] add `data/llm-chat.localhost/code/main.ts`, based on example from
+- [x] add `data/llm-chat.localhost/src/main.ts`, based on example from
       ws-echo.localhost
 - [x] `main.ts` stores user & assistant messages in `messages` table
 - [x] Messages replay on `onConnect`

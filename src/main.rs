@@ -36,7 +36,7 @@ fn start_server(config: config::Config) -> Server {
   let mut pingora_config = ServerConf::new().unwrap();
   //pingora_config.graceful_shutdown_timeout_seconds = Some(1);
   pingora_config.grace_period_seconds =
-    std::env::var("CELLD_GRACE_PERIOD_SECONDS")
+    std::env::var("CELL_GRACE_PERIOD_SECONDS")
       .ok()
       .and_then(|s| s.parse().ok());
 
@@ -177,8 +177,8 @@ mod tests {
     std::env::set_var("LISTEN_ADDR", "127.0.0.1:6146"); // Set listen address
     std::env::set_var("INTERNAL_LISTEN_ADDR", "127.0.0.1:6147"); // Set internal address
     std::env::set_var("DATA", "./data"); // Set data directory
-    std::env::set_var("CELLD_HEARTBEAT_INTERVAL", "2"); // Fast heartbeat for tests
-    std::env::set_var("CELLD_GRACE_PERIOD_SECONDS", "0");
+    std::env::set_var("CELL_HEARTBEAT_INTERVAL", "2"); // Fast heartbeat for tests
+    std::env::set_var("CELL_GRACE_PERIOD_SECONDS", "0");
 
     let h = std::thread::spawn(|| {
       // Create config from environment variables

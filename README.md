@@ -38,14 +38,14 @@ replication, and failover.
 mkdir ./cell-data
 # Run (replace S3 details and <hostname>)
 docker run --rm -it -p 8000:8000 -v "./cell-data:/data" \
-  -e CELLD_S3_ENDPOINT=<your_s3_endpoint> \
-  -e CELLD_S3_BUCKET=<your_s3_bucket> \
-  -e CELLD_S3_ACCESS_KEY_ID=<your_access_key> \
-  -e CELLD_S3_SECRET_ACCESS_KEY=<your_secret_key> \
+  -e CELL_S3_ENDPOINT=<your_s3_endpoint> \
+  -e CELL_S3_BUCKET=<your_s3_bucket> \
+  -e CELL_S3_ACCESS_KEY_ID=<your_access_key> \
+  -e CELL_S3_SECRET_ACCESS_KEY=<your_secret_key> \
   denoland/cell:latest
 ```
 
-Create `./cell-data/<hostname>/code/main.ts` for your Cell logic.
+Create `./cell-data/<hostname>/src/main.ts` for your Cell logic.
 
 ## Accessing Cells
 
@@ -71,7 +71,7 @@ The data directory contains one folder per tenant domain:
 └── myapp.localhost/
     ├── static/          # Served at /
     │   └── index.html, client.js, etc.
-    ├── code/
+    ├── src/
     │   └── main.ts      # logic for all cells
     ├── sqlite/          # sqlite per room
     │   └── A.db
@@ -111,12 +111,12 @@ Key API: `cell.id`, `cell.db`, `cell.request`, `cell.connect`, `cell.message`,
 
 For Persistence & Discovery, setup S3:
 
-- `CELLD_S3_ENDPOINT`
-- `CELLD_S3_BUCKET`
-- `CELLD_S3_ACCESS_KEY_ID`
-- `CELLD_S3_SECRET_ACCESS_KEY`
-- `CELLD_S3_REGION`
-- `CELLD_S3_PREFIX`
+- `CELL_S3_ENDPOINT`
+- `CELL_S3_BUCKET`
+- `CELL_S3_ACCESS_KEY_ID`
+- `CELL_S3_SECRET_ACCESS_KEY`
+- `CELL_S3_REGION`
+- `CELL_S3_PREFIX`
 
 Also use
 

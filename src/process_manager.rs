@@ -197,10 +197,10 @@ impl ProcessManager {
     // checked higher up, but done again here for safety
     assert!(!host.contains('/') && !host.contains(".."));
     let tenant_dir = self.data_dir.join(host);
-    let app_code_dir = tenant_dir.join("code");
-    let main_script = app_code_dir.join("main.ts");
+    let app_code_dir = tenant_dir.join("src");
+    let main_script = app_code_dir.join("main.ts"); // TODO support main.js
     if !main_script.exists() {
-      warn!("Application code not found at {}", main_script.display());
+      error!("Application code not found at {}", main_script.display());
       return Err(ProcessManagerError::Internal(
         ProxyError::AppNotFound(host.to_string()).into(),
       ));
