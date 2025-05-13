@@ -252,13 +252,10 @@ mod tests {
     let _ = server.stdout.as_mut().unwrap().read_exact(&mut buf);
     assert_eq!(buf[0], b'k');
 
-    sleep(Duration::from_secs(1));
-
     // Should have exactly one active connection
     assert_eq!(count(server.id()), 1);
 
-    // Cleanup
-    drop(client); // keep alive until end
+    drop(client); // Prevent early drop
     let _ = server.kill();
     let _ = server.wait();
   }
