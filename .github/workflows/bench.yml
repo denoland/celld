@@ -15,7 +15,8 @@ jobs:
   benchmark:
     name: Coldstart Benchmark
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
+    if: github.ref == 'refs/heads/main' || contains(github.event.pull_request.labels.*.name, 'run-benchmark')
     steps:
       - uses: actions/checkout@v4
 
@@ -87,14 +88,12 @@ jobs:
 
       - name: Build
         run: |
-          # cargo build --release
-          cargo build
+          cargo build --release
 
       - name: Run coldstart benchmark
         id: benchmark
         run: |
-          # ./target/release/celld > /dev/null 2>&1 &
-          ./target/debug/celld > /dev/null 2>&1 &
+          ./target/release/celld > /dev/null 2>&1 &
           sleep 2
           echo "Running benchmark..."
           BENCHMARK_OUTPUT=$(hey -cpus 1 -n 10 -c 1 -host hello.localhost -H "x-single-use-isolate: true" http://127.0.0.1:8000/cell/foo)
@@ -104,7 +103,22 @@ jobs:
           echo "$BENCHMARK_OUTPUT" >> $GITHUB_OUTPUT
           echo 'EOF' >> $GITHUB_OUTPUT
 
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const benchmarkResult = `${{ steps.benchmark.outputs.result }}`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: benchmarkResult
+            });
+
       - name: Comment on commit (push event)
+        if: github.ref == 'refs/heads/main'
         uses: peter-evans/commit-comment@v3
         with:
           body: ${{ steps.benchmark.outputs.result }}
