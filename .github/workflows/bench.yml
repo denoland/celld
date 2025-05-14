@@ -1,0 +1,107 @@
+name: Benchmark
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  benchmark:
+    name: Coldstart Benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libsqlite3-dev \
+            curl
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.22"
+
+      - name: Install hey for HTTP load testing
+        run: |
+          go install github.com/rakyll/hey@latest
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+
+      - name: Install Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-
+
+      - name: Setup hosts file
+        run: |
+          echo "Adding localhost entries to /etc/hosts"
+          sudo bash -c 'cat >> /etc/hosts << EOF
+          127.0.0.1 basic-db.localhost
+          127.0.0.1 env-test.localhost
+          127.0.0.1 hello.localhost
+          127.0.0.1 llm-chat.localhost
+          127.0.0.1 ws-echo.localhost
+          EOF'
+
+      - name: Run coldstart benchmark
+        id: benchmark
+        run: |
+          # Run the benchmark script and capture output
+          BENCHMARK_OUTPUT=$(bash ./benchmark_coldstart.sh)
+          echo "$BENCHMARK_OUTPUT"
+
+          # Convert output to markdown format for the comment
+          BENCHMARK_MARKDOWN="## Coldstart Benchmark Results
+
+          \`\`\`
+          $BENCHMARK_OUTPUT
+          \`\`\`"
+
+          # Save as output for next step
+          echo "result<<EOF" >> $GITHUB_OUTPUT
+          echo "$BENCHMARK_MARKDOWN" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const benchmarkResult = `${{ steps.benchmark.outputs.result }}`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: benchmarkResult
+            });
+
+      - name: Comment on commit (push event)
+        if: github.event_name == 'push'
+        uses: peter-evans/commit-comment@v2
+        with:
+          body: ${{ steps.benchmark.outputs.result }}
