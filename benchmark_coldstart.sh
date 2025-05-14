@@ -2,7 +2,7 @@
 set -euo pipefail
 
 echo "Building production version..."
-cargo build --quiet --release
+cargo build --release
 
 echo "Cleaning up any existing processes..."
 pkill -f "deno run" || true
