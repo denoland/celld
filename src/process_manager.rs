@@ -36,14 +36,23 @@ pub struct ProcessEntry {
   pub pid: u32,
   pub socket_path: PathBuf,
   pub last_used: Instant,
+
   /// Number of current websocket connections to this process
   /// This is used to determine if the process should be kept alive
   incoming_connections: usize,
-  pub parent_exit_guard: ChildOnParentExit, // Guard for automatic termination on parent exit
-  pub lock_guard: LockGuard, // Guard for ensuring the uniqueness of the tenant/cellId in the cluster
-  pub single_use: bool,      // Flag for single-use isolates
-  pub _socket_tempdir: TempDir, // Keep tempdir alive as long as process exists
-  pub replica: Option<SqliteReplica>, // SQLite replication to S3/MinIO
+
+  /// Guard for automatic termination on parent exit
+  pub parent_exit_guard: ChildOnParentExit,
+
+  /// Guard for ensuring the uniqueness of the tenant/cellId in the cluster
+  pub lock_guard: LockGuard,
+
+  /// Keep tempdir alive as long as process exists
+  pub _socket_tempdir: TempDir,
+
+  /// SQLite replication to S3/MinIO
+  pub replica: Option<SqliteReplica>,
+
   /// State of the database restore operation
   #[allow(dead_code)]
   pub restore_state: RestoreState,
@@ -64,9 +73,26 @@ impl ProcessEntry {
   }
 }
 
+pub struct SingleUseProcessEntry {
+  pub pid: u32,
+  pub socket_path: PathBuf,
+  pub last_used: Instant,
+
+  /// Number of current websocket connections to this process
+  /// This is used to determine if the process should be kept alive
+  incoming_connections: usize,
+
+  /// Guard for automatic termination on parent exit
+  pub parent_exit_guard: ChildOnParentExit,
+
+  /// Keep tempdir alive as long as process exists
+  pub _socket_tempdir: TempDir,
+}
+
 pub struct ProcessManager {
   pub data_dir: PathBuf,
   pub processes: Mutex<HashMap<String, ProcessEntry>>,
+  pub single_use_processes: Mutex<HashMap<String, SingleUseProcessEntry>>,
 }
 
 impl ProcessManager {
@@ -81,6 +107,7 @@ impl ProcessManager {
     ProcessManager {
       data_dir: std::fs::canonicalize(data_dir.clone()).unwrap(),
       processes: Mutex::new(HashMap::new()),
+      single_use_processes: Mutex::new(HashMap::new()),
     }
   }
 
@@ -159,51 +186,44 @@ impl ProcessManager {
     &self,
     host: &str,
     cell_id: &str,
-    single_use: bool,
     node_state: Arc<NodeState>,
   ) -> Result<(PathBuf, UnixStream), ProcessManagerError> {
+    warn!(line = line!(), "👿👿 get_or_spawn_process");
     // Create a combined key for host and cell to ensure one isolate per cell
     let process_key = cell_hash_key(host, cell_id);
 
-    // For single_use requests, always spawn a new process
-    // TODO: This should not be supported in production
-    if !single_use {
-      // First, try to find and connect to an existing process, keeping the lock time minimal
-      let socket_path_opt = {
-        let processes = self.processes.lock().await;
-        if let Some(entry) = processes.get(&process_key) {
-          // Skip single-use entries when looking for a regular process
-          if !entry.single_use {
-            Some(entry.socket_path.clone())
-          } else {
-            None
-          }
-        } else {
-          None
-        }
-      };
+    // First, try to find and connect to an existing process, keeping the lock time minimal
+    let socket_path_opt = {
+      let processes = self.processes.lock().await;
+      if let Some(entry) = processes.get(&process_key) {
+        Some(entry.socket_path.clone())
+      } else {
+        None
+      }
+    };
 
-      // If we found a socket path, try to connect without holding the lock
-      if let Some(socket_path) = socket_path_opt {
-        match UnixStream::connect(&socket_path).await {
-          Ok(stream) => {
-            debug!(
-              socket = %socket_path.display(),
-              "Connected to existing process socket"
-            );
-            return Ok((socket_path, stream));
-          }
-          Err(e) => {
-            error!(
-              socket = %socket_path.display(),
-              error = %e,
-              "Failed to connect to existing process socket, spawn new one"
-            );
-            // Fall through to spawn a new process
-          }
+    // If we found a socket path, try to connect without holding the lock
+    if let Some(socket_path) = socket_path_opt {
+      match UnixStream::connect(&socket_path).await {
+        Ok(stream) => {
+          debug!(
+            socket = %socket_path.display(),
+            "Connected to existing process socket"
+          );
+          return Ok((socket_path, stream));
+        }
+        Err(e) => {
+          error!(
+            socket = %socket_path.display(),
+            error = %e,
+            "Failed to connect to existing process socket, spawn new one"
+          );
+          // Fall through to spawn a new process
         }
       }
     }
+
+    warn!(line = line!(), "👿👿 get_or_spawn_process");
 
     // checked higher up, but done again here for safety
     assert!(!host.contains('/') && !host.contains(".."));
@@ -216,12 +236,14 @@ impl ProcessManager {
         ProxyError::AppNotFound(host.to_string()).into(),
       ));
     }
+    warn!(line = line!(), "👿👿 get_or_spawn_process");
 
     // Acquire a lock on the cell to declare ownership of the combination of
     // tenant and cellId. This lock's lifetime should match that of the Deno
     // process we will create later.
     let lock_name = cell_hash_key(host, cell_id);
     let node_id = node_state.peer_manager.get_local_node_id();
+    warn!(line = line!(), "👿👿 get_or_spawn_process");
     let lock_guard = node_state
       .distributed_lock
       .clone()
@@ -252,6 +274,7 @@ impl ProcessManager {
         }
       })?;
 
+    warn!(line = line!(), "👿👿 get_or_spawn_process");
     // Create a temporary directory for the socket
     // This will be automatically cleaned up when dropped
     let socket_tempdir = tempfile::tempdir()
@@ -264,12 +287,14 @@ impl ProcessManager {
     };
     let socket_path = socket_tempdir.path().join(socket_name);
 
+    warn!(line = line!(), ?socket_path, "👿👿 get_or_spawn_process");
     // Create SQLite directory
     let sqlite_dir = tenant_dir.join("sqlite");
     std::fs::create_dir_all(&sqlite_dir).unwrap_or_else(|e| {
       warn!("Failed to create sqlite directory: {}", e);
     });
 
+    warn!(line = line!(), "👿👿 get_or_spawn_process");
     // Configure SQLite replication if S3 is configured
     let db_path = sqlite_dir.join(format!("{}.db", cell_id));
 
@@ -302,6 +327,7 @@ impl ProcessManager {
         None
       }
     };
+    warn!(line = line!(), "👿👿 get_or_spawn_process");
 
     // Initialize restore state variable
     let restore_state;
@@ -367,6 +393,7 @@ impl ProcessManager {
       // Update state to Complete(false) since we created a new empty DB
       restore_state = RestoreState::Complete(false);
     } else {
+      warn!(line = line!(), "👿👿 get_or_spawn_process");
       // No replica and the database already exists
       debug!(
         tenant = %host,
@@ -377,6 +404,7 @@ impl ProcessManager {
       restore_state = RestoreState::Complete(false);
     }
 
+    warn!(line = line!(), "👿👿 get_or_spawn_process");
     let spawn_start = Instant::now();
 
     debug!(
@@ -396,6 +424,7 @@ impl ProcessManager {
       &main_script,
     )?;
 
+    warn!(line = line!(), "👿👿 get_or_spawn_process");
     debug!(
       tenant = %host,
       cell_id = %cell_id,
@@ -414,18 +443,19 @@ impl ProcessManager {
       incoming_connections: 0,
       parent_exit_guard: child_guard,
       lock_guard,
-      single_use,
       _socket_tempdir: socket_tempdir,
       replica: replica.clone(),
       restore_state,
     };
 
+    warn!(line = line!(), "👿👿 get_or_spawn_process");
     // Insert the entry into the processes map using a short-lived lock
     {
       let mut processes = self.processes.lock().await;
       processes.insert(process_key.clone(), entry);
     }
 
+    warn!(line = line!(), ?socket_path, "👿👿 get_or_spawn_process");
     // --- Wait for the socket to become available (crucial for cold start) ---
     let socket_ = socket_path.clone();
     let wait_start = Instant::now();
@@ -437,6 +467,7 @@ impl ProcessManager {
 
     // Wait for the socket to be available and connect to it
     let stream = loop {
+      warn!(line = line!(), "👿👿 get_or_spawn_process");
       if wait_start.elapsed() > wait_timeout {
         error!(
           pid = pid,
@@ -523,18 +554,189 @@ impl ProcessManager {
       }
     };
 
-    // For single-use isolates, use a unique key with a UUID suffix
-    // This allows multiple single-use isolates for the same host+cell combination
-    if single_use {
-      let unique_key =
-        format!("{}/{}", cell_hash_key(host, cell_id), Uuid::new_v4());
+    Ok((socket_path, stream))
+  }
 
-      // Move the entry to a unique key
-      let mut processes = self.processes.lock().await;
-      if let Some(entry) = processes.remove(&process_key) {
-        processes.insert(unique_key, entry);
+  /// Spawn a single-use Deno process.
+  ///
+  /// A spawned process has SQLite database attached but it's not backed up.
+  pub async fn spawn_single_use_process(
+    &self,
+    host: &str,
+    cell_id: &str,
+  ) -> Result<(PathBuf, UnixStream), ProcessManagerError> {
+    let unique_process_key =
+      format!("{}/{}", cell_hash_key(host, cell_id), Uuid::new_v4());
+
+    assert!(!host.contains('/') && !host.contains(".."));
+    let tenant_dir = self.data_dir.join(host);
+    let app_code_dir = tenant_dir.join("src");
+    let main_script = app_code_dir.join("main.ts"); // TODO support main.js
+    if !main_script.exists() {
+      error!("Application code not found at {}", main_script.display());
+      return Err(ProcessManagerError::Internal(
+        ProxyError::AppNotFound(host.to_string()).into(),
+      ));
+    }
+
+    // Create a temporary directory for the socket
+    // This will be automatically cleaned up when dropped
+    let socket_tempdir = tempfile::tempdir()
+      .with_context(|| "Failed to create temporary directory for socket")?;
+
+    let socket_name = {
+      let uuid_string = Uuid::new_v4().to_string();
+      let first_segment: &str = &uuid_string[0..8];
+      format!("{}.sock", first_segment)
+    };
+    let socket_path = socket_tempdir.path().join(socket_name);
+
+    // Create SQLite directory
+    let sqlite_dir = tenant_dir.join("sqlite");
+    std::fs::create_dir_all(&sqlite_dir).unwrap_or_else(|e| {
+      warn!("Failed to create sqlite directory: {}", e);
+    });
+
+    let db_path = sqlite_dir.join(format!("{}.db", cell_id));
+
+    if !db_path.exists() {
+      info!(
+        tenant = %host,
+        cell_id = %cell_id,
+        "No S3 replication, creating empty database"
+      );
+
+      if let Err(e) = create_empty_database(&db_path) {
+        warn!("Failed to create empty database file: {}", e);
       }
     }
+
+    let spawn_start = Instant::now();
+
+    // Spawn the Deno process
+    let child_guard = spawn_deno_process(
+      host,
+      cell_id,
+      &tenant_dir,
+      &socket_path,
+      &main_script,
+    )?;
+
+    // Convert to tokio::process::Child using the PID
+    let pid = child_guard.pid().unwrap() as u32;
+
+    // Create a new SingleUseProcessEntry with proper values
+    let entry = SingleUseProcessEntry {
+      pid,
+      socket_path: socket_path.clone(),
+      last_used: Instant::now(),
+      incoming_connections: 0,
+      parent_exit_guard: child_guard,
+      _socket_tempdir: socket_tempdir,
+    };
+
+    // Insert the entry into the processes map using a short-lived lock
+    {
+      let mut processes = self.single_use_processes.lock().await;
+      processes.insert(unique_process_key.clone(), entry);
+    }
+
+    // --- Wait for the socket to become available (crucial for cold start) ---
+    let socket_ = socket_path.clone();
+    let wait_start = Instant::now();
+    let wait_timeout = Duration::from_secs(10); // Timeout for socket connection
+
+    // Use minimal polling for fastest possible connection with exponential backoff
+    let mut delay = Duration::from_micros(50);
+    let max_delay = Duration::from_millis(20);
+
+    // Wait for the socket to be available and connect to it
+    let stream = loop {
+      if wait_start.elapsed() > wait_timeout {
+        error!(
+          pid = pid,
+          socket = %socket_.display(),
+          tenant = %host,
+          cell_id = %cell_id,
+          "Timeout waiting for Deno process socket"
+        );
+
+        // Remove the entry from the map to avoid stale entries
+        let mut processes = self.single_use_processes.lock().await;
+        if let Some(entry) = processes.remove(&unique_process_key) {
+          // Kill the process to avoid zombies
+          entry.parent_exit_guard.kill(Signal::SIGTERM);
+        }
+
+        // The tempdir will be dropped at the end of this scope, cleaning up the socket file
+        return Err(
+          anyhow::anyhow!("Timeout waiting for process socket").into(),
+        );
+      }
+
+      debug!(
+        pid = pid,
+        socket = %socket_.display(),
+        tenant = %host,
+        cell_id = %cell_id,
+        elapsed = ?wait_start.elapsed(),
+        "Attempting to connect to Deno socket"
+      );
+
+      match UnixStream::connect(&socket_).await {
+        Ok(stream) => {
+          debug!(
+            pid = pid,
+            socket = %socket_.display(),
+            tenant = %host,
+            cell_id = %cell_id,
+            socket_wait_duration = ?wait_start.elapsed(),
+            total_startup_duration = ?spawn_start.elapsed(),
+            "Socket connected!"
+          );
+          // We have a connected socket
+          break stream; // Socket is ready and connected, return the stream
+        }
+        Err(ref e)
+          if e.kind() == std::io::ErrorKind::ConnectionRefused
+            || e.kind() == std::io::ErrorKind::NotFound =>
+        {
+          debug!(
+            pid = pid,
+            socket = %socket_.display(),
+            tenant = %host,
+            cell_id = %cell_id,
+            error = %e,
+            error_kind = ?e.kind(),
+            "Socket not yet available, retrying after delay"
+          );
+          // Socket not ready yet, use minimal polling with exponential backoff
+          sleep(delay).await;
+          // Increase delay with exponential backoff, but cap at max_delay
+          delay = std::cmp::min(delay * 2, max_delay);
+        }
+        Err(e) => {
+          error!(
+            pid = pid,
+            socket = %socket_.display(),
+            error = %e,
+            "Error connecting to socket during startup"
+          );
+
+          // Remove the entry from the map to avoid stale entries
+          let mut processes = self.single_use_processes.lock().await;
+          if let Some(entry) = processes.remove(&unique_process_key) {
+            // Kill the process to avoid zombies
+            entry.parent_exit_guard.kill(Signal::SIGTERM);
+          }
+
+          // The tempdir will be dropped at the end of this scope, cleaning up the socket file
+          return Err(
+            anyhow::anyhow!("Error connecting to process socket: {}", e).into(),
+          );
+        }
+      }
+    };
 
     Ok((socket_path, stream))
   }
@@ -565,6 +767,44 @@ pub enum ProcessManagerError {
   Serde(serde_json::Error),
   #[error("Internal error: {0}")]
   Internal(#[from] anyhow::Error),
+}
+
+impl From<ProcessManagerError> for Box<pingora::Error> {
+  fn from(e: ProcessManagerError) -> Self {
+    use ProcessManagerError::*;
+    match e {
+      ProcessCreationInProgress => pingora::Error::explain(
+        pingora::ErrorType::HTTPStatus(
+          http::StatusCode::INTERNAL_SERVER_ERROR.into(),
+        ),
+        "Failed to get or spawn process",
+      ),
+      LockContention => pingora::Error::explain(
+        pingora::ErrorType::HTTPStatus(
+          http::StatusCode::INTERNAL_SERVER_ERROR.into(),
+        ),
+        "Cell is being handled by another node",
+      ),
+      S3(_) => pingora::Error::explain(
+        pingora::ErrorType::HTTPStatus(
+          http::StatusCode::INTERNAL_SERVER_ERROR.into(),
+        ),
+        "S3 operation failed",
+      ),
+      Serde(_) => pingora::Error::explain(
+        pingora::ErrorType::HTTPStatus(
+          http::StatusCode::INTERNAL_SERVER_ERROR.into(),
+        ),
+        "Failed to serialize or deserialize lock data",
+      ),
+      Internal(_) => pingora::Error::explain(
+        pingora::ErrorType::HTTPStatus(
+          http::StatusCode::INTERNAL_SERVER_ERROR.into(),
+        ),
+        "Internal server error during process lookup",
+      ),
+    }
+  }
 }
 
 fn parse_env_vars(content: &str) -> HashMap<String, String> {

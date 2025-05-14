@@ -30,6 +30,7 @@ pub struct InternalAPI {
 pub struct Ctx {
   pub tenant: String,
   pub cell_id: Option<String>,
+  pub process_key: String,
 }
 
 #[derive(Debug, Default)]
@@ -449,71 +450,70 @@ impl ProxyHttp for Proxy {
 
     let mut socket_path = None;
 
-    for _ in 0..RETRY_COUNT {
+    if single_use {
       match self
         .node_state
         .process_manager
-        .get_or_spawn_process(
-          &ctx.tenant,
-          cell_id,
-          single_use,
-          self.node_state.clone(),
-        )
+        .spawn_single_use_process(&ctx.tenant, cell_id)
         .await
       {
         Ok((path, _stream)) => {
-          // We only need the path, Pingora will handle the connection
-          // Increment active connection count
-          let default_cell = "default-cell".to_string();
-          let cell_id = ctx.cell_id.as_ref().unwrap_or(&default_cell);
-          self
-            .node_state
-            .process_manager
-            .increment_connection_count(&ctx.tenant, cell_id)
-            .await;
           socket_path = Some(path);
-          break;
         }
-        Err(ProcessManagerError::ProcessCreationInProgress) => {
-          info!(
-            node_id = %self.node_state.node_id,
-            "Lock is held by this node, meaning a deno process creation is already in progress. Retry in {:?}",
-            RETRY_INTERVAL
-          );
-          tokio::time::sleep(RETRY_INTERVAL).await;
-          continue;
+        Err(error) => {
+          error!(?error, "Failed to spawn single-use process");
+          return Err(error.into());
         }
-        Err(ProcessManagerError::LockContention) => {
-          debug!(
-            "Lock is held by another node that is responsible for this cell"
-          );
-          // TODO: forward the request to the lock holder?
-          tokio::time::sleep(RETRY_INTERVAL).await;
-          return Err(pingora::Error::explain(
-            ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
-            "Cell is being handled by another node",
-          ));
-        }
-        Err(ProcessManagerError::S3(e)) => {
-          debug!("S3 operation failed: {}", e);
-          return Err(pingora::Error::explain(
-            ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
-            "S3 operation failed",
-          ));
-        }
-        Err(ProcessManagerError::Serde(e)) => {
-          debug!("Failed to serialize or deserialize lock data: {}", e);
-          return Err(pingora::Error::explain(
-            ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
-            "Failed to serialize or deserialize lock data",
-          ));
-        }
-        Err(ProcessManagerError::Internal(e)) => {
-          error!("Error getting or spawning process: {:?}", e);
-          return Err(pingora::Error::explain(
-            ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
-            "Internal server error during process lookup",
-          ));
+      }
+    } else {
+      for _ in 0..RETRY_COUNT {
+        match self
+          .node_state
+          .process_manager
+          .get_or_spawn_process(&ctx.tenant, cell_id, self.node_state.clone())
+          .await
+        {
+          Ok((path, _stream)) => {
+            // We only need the path, Pingora will handle the connection
+            // Increment active connection count
+            let default_cell = "default-cell".to_string();
+            let cell_id = ctx.cell_id.as_ref().unwrap_or(&default_cell);
+            self
+              .node_state
+              .process_manager
+              .increment_connection_count(&ctx.tenant, cell_id)
+              .await;
+            socket_path = Some(path);
+            break;
+          }
+          Err(ProcessManagerError::ProcessCreationInProgress) => {
+            info!(
+              node_id = %self.node_state.node_id,
+              "Lock is held by this node, meaning a deno process creation is already in progress. Retry in {:?}",
+              RETRY_INTERVAL
+            );
+            tokio::time::sleep(RETRY_INTERVAL).await;
+            continue;
+          }
+          Err(error @ ProcessManagerError::LockContention) => {
+            debug!(
+              "Lock is held by another node that is responsible for this cell"
+            );
+            // TODO: forward the request to the lock holder?
+            return Err(error.into());
+          }
+          Err(error @ ProcessManagerError::S3(_)) => {
+            debug!(?error, "S3 operation failed");
+            return Err(error.into());
+          }
+          Err(error @ ProcessManagerError::Serde(_)) => {
+            debug!(?error, "Failed to serialize or deserialize lock data");
+            return Err(error.into());
+          }
+          Err(error @ ProcessManagerError::Internal(_)) => {
+            error!(?error, "Error getting or spawning process");
+            return Err(error.into());
+          }
         }
       }
     }
