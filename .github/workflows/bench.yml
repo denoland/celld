@@ -24,7 +24,8 @@ jobs:
           sudo apt-get install -y \
             build-essential \
             libsqlite3-dev \
-            curl
+            curl \
+            wget
 
           echo "Installing MinIO and mc for Linux..."
           wget https://dl.min.io/server/minio/release/linux-amd64/minio -O minio
