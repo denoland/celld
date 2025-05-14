@@ -31,7 +31,64 @@ pub enum RestoreState {
   Failed(String),
 }
 
-pub struct ProcessEntry {
+pub enum ProcessEntry {
+  SingleUse(SingleUseProcessEntry),
+  Reusable(ReusableProcessEntry),
+}
+
+impl ProcessEntry {
+  pub fn pid(&self) -> u32 {
+    match self {
+      ProcessEntry::SingleUse(entry) => entry.pid,
+      ProcessEntry::Reusable(entry) => entry.pid,
+    }
+  }
+
+  /// Check if the process has any active connections. We measure this two ways:
+  /// - we manually track the number of ongoing requests/websocket connections
+  ///   with self.incoming_connections
+  /// - if incoming_connections is 0, we check the number of active TCP outbound
+  ///   connections using /proc or lsof.
+  pub fn has_active_connections(&self) -> bool {
+    match self {
+      ProcessEntry::SingleUse(entry) => {
+        entry.incoming_connections > 0
+          || active_connections::count(entry.pid) > 0
+      }
+      ProcessEntry::Reusable(entry) => {
+        entry.incoming_connections > 0
+          || active_connections::count(entry.pid) > 0
+      }
+    }
+  }
+
+  pub fn last_used(&self) -> Instant {
+    match self {
+      ProcessEntry::SingleUse(entry) => entry.last_used,
+      ProcessEntry::Reusable(entry) => entry.last_used,
+    }
+  }
+
+  pub fn socket_path(&self) -> &Path {
+    match self {
+      ProcessEntry::SingleUse(entry) => &entry.socket_path,
+      ProcessEntry::Reusable(entry) => &entry.socket_path,
+    }
+  }
+
+  pub fn terminate(self) {
+    match self {
+      ProcessEntry::SingleUse(entry) => {
+        entry.parent_exit_guard.kill(Signal::SIGTERM);
+      }
+      ProcessEntry::Reusable(entry) => {
+        entry.parent_exit_guard.kill(Signal::SIGTERM);
+      }
+    }
+  }
+}
+
+pub struct ReusableProcessEntry {
   pub pid: u32,
   pub socket_path: PathBuf,
   pub last_used: Instant,
@@ -50,6 +107,7 @@ pub struct ProcessEntry {
   pub _socket_tempdir: TempDir,
 
   /// SQLite replication to S3/MinIO
+  /// `None` if S3/MinIO is not configured
   pub replica: Option<SqliteReplica>,
 
   /// State of the database restore operation
@@ -57,18 +115,9 @@ pub struct ProcessEntry {
   pub restore_state: RestoreState,
 }
 
-impl ProcessEntry {
+impl ReusableProcessEntry {
   async fn renew_lock_ttl(&self, new_ttl: Duration) -> anyhow::Result<()> {
     self.lock_guard.renew(new_ttl).await
-  }
-
-  /// Check if the process has any active connections. We measure this two ways:
-  /// - we manually track the number of ongoing requests/websocket connections
-  ///   with self.incoming_connections
-  /// - if incoming_connections is 0, we check the number of active TCP outbound
-  ///   connections using /proc or lsof.
-  pub fn has_active_connections(&self) -> bool {
-    self.incoming_connections > 0 || active_connections::count(self.pid) > 0
   }
 }
 
@@ -95,23 +144,16 @@ impl ProcessKey {
   fn new(host: &str, cell_id: &str) -> Self {
     ProcessKey(format!("{}/{}", host, cell_id))
   }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SingleUseProcessKey(String);
-
-impl SingleUseProcessKey {
-  fn new(host: &str, cell_id: &str) -> Self {
+  fn new_single_use(host: &str, cell_id: &str) -> Self {
     let uuid = Uuid::new_v4();
-    SingleUseProcessKey(format!("{}/{}/{}", host, cell_id, uuid))
+    ProcessKey(format!("{}/{}/{}", host, cell_id, uuid))
   }
 }
 
 pub struct ProcessManager {
   pub data_dir: PathBuf,
   pub processes: Mutex<HashMap<ProcessKey, ProcessEntry>>,
-  pub single_use_processes:
-    Mutex<HashMap<SingleUseProcessKey, SingleUseProcessEntry>>,
 }
 
 impl ProcessManager {
@@ -126,7 +168,6 @@ impl ProcessManager {
     ProcessManager {
       data_dir: std::fs::canonicalize(data_dir.clone()).unwrap(),
       processes: Mutex::new(HashMap::new()),
-      single_use_processes: Mutex::new(HashMap::new()),
     }
   }
 
@@ -135,9 +176,13 @@ impl ProcessManager {
     new_ttl: Duration,
   ) -> anyhow::Result<()> {
     let processes = self.processes.lock().await;
-    futures::future::try_join_all(
-      processes.values().map(|p| p.renew_lock_ttl(new_ttl)),
-    )
+    futures::future::try_join_all(processes.values().filter_map(|p| {
+      if let ProcessEntry::Reusable(entry) = p {
+        Some(entry.renew_lock_ttl(new_ttl))
+      } else {
+        None
+      }
+    }))
     .await?;
     Ok(())
   }
@@ -151,14 +196,16 @@ impl ProcessManager {
     // Ensure all locks are released
     // NOTE: Awaiting all notifiers at once with futures::future::join_all
     // somehow causes hangs. So we process each one sequentially.
-    for (_, mut process) in processes {
-      let (tx, rx) = tokio::sync::oneshot::channel();
-      process.lock_guard.set_release_notifier(tx);
-      // `drop(process)` would not invoke the Drop impl of LockGuard immediately
-      // for unknown reasons. Specifying `.lock_guard` directly is needed.
-      drop(process.lock_guard);
-      if let Err(e) = rx.await {
-        tracing::error!(error = ?e, "Error waiting for process cleanup to complete");
+    for (_, process) in processes {
+      if let ProcessEntry::Reusable(mut entry) = process {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        entry.lock_guard.set_release_notifier(tx);
+        // `drop(process)` would not invoke the Drop impl of LockGuard immediately
+        // for unknown reasons. Specifying `.lock_guard` directly is needed.
+        drop(entry.lock_guard);
+        if let Err(e) = rx.await {
+          tracing::error!(error = ?e, "Error waiting for process cleanup to complete");
+        }
       }
     }
   }
@@ -169,13 +216,23 @@ impl ProcessManager {
     process_key: &ProcessKey,
   ) -> bool {
     let mut processes = self.processes.lock().await;
-    if let Some(entry) = processes.get_mut(process_key) {
-      entry.incoming_connections += 1;
-      entry.last_used = Instant::now();
-      return true;
+
+    let Some(entry) = processes.get_mut(process_key) else {
+      return false;
+    };
+
+    match entry {
+      ProcessEntry::Reusable(entry) => {
+        entry.incoming_connections += 1;
+        entry.last_used = Instant::now();
+      }
+      ProcessEntry::SingleUse(entry) => {
+        entry.incoming_connections += 1;
+        entry.last_used = Instant::now();
+      }
     }
 
-    false
+    true
   }
 
   /// Track a closed connection to the process
@@ -184,14 +241,25 @@ impl ProcessManager {
     process_key: &ProcessKey,
   ) -> bool {
     let mut processes = self.processes.lock().await;
-    if let Some(entry) = processes.get_mut(process_key) {
-      assert!(entry.incoming_connections > 0);
-      entry.incoming_connections -= 1;
-      entry.last_used = Instant::now();
-      return true;
+
+    let Some(entry) = processes.get_mut(process_key) else {
+      return false;
+    };
+
+    match entry {
+      ProcessEntry::Reusable(entry) => {
+        assert!(entry.incoming_connections > 0);
+        entry.incoming_connections -= 1;
+        entry.last_used = Instant::now();
+      }
+      ProcessEntry::SingleUse(entry) => {
+        assert!(entry.incoming_connections > 0);
+        entry.incoming_connections -= 1;
+        entry.last_used = Instant::now();
+      }
     }
 
-    false
+    true
   }
 
   #[instrument(skip(self, node_state), fields(host = %host, cell_id = %cell_id))]
@@ -208,11 +276,9 @@ impl ProcessManager {
     // First, try to find and connect to an existing process, keeping the lock time minimal
     let socket_path_opt = {
       let processes = self.processes.lock().await;
-      if let Some(entry) = processes.get(&process_key) {
-        Some(entry.socket_path.clone())
-      } else {
-        None
-      }
+      processes
+        .get(&process_key)
+        .map(|entry| entry.socket_path().to_path_buf())
     };
 
     // If we found a socket path, try to connect without holding the lock
@@ -223,7 +289,7 @@ impl ProcessManager {
             socket = %socket_path.display(),
             "Connected to existing process socket"
           );
-          return Ok((socket_path, stream));
+          return Ok((socket_path, stream, process_key));
         }
         Err(e) => {
           error!(
@@ -449,7 +515,7 @@ impl ProcessManager {
     let pid = child_guard.pid().unwrap() as u32;
 
     // Create a new ProcessEntry with proper values
-    let entry = ProcessEntry {
+    let entry = ProcessEntry::Reusable(ReusableProcessEntry {
       pid,
       socket_path: socket_path.clone(),
       last_used: Instant::now(),
@@ -459,7 +525,7 @@ impl ProcessManager {
       _socket_tempdir: socket_tempdir,
       replica: replica.clone(),
       restore_state,
-    };
+    });
 
     warn!(line = line!(), "👿👿 get_or_spawn_process");
     // Insert the entry into the processes map using a short-lived lock
@@ -493,8 +559,8 @@ impl ProcessManager {
         // Remove the entry from the map to avoid stale entries
         let mut processes = self.processes.lock().await;
         if let Some(entry) = processes.remove(&process_key) {
-          // Kill the process to avoid zombies
-          entry.parent_exit_guard.kill(Signal::SIGTERM);
+          // Terminate the process to avoid zombies
+          entry.terminate();
         }
 
         // The tempdir will be dropped at the end of this scope, cleaning up the socket file
@@ -555,8 +621,8 @@ impl ProcessManager {
           // Remove the entry from the map to avoid stale entries
           let mut processes = self.processes.lock().await;
           if let Some(entry) = processes.remove(&process_key) {
-            // Kill the process to avoid zombies
-            entry.parent_exit_guard.kill(Signal::SIGTERM);
+            // Terminate the process to avoid zombies
+            entry.terminate();
           }
 
           // The tempdir will be dropped at the end of this scope, cleaning up the socket file
@@ -577,9 +643,8 @@ impl ProcessManager {
     &self,
     host: &str,
     cell_id: &str,
-  ) -> Result<(PathBuf, UnixStream, SingleUseProcessKey), ProcessManagerError>
-  {
-    let single_use_process_key = SingleUseProcessKey::new(host, cell_id);
+  ) -> Result<(PathBuf, UnixStream, ProcessKey), ProcessManagerError> {
+    let process_key = ProcessKey::new_single_use(host, cell_id);
 
     assert!(!host.contains('/') && !host.contains(".."));
     let tenant_dir = self.data_dir.join(host);
@@ -638,20 +703,20 @@ impl ProcessManager {
     // Convert to tokio::process::Child using the PID
     let pid = child_guard.pid().unwrap() as u32;
 
-    // Create a new SingleUseProcessEntry with proper values
-    let entry = SingleUseProcessEntry {
+    // Create a new ProcessEntry with proper values
+    let entry = ProcessEntry::SingleUse(SingleUseProcessEntry {
       pid,
       socket_path: socket_path.clone(),
       last_used: Instant::now(),
       incoming_connections: 0,
       parent_exit_guard: child_guard,
       _socket_tempdir: socket_tempdir,
-    };
+    });
 
     // Insert the entry into the processes map using a short-lived lock
     {
-      let mut processes = self.single_use_processes.lock().await;
-      processes.insert(single_use_process_key.clone(), entry);
+      let mut processes = self.processes.lock().await;
+      processes.insert(process_key.clone(), entry);
     }
 
     // --- Wait for the socket to become available (crucial for cold start) ---
@@ -675,10 +740,10 @@ impl ProcessManager {
         );
 
         // Remove the entry from the map to avoid stale entries
-        let mut processes = self.single_use_processes.lock().await;
-        if let Some(entry) = processes.remove(&single_use_process_key) {
-          // Kill the process to avoid zombies
-          entry.parent_exit_guard.kill(Signal::SIGTERM);
+        let mut processes = self.processes.lock().await;
+        if let Some(entry) = processes.remove(&process_key) {
+          // Terminate the process to avoid zombies
+          entry.terminate();
         }
 
         // The tempdir will be dropped at the end of this scope, cleaning up the socket file
@@ -737,10 +802,10 @@ impl ProcessManager {
           );
 
           // Remove the entry from the map to avoid stale entries
-          let mut processes = self.single_use_processes.lock().await;
-          if let Some(entry) = processes.remove(&single_use_process_key) {
-            // Kill the process to avoid zombies
-            entry.parent_exit_guard.kill(Signal::SIGTERM);
+          let mut processes = self.processes.lock().await;
+          if let Some(entry) = processes.remove(&process_key) {
+            // Terminate the process to avoid zombies
+            entry.terminate();
           }
 
           // The tempdir will be dropped at the end of this scope, cleaning up the socket file
@@ -751,19 +816,19 @@ impl ProcessManager {
       }
     };
 
-    Ok((socket_path, stream, single_use_process_key))
+    Ok((socket_path, stream, process_key))
   }
 
-  pub async fn kill_all(&self) {
+  pub async fn terminate_all(&self) {
     // Move all entries into a local collection to minimize lock duration
     let entries: Vec<_> = {
       let mut processes = self.processes.lock().await;
       processes.drain().collect()
     };
 
-    // Kill all processes without holding the lock
+    // Terminate all processes without holding the lock
     for (_, entry) in entries {
-      entry.parent_exit_guard.kill(Signal::SIGTERM);
+      entry.terminate();
     }
   }
 }

@@ -5,9 +5,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info};
 
 use crate::node_state::NodeState;
-use crate::process_manager::{
-  ProcessKey, ProcessManagerError, SingleUseProcessKey,
-};
+use crate::process_manager::{ProcessKey, ProcessManagerError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
@@ -33,7 +31,6 @@ pub struct Ctx {
   pub tenant: String,
   pub cell_id: Option<String>,
   pub process_key: Option<ProcessKey>,
-  pub single_use_process_key: Option<SingleUseProcessKey>,
 }
 
 #[derive(Debug, Default)]
@@ -208,14 +205,11 @@ impl ProxyHttp for Proxy {
     _e: Option<&pingora::Error>,
     ctx: &mut Self::CTX,
   ) {
-    if !ctx.tenant.is_empty() {
-      let default_cell = "default-cell".to_string();
-      let cell_id = ctx.cell_id.as_ref().unwrap_or(&default_cell);
-
+    if let Some(process_key) = &ctx.process_key {
       let _ = self
         .node_state
         .process_manager
-        .decrement_connection_count(&ctx.tenant, cell_id)
+        .decrement_connection_count(process_key)
         .await;
     }
   }
@@ -460,13 +454,13 @@ impl ProxyHttp for Proxy {
         .spawn_single_use_process(&ctx.tenant, cell_id)
         .await
       {
-        Ok((path, _stream, single_use_process_key)) => {
+        Ok((path, _stream, process_key)) => {
           self
             .node_state
             .process_manager
-            .increment_connection_count(&single_use_process_key)
+            .increment_connection_count(&process_key)
             .await;
-          ctx.single_use_process_key = Some(single_use_process_key);
+          ctx.process_key = Some(process_key);
           socket_path = Some(path);
         }
         Err(error) => {
@@ -485,8 +479,6 @@ impl ProxyHttp for Proxy {
           Ok((path, _stream, process_key)) => {
             // We only need the path, Pingora will handle the connection
             // Increment active connection count
-            let default_cell = "default-cell".to_string();
-            let cell_id = ctx.cell_id.as_ref().unwrap_or(&default_cell);
             self
               .node_state
               .process_manager
