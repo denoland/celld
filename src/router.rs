@@ -434,7 +434,7 @@ impl ProxyHttp for Proxy {
     }
 
     // We are the responsible peer, so handle the request locally
-    info!(
+    debug!(
       my_node_id = %self.node_state.node_id,
       host = %ctx.tenant,
       cell_id = %cell_id,
