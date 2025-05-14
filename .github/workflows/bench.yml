@@ -98,7 +98,9 @@ jobs:
           BENCHMARK_OUTPUT=$(hey -cpus 1 -n 10 -c 1 -host hello.localhost -H "x-single-use-isolate: true" http://127.0.0.1:8000/cell/foo)
           echo "Benchmark output:"
           echo "$BENCHMARK_OUTPUT"
+          echo 'result<<EOF' >> $GITHUB_OUTPUT
           echo "$BENCHMARK_OUTPUT" >> $GITHUB_OUTPUT
+          echo 'EOF' >> $GITHUB_OUTPUT
 
       - name: Comment on PR
         if: github.event_name == 'pull_request'
