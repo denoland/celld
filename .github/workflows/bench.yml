@@ -26,6 +26,21 @@ jobs:
             libsqlite3-dev \
             curl
 
+          echo "Installing MinIO and mc for Linux..."
+          wget https://dl.min.io/server/minio/release/linux-amd64/minio -O minio
+          chmod +x minio
+          sudo mv minio /usr/local/bin/
+          wget https://dl.min.io/client/mc/release/linux-amd64/mc -O mc
+          chmod +x mc
+          sudo mv mc /usr/local/bin/
+          minio --version
+          mc --version
+
+          echo "Installing Litestream for Linux..."
+          curl -L -o litestream.deb "https://github.com/benbjohnson/litestream/releases/download/${LITESTREAM_VERSION}/litestream-${LITESTREAM_VERSION}-linux-amd64.deb"
+          sudo dpkg -i litestream.deb
+          litestream version
+
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
