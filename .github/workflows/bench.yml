@@ -87,12 +87,14 @@ jobs:
 
       - name: Build
         run: |
-          cargo build --release
+          # cargo build --release
+          cargo build
 
       - name: Run coldstart benchmark
         id: benchmark
         run: |
-          ./target/release/celld > /dev/null 2>&1 &
+          # ./target/release/celld > /dev/null 2>&1 &
+          ./target/debug/celld > /dev/null 2>&1 &
           sleep 2
           echo "Running benchmark..."
           BENCHMARK_OUTPUT=$(hey -cpus 1 -n 10 -c 1 -host hello.localhost -H "x-single-use-isolate: true" http://127.0.0.1:8000/cell/foo)
