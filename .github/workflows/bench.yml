@@ -96,7 +96,7 @@ jobs:
           ./target/release/celld > /dev/null 2>&1 &
           sleep 2
           echo "Running benchmark..."
-          BENCHMARK_OUTPUT=$(hey -cpus 1 -n 10 -c 1 -host hello.localhost -H "x-single-use-isolate: true" http://127.0.0.1:8000/cell/foo)
+          BENCHMARK_OUTPUT=$(hey -cpus 1 -n 1000 -c 10 -host hello.localhost -H "x-single-use-isolate: true" http://127.0.0.1:8000/cell/foo)
           echo "Benchmark output:"
           echo "$BENCHMARK_OUTPUT"
           echo 'result<<EOF' >> $GITHUB_OUTPUT
