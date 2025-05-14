@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: ["main"]
 
+permissions:
+    issues: write
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -120,6 +123,6 @@ jobs:
 
       - name: Comment on commit (push event)
         if: github.event_name == 'push'
-        uses: peter-evans/commit-comment@v2
+        uses: peter-evans/commit-comment@v3
         with:
           body: ${{ steps.benchmark.outputs.result }}
