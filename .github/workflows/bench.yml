@@ -68,24 +68,20 @@ jobs:
           127.0.0.1 ws-echo.localhost
           EOF'
 
+      - name: Build
+        run: |
+          cargo build --release
+
       - name: Run coldstart benchmark
         id: benchmark
         run: |
-          # Run the benchmark script and capture output
-          BENCHMARK_OUTPUT=$(bash ./benchmark_coldstart.sh)
+          ./target/release/celld > /dev/null 2>&1 &
+          sleep 2
+          echo "Running benchmark..."
+          BENCHMARK_OUTPUT=$(hey -cpus 1 -n 1000 -c 10 -host hello.localhost -H "x-single-use-isolate: true" http://127.0.0.1:8000/cell/foo)
+          echo "Benchmark output:"
           echo "$BENCHMARK_OUTPUT"
-
-          # Convert output to markdown format for the comment
-          BENCHMARK_MARKDOWN="## Coldstart Benchmark Results
-
-          \`\`\`
-          $BENCHMARK_OUTPUT
-          \`\`\`"
-
-          # Save as output for next step
-          echo "result<<EOF" >> $GITHUB_OUTPUT
-          echo "$BENCHMARK_MARKDOWN" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          echo "$BENCHMARK_OUTPUT" >> $GITHUB_OUTPUT
 
       - name: Comment on PR
         if: github.event_name == 'pull_request'
