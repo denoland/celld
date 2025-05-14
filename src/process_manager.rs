@@ -17,7 +17,6 @@ use crate::active_connections;
 use crate::child_on_parent_exit::ChildOnParentExit;
 use crate::distributed_lock::LockAcquireError;
 use crate::distributed_lock::LockGuard;
-use crate::peer_manager::cell_hash_key;
 use crate::router::ProxyError;
 use crate::sqlite_replica::{create_empty_database, SqliteReplica};
 use crate::NodeState;
@@ -89,10 +88,30 @@ pub struct SingleUseProcessEntry {
   pub _socket_tempdir: TempDir,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProcessKey(String);
+
+impl ProcessKey {
+  fn new(host: &str, cell_id: &str) -> Self {
+    ProcessKey(format!("{}/{}", host, cell_id))
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SingleUseProcessKey(String);
+
+impl SingleUseProcessKey {
+  fn new(host: &str, cell_id: &str) -> Self {
+    let uuid = Uuid::new_v4();
+    SingleUseProcessKey(format!("{}/{}/{}", host, cell_id, uuid))
+  }
+}
+
 pub struct ProcessManager {
   pub data_dir: PathBuf,
-  pub processes: Mutex<HashMap<String, ProcessEntry>>,
-  pub single_use_processes: Mutex<HashMap<String, SingleUseProcessEntry>>,
+  pub processes: Mutex<HashMap<ProcessKey, ProcessEntry>>,
+  pub single_use_processes:
+    Mutex<HashMap<SingleUseProcessKey, SingleUseProcessEntry>>,
 }
 
 impl ProcessManager {
@@ -147,13 +166,10 @@ impl ProcessManager {
   /// Track a new connection to the process
   pub async fn increment_connection_count(
     &self,
-    host: &str,
-    cell_id: &str,
+    process_key: &ProcessKey,
   ) -> bool {
-    let process_key = cell_hash_key(host, cell_id);
-
     let mut processes = self.processes.lock().await;
-    if let Some(entry) = processes.get_mut(&process_key) {
+    if let Some(entry) = processes.get_mut(process_key) {
       entry.incoming_connections += 1;
       entry.last_used = Instant::now();
       return true;
@@ -165,13 +181,10 @@ impl ProcessManager {
   /// Track a closed connection to the process
   pub async fn decrement_connection_count(
     &self,
-    host: &str,
-    cell_id: &str,
+    process_key: &ProcessKey,
   ) -> bool {
-    let process_key = cell_hash_key(host, cell_id);
-
     let mut processes = self.processes.lock().await;
-    if let Some(entry) = processes.get_mut(&process_key) {
+    if let Some(entry) = processes.get_mut(process_key) {
       assert!(entry.incoming_connections > 0);
       entry.incoming_connections -= 1;
       entry.last_used = Instant::now();
@@ -187,10 +200,10 @@ impl ProcessManager {
     host: &str,
     cell_id: &str,
     node_state: Arc<NodeState>,
-  ) -> Result<(PathBuf, UnixStream), ProcessManagerError> {
+  ) -> Result<(PathBuf, UnixStream, ProcessKey), ProcessManagerError> {
     warn!(line = line!(), "👿👿 get_or_spawn_process");
     // Create a combined key for host and cell to ensure one isolate per cell
-    let process_key = cell_hash_key(host, cell_id);
+    let process_key = ProcessKey::new(host, cell_id);
 
     // First, try to find and connect to an existing process, keeping the lock time minimal
     let socket_path_opt = {
@@ -241,7 +254,7 @@ impl ProcessManager {
     // Acquire a lock on the cell to declare ownership of the combination of
     // tenant and cellId. This lock's lifetime should match that of the Deno
     // process we will create later.
-    let lock_name = cell_hash_key(host, cell_id);
+    let lock_name = format!("{}/{}", host, cell_id);
     let node_id = node_state.peer_manager.get_local_node_id();
     warn!(line = line!(), "👿👿 get_or_spawn_process");
     let lock_guard = node_state
@@ -554,7 +567,7 @@ impl ProcessManager {
       }
     };
 
-    Ok((socket_path, stream))
+    Ok((socket_path, stream, process_key))
   }
 
   /// Spawn a single-use Deno process.
@@ -564,9 +577,9 @@ impl ProcessManager {
     &self,
     host: &str,
     cell_id: &str,
-  ) -> Result<(PathBuf, UnixStream), ProcessManagerError> {
-    let unique_process_key =
-      format!("{}/{}", cell_hash_key(host, cell_id), Uuid::new_v4());
+  ) -> Result<(PathBuf, UnixStream, SingleUseProcessKey), ProcessManagerError>
+  {
+    let single_use_process_key = SingleUseProcessKey::new(host, cell_id);
 
     assert!(!host.contains('/') && !host.contains(".."));
     let tenant_dir = self.data_dir.join(host);
@@ -638,7 +651,7 @@ impl ProcessManager {
     // Insert the entry into the processes map using a short-lived lock
     {
       let mut processes = self.single_use_processes.lock().await;
-      processes.insert(unique_process_key.clone(), entry);
+      processes.insert(single_use_process_key.clone(), entry);
     }
 
     // --- Wait for the socket to become available (crucial for cold start) ---
@@ -663,7 +676,7 @@ impl ProcessManager {
 
         // Remove the entry from the map to avoid stale entries
         let mut processes = self.single_use_processes.lock().await;
-        if let Some(entry) = processes.remove(&unique_process_key) {
+        if let Some(entry) = processes.remove(&single_use_process_key) {
           // Kill the process to avoid zombies
           entry.parent_exit_guard.kill(Signal::SIGTERM);
         }
@@ -725,7 +738,7 @@ impl ProcessManager {
 
           // Remove the entry from the map to avoid stale entries
           let mut processes = self.single_use_processes.lock().await;
-          if let Some(entry) = processes.remove(&unique_process_key) {
+          if let Some(entry) = processes.remove(&single_use_process_key) {
             // Kill the process to avoid zombies
             entry.parent_exit_guard.kill(Signal::SIGTERM);
           }
@@ -738,7 +751,7 @@ impl ProcessManager {
       }
     };
 
-    Ok((socket_path, stream))
+    Ok((socket_path, stream, single_use_process_key))
   }
 
   pub async fn kill_all(&self) {

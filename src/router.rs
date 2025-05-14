@@ -5,7 +5,9 @@ use std::sync::Arc;
 use tracing::{debug, error, info};
 
 use crate::node_state::NodeState;
-use crate::process_manager::ProcessManagerError;
+use crate::process_manager::{
+  ProcessKey, ProcessManagerError, SingleUseProcessKey,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
@@ -30,7 +32,8 @@ pub struct InternalAPI {
 pub struct Ctx {
   pub tenant: String,
   pub cell_id: Option<String>,
-  pub process_key: String,
+  pub process_key: Option<ProcessKey>,
+  pub single_use_process_key: Option<SingleUseProcessKey>,
 }
 
 #[derive(Debug, Default)]
@@ -457,7 +460,13 @@ impl ProxyHttp for Proxy {
         .spawn_single_use_process(&ctx.tenant, cell_id)
         .await
       {
-        Ok((path, _stream)) => {
+        Ok((path, _stream, single_use_process_key)) => {
+          self
+            .node_state
+            .process_manager
+            .increment_connection_count(&single_use_process_key)
+            .await;
+          ctx.single_use_process_key = Some(single_use_process_key);
           socket_path = Some(path);
         }
         Err(error) => {
@@ -473,7 +482,7 @@ impl ProxyHttp for Proxy {
           .get_or_spawn_process(&ctx.tenant, cell_id, self.node_state.clone())
           .await
         {
-          Ok((path, _stream)) => {
+          Ok((path, _stream, process_key)) => {
             // We only need the path, Pingora will handle the connection
             // Increment active connection count
             let default_cell = "default-cell".to_string();
@@ -481,8 +490,9 @@ impl ProxyHttp for Proxy {
             self
               .node_state
               .process_manager
-              .increment_connection_count(&ctx.tenant, cell_id)
+              .increment_connection_count(&process_key)
               .await;
+            ctx.process_key = Some(process_key);
             socket_path = Some(path);
             break;
           }
