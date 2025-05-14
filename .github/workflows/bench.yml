@@ -6,10 +6,6 @@ on:
   pull_request:
     branches: ["main"]
 
-permissions:
-    contents: read
-    issues: write
-
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -108,22 +104,7 @@ jobs:
           echo "$BENCHMARK_OUTPUT" >> $GITHUB_OUTPUT
           echo 'EOF' >> $GITHUB_OUTPUT
 
-      - name: Comment on PR
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v6
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const benchmarkResult = `${{ steps.benchmark.outputs.result }}`;
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: benchmarkResult
-            });
-
       - name: Comment on commit (push event)
-        if: github.event_name == 'push'
         uses: peter-evans/commit-comment@v3
         with:
           body: ${{ steps.benchmark.outputs.result }}
