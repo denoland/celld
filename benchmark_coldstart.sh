@@ -9,7 +9,7 @@ pkill -f "deno run" || true
 sleep 1
 
 echo "Starting server with timing info enabled..."
-RUST_LOG=info ./target/release/celld &
+RUST_LOG=info ./target/release/celld  &
 SERVER_PID=$!
 
 # Give server time to start

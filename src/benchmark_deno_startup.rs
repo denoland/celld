@@ -50,9 +50,9 @@ pub async fn run(iterations: usize) -> Result<()> {
     let start = Instant::now();
 
     // Use single_use isolate to ensure a new process each time
-    let (_socket_path, _stream) = node_state
+    let (_socket_path, _stream, _process_key) = node_state
       .process_manager
-      .get_or_spawn_process(host, cell_id, true, node_state.clone())
+      .spawn_single_use_process(host, cell_id)
       .await?;
     let elapsed = start.elapsed();
 
@@ -93,7 +93,7 @@ pub async fn run(iterations: usize) -> Result<()> {
     println!("p99: {} ms", p99.as_millis());
   }
 
-  node_state.process_manager.kill_all().await;
+  node_state.process_manager.terminate_all().await;
 
   Ok(())
 }

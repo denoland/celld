@@ -29,9 +29,7 @@ impl BackgroundService for LockGuardTTLUpdater {
               break;
           }
           _ = interval.tick() => {
-              if let Err(e) = self.process_manager.renew_all_lock_ttls(self.ttl).await {
-                tracing::error!(error = ?e, "Error renewing lock guard TTLs");
-              }
+              self.process_manager.request_all_lock_ttls_renewal(self.ttl);
           }
       }
     }
