@@ -201,7 +201,7 @@ impl ProcessManager {
     let socket_path_opt = {
       let processes = self.processes.lock().unwrap();
       processes
-        .get(&process_key)
+        .get(process_key)
         .map(|entry| entry.socket_path().to_path_buf())
     };
 
@@ -468,7 +468,7 @@ impl ProcessManager {
 
         // Remove the entry from the map to avoid stale entries
         let mut processes = self.processes.lock().unwrap();
-        if let Some(entry) = processes.remove(&process_key) {
+        if let Some(entry) = processes.remove(process_key) {
           // Terminate the process to avoid zombies
           entry.terminate();
         }
@@ -530,7 +530,7 @@ impl ProcessManager {
 
           // Remove the entry from the map to avoid stale entries
           let mut processes = self.processes.lock().unwrap();
-          if let Some(entry) = processes.remove(&process_key) {
+          if let Some(entry) = processes.remove(process_key) {
             // Terminate the process to avoid zombies
             entry.terminate();
           }
