@@ -100,7 +100,9 @@ jobs:
           echo "Benchmark output:"
           echo "$BENCHMARK_OUTPUT"
           echo 'result<<EOF' >> $GITHUB_OUTPUT
+          echo '```' >> $GITHUB_OUTPUT
           echo "$BENCHMARK_OUTPUT" >> $GITHUB_OUTPUT
+          echo '```' >> $GITHUB_OUTPUT
           echo 'EOF' >> $GITHUB_OUTPUT
 
       - name: Comment on PR
