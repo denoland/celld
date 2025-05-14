@@ -5,10 +5,10 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
-use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
@@ -88,6 +88,7 @@ impl ProcessEntry {
   }
 }
 
+#[derive(Debug)]
 pub struct ReusableProcessEntry {
   pub pid: u32,
   pub socket_path: PathBuf,
@@ -101,7 +102,7 @@ pub struct ReusableProcessEntry {
   pub parent_exit_guard: ChildOnParentExit,
 
   /// Guard for ensuring the uniqueness of the tenant/cellId in the cluster
-  pub lock_guard: LockGuard,
+  lock_guard: LockGuard,
 
   /// Keep tempdir alive as long as process exists
   pub _socket_tempdir: TempDir,
@@ -116,8 +117,8 @@ pub struct ReusableProcessEntry {
 }
 
 impl ReusableProcessEntry {
-  async fn renew_lock_ttl(&self, new_ttl: Duration) -> anyhow::Result<()> {
-    self.lock_guard.renew(new_ttl).await
+  fn request_lock_ttl_renewal(&self, new_ttl: Duration) {
+    self.lock_guard.request_ttl_renewal(new_ttl)
   }
 }
 
@@ -171,25 +172,18 @@ impl ProcessManager {
     }
   }
 
-  pub async fn renew_all_lock_ttls(
-    &self,
-    new_ttl: Duration,
-  ) -> anyhow::Result<()> {
-    let processes = self.processes.lock().await;
-    futures::future::try_join_all(processes.values().filter_map(|p| {
-      if let ProcessEntry::Reusable(entry) = p {
-        Some(entry.renew_lock_ttl(new_ttl))
-      } else {
-        None
+  pub fn request_all_lock_ttls_renewal(&self, new_ttl: Duration) {
+    let processes = self.processes.lock().unwrap();
+    for process in processes.values() {
+      if let ProcessEntry::Reusable(entry) = process {
+        entry.request_lock_ttl_renewal(new_ttl);
       }
-    }))
-    .await?;
-    Ok(())
+    }
   }
 
   pub async fn wait_until_process_cleanup_complete(&self) {
     let processes = {
-      let mut lock = self.processes.lock().await;
+      let mut lock = self.processes.lock().unwrap();
       std::mem::take(&mut *lock)
     };
 
@@ -215,7 +209,7 @@ impl ProcessManager {
     &self,
     process_key: &ProcessKey,
   ) -> bool {
-    let mut processes = self.processes.lock().await;
+    let mut processes = self.processes.lock().unwrap();
 
     let Some(entry) = processes.get_mut(process_key) else {
       return false;
@@ -240,7 +234,7 @@ impl ProcessManager {
     &self,
     process_key: &ProcessKey,
   ) -> bool {
-    let mut processes = self.processes.lock().await;
+    let mut processes = self.processes.lock().unwrap();
 
     let Some(entry) = processes.get_mut(process_key) else {
       return false;
@@ -274,7 +268,7 @@ impl ProcessManager {
 
     // First, try to find and connect to an existing process, keeping the lock time minimal
     let socket_path_opt = {
-      let processes = self.processes.lock().await;
+      let processes = self.processes.lock().unwrap();
       processes
         .get(&process_key)
         .map(|entry| entry.socket_path().to_path_buf())
@@ -517,7 +511,7 @@ impl ProcessManager {
 
     // Insert the entry into the processes map using a short-lived lock
     {
-      let mut processes = self.processes.lock().await;
+      let mut processes = self.processes.lock().unwrap();
       processes.insert(process_key.clone(), entry);
     }
 
@@ -542,7 +536,7 @@ impl ProcessManager {
         );
 
         // Remove the entry from the map to avoid stale entries
-        let mut processes = self.processes.lock().await;
+        let mut processes = self.processes.lock().unwrap();
         if let Some(entry) = processes.remove(&process_key) {
           // Terminate the process to avoid zombies
           entry.terminate();
@@ -604,7 +598,7 @@ impl ProcessManager {
           );
 
           // Remove the entry from the map to avoid stale entries
-          let mut processes = self.processes.lock().await;
+          let mut processes = self.processes.lock().unwrap();
           if let Some(entry) = processes.remove(&process_key) {
             // Terminate the process to avoid zombies
             entry.terminate();
@@ -700,7 +694,7 @@ impl ProcessManager {
 
     // Insert the entry into the processes map using a short-lived lock
     {
-      let mut processes = self.processes.lock().await;
+      let mut processes = self.processes.lock().unwrap();
       processes.insert(process_key.clone(), entry);
     }
 
@@ -725,7 +719,7 @@ impl ProcessManager {
         );
 
         // Remove the entry from the map to avoid stale entries
-        let mut processes = self.processes.lock().await;
+        let mut processes = self.processes.lock().unwrap();
         if let Some(entry) = processes.remove(&process_key) {
           // Terminate the process to avoid zombies
           entry.terminate();
@@ -787,7 +781,7 @@ impl ProcessManager {
           );
 
           // Remove the entry from the map to avoid stale entries
-          let mut processes = self.processes.lock().await;
+          let mut processes = self.processes.lock().unwrap();
           if let Some(entry) = processes.remove(&process_key) {
             // Terminate the process to avoid zombies
             entry.terminate();
@@ -807,7 +801,7 @@ impl ProcessManager {
   pub async fn terminate_all(&self) {
     // Move all entries into a local collection to minimize lock duration
     let entries: Vec<_> = {
-      let mut processes = self.processes.lock().await;
+      let mut processes = self.processes.lock().unwrap();
       processes.drain().collect()
     };
 

@@ -34,7 +34,7 @@ impl ProcessReaper {
 
     // Identify processes to reap without holding the lock too long
     let processes_to_reap = {
-      let processes = self.node_state.process_manager.processes.lock().await;
+      let processes = self.node_state.process_manager.processes.lock().unwrap();
       let mut to_reap = Vec::new();
 
       for (process_key, entry) in processes.iter() {
@@ -66,7 +66,7 @@ impl ProcessReaper {
       // Remove the entry from the map - keep lock held minimal time
       let maybe_entry = {
         let mut processes =
-          self.node_state.process_manager.processes.lock().await;
+          self.node_state.process_manager.processes.lock().unwrap();
         processes.remove(&process_key)
       };
 
