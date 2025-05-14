@@ -269,7 +269,6 @@ impl ProcessManager {
     cell_id: &str,
     node_state: Arc<NodeState>,
   ) -> Result<(PathBuf, UnixStream, ProcessKey), ProcessManagerError> {
-    warn!(line = line!(), "👿👿 get_or_spawn_process");
     // Create a combined key for host and cell to ensure one isolate per cell
     let process_key = ProcessKey::new(host, cell_id);
 
@@ -302,8 +301,6 @@ impl ProcessManager {
       }
     }
 
-    warn!(line = line!(), "👿👿 get_or_spawn_process");
-
     // checked higher up, but done again here for safety
     assert!(!host.contains('/') && !host.contains(".."));
     let tenant_dir = self.data_dir.join(host);
@@ -315,14 +312,12 @@ impl ProcessManager {
         ProxyError::AppNotFound(host.to_string()).into(),
       ));
     }
-    warn!(line = line!(), "👿👿 get_or_spawn_process");
 
     // Acquire a lock on the cell to declare ownership of the combination of
     // tenant and cellId. This lock's lifetime should match that of the Deno
     // process we will create later.
     let lock_name = format!("{}/{}", host, cell_id);
     let node_id = node_state.peer_manager.get_local_node_id();
-    warn!(line = line!(), "👿👿 get_or_spawn_process");
     let lock_guard = node_state
       .distributed_lock
       .clone()
@@ -353,7 +348,6 @@ impl ProcessManager {
         }
       })?;
 
-    warn!(line = line!(), "👿👿 get_or_spawn_process");
     // Create a temporary directory for the socket
     // This will be automatically cleaned up when dropped
     let socket_tempdir = tempfile::tempdir()
@@ -366,14 +360,12 @@ impl ProcessManager {
     };
     let socket_path = socket_tempdir.path().join(socket_name);
 
-    warn!(line = line!(), ?socket_path, "👿👿 get_or_spawn_process");
     // Create SQLite directory
     let sqlite_dir = tenant_dir.join("sqlite");
     std::fs::create_dir_all(&sqlite_dir).unwrap_or_else(|e| {
       warn!("Failed to create sqlite directory: {}", e);
     });
 
-    warn!(line = line!(), "👿👿 get_or_spawn_process");
     // Configure SQLite replication if S3 is configured
     let db_path = sqlite_dir.join(format!("{}.db", cell_id));
 
@@ -406,7 +398,6 @@ impl ProcessManager {
         None
       }
     };
-    warn!(line = line!(), "👿👿 get_or_spawn_process");
 
     // Initialize restore state variable
     let restore_state;
@@ -472,7 +463,6 @@ impl ProcessManager {
       // Update state to Complete(false) since we created a new empty DB
       restore_state = RestoreState::Complete(false);
     } else {
-      warn!(line = line!(), "👿👿 get_or_spawn_process");
       // No replica and the database already exists
       debug!(
         tenant = %host,
@@ -483,7 +473,6 @@ impl ProcessManager {
       restore_state = RestoreState::Complete(false);
     }
 
-    warn!(line = line!(), "👿👿 get_or_spawn_process");
     let spawn_start = Instant::now();
 
     debug!(
@@ -503,7 +492,6 @@ impl ProcessManager {
       &main_script,
     )?;
 
-    warn!(line = line!(), "👿👿 get_or_spawn_process");
     debug!(
       tenant = %host,
       cell_id = %cell_id,
@@ -527,14 +515,12 @@ impl ProcessManager {
       restore_state,
     });
 
-    warn!(line = line!(), "👿👿 get_or_spawn_process");
     // Insert the entry into the processes map using a short-lived lock
     {
       let mut processes = self.processes.lock().await;
       processes.insert(process_key.clone(), entry);
     }
 
-    warn!(line = line!(), ?socket_path, "👿👿 get_or_spawn_process");
     // --- Wait for the socket to become available (crucial for cold start) ---
     let socket_ = socket_path.clone();
     let wait_start = Instant::now();
@@ -546,7 +532,6 @@ impl ProcessManager {
 
     // Wait for the socket to be available and connect to it
     let stream = loop {
-      warn!(line = line!(), "👿👿 get_or_spawn_process");
       if wait_start.elapsed() > wait_timeout {
         error!(
           pid = pid,
