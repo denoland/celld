@@ -206,11 +206,27 @@ impl ProxyHttp for Proxy {
     ctx: &mut Self::CTX,
   ) {
     if let Some(process_key) = &ctx.process_key {
-      let _ = self
-        .node_state
-        .process_manager
-        .decrement_connection_count(process_key)
-        .await;
+      match process_key {
+        ProcessKey::SingleUse(_) => {
+          if let Some(proc) = self
+            .node_state
+            .process_manager
+            .processes
+            .lock()
+            .unwrap()
+            .remove(process_key)
+          {
+            proc.terminate();
+          }
+        }
+        ProcessKey::Reusable(_) => {
+          let _ = self
+            .node_state
+            .process_manager
+            .decrement_connection_count(process_key)
+            .await;
+        }
+      }
     }
   }
 

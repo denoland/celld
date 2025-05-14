@@ -139,16 +139,19 @@ pub struct SingleUseProcessEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ProcessKey(String);
+pub enum ProcessKey {
+  SingleUse(String),
+  Reusable(String),
+}
 
 impl ProcessKey {
   fn new(host: &str, cell_id: &str) -> Self {
-    ProcessKey(format!("{}/{}", host, cell_id))
+    ProcessKey::Reusable(format!("{}/{}", host, cell_id))
   }
 
   fn new_single_use(host: &str, cell_id: &str) -> Self {
     let uuid = Uuid::new_v4();
-    ProcessKey(format!("{}/{}/{}", host, cell_id, uuid))
+    ProcessKey::SingleUse(format!("{}/{}/{}", host, cell_id, uuid))
   }
 }
 
