@@ -1,7 +1,4 @@
-use crate::{
-  process_manager::{ProcessEntry, ReusableProcessEntry},
-  NodeState,
-};
+use crate::{process_manager::ProcessEntry, NodeState};
 use pingora::server::ShutdownWatch;
 use pingora::services::background::BackgroundService;
 use std::sync::Arc;
@@ -78,10 +75,10 @@ impl ProcessReaper {
         warn!(?process_key, pid = pid, "Reaping idle process");
 
         // Kill the litestream replicate process.
-        if let ProcessEntry::Reusable(ReusableProcessEntry {
+        if let ProcessEntry {
           replica: Some(ref replica),
           ..
-        }) = entry
+        } = entry
         {
           if let Err(e) = replica.shutdown().await {
             warn!(

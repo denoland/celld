@@ -463,14 +463,27 @@ impl ProxyHttp for Proxy {
 
     let mut socket_path = None;
 
-    if single_use {
+    let process_key = if single_use {
+      ProcessKey::new_single_use(&ctx.tenant, cell_id)
+    } else {
+      ProcessKey::new(&ctx.tenant, cell_id)
+    };
+
+    for _ in 0..RETRY_COUNT {
       match self
         .node_state
         .process_manager
-        .spawn_single_use_process(&ctx.tenant, cell_id)
+        .get_or_spawn_process(
+          &ctx.tenant,
+          cell_id,
+          &process_key,
+          self.node_state.clone(),
+        )
         .await
       {
-        Ok((path, _stream, process_key)) => {
+        Ok((path, _stream)) => {
+          // We only need the path, Pingora will handle the connection
+          // Increment active connection count
           self
             .node_state
             .process_manager
@@ -478,60 +491,35 @@ impl ProxyHttp for Proxy {
             .await;
           ctx.process_key = Some(process_key);
           socket_path = Some(path);
+          break;
         }
-        Err(error) => {
-          error!(?error, "Failed to spawn single-use process");
+        Err(ProcessManagerError::ProcessCreationInProgress) => {
+          info!(
+            node_id = %self.node_state.node_id,
+            "Lock is held by this node, meaning a deno process creation is already in progress. Retry in {:?}",
+            RETRY_INTERVAL
+          );
+          tokio::time::sleep(RETRY_INTERVAL).await;
+          continue;
+        }
+        Err(error @ ProcessManagerError::LockContention) => {
+          debug!(
+            "Lock is held by another node that is responsible for this cell"
+          );
+          // TODO: forward the request to the lock holder?
           return Err(error.into());
         }
-      }
-    } else {
-      for _ in 0..RETRY_COUNT {
-        match self
-          .node_state
-          .process_manager
-          .get_or_spawn_process(&ctx.tenant, cell_id, self.node_state.clone())
-          .await
-        {
-          Ok((path, _stream, process_key)) => {
-            // We only need the path, Pingora will handle the connection
-            // Increment active connection count
-            self
-              .node_state
-              .process_manager
-              .increment_connection_count(&process_key)
-              .await;
-            ctx.process_key = Some(process_key);
-            socket_path = Some(path);
-            break;
-          }
-          Err(ProcessManagerError::ProcessCreationInProgress) => {
-            info!(
-              node_id = %self.node_state.node_id,
-              "Lock is held by this node, meaning a deno process creation is already in progress. Retry in {:?}",
-              RETRY_INTERVAL
-            );
-            tokio::time::sleep(RETRY_INTERVAL).await;
-            continue;
-          }
-          Err(error @ ProcessManagerError::LockContention) => {
-            debug!(
-              "Lock is held by another node that is responsible for this cell"
-            );
-            // TODO: forward the request to the lock holder?
-            return Err(error.into());
-          }
-          Err(error @ ProcessManagerError::S3(_)) => {
-            debug!(?error, "S3 operation failed");
-            return Err(error.into());
-          }
-          Err(error @ ProcessManagerError::Serde(_)) => {
-            debug!(?error, "Failed to serialize or deserialize lock data");
-            return Err(error.into());
-          }
-          Err(error @ ProcessManagerError::Internal(_)) => {
-            error!(?error, "Error getting or spawning process");
-            return Err(error.into());
-          }
+        Err(error @ ProcessManagerError::S3(_)) => {
+          debug!(?error, "S3 operation failed");
+          return Err(error.into());
+        }
+        Err(error @ ProcessManagerError::Serde(_)) => {
+          debug!(?error, "Failed to serialize or deserialize lock data");
+          return Err(error.into());
+        }
+        Err(error @ ProcessManagerError::Internal(_)) => {
+          error!(?error, "Error getting or spawning process");
+          return Err(error.into());
         }
       }
     }

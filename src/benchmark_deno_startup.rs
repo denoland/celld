@@ -50,9 +50,13 @@ pub async fn run(iterations: usize) -> Result<()> {
     let start = Instant::now();
 
     // Use single_use isolate to ensure a new process each time
-    let (_socket_path, _stream, _process_key) = node_state
+
+    let process_key =
+      crate::process_manager::ProcessKey::new_single_use(host, cell_id);
+    let (_socket_path, _stream) = node_state
+      .clone()
       .process_manager
-      .spawn_single_use_process(host, cell_id)
+      .get_or_spawn_process(host, cell_id, &process_key, node_state.clone())
       .await?;
     let elapsed = start.elapsed();
 

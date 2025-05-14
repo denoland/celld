@@ -31,65 +31,8 @@ pub enum RestoreState {
   Failed(String),
 }
 
-pub enum ProcessEntry {
-  SingleUse(SingleUseProcessEntry),
-  Reusable(ReusableProcessEntry),
-}
-
-impl ProcessEntry {
-  pub fn pid(&self) -> u32 {
-    match self {
-      ProcessEntry::SingleUse(entry) => entry.pid,
-      ProcessEntry::Reusable(entry) => entry.pid,
-    }
-  }
-
-  /// Check if the process has any active connections. We measure this two ways:
-  /// - we manually track the number of ongoing requests/websocket connections
-  ///   with self.incoming_connections
-  /// - if incoming_connections is 0, we check the number of active TCP outbound
-  ///   connections using /proc or lsof.
-  pub fn has_active_connections(&self) -> bool {
-    match self {
-      ProcessEntry::SingleUse(entry) => {
-        entry.incoming_connections > 0
-          || active_connections::count(entry.pid) > 0
-      }
-      ProcessEntry::Reusable(entry) => {
-        entry.incoming_connections > 0
-          || active_connections::count(entry.pid) > 0
-      }
-    }
-  }
-
-  pub fn last_used(&self) -> Instant {
-    match self {
-      ProcessEntry::SingleUse(entry) => entry.last_used,
-      ProcessEntry::Reusable(entry) => entry.last_used,
-    }
-  }
-
-  pub fn socket_path(&self) -> &Path {
-    match self {
-      ProcessEntry::SingleUse(entry) => &entry.socket_path,
-      ProcessEntry::Reusable(entry) => &entry.socket_path,
-    }
-  }
-
-  pub fn terminate(self) {
-    match self {
-      ProcessEntry::SingleUse(entry) => {
-        entry.parent_exit_guard.kill(Signal::SIGTERM);
-      }
-      ProcessEntry::Reusable(entry) => {
-        entry.parent_exit_guard.kill(Signal::SIGTERM);
-      }
-    }
-  }
-}
-
 #[derive(Debug)]
-pub struct ReusableProcessEntry {
+pub struct ProcessEntry {
   pub pid: u32,
   pub socket_path: PathBuf,
   pub last_used: Instant,
@@ -116,40 +59,48 @@ pub struct ReusableProcessEntry {
   pub restore_state: RestoreState,
 }
 
-impl ReusableProcessEntry {
+impl ProcessEntry {
+  pub fn pid(&self) -> u32 {
+    self.pid
+  }
+
+  /// Check if the process has any active connections. We measure this two ways:
+  /// - we manually track the number of ongoing requests/websocket connections
+  ///   with self.incoming_connections
+  /// - if incoming_connections is 0, we check the number of active TCP outbound
+  ///   connections using /proc or lsof.
+  pub fn has_active_connections(&self) -> bool {
+    self.incoming_connections > 0 || active_connections::count(self.pid) > 0
+  }
+
+  pub fn last_used(&self) -> Instant {
+    self.last_used
+  }
+
+  pub fn socket_path(&self) -> &Path {
+    self.socket_path.as_path()
+  }
+
+  pub fn terminate(self) {
+    self.parent_exit_guard.kill(Signal::SIGTERM);
+  }
   fn request_lock_ttl_renewal(&self, new_ttl: Duration) {
     self.lock_guard.request_ttl_renewal(new_ttl)
   }
 }
 
-pub struct SingleUseProcessEntry {
-  pub pid: u32,
-  pub socket_path: PathBuf,
-  pub last_used: Instant,
-
-  /// Number of current websocket connections to this process
-  /// This is used to determine if the process should be kept alive
-  incoming_connections: usize,
-
-  /// Guard for automatic termination on parent exit
-  pub parent_exit_guard: ChildOnParentExit,
-
-  /// Keep tempdir alive as long as process exists
-  pub _socket_tempdir: TempDir,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ProcessKey {
-  SingleUse(String),
+  SingleUse(String), // only used for benchmarking cold starts
   Reusable(String),
 }
 
 impl ProcessKey {
-  fn new(host: &str, cell_id: &str) -> Self {
+  pub fn new(host: &str, cell_id: &str) -> Self {
     ProcessKey::Reusable(format!("{}/{}", host, cell_id))
   }
 
-  fn new_single_use(host: &str, cell_id: &str) -> Self {
+  pub fn new_single_use(host: &str, cell_id: &str) -> Self {
     let uuid = Uuid::new_v4();
     ProcessKey::SingleUse(format!("{}/{}/{}", host, cell_id, uuid))
   }
@@ -178,9 +129,7 @@ impl ProcessManager {
   pub fn request_all_lock_ttls_renewal(&self, new_ttl: Duration) {
     let processes = self.processes.lock().unwrap();
     for process in processes.values() {
-      if let ProcessEntry::Reusable(entry) = process {
-        entry.request_lock_ttl_renewal(new_ttl);
-      }
+      process.request_lock_ttl_renewal(new_ttl);
     }
   }
 
@@ -193,16 +142,14 @@ impl ProcessManager {
     // Ensure all locks are released
     // NOTE: Awaiting all notifiers at once with futures::future::join_all
     // somehow causes hangs. So we process each one sequentially.
-    for (_, process) in processes {
-      if let ProcessEntry::Reusable(mut entry) = process {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        entry.lock_guard.set_release_notifier(tx);
-        // `drop(process)` would not invoke the Drop impl of LockGuard immediately
-        // for unknown reasons. Specifying `.lock_guard` directly is needed.
-        drop(entry.lock_guard);
-        if let Err(e) = rx.await {
-          tracing::error!(error = ?e, "Error waiting for process cleanup to complete");
-        }
+    for (_, mut process) in processes {
+      let (tx, rx) = tokio::sync::oneshot::channel();
+      process.lock_guard.set_release_notifier(tx);
+      // `drop(process)` would not invoke the Drop impl of LockGuard immediately
+      // for unknown reasons. Specifying `.lock_guard` directly is needed.
+      drop(process.lock_guard);
+      if let Err(e) = rx.await {
+        tracing::error!(error = ?e, "Error waiting for process cleanup to complete");
       }
     }
   }
@@ -218,16 +165,8 @@ impl ProcessManager {
       return false;
     };
 
-    match entry {
-      ProcessEntry::Reusable(entry) => {
-        entry.incoming_connections += 1;
-        entry.last_used = Instant::now();
-      }
-      ProcessEntry::SingleUse(entry) => {
-        entry.incoming_connections += 1;
-        entry.last_used = Instant::now();
-      }
-    }
+    entry.incoming_connections += 1;
+    entry.last_used = Instant::now();
 
     true
   }
@@ -243,18 +182,9 @@ impl ProcessManager {
       return false;
     };
 
-    match entry {
-      ProcessEntry::Reusable(entry) => {
-        assert!(entry.incoming_connections > 0);
-        entry.incoming_connections -= 1;
-        entry.last_used = Instant::now();
-      }
-      ProcessEntry::SingleUse(entry) => {
-        assert!(entry.incoming_connections > 0);
-        entry.incoming_connections -= 1;
-        entry.last_used = Instant::now();
-      }
-    }
+    assert!(entry.incoming_connections > 0);
+    entry.incoming_connections -= 1;
+    entry.last_used = Instant::now();
 
     true
   }
@@ -264,11 +194,9 @@ impl ProcessManager {
     &self,
     host: &str,
     cell_id: &str,
+    process_key: &ProcessKey,
     node_state: Arc<NodeState>,
-  ) -> Result<(PathBuf, UnixStream, ProcessKey), ProcessManagerError> {
-    // Create a combined key for host and cell to ensure one isolate per cell
-    let process_key = ProcessKey::new(host, cell_id);
-
+  ) -> Result<(PathBuf, UnixStream), ProcessManagerError> {
     // First, try to find and connect to an existing process, keeping the lock time minimal
     let socket_path_opt = {
       let processes = self.processes.lock().unwrap();
@@ -285,7 +213,7 @@ impl ProcessManager {
             socket = %socket_path.display(),
             "Connected to existing process socket"
           );
-          return Ok((socket_path, stream, process_key));
+          return Ok((socket_path, stream));
         }
         Err(e) => {
           error!(
@@ -500,7 +428,7 @@ impl ProcessManager {
     let pid = child_guard.pid().unwrap() as u32;
 
     // Create a new ProcessEntry with proper values
-    let entry = ProcessEntry::Reusable(ReusableProcessEntry {
+    let entry = ProcessEntry {
       pid,
       socket_path: socket_path.clone(),
       last_used: Instant::now(),
@@ -510,7 +438,7 @@ impl ProcessManager {
       _socket_tempdir: socket_tempdir,
       replica: replica.clone(),
       restore_state,
-    });
+    };
 
     // Insert the entry into the processes map using a short-lived lock
     {
@@ -615,190 +543,7 @@ impl ProcessManager {
       }
     };
 
-    Ok((socket_path, stream, process_key))
-  }
-
-  /// Spawn a single-use Deno process.
-  ///
-  /// A spawned process has SQLite database attached but it's not backed up.
-  pub async fn spawn_single_use_process(
-    &self,
-    host: &str,
-    cell_id: &str,
-  ) -> Result<(PathBuf, UnixStream, ProcessKey), ProcessManagerError> {
-    let process_key = ProcessKey::new_single_use(host, cell_id);
-
-    assert!(!host.contains('/') && !host.contains(".."));
-    let tenant_dir = self.data_dir.join(host);
-    let app_code_dir = tenant_dir.join("src");
-    let main_script = app_code_dir.join("main.ts"); // TODO support main.js
-    if !main_script.exists() {
-      error!("Application code not found at {}", main_script.display());
-      return Err(ProcessManagerError::Internal(
-        ProxyError::AppNotFound(host.to_string()).into(),
-      ));
-    }
-
-    // Create a temporary directory for the socket
-    // This will be automatically cleaned up when dropped
-    let socket_tempdir = tempfile::tempdir()
-      .with_context(|| "Failed to create temporary directory for socket")?;
-
-    let socket_name = {
-      let uuid_string = Uuid::new_v4().to_string();
-      let first_segment: &str = &uuid_string[0..8];
-      format!("{}.sock", first_segment)
-    };
-    let socket_path = socket_tempdir.path().join(socket_name);
-
-    // Create SQLite directory
-    let sqlite_dir = tenant_dir.join("sqlite");
-    std::fs::create_dir_all(&sqlite_dir).unwrap_or_else(|e| {
-      warn!("Failed to create sqlite directory: {}", e);
-    });
-
-    let db_path = sqlite_dir.join(format!("{}.db", cell_id));
-
-    if !db_path.exists() {
-      info!(
-        tenant = %host,
-        cell_id = %cell_id,
-        "No S3 replication, creating empty database"
-      );
-
-      if let Err(e) = create_empty_database(&db_path) {
-        warn!("Failed to create empty database file: {}", e);
-      }
-    }
-
-    let spawn_start = Instant::now();
-
-    // Spawn the Deno process
-    let child_guard = spawn_deno_process(
-      host,
-      cell_id,
-      &tenant_dir,
-      &socket_path,
-      &main_script,
-    )?;
-
-    // Convert to tokio::process::Child using the PID
-    let pid = child_guard.pid().unwrap() as u32;
-
-    // Create a new ProcessEntry with proper values
-    let entry = ProcessEntry::SingleUse(SingleUseProcessEntry {
-      pid,
-      socket_path: socket_path.clone(),
-      last_used: Instant::now(),
-      incoming_connections: 0,
-      parent_exit_guard: child_guard,
-      _socket_tempdir: socket_tempdir,
-    });
-
-    // Insert the entry into the processes map using a short-lived lock
-    {
-      let mut processes = self.processes.lock().unwrap();
-      processes.insert(process_key.clone(), entry);
-    }
-
-    // --- Wait for the socket to become available (crucial for cold start) ---
-    let socket_ = socket_path.clone();
-    let wait_start = Instant::now();
-    let wait_timeout = Duration::from_secs(10); // Timeout for socket connection
-
-    // Use minimal polling for fastest possible connection with exponential backoff
-    let mut delay = Duration::from_micros(50);
-    let max_delay = Duration::from_millis(20);
-
-    // Wait for the socket to be available and connect to it
-    let stream = loop {
-      if wait_start.elapsed() > wait_timeout {
-        error!(
-          pid = pid,
-          socket = %socket_.display(),
-          tenant = %host,
-          cell_id = %cell_id,
-          "Timeout waiting for Deno process socket"
-        );
-
-        // Remove the entry from the map to avoid stale entries
-        let mut processes = self.processes.lock().unwrap();
-        if let Some(entry) = processes.remove(&process_key) {
-          // Terminate the process to avoid zombies
-          entry.terminate();
-        }
-
-        // The tempdir will be dropped at the end of this scope, cleaning up the socket file
-        return Err(
-          anyhow::anyhow!("Timeout waiting for process socket").into(),
-        );
-      }
-
-      debug!(
-        pid = pid,
-        socket = %socket_.display(),
-        tenant = %host,
-        cell_id = %cell_id,
-        elapsed = ?wait_start.elapsed(),
-        "Attempting to connect to Deno socket"
-      );
-
-      match UnixStream::connect(&socket_).await {
-        Ok(stream) => {
-          debug!(
-            pid = pid,
-            socket = %socket_.display(),
-            tenant = %host,
-            cell_id = %cell_id,
-            socket_wait_duration = ?wait_start.elapsed(),
-            total_startup_duration = ?spawn_start.elapsed(),
-            "Socket connected!"
-          );
-          // We have a connected socket
-          break stream; // Socket is ready and connected, return the stream
-        }
-        Err(ref e)
-          if e.kind() == std::io::ErrorKind::ConnectionRefused
-            || e.kind() == std::io::ErrorKind::NotFound =>
-        {
-          debug!(
-            pid = pid,
-            socket = %socket_.display(),
-            tenant = %host,
-            cell_id = %cell_id,
-            error = %e,
-            error_kind = ?e.kind(),
-            "Socket not yet available, retrying after delay"
-          );
-          // Socket not ready yet, use minimal polling with exponential backoff
-          sleep(delay).await;
-          // Increase delay with exponential backoff, but cap at max_delay
-          delay = std::cmp::min(delay * 2, max_delay);
-        }
-        Err(e) => {
-          error!(
-            pid = pid,
-            socket = %socket_.display(),
-            error = %e,
-            "Error connecting to socket during startup"
-          );
-
-          // Remove the entry from the map to avoid stale entries
-          let mut processes = self.processes.lock().unwrap();
-          if let Some(entry) = processes.remove(&process_key) {
-            // Terminate the process to avoid zombies
-            entry.terminate();
-          }
-
-          // The tempdir will be dropped at the end of this scope, cleaning up the socket file
-          return Err(
-            anyhow::anyhow!("Error connecting to process socket: {}", e).into(),
-          );
-        }
-      }
-    };
-
-    Ok((socket_path, stream, process_key))
+    Ok((socket_path, stream))
   }
 
   pub async fn terminate_all(&self) {
