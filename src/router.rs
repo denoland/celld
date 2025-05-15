@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info};
 
 use crate::node_state::NodeState;
-use crate::process_manager::ProcessManagerError;
+use crate::process_manager::{ProcessKey, ProcessManagerError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
@@ -30,6 +30,7 @@ pub struct InternalAPI {
 pub struct Ctx {
   pub tenant: String,
   pub cell_id: Option<String>,
+  pub process_key: Option<ProcessKey>,
 }
 
 #[derive(Debug, Default)]
@@ -204,14 +205,11 @@ impl ProxyHttp for Proxy {
     _e: Option<&pingora::Error>,
     ctx: &mut Self::CTX,
   ) {
-    if !ctx.tenant.is_empty() {
-      let default_cell = "default-cell".to_string();
-      let cell_id = ctx.cell_id.as_ref().unwrap_or(&default_cell);
-
+    if let Some(process_key) = &ctx.process_key {
       let _ = self
         .node_state
         .process_manager
-        .decrement_connection_count(&ctx.tenant, cell_id)
+        .decrement_connection_count(process_key)
         .await;
     }
   }
@@ -372,17 +370,11 @@ impl ProxyHttp for Proxy {
   // This method is called for each HTTP request to determine the upstream server
   async fn upstream_peer(
     &self,
-    session: &mut Session,
+    _session: &mut Session,
     ctx: &mut Self::CTX,
   ) -> pingora::Result<Box<HttpPeer>> {
     // Start timing the request path
     let request_start = std::time::Instant::now();
-
-    // Check for the single-use header
-    let single_use = session
-      .req_header()
-      .headers
-      .contains_key("x-single-use-isolate");
 
     // Get the cell_id from the context, or use a default value
     let cell_id = match &ctx.cell_id {
@@ -393,7 +385,6 @@ impl ProxyHttp for Proxy {
     debug!(
       host = %ctx.tenant,
       cell_id = %cell_id,
-      single_use = %single_use,
       request_init_time = ?request_start.elapsed(),
       "Processing request"
     );
@@ -436,7 +427,7 @@ impl ProxyHttp for Proxy {
     }
 
     // We are the responsible peer, so handle the request locally
-    info!(
+    debug!(
       my_node_id = %self.node_state.node_id,
       host = %ctx.tenant,
       cell_id = %cell_id,
@@ -453,24 +444,18 @@ impl ProxyHttp for Proxy {
       match self
         .node_state
         .process_manager
-        .get_or_spawn_process(
-          &ctx.tenant,
-          cell_id,
-          single_use,
-          self.node_state.clone(),
-        )
+        .get_or_spawn_process(&ctx.tenant, cell_id, self.node_state.clone())
         .await
       {
-        Ok((path, _stream)) => {
+        Ok((path, _stream, process_key)) => {
           // We only need the path, Pingora will handle the connection
           // Increment active connection count
-          let default_cell = "default-cell".to_string();
-          let cell_id = ctx.cell_id.as_ref().unwrap_or(&default_cell);
           self
             .node_state
             .process_manager
-            .increment_connection_count(&ctx.tenant, cell_id)
+            .increment_connection_count(&process_key)
             .await;
+          ctx.process_key = Some(process_key);
           socket_path = Some(path);
           break;
         }
@@ -483,37 +468,24 @@ impl ProxyHttp for Proxy {
           tokio::time::sleep(RETRY_INTERVAL).await;
           continue;
         }
-        Err(ProcessManagerError::LockContention) => {
+        Err(error @ ProcessManagerError::LockContention) => {
           debug!(
             "Lock is held by another node that is responsible for this cell"
           );
           // TODO: forward the request to the lock holder?
-          tokio::time::sleep(RETRY_INTERVAL).await;
-          return Err(pingora::Error::explain(
-            ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
-            "Cell is being handled by another node",
-          ));
+          return Err(error.into());
         }
-        Err(ProcessManagerError::S3(e)) => {
-          debug!("S3 operation failed: {}", e);
-          return Err(pingora::Error::explain(
-            ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
-            "S3 operation failed",
-          ));
+        Err(error @ ProcessManagerError::S3(_)) => {
+          debug!(?error, "S3 operation failed");
+          return Err(error.into());
         }
-        Err(ProcessManagerError::Serde(e)) => {
-          debug!("Failed to serialize or deserialize lock data: {}", e);
-          return Err(pingora::Error::explain(
-            ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
-            "Failed to serialize or deserialize lock data",
-          ));
+        Err(error @ ProcessManagerError::Serde(_)) => {
+          debug!(?error, "Failed to serialize or deserialize lock data");
+          return Err(error.into());
         }
-        Err(ProcessManagerError::Internal(e)) => {
-          error!("Error getting or spawning process: {:?}", e);
-          return Err(pingora::Error::explain(
-            ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
-            "Internal server error during process lookup",
-          ));
+        Err(error @ ProcessManagerError::Internal(_)) => {
+          error!(?error, "Error getting or spawning process");
+          return Err(error.into());
         }
       }
     }

@@ -6,7 +6,7 @@ use crate::config::Config;
 use crate::node_state::NodeState;
 
 /// Benchmark function to measure Deno process coldstart performance
-pub async fn benchmark_deno_coldstart(iterations: usize) -> Result<()> {
+pub async fn run(iterations: usize) -> Result<()> {
   // Create a mock configuration and process manager
   let config = match Config::from_env() {
     Ok(config) => config,
@@ -38,7 +38,7 @@ pub async fn benchmark_deno_coldstart(iterations: usize) -> Result<()> {
 
   // The host and cell to use for testing
   let host = "hello.localhost";
-  let cell_id = "benchmark";
+  let cell_id_base = "benchmark";
 
   // Perform the benchmark
   println!(
@@ -46,13 +46,15 @@ pub async fn benchmark_deno_coldstart(iterations: usize) -> Result<()> {
     iterations
   );
   for i in 0..iterations {
+    // Use a unique cell_id for each iteration to ensure a new process each time
+    let cell_id = format!("{}-{}", cell_id_base, i);
+
     // Start timing
     let start = Instant::now();
 
-    // Use single_use isolate to ensure a new process each time
-    let (_socket_path, _stream) = node_state
+    let (_socket_path, _stream, _process_key) = node_state
       .process_manager
-      .get_or_spawn_process(host, cell_id, true, node_state.clone())
+      .get_or_spawn_process(host, &cell_id, node_state.clone())
       .await?;
     let elapsed = start.elapsed();
 
@@ -84,7 +86,7 @@ pub async fn benchmark_deno_coldstart(iterations: usize) -> Result<()> {
     let total: Duration = results.iter().sum();
     let avg = total / results.len() as u32;
 
-    println!("\nDeno Coldstart Statistics:");
+    println!("\nDeno Startup Statistics:");
     println!("Min: {} ms", min.as_millis());
     println!("Max: {} ms", max.as_millis());
     println!("Avg: {} ms", avg.as_millis());
@@ -93,7 +95,7 @@ pub async fn benchmark_deno_coldstart(iterations: usize) -> Result<()> {
     println!("p99: {} ms", p99.as_millis());
   }
 
-  node_state.process_manager.kill_all().await;
+  node_state.process_manager.terminate_all().await;
 
   Ok(())
 }

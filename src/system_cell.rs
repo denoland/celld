@@ -190,7 +190,6 @@ impl AlarmProcessor for StandaloneSystemCell {
             .get_or_spawn_process(
               &alarm.tenant,
               &alarm.cell_id,
-              true,
               node_state.clone(),
             )
             .await

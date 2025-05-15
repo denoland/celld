@@ -5,18 +5,18 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
-use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
+use crate::active_connections;
 use crate::child_on_parent_exit::ChildOnParentExit;
 use crate::distributed_lock::LockAcquireError;
 use crate::distributed_lock::LockGuard;
-use crate::peer_manager::cell_hash_key;
 use crate::router::ProxyError;
 use crate::sqlite_replica::{create_empty_database, SqliteReplica};
 use crate::NodeState;
@@ -31,30 +31,60 @@ pub enum RestoreState {
   Failed(String),
 }
 
+#[derive(Debug)]
 pub struct ProcessEntry {
   pub pid: u32,
   pub socket_path: PathBuf,
   pub last_used: Instant,
-  pub parent_exit_guard: ChildOnParentExit, // Guard for automatic termination on parent exit
-  pub lock_guard: LockGuard, // Guard for ensuring the uniqueness of the tenant/cellId in the cluster
-  pub single_use: bool,      // Flag for single-use isolates
-  pub active_connections: u32, // Counter for active connections (including WebSockets)
-  pub _socket_tempdir: TempDir, // Keep tempdir alive as long as process exists
-  pub replica: Option<SqliteReplica>, // SQLite replication to S3/MinIO
+
+  /// Number of current websocket connections to this process
+  /// This is used to determine if the process should be kept alive
+  incoming_connections: usize,
+
+  /// Guard for automatic termination on parent exit
+  pub parent_exit_guard: ChildOnParentExit,
+
+  /// Guard for ensuring the uniqueness of the tenant/cellId in the cluster
+  lock_guard: LockGuard,
+
+  /// Keep tempdir alive as long as process exists
+  pub _socket_tempdir: TempDir,
+
+  /// SQLite replication to S3/MinIO
+  /// `None` if S3/MinIO is not configured
+  pub replica: Option<SqliteReplica>,
+
   /// State of the database restore operation
   #[allow(dead_code)]
   pub restore_state: RestoreState,
 }
 
 impl ProcessEntry {
-  async fn renew_lock_ttl(&self, new_ttl: Duration) -> anyhow::Result<()> {
-    self.lock_guard.renew(new_ttl).await
+  fn request_lock_ttl_renewal(&self, new_ttl: Duration) {
+    self.lock_guard.request_ttl_renewal(new_ttl)
+  }
+
+  pub fn terminate(self) {
+    self.parent_exit_guard.kill(Signal::SIGTERM);
+  }
+
+  pub fn has_active_connections(&self) -> bool {
+    self.incoming_connections > 0 || active_connections::count(self.pid) > 0
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProcessKey(String);
+
+impl ProcessKey {
+  fn new(host: &str, cell_id: &str) -> Self {
+    ProcessKey(format!("{}/{}", host, cell_id))
   }
 }
 
 pub struct ProcessManager {
   pub data_dir: PathBuf,
-  pub processes: Mutex<HashMap<String, ProcessEntry>>,
+  pub processes: Mutex<HashMap<ProcessKey, ProcessEntry>>,
 }
 
 impl ProcessManager {
@@ -72,21 +102,16 @@ impl ProcessManager {
     }
   }
 
-  pub async fn renew_all_lock_ttls(
-    &self,
-    new_ttl: Duration,
-  ) -> anyhow::Result<()> {
-    let processes = self.processes.lock().await;
-    futures::future::try_join_all(
-      processes.values().map(|p| p.renew_lock_ttl(new_ttl)),
-    )
-    .await?;
-    Ok(())
+  pub fn request_all_lock_ttls_renewal(&self, new_ttl: Duration) {
+    let processes = self.processes.lock().unwrap();
+    for process in processes.values() {
+      process.request_lock_ttl_renewal(new_ttl);
+    }
   }
 
   pub async fn wait_until_process_cleanup_complete(&self) {
     let processes = {
-      let mut lock = self.processes.lock().await;
+      let mut lock = self.processes.lock().unwrap();
       std::mem::take(&mut *lock)
     };
 
@@ -108,39 +133,36 @@ impl ProcessManager {
   /// Track a new connection to the process
   pub async fn increment_connection_count(
     &self,
-    host: &str,
-    cell_id: &str,
+    process_key: &ProcessKey,
   ) -> bool {
-    let process_key = cell_hash_key(host, cell_id);
+    let mut processes = self.processes.lock().unwrap();
 
-    let mut processes = self.processes.lock().await;
-    if let Some(entry) = processes.get_mut(&process_key) {
-      entry.active_connections += 1;
-      entry.last_used = Instant::now();
-      return true;
-    }
+    let Some(entry) = processes.get_mut(process_key) else {
+      return false;
+    };
 
-    false
+    entry.incoming_connections += 1;
+    entry.last_used = Instant::now();
+
+    true
   }
 
   /// Track a closed connection to the process
   pub async fn decrement_connection_count(
     &self,
-    host: &str,
-    cell_id: &str,
+    process_key: &ProcessKey,
   ) -> bool {
-    let process_key = cell_hash_key(host, cell_id);
+    let mut processes = self.processes.lock().unwrap();
 
-    let mut processes = self.processes.lock().await;
-    if let Some(entry) = processes.get_mut(&process_key) {
-      if entry.active_connections > 0 {
-        entry.active_connections -= 1;
-      }
-      entry.last_used = Instant::now();
-      return true;
-    }
+    let Some(entry) = processes.get_mut(process_key) else {
+      return false;
+    };
 
-    false
+    assert!(entry.incoming_connections > 0);
+    entry.incoming_connections -= 1;
+    entry.last_used = Instant::now();
+
+    true
   }
 
   #[instrument(skip(self, node_state), fields(host = %host, cell_id = %cell_id))]
@@ -148,48 +170,36 @@ impl ProcessManager {
     &self,
     host: &str,
     cell_id: &str,
-    single_use: bool,
     node_state: Arc<NodeState>,
-  ) -> Result<(PathBuf, UnixStream), ProcessManagerError> {
+  ) -> Result<(PathBuf, UnixStream, ProcessKey), ProcessManagerError> {
     // Create a combined key for host and cell to ensure one isolate per cell
-    let process_key = cell_hash_key(host, cell_id);
+    let process_key = ProcessKey::new(host, cell_id);
 
-    // For single_use requests, always spawn a new process
-    // TODO: This should not be supported in production
-    if !single_use {
-      // First, try to find and connect to an existing process, keeping the lock time minimal
-      let socket_path_opt = {
-        let processes = self.processes.lock().await;
-        if let Some(entry) = processes.get(&process_key) {
-          // Skip single-use entries when looking for a regular process
-          if !entry.single_use {
-            Some(entry.socket_path.clone())
-          } else {
-            None
-          }
-        } else {
-          None
+    // First, try to find and connect to an existing process, keeping the lock time minimal
+    let socket_path_opt = {
+      let processes = self.processes.lock().unwrap();
+      processes
+        .get(&process_key)
+        .map(|entry| entry.socket_path.to_path_buf())
+    };
+
+    // If we found a socket path, try to connect without holding the lock
+    if let Some(socket_path) = socket_path_opt {
+      match UnixStream::connect(&socket_path).await {
+        Ok(stream) => {
+          debug!(
+            socket = %socket_path.display(),
+            "Connected to existing process socket"
+          );
+          return Ok((socket_path, stream, process_key));
         }
-      };
-
-      // If we found a socket path, try to connect without holding the lock
-      if let Some(socket_path) = socket_path_opt {
-        match UnixStream::connect(&socket_path).await {
-          Ok(stream) => {
-            debug!(
-              socket = %socket_path.display(),
-              "Connected to existing process socket"
-            );
-            return Ok((socket_path, stream));
-          }
-          Err(e) => {
-            error!(
-              socket = %socket_path.display(),
-              error = %e,
-              "Failed to connect to existing process socket, spawn new one"
-            );
-            // Fall through to spawn a new process
-          }
+        Err(e) => {
+          error!(
+            socket = %socket_path.display(),
+            error = %e,
+            "Failed to connect to existing process socket, spawn new one"
+          );
+          // Fall through to spawn a new process
         }
       }
     }
@@ -197,10 +207,10 @@ impl ProcessManager {
     // checked higher up, but done again here for safety
     assert!(!host.contains('/') && !host.contains(".."));
     let tenant_dir = self.data_dir.join(host);
-    let app_code_dir = tenant_dir.join("code");
-    let main_script = app_code_dir.join("main.ts");
+    let app_code_dir = tenant_dir.join("src");
+    let main_script = app_code_dir.join("main.ts"); // TODO support main.js
     if !main_script.exists() {
-      warn!("Application code not found at {}", main_script.display());
+      error!("Application code not found at {}", main_script.display());
       return Err(ProcessManagerError::Internal(
         ProxyError::AppNotFound(host.to_string()).into(),
       ));
@@ -209,7 +219,7 @@ impl ProcessManager {
     // Acquire a lock on the cell to declare ownership of the combination of
     // tenant and cellId. This lock's lifetime should match that of the Deno
     // process we will create later.
-    let lock_name = cell_hash_key(host, cell_id);
+    let lock_name = format!("{}/{}", host, cell_id);
     let node_id = node_state.peer_manager.get_local_node_id();
     let lock_guard = node_state
       .distributed_lock
@@ -343,7 +353,7 @@ impl ProcessManager {
       replica.start_replication().await?;
     } else if !db_path.exists() {
       // No replica, but we still need a database - create an empty one
-      info!(
+      debug!(
         tenant = %host,
         cell_id = %cell_id,
         "No S3 replication, creating empty database"
@@ -357,7 +367,7 @@ impl ProcessManager {
       restore_state = RestoreState::Complete(false);
     } else {
       // No replica and the database already exists
-      info!(
+      debug!(
         tenant = %host,
         cell_id = %cell_id,
         db_path = %db_path.display(),
@@ -400,10 +410,9 @@ impl ProcessManager {
       pid,
       socket_path: socket_path.clone(),
       last_used: Instant::now(),
+      incoming_connections: 0,
       parent_exit_guard: child_guard,
       lock_guard,
-      single_use,
-      active_connections: 0,
       _socket_tempdir: socket_tempdir,
       replica: replica.clone(),
       restore_state,
@@ -411,7 +420,7 @@ impl ProcessManager {
 
     // Insert the entry into the processes map using a short-lived lock
     {
-      let mut processes = self.processes.lock().await;
+      let mut processes = self.processes.lock().unwrap();
       processes.insert(process_key.clone(), entry);
     }
 
@@ -436,10 +445,10 @@ impl ProcessManager {
         );
 
         // Remove the entry from the map to avoid stale entries
-        let mut processes = self.processes.lock().await;
+        let mut processes = self.processes.lock().unwrap();
         if let Some(entry) = processes.remove(&process_key) {
-          // Kill the process to avoid zombies
-          entry.parent_exit_guard.kill(Signal::SIGTERM);
+          // Terminate the process to avoid zombies
+          entry.terminate();
         }
 
         // The tempdir will be dropped at the end of this scope, cleaning up the socket file
@@ -498,10 +507,10 @@ impl ProcessManager {
           );
 
           // Remove the entry from the map to avoid stale entries
-          let mut processes = self.processes.lock().await;
+          let mut processes = self.processes.lock().unwrap();
           if let Some(entry) = processes.remove(&process_key) {
-            // Kill the process to avoid zombies
-            entry.parent_exit_guard.kill(Signal::SIGTERM);
+            // Terminate the process to avoid zombies
+            entry.terminate();
           }
 
           // The tempdir will be dropped at the end of this scope, cleaning up the socket file
@@ -512,32 +521,19 @@ impl ProcessManager {
       }
     };
 
-    // For single-use isolates, use a unique key with a UUID suffix
-    // This allows multiple single-use isolates for the same host+cell combination
-    if single_use {
-      let unique_key =
-        format!("{}/{}", cell_hash_key(host, cell_id), Uuid::new_v4());
-
-      // Move the entry to a unique key
-      let mut processes = self.processes.lock().await;
-      if let Some(entry) = processes.remove(&process_key) {
-        processes.insert(unique_key, entry);
-      }
-    }
-
-    Ok((socket_path, stream))
+    Ok((socket_path, stream, process_key))
   }
 
-  pub async fn kill_all(&self) {
+  pub async fn terminate_all(&self) {
     // Move all entries into a local collection to minimize lock duration
     let entries: Vec<_> = {
-      let mut processes = self.processes.lock().await;
+      let mut processes = self.processes.lock().unwrap();
       processes.drain().collect()
     };
 
-    // Kill all processes without holding the lock
+    // Terminate all processes without holding the lock
     for (_, entry) in entries {
-      entry.parent_exit_guard.kill(Signal::SIGTERM);
+      entry.terminate();
     }
   }
 }
@@ -554,6 +550,44 @@ pub enum ProcessManagerError {
   Serde(serde_json::Error),
   #[error("Internal error: {0}")]
   Internal(#[from] anyhow::Error),
+}
+
+impl From<ProcessManagerError> for Box<pingora::Error> {
+  fn from(e: ProcessManagerError) -> Self {
+    use ProcessManagerError::*;
+    match e {
+      ProcessCreationInProgress => pingora::Error::explain(
+        pingora::ErrorType::HTTPStatus(
+          http::StatusCode::INTERNAL_SERVER_ERROR.into(),
+        ),
+        "Failed to get or spawn process",
+      ),
+      LockContention => pingora::Error::explain(
+        pingora::ErrorType::HTTPStatus(
+          http::StatusCode::INTERNAL_SERVER_ERROR.into(),
+        ),
+        "Cell is being handled by another node",
+      ),
+      S3(_) => pingora::Error::explain(
+        pingora::ErrorType::HTTPStatus(
+          http::StatusCode::INTERNAL_SERVER_ERROR.into(),
+        ),
+        "S3 operation failed",
+      ),
+      Serde(_) => pingora::Error::explain(
+        pingora::ErrorType::HTTPStatus(
+          http::StatusCode::INTERNAL_SERVER_ERROR.into(),
+        ),
+        "Failed to serialize or deserialize lock data",
+      ),
+      Internal(_) => pingora::Error::explain(
+        pingora::ErrorType::HTTPStatus(
+          http::StatusCode::INTERNAL_SERVER_ERROR.into(),
+        ),
+        "Internal server error during process lookup",
+      ),
+    }
+  }
 }
 
 fn parse_env_vars(content: &str) -> HashMap<String, String> {
@@ -661,6 +695,13 @@ fn spawn_deno_process(
   }
 
   cmd.arg(main_script);
+
+  // Disable this for debugging. Eventually we'll want to collect Deno stdio
+  // output into an otel stream.
+  #[cfg(not(debug_assertions))]
+  cmd
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null());
 
   // Spawn with ChildOnParentExit for automatic termination when parent exits
   ChildOnParentExit::spawn(cmd).with_context(|| {

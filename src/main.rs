@@ -1,8 +1,9 @@
+mod active_connections;
 mod alarm_processor;
+mod benchmark_deno_startup;
 mod child_on_parent_exit;
 mod cluster_membership;
 mod config;
-mod deno_benchmark;
 mod distributed_lock;
 mod heartbeat_service;
 mod lock_guard_ttl_updater;
@@ -38,7 +39,7 @@ fn start_server(config: config::Config) -> Server {
   let mut pingora_config = ServerConf::new().unwrap();
   //pingora_config.graceful_shutdown_timeout_seconds = Some(1);
   pingora_config.grace_period_seconds =
-    std::env::var("CELLD_GRACE_PERIOD_SECONDS")
+    std::env::var("CELL_GRACE_PERIOD_SECONDS")
       .ok()
       .and_then(|s| s.parse().ok());
 
@@ -122,25 +123,18 @@ fn start_server(config: config::Config) -> Server {
 fn main() {
   tracing_subscriber::fmt::init();
 
-  // Check if we should run the benchmark
-  if std::env::var("DENO_BENCH").unwrap_or_default() == "1" {
-    // Get iteration count from environment variable
-    let iterations = std::env::var("BENCH_ITERATIONS")
-      .unwrap_or_else(|_| "100".to_string())
-      .parse::<usize>()
-      .unwrap_or(100);
-
+  // see benchmark_deno_startup.sh
+  if std::env::var("BENCHMARK_DENO_STARTUP").is_ok() {
+    let iterations = 100;
     println!(
-      "Running Deno coldstart benchmark (iterations: {})...",
+      "Running Deno startup time benchmark (iterations: {})...",
       iterations
     );
 
     // Create a tokio runtime for the benchmark
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-      deno_benchmark::benchmark_deno_coldstart(iterations)
-        .await
-        .unwrap();
+      benchmark_deno_startup::run(iterations).await.unwrap();
     });
     return;
   }
@@ -179,8 +173,8 @@ mod tests {
     std::env::set_var("LISTEN_ADDR", "127.0.0.1:6146"); // Set listen address
     std::env::set_var("INTERNAL_LISTEN_ADDR", "127.0.0.1:6147"); // Set internal address
     std::env::set_var("DATA", "./data"); // Set data directory
-    std::env::set_var("CELLD_HEARTBEAT_INTERVAL", "2"); // Fast heartbeat for tests
-    std::env::set_var("CELLD_GRACE_PERIOD_SECONDS", "0");
+    std::env::set_var("CELL_HEARTBEAT_INTERVAL", "2"); // Fast heartbeat for tests
+    std::env::set_var("CELL_GRACE_PERIOD_SECONDS", "0");
 
     let h = std::thread::spawn(|| {
       // Create config from environment variables

@@ -137,6 +137,9 @@ impl PeerManager {
   }
 }
 
-pub fn cell_hash_key(tenant: &str, cell_id: &str) -> String {
-  format!("{}/{}", tenant, cell_id)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CellHashKey(String);
+
+fn cell_hash_key(tenant: &str, cell_id: &str) -> CellHashKey {
+  CellHashKey(format!("{}/{}", tenant, cell_id))
 }

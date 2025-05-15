@@ -48,13 +48,12 @@ impl ChildOnParentExit {
     {
       use nix::fcntl::{fcntl, FcntlArg, FdFlag};
       use nix::unistd::{fork, pipe, read, ForkResult};
-      use std::os::unix::io::AsRawFd;
 
       // create a pipe; parent holds w, watcher holds r
       let (r, w) =
         pipe().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
       let flags = FdFlag::FD_CLOEXEC;
-      fcntl(r.as_raw_fd(), FcntlArg::F_SETFD(flags))
+      fcntl(&r, FcntlArg::F_SETFD(flags))
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
       match unsafe {
@@ -75,7 +74,7 @@ impl ChildOnParentExit {
 
           // block until parent exits
           let mut buf = [0u8; 1];
-          let _ = read(r.as_raw_fd(), &mut buf);
+          let _ = read(&r, &mut buf);
 
           // parent gone → kill real child
           let _ = kill(Pid::from_raw(real_child.id() as i32), Signal::SIGINT);

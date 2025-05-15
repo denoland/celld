@@ -20,7 +20,9 @@ OPERATION:
     http://<tenant_host>/<path>         (Serves static file)
 
   Each unique '/cell/<cell_id>' gets a dedicated Deno isolate. Clustered
-  celld nodes use consistent hashing to distribute Cells.
+  celld nodes use consistent hashing to distribute Cells. Cells with active
+  WebSocket connections or outbound TCP connections remain alive, and
+  automatically terminate after becoming idle.
 
 JS API (starting at main.js or main.ts):
 	import { cell } from "jsr:@ry/cells";
@@ -98,20 +100,20 @@ OPTIONS:
         Root directory containing your tenant application folders.
         Each subdirectory is a tenant (e.g., 'myapp.com/').
         Overrides 'tenants_dir' in 'celld.toml'.
-        [env: CELLD_TENANTS_DIR]
+        [env: CELL_TENANTS_DIR]
         [Default: "." (relative to 'celld.toml' location, or current directory)]
 
     --runtime-subdir <NAME>
         Name of the subdirectory within each tenant folder for celld's
         runtime data (SQLite databases, internal sockets, etc.).
         Overrides 'tenant_runtime_subdir' in 'celld.toml'.
-        [env: CELLD_TENANT_RUNTIME_SUBDIR]
+        [env: CELL_TENANT_RUNTIME_SUBDIR]
         [Default: ".celld-data"]
 
     --listen-addr <IP:PORT>
         Public IP:Port for celld's main server to listen on.
         Overrides 'listen_addr' in 'celld.toml'.
-        [env: CELLD_LISTEN_ADDR]
+        [env: CELL_LISTEN_ADDR]
         [Default: "0.0.0.0:8000" or as per 'celld.toml']
 
     --advertise-addr <IP:PORT>
@@ -119,62 +121,62 @@ OPTIONS:
         for inter-node communication and request forwarding. Must be reachable
         by other celld nodes.
         Overrides 'advertise_addr' in 'celld.toml'.
-        [env: CELLD_ADVERTISE_ADDR]
+        [env: CELL_ADVERTISE_ADDR]
         [Default: "127.0.0.1:8000" or as per 'celld.toml']
 
     --internal-listen-addr <IP:PORT>
         IP:Port for celld's internal control plane server. Used for intra-cluster
         operations like cell takeovers and state queries.
         Overrides 'internal_listen_addr' in 'celld.toml'.
-        [env: CELLD_INTERNAL_LISTEN_ADDR]
+        [env: CELL_INTERNAL_LISTEN_ADDR]
         [Default: Derived from advertise_addr (e.g., port+1) or as per 'celld.toml']
 
     --s3-endpoint-url <URL>
         S3 endpoint URL for Litestream replication and cluster services.
         Overrides 'endpoint_url' in '[s3]' table of 'celld.toml'.
-        [env: AWS_ENDPOINT_URL or CELLD_S3_ENDPOINT]
+        [env: AWS_ENDPOINT_URL or CELL_S3_ENDPOINT]
 
     --s3-bucket <NAME>
         S3 bucket name for Litestream and cluster services.
         Overrides 'bucket' in '[s3]' table of 'celld.toml'.
-        [env: CELLD_S3_BUCKET]
+        [env: CELL_S3_BUCKET]
 
     --s3-region <REGION>
         AWS Region for the S3 bucket.
         Overrides 'region' in '[s3]' table of 'celld.toml'.
-        [env: AWS_DEFAULT_REGION or AWS_REGION or CELLD_S3_REGION]
+        [env: AWS_DEFAULT_REGION or AWS_REGION or CELL_S3_REGION]
 
     --s3-access-key-id <KEY_ID>
         S3 Access Key ID.
         Overrides 'access_key_id' in '[s3]' table of 'celld.toml'.
-        [env: AWS_ACCESS_KEY_ID or CELLD_S3_ACCESS_KEY_ID]
+        [env: AWS_ACCESS_KEY_ID or CELL_S3_ACCESS_KEY_ID]
 
     --s3-secret-access-key <SECRET_KEY>
         S3 Secret Access Key.
         Overrides 'secret_access_key' in '[s3]' table of 'celld.toml'.
-        [env: AWS_SECRET_ACCESS_KEY or CELLD_S3_SECRET_ACCESS_KEY]
+        [env: AWS_SECRET_ACCESS_KEY or CELL_S3_SECRET_ACCESS_KEY]
 
     --s3-prefix <PREFIX>
         Optional S3 path prefix within the bucket for all celld data.
         Overrides 'prefix' in '[s3]' table of 'celld.toml'.
-        [env: CELLD_S3_PREFIX]
+        [env: CELL_S3_PREFIX]
 
     --heartbeat-interval <SECONDS>
         Interval in seconds for cluster heartbeat to S3.
         Overrides 'heartbeat_interval' in '[cluster]' table of 'celld.toml'.
-        [env: CELLD_HEARTBEAT_INTERVAL]
+        [env: CELL_HEARTBEAT_INTERVAL]
         [Default: 30]
 
     --staleness-threshold <SECONDS>
         Interval in seconds after which an inactive cluster node is considered stale.
         Overrides 'staleness_threshold' in '[cluster]' table of 'celld.toml'.
-        [env: CELLD_STALENESS_THRESHOLD_SECS]
+        [env: CELL_STALENESS_THRESHOLD_SECS]
         [Default: 90]
 
     --grace-period <SECONDS>
         Grace period in seconds for server shutdown.
         Overrides 'grace_period_seconds' in 'celld.toml'.
-        [env: CELLD_GRACE_PERIOD_SECONDS]
+        [env: CELL_GRACE_PERIOD_SECONDS]
 
     -c, --config <FILE>
         Path to the 'celld.toml' configuration file.
@@ -190,6 +192,6 @@ OPTIONS:
 
 CONFIGURATION ORDER:
   1. Command-Line Options (these flags)
-  2. Environment Variables (CELLD_* prefixed, then standard AWS_*)
+  2. Environment Variables (CELL_* prefixed, then standard AWS_*)
   3. 'celld.toml' file
   4. Built-in defaults
