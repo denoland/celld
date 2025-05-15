@@ -22,9 +22,8 @@ pub mod test_utils;
 use pingora::prelude::*;
 use pingora::server::configuration::ServerConf;
 use pingora::services::background::background_service;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use system_cell::SystemCell;
 use tracing::{debug, error, info};
 
 use node_state::NodeState;
@@ -127,6 +126,16 @@ fn start_server(config: config::Config) -> Server {
           Ok(Arc::new(system_cell))
         })
       },
+    },
+  ));
+
+  // Add a background service for alarm scheduler
+  server.add_service(background_service(
+    "alarm_scheduler",
+    alarm_scheduler::AlarmScheduler {
+      node_state: node_state.clone(),
+      system_cell_rx: Mutex::new(Some(system_cell_rx)),
+      interval: node_state.config.alarm_scheduler_interval,
     },
   ));
 
