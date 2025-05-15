@@ -97,10 +97,10 @@ jobs:
           cat > stats.sql <<EOF
           SELECT
             count(*) as count,
-            min(latency) * 1000 as "min(ms)",
-            max(latency) * 1000 as "max(ms)",
-            avg(latency) * 1000 as "avg(ms)",
-            median(latency) * 1000 as "median(ms)"
+            round(min(latency) * 1000, 2) as "min(ms)",
+            round(max(latency) * 1000, 2) as "max(ms)",
+            round(avg(latency) * 1000, 2) as "avg(ms)",
+            round(median(latency) * 1000, 2) as "median(ms)"
           FROM read_json("coldstart-benchmark.jsonl", format="newline_delimited");
           EOF
 
