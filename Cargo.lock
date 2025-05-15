@@ -748,6 +748,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "aws-smithy-types",
+ "bytes",
  "chrono",
  "futures",
  "futures-util",

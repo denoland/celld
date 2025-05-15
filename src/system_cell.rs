@@ -59,6 +59,20 @@ impl AlarmProcessor for S3SystemCell {
     current_timestamp: DateTime<Utc>,
     limit: u32,
   ) -> Result<(), AlarmError> {
+    // Otherwise, find the target node in the cluster
+    // let candidates = node_state
+    //   .peer_manager
+    //   .get_cell_owners(&alarm.tenant, &alarm.cell_id);
+
+    // for candidate in candidates {
+    //   // TODO: Send alarm to the candidate
+    //   // If error, continue to the next candidate
+    //   // If success, return the alarm
+    //   return Some(alarm);
+    // }
+
+    // None
+
     todo!()
   }
 }
@@ -178,43 +192,56 @@ impl AlarmProcessor for StandaloneSystemCell {
     let futs = alarms.into_iter().map(|alarm| {
       let node_state = self.node_state.clone();
 
+      // Return `Some(alarm)` if the alarm was processed successfully, otherwise `None`.
       async move {
-        // If the local node is the owner of the cell responsible for the alarm,
-        // spawn (or get) a Deno process and dispatch the alarm via UDS.
-        if node_state
-          .peer_manager
-          .is_local_owner(&alarm.tenant, &alarm.cell_id)
-        {
-            node_state
-            .process_manager
-            .get_or_spawn_process(
-              &alarm.tenant,
-              &alarm.cell_id,
-              node_state.clone(),
-            )
-            .await
-            .inspect_err(|e| {
-              error!(?alarm, error = ?e, "Failed to spawn or get Deno process for alarm");
-            }).ok()?;
+        // Since this is a single-node cluster, the local node must be the owner of the cell.
+        assert!(node_state.peer_manager.is_local_owner(&alarm.tenant, &alarm.cell_id));
 
-          // TODO: Dispatch the alarm via UDS
+        let (_sock_path, stream, _process_key) = node_state
+        .process_manager
+        .get_or_spawn_process(
+          &alarm.tenant,
+          &alarm.cell_id,
+          node_state.clone(),
+        )
+        .await
+        .inspect_err(|e| {
+          error!(?alarm, error = ?e, "Failed to spawn or get Deno process for alarm");
+        }).ok()?;
 
-          return Some(alarm);
+        let io = hyper_util::rt::TokioIo::new(stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await.inspect_err(|e| {
+          error!(?alarm, error = ?e, "Failed to handshake with Deno process");
+        }).ok()?;
+
+        tokio::spawn({
+          let alarm = alarm.clone();
+          async move {
+            if let Err(e) = conn.await {
+              error!(?alarm, error = ?e, "Connection error");
+            }
+          }
+        });
+
+        let req = hyper::Request::builder()
+        .uri("/_internal/alarm")
+        .body(http_body_util::Empty::<bytes::Bytes>::new())
+        .unwrap();
+
+        let res = match sender.send_request(req).await {
+          Ok(res) => res,
+          Err(e) => {
+            error!(?alarm, error = ?e, "Failed to send alarm to Deno process");
+            return None;
+          }
+        };
+
+        if res.status() != http::StatusCode::OK {
+          error!(?alarm, status = ?res.status(), "Non-200 response from Deno process");
+          return None;
         }
 
-        // Otherwise, find the target node in the cluster
-        let candidates = node_state
-          .peer_manager
-          .get_cell_owners(&alarm.tenant, &alarm.cell_id);
-
-        for candidate in candidates {
-          // TODO: Send alarm to the candidate
-          // If error, continue to the next candidate
-          // If success, return the alarm
-          return Some(alarm);
-        }
-
-        None
+        Some(alarm)
       }
     });
 
