@@ -42,21 +42,17 @@ pub struct ProcessEntry {
   incoming_connections: usize,
 
   /// Guard for automatic termination on parent exit
-  pub parent_exit_guard: ChildOnParentExit,
+  parent_exit_guard: ChildOnParentExit,
 
   /// Guard for ensuring the uniqueness of the tenant/cellId in the cluster
   lock_guard: LockGuard,
 
   /// Keep tempdir alive as long as process exists
-  pub _socket_tempdir: TempDir,
+  _socket_tempdir: TempDir,
 
   /// SQLite replication to S3/MinIO
   /// `None` if S3/MinIO is not configured
   pub replica: Option<SqliteReplica>,
-
-  /// State of the database restore operation
-  #[allow(dead_code)]
-  pub restore_state: RestoreState,
 }
 
 impl ProcessEntry {
@@ -302,9 +298,6 @@ impl ProcessManager {
       }
     };
 
-    // Initialize restore state variable
-    let restore_state;
-
     // Handle database restoration if necessary
     if let Some(ref replica) = replica {
       info!(
@@ -328,8 +321,6 @@ impl ProcessManager {
             },
             "Database restore completed successfully"
           );
-          // Update state and continue to spawn Deno
-          restore_state = state;
         }
         state @ RestoreState::Failed(_) => {
           let err_msg = match &state {
@@ -362,9 +353,6 @@ impl ProcessManager {
       if let Err(e) = create_empty_database(&db_path) {
         warn!("Failed to create empty database file: {}", e);
       }
-
-      // Update state to Complete(false) since we created a new empty DB
-      restore_state = RestoreState::Complete(false);
     } else {
       // No replica and the database already exists
       debug!(
@@ -373,7 +361,6 @@ impl ProcessManager {
         db_path = %db_path.display(),
         "No replica and database already exists, using existing database"
       );
-      restore_state = RestoreState::Complete(false);
     }
 
     let spawn_start = Instant::now();
@@ -415,7 +402,6 @@ impl ProcessManager {
       lock_guard,
       _socket_tempdir: socket_tempdir,
       replica: replica.clone(),
-      restore_state,
     };
 
     // Insert the entry into the processes map using a short-lived lock
