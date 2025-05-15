@@ -109,7 +109,7 @@ jobs:
           HISTOGRAM=$(duckdb -table -c 'CREATE TABLE t AS SELECT latency FROM read_json("coldstart-benchmark.jsonl", format="newline_delimited"); SELECT * FROM histogram(t, "latency")')
 
           echo 'result<<EOF' >> $GITHUB_OUTPUT
-          echo "$ANALYZE" >> $GITHUB_OUTPUT
+          echo "$STATS" >> $GITHUB_OUTPUT
           echo "\n\n$HISTOGRAM" >> $GITHUB_OUTPUT
           echo 'EOF' >> $GITHUB_OUTPUT
 
