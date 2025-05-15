@@ -44,20 +44,12 @@ jobs:
           sudo dpkg -i litestream.deb
           litestream version
 
-      - name: Set up Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: "1.22"
-
-      - name: Install hey for HTTP load testing
-        run: |
-          go install github.com/rakyll/hey@latest
-          echo "$HOME/go/bin" >> $GITHUB_PATH
-
       - name: Install Deno
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
+
+      - uses: opt-nc/setup-duckdb-action@v1.0.12
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -91,16 +83,34 @@ jobs:
           cargo build --release
 
       - name: Run coldstart benchmark
-        id: benchmark
         run: |
           ./target/release/celld > /dev/null 2>&1 &
           sleep 2
           echo "Running benchmark..."
-          BENCHMARK_OUTPUT=$(hey -cpus 1 -n 1000 -c 10 -host hello.localhost -H "x-single-use-isolate: true" http://127.0.0.1:8000/cell/foo)
-          echo "Benchmark output:"
-          echo "$BENCHMARK_OUTPUT"
+          curl -s -o /dev/null -w '{ "url": "%{url_effective}", "status": %{http_code}, "latency": %{time_total} }\n' -H 'Host: hello.localhost' http://127.0.0.1:8000/cell/foo[1-500] > coldstart-benchmark.jsonl
+          echo "Benchmark output saved to coldstart-benchmark.jsonl:"
+          cat coldstart-benchmark.jsonl
+
+      - name: Analyze
+        id: analyze
+        run: |
+          cat > stats.sql <<EOF
+          SELECT
+            count(*) as count,
+            round(min(latency) * 1000, 2) as "min(ms)",
+            round(max(latency) * 1000, 2) as "max(ms)",
+            round(avg(latency) * 1000, 2) as "avg(ms)",
+            round(median(latency) * 1000, 2) as "median(ms)"
+          FROM read_json("coldstart-benchmark.jsonl", format="newline_delimited");
+          EOF
+
+          STATS=$(duckdb -line < stats.sql)
+
+          HISTOGRAM=$(duckdb -table -c 'CREATE TABLE t AS SELECT latency FROM read_json("coldstart-benchmark.jsonl", format="newline_delimited"); SELECT * FROM histogram(t, "latency")')
+
           echo 'result<<EOF' >> $GITHUB_OUTPUT
-          echo "$BENCHMARK_OUTPUT" >> $GITHUB_OUTPUT
+          echo "$STATS" >> $GITHUB_OUTPUT
+          echo "\n\n$HISTOGRAM" >> $GITHUB_OUTPUT
           echo 'EOF' >> $GITHUB_OUTPUT
 
       - name: Comment on PR
@@ -109,7 +119,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const benchmarkResult = `${{ steps.benchmark.outputs.result }}`;
+            const benchmarkResult = `${{ steps.analyze.outputs.result }}`;
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
@@ -121,4 +131,7 @@ jobs:
         if: github.ref == 'refs/heads/main'
         uses: peter-evans/commit-comment@v3
         with:
-          body: ${{ steps.benchmark.outputs.result }}
+          body: |
+            ```
+            ${{ steps.analyze.outputs.result }}
+            ```

@@ -38,7 +38,7 @@ pub async fn run(iterations: usize) -> Result<()> {
 
   // The host and cell to use for testing
   let host = "hello.localhost";
-  let cell_id = "benchmark";
+  let cell_id_base = "benchmark";
 
   // Perform the benchmark
   println!(
@@ -46,13 +46,15 @@ pub async fn run(iterations: usize) -> Result<()> {
     iterations
   );
   for i in 0..iterations {
+    // Use a unique cell_id for each iteration to ensure a new process each time
+    let cell_id = format!("{}-{}", cell_id_base, i);
+
     // Start timing
     let start = Instant::now();
 
-    // Use single_use isolate to ensure a new process each time
     let (_socket_path, _stream, _process_key) = node_state
       .process_manager
-      .spawn_single_use_process(host, cell_id)
+      .get_or_spawn_process(host, &cell_id, node_state.clone())
       .await?;
     let elapsed = start.elapsed();
 
