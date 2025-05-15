@@ -94,10 +94,23 @@ jobs:
       - name: Analyze
         id: analyze
         run: |
-          ANALYZE=$(duckdb -c 'SELECT avg(latency) AS avg, median(latency) AS median, stddev(latency) AS stddev, min(latency) AS min, max(latency) AS max FROM read_json("coldstart-benchmark.jsonl", format="newline_delimited")')
+          cat > stats.sql <<EOF
+          SELECT
+            count(*) as count,
+            round(min(latency), 4) * 1000 as "min(ms)",
+            round(max(latency), 4) * 1000 as "max(ms)",
+            round(avg(latency), 4) * 1000 as "avg(ms)",
+            round(median(latency), 4) * 1000 as "median(ms)"
+          FROM read_json("coldstart-benchmark.jsonl", format="newline_delimited");
+          EOF
+
+          STATS=$(duckdb -line < stats.sql)
+
+          HISTOGRAM=$(duckdb -table -c 'CREATE TABLE t AS SELECT latency FROM read_json("coldstart-benchmark.jsonl", format="newline_delimited"); SELECT * FROM histogram(t, "latency")')
 
           echo 'result<<EOF' >> $GITHUB_OUTPUT
           echo "$ANALYZE" >> $GITHUB_OUTPUT
+          echo "\n\n$HISTOGRAM" >> $GITHUB_OUTPUT
           echo 'EOF' >> $GITHUB_OUTPUT
 
       - name: Comment on PR
