@@ -36,6 +36,8 @@ pub struct Config {
   /// For example, if the value is 30 seconds, the lock guard will be renewed
   /// every 10 seconds.
   pub lock_guard_ttl: Duration,
+  /// Interval for system cell takeover
+  pub system_cell_takeover_interval: Duration,
 }
 
 /// Configuration for a MinIO or S3 replica target
@@ -153,6 +155,14 @@ impl Config {
       .unwrap_or(30);
     let lock_guard_ttl = Duration::from_secs(lock_guard_ttl_secs);
 
+    let system_cell_takeover_interval_secs =
+      var("CELL_SYSTEM_CELL_TAKEOVER_INTERVAL")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(10);
+    let system_cell_takeover_interval =
+      Duration::from_secs(system_cell_takeover_interval_secs);
+
     // Get optional S3 configuration
     // Prioritize CELL_S3 specific variables over standard AWS variables
     let s3_endpoint = var("CELL_S3_ENDPOINT").ok();
@@ -174,6 +184,7 @@ impl Config {
       heartbeat_interval,
       staleness_threshold,
       lock_guard_ttl,
+      system_cell_takeover_interval,
       s3_endpoint,
       s3_bucket,
       s3_region,

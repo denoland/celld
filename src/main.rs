@@ -1,5 +1,6 @@
 mod active_connections;
 mod alarm_processor;
+mod alarm_scheduler;
 mod benchmark_deno_startup;
 mod child_on_parent_exit;
 mod cluster_membership;
@@ -14,6 +15,7 @@ mod process_reaper;
 mod router;
 mod sqlite_replica;
 mod system_cell;
+mod system_cell_takeover;
 #[cfg(test)]
 pub mod test_utils;
 
@@ -22,6 +24,7 @@ use pingora::server::configuration::ServerConf;
 use pingora::services::background::background_service;
 use std::sync::Arc;
 use std::time::Duration;
+use system_cell::SystemCell;
 use tracing::{debug, error, info};
 
 use node_state::NodeState;
@@ -104,6 +107,26 @@ fn start_server(config: config::Config) -> Server {
       cluster_membership: node_state.cluster_membership.clone(),
       peer_manager: node_state.peer_manager.clone(),
       interval: node_state.config.heartbeat_interval,
+    },
+  ));
+
+  let (system_cell_broadcast, system_cell_rx) =
+    tokio::sync::broadcast::channel(1);
+  // Add a background service for system cell takeover
+  server.add_service(background_service(
+    "system_cell_takeover",
+    system_cell_takeover::SystemCellTakeover {
+      interval: node_state.config.system_cell_takeover_interval,
+      broadcast: system_cell_broadcast,
+      lock_manager: node_state.distributed_lock.clone(),
+      system_cell_factory: {
+        let node_state = node_state.clone();
+        Box::new(move |lock_guard| {
+          let system_cell =
+            system_cell::SystemCell::new(node_state.clone(), lock_guard)?;
+          Ok(Arc::new(system_cell))
+        })
+      },
     },
   ));
 

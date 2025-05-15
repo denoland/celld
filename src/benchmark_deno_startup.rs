@@ -26,6 +26,7 @@ pub async fn run(iterations: usize) -> Result<()> {
         heartbeat_interval: Duration::from_secs(30),
         staleness_threshold: Duration::from_secs(90),
         lock_guard_ttl: Duration::from_secs(30),
+        system_cell_takeover_interval: Duration::from_secs(10),
       }
     }
   };
