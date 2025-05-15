@@ -87,7 +87,7 @@ jobs:
           ./target/release/celld > /dev/null 2>&1 &
           sleep 2
           echo "Running benchmark..."
-          BENCHMARK_OUTPUT=$(curl -s -o /dev/null -w '{ "url": "%{url_effective}", "status": %{http_code}, "latency": %{time_total} }\n' -H 'Host: hello.localhost' http://127.0.0.1:8000/cell/foo[1-100])
+          BENCHMARK_OUTPUT=$(curl -s -o /dev/null -w '{ "url": "%{url_effective}", "status": %{http_code}, "latency": %{time_total} }\\n' -H 'Host: hello.localhost' http://127.0.0.1:8000/cell/foo[1-100])
           echo $BENCHMARK_OUTPUT > coldstart-benchmark.jsonl
           echo "Benchmark output saved to coldstart-benchmark.jsonl:"
           cat coldstart-benchmark.jsonl
