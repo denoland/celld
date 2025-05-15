@@ -18,7 +18,7 @@ sleep 2
 echo "Running coldstart benchmark..."
 
 curl -s -o /dev/null \
-  -w "%{url_effective} %{http_code} %{time_total}\n" \
+  -w '{ "url": "%{url_effective}", "status": %{http_code}, "latency": %{time_total} }\n' \
   -H 'Host: hello.localhost' \
   http://127.0.0.1:8000/cell/foo[1-100]
 
