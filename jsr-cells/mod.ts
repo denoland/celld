@@ -5,8 +5,9 @@ export class Cell {
   id: string;
   sockets: Map<string, WebSocket>;
   private dbInstance: DatabaseSync | null = null;
-  private onRequestCallback: ((req: Request) => Promise<Response> | Response | void) | null =
-    null;
+  private onRequestCallback:
+    | ((req: Request) => Promise<Response> | Response | void)
+    | null = null;
   private onConnectCallback:
     | ((socket: WebSocket, id: string) => Promise<void> | void)
     | null = null;
@@ -22,6 +23,9 @@ export class Cell {
     | null = null;
   private onErrorCallback:
     | ((error: Error | ErrorEvent | Event) => Promise<void> | void)
+    | null = null;
+  private onAlarmCallback:
+    | (() => Promise<void> | void)
     | null = null;
 
   constructor() {
@@ -53,6 +57,10 @@ export class Cell {
 
   request(cb: (req: Request) => Promise<Response> | Response | void): void {
     this.onRequestCallback = cb;
+  }
+
+  onAlarm(cb: () => Promise<void> | void): void {
+    this.onAlarmCallback = cb;
   }
 
   connect(cb: (socket: WebSocket, id: string) => Promise<void> | void): void {
@@ -123,6 +131,17 @@ export class Cell {
         };
 
         return response;
+      }
+
+      const url = new URL(req.url);
+
+      if (req.method === "POST" && url.pathname === "/_internal/alarm") {
+        // Invoke the onAlarm callback
+        if (this.onAlarmCallback) {
+          await this.onAlarmCallback();
+        }
+
+        return new Response("OK", { status: 200 });
       }
 
       // Handle HTTP requests
