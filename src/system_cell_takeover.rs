@@ -3,7 +3,7 @@ use pingora::services::background::BackgroundService;
 use tracing::{debug, error, info};
 
 use crate::distributed_lock::{DistributedLock, LockGuard};
-use crate::system_cell::SystemCell;
+use crate::system_cell::{SystemCell, SYSTEM_CELL_ID, SYSTEM_TENANT};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +18,8 @@ pub struct SystemCellTakeover {
   pub broadcast: tokio::sync::broadcast::Sender<Arc<SystemCell>>,
 
   pub lock_manager: Arc<dyn DistributedLock + Send + Sync>,
+
+  pub node_id: String,
 
   pub system_cell_factory: Box<
     dyn Fn(LockGuard) -> Result<Arc<SystemCell>, anyhow::Error> + Send + Sync,
@@ -44,7 +46,8 @@ impl BackgroundService for SystemCellTakeover {
               break;
           }
           _ = interval.tick() => {
-              let lock_guard = match self.lock_manager.clone().try_acquire("TODO", "TODO", SYSTEM_CELL_LOCK_TTL).await {
+              let lock_name = format!("{}/{}", SYSTEM_TENANT, SYSTEM_CELL_ID);
+              let lock_guard = match self.lock_manager.clone().try_acquire(&lock_name, &self.node_id, SYSTEM_CELL_LOCK_TTL).await {
                 Ok(lock_guard) => lock_guard,
                 Err(e) => {
                     debug!(error = ?e, "Failed to acquire lock on system cell");

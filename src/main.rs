@@ -118,6 +118,7 @@ fn start_server(config: config::Config) -> Server {
       interval: node_state.config.system_cell_takeover_interval,
       broadcast: system_cell_broadcast,
       lock_manager: node_state.distributed_lock.clone(),
+      node_id: node_state.peer_manager.get_local_node_id().to_string(),
       system_cell_factory: {
         let node_state = node_state.clone();
         Box::new(move |lock_guard| {
