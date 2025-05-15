@@ -447,7 +447,7 @@ impl ProcessManager {
       replica.start_replication().await?;
     } else if !db_path.exists() {
       // No replica, but we still need a database - create an empty one
-      info!(
+      debug!(
         tenant = %host,
         cell_id = %cell_id,
         "No S3 replication, creating empty database"
