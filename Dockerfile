@@ -15,7 +15,6 @@ WORKDIR /build
 
 # Copy only source files
 COPY Cargo.toml Cargo.lock ./
-COPY vendor ./vendor/
 COPY src ./src/
 COPY tests ./tests/
 
