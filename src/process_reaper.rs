@@ -1,7 +1,4 @@
-use crate::{
-  process_manager::{ProcessEntry, ReusableProcessEntry},
-  NodeState,
-};
+use crate::NodeState;
 use pingora::server::ShutdownWatch;
 use pingora::services::background::BackgroundService;
 use std::sync::Arc;
@@ -40,19 +37,19 @@ impl ProcessReaper {
       for (process_key, entry) in processes.iter() {
         let has_active_connections = entry.has_active_connections();
         if !has_active_connections
-          && now.duration_since(entry.last_used()) > self.idle_timeout
+          && now.duration_since(entry.last_used) > self.idle_timeout
         {
           info!(
             ?process_key,
-            pid = entry.pid(),
-            idle_duration = ?now.duration_since(entry.last_used()),
+            pid = entry.pid,
+            idle_duration = ?now.duration_since(entry.last_used),
             "Process marked for reaping due to inactivity"
           );
           to_reap.push(process_key.clone());
         } else if has_active_connections {
           trace!(
             ?process_key,
-            pid = entry.pid(),
+            pid = entry.pid,
             active_connections = has_active_connections,
             "Skipping reap for process with active connections"
           );
@@ -74,15 +71,11 @@ impl ProcessReaper {
       if let Some(entry) = maybe_entry {
         // TODO Move the following stanza to ProcessEntry::Drop ?
 
-        let pid = entry.pid();
+        let pid = entry.pid;
         warn!(?process_key, pid = pid, "Reaping idle process");
 
         // Kill the litestream replicate process.
-        if let ProcessEntry::Reusable(ReusableProcessEntry {
-          replica: Some(ref replica),
-          ..
-        }) = entry
-        {
+        if let Some(replica) = &entry.replica {
           if let Err(e) = replica.shutdown().await {
             warn!(
               ?process_key,
@@ -93,7 +86,7 @@ impl ProcessReaper {
         }
 
         // Store socket path to clean up after reaping
-        let socket_path = entry.socket_path().to_path_buf();
+        let socket_path = entry.socket_path.to_path_buf();
 
         // Terminate the Deno process
         entry.terminate();
