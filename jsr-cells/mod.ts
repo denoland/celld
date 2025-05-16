@@ -2,7 +2,9 @@ import { DatabaseSync } from "node:sqlite";
 
 // Create a Cell class to track sockets and provide broadcast functionality
 export class Cell {
+  tenant: string;
   id: string;
+  ctlClient: Deno.HttpClient;
   sockets: Map<string, WebSocket>;
   private dbInstance: DatabaseSync | null = null;
   private onRequestCallback:
@@ -29,8 +31,16 @@ export class Cell {
     | null = null;
 
   constructor() {
-    // Get the cell ID from environment variable when the process starts
+    // Get the config params from env var when the process starts
+    this.tenant = Deno.env.get("X-Tenant")!;
     this.id = Deno.env.get("X-Cell-Id")!;
+    const ctlSockPath = Deno.env.get("CELL_CONTROL_SOCKET")!;
+    this.ctlClient = Deno.createHttpClient({
+      proxy: {
+        transport: "unix",
+        path: ctlSockPath,
+      },
+    });
     this.sockets = new Map<string, WebSocket>();
     this.setupServer();
   }
@@ -61,6 +71,44 @@ export class Cell {
 
   onAlarm(cb: () => Promise<void> | void): void {
     this.onAlarmCallback = cb;
+  }
+
+  async getAlarm(): Promise<number | null> {
+    const res = await fetch(
+      `http://localhost/_internal/alarms?tenant=${this.tenant}&cell_id=${this.id}`,
+      {
+        client: this.ctlClient,
+      },
+    );
+    if (res.status !== 200) {
+      return null;
+    }
+    const data = await res.json();
+    return data.scheduled_time_unix_ms;
+  }
+
+  async setAlarm(scheduledTimeUnixMs: number): Promise<void> {
+    await fetch("http://localhost/_internal/alarms", {
+      client: this.ctlClient,
+      method: "POST",
+      body: JSON.stringify({
+        tenant: this.tenant,
+        cell_id: this.id,
+        scheduled_time_unix_ms: scheduledTimeUnixMs,
+      }),
+    });
+  }
+
+  async deleteAlarm(): Promise<boolean> {
+    const res = await fetch("http://localhost/_internal/alarms", {
+      client: this.ctlClient,
+      method: "DELETE",
+      body: JSON.stringify({
+        tenant: this.tenant,
+        cell_id: this.id,
+      }),
+    });
+    return res.status === 200;
   }
 
   connect(cb: (socket: WebSocket, id: string) => Promise<void> | void): void {
