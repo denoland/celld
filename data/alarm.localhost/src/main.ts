@@ -1,6 +1,13 @@
 import { cell } from "../../../jsr-cells/mod.ts";
 
+let alarmCount = 0;
+
 cell.request(async (req: Request) => {
+  const url = new URL(req.url);
+  if (url.pathname.split("/").at(-1) === "getAlarmCount") {
+    return Response.json({ count: alarmCount });
+  }
+
   switch (req.method) {
     case "GET": {
       const alarm = await cell.getAlarm();
@@ -26,4 +33,8 @@ cell.request(async (req: Request) => {
       });
     }
   }
+});
+
+cell.onAlarm(() => {
+  alarmCount++;
 });

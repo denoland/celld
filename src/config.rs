@@ -158,17 +158,18 @@ impl Config {
     let lock_guard_ttl = Duration::from_secs(lock_guard_ttl_secs);
 
     let system_cell_takeover_interval_secs =
-      var("CELL_SYSTEM_CELL_TAKEOVER_INTERVAL")
+      var("CELL_SYSTEM_CELL_TAKEOVER_INTERVAL_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(10);
     let system_cell_takeover_interval =
       Duration::from_secs(system_cell_takeover_interval_secs);
 
-    let alarm_scheduler_interval_secs = var("CELL_ALARM_SCHEDULER_INTERVAL")
-      .ok()
-      .and_then(|s| s.parse::<u64>().ok())
-      .unwrap_or(5);
+    let alarm_scheduler_interval_secs =
+      var("CELL_ALARM_SCHEDULER_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(5);
     let alarm_scheduler_interval =
       Duration::from_secs(alarm_scheduler_interval_secs);
 

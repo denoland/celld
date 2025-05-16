@@ -339,6 +339,7 @@ async fn dispatch_alarms(
 
         let req = hyper::Request::builder()
         .uri("/_internal/alarm")
+        .method(hyper::Method::POST)
         .body(http_body_util::Empty::<bytes::Bytes>::new())
         .unwrap();
 

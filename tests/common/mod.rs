@@ -134,6 +134,8 @@ impl TestEnv {
       // Use a shorter staleness threshold for tests to detect failures faster
       .env("CELL_STALENESS_THRESHOLD_SECS", "6")
       .env("CELL_LOCK_GUARD_TTL_SECS", "6")
+      // Configure alarm scheduler to check alarms every second
+      .env("CELL_ALARM_SCHEDULE_INTERVAL_SECS", "1")
       .env(
         "CELL_S3_ENDPOINT",
         format!("http://localhost:{}", self.minio_server.port),
