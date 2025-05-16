@@ -22,16 +22,6 @@ use crate::router::ProxyError;
 use crate::sqlite_replica::{create_empty_database, SqliteReplica};
 use crate::NodeState;
 
-/// Represents the current state of a database restore operation
-#[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
-pub enum RestoreState {
-  /// Restore process completed (bool indicates if data was actually restored)
-  Complete(bool),
-  /// Restore failed with the specified error message
-  Failed(String),
-}
-
 #[derive(Debug)]
 pub struct ProcessEntry {
   pub pid: u32,
@@ -310,40 +300,7 @@ impl ProcessManager {
       );
 
       // Call ensure_restored to perform the restore with distributed locking
-      let restore_result = replica.ensure_restored(&lock_guard).await;
-
-      // Update the restore state based on the result
-      match restore_result {
-        state @ RestoreState::Complete(_) => {
-          info!(
-            tenant = %host,
-            cell_id = %cell_id,
-            restored = match &state {
-              RestoreState::Complete(restored) => *restored,
-              _ => false
-            },
-            "Database restore completed successfully"
-          );
-        }
-        state @ RestoreState::Failed(_) => {
-          let err_msg = match &state {
-            RestoreState::Failed(msg) => msg.clone(),
-            _ => "Unknown error".to_string(),
-          };
-          error!(
-            tenant = %host,
-            cell_id = %cell_id,
-            error = %err_msg,
-            "Database restore failed"
-          );
-          // Update state and return error
-          return Err(ProcessManagerError::Internal(anyhow!(
-            "Database restore failed: {}",
-            err_msg
-          )));
-        }
-      }
-
+      replica.ensure_restored(&lock_guard).await;
       replica.start_replication().await?;
     } else if !db_path.exists() {
       // No replica, but we still need a database - create an empty one

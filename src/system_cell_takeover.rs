@@ -1,3 +1,4 @@
+use futures::future::BoxFuture;
 use pingora::server::ShutdownWatch;
 use pingora::services::background::BackgroundService;
 use tracing::{debug, error, info};
@@ -22,7 +23,11 @@ pub struct SystemCellTakeover {
   pub node_id: String,
 
   pub system_cell_factory: Box<
-    dyn Fn(LockGuard) -> Result<Arc<SystemCell>, anyhow::Error> + Send + Sync,
+    dyn Fn(
+        LockGuard,
+      ) -> BoxFuture<'static, Result<Arc<SystemCell>, anyhow::Error>>
+      + Send
+      + Sync,
   >,
 }
 
@@ -55,7 +60,7 @@ impl BackgroundService for SystemCellTakeover {
                 }
               };
 
-              let system_cell = match (self.system_cell_factory)(lock_guard) {
+              let system_cell = match (self.system_cell_factory)(lock_guard).await {
                 Ok(system_cell) => system_cell,
                 Err(e) => {
                     debug!(error = ?e, "Failed to create system cell");

@@ -199,7 +199,7 @@ impl SqliteReplica {
   /// Run the restore operation for this replica
   /// Returns true if data was restored, false if no backup was found or the database already exists
   #[instrument(skip(self))]
-  pub async fn run_restore(&self) -> Result<bool> {
+  async fn run_restore(&self) -> Result<bool> {
     // If the database already exists, nothing to restore
     if self.db_path.exists() {
       debug!(
@@ -321,9 +321,7 @@ impl SqliteReplica {
   pub async fn ensure_restored(
     &self,
     _lock_guard: &distributed_lock::LockGuard,
-  ) -> crate::process_manager::RestoreState {
-    use crate::process_manager::RestoreState;
-
+  ) {
     // Check if database already exists locally
     if self.db_path.exists() {
       debug!(
@@ -331,7 +329,7 @@ impl SqliteReplica {
         cell_id = %self.cell_id,
         "Database already exists locally, no restore needed"
       );
-      return RestoreState::Complete(false);
+      return;
     }
 
     // We got the lock, proceed with restore
@@ -351,9 +349,6 @@ impl SqliteReplica {
           "Database restore completed successfully (restored = {})",
           restored
         );
-
-        // Return Complete state with whether data was actually restored
-        RestoreState::Complete(restored)
       }
       Err(e) => {
         // Restore failed
@@ -363,9 +358,6 @@ impl SqliteReplica {
           error = %e,
           "Database restore failed"
         );
-
-        // Return Failed state with error message
-        RestoreState::Failed(e.to_string())
       }
     }
   }

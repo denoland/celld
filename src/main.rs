@@ -20,6 +20,7 @@ mod system_cell_takeover;
 #[cfg(test)]
 pub mod test_utils;
 
+use futures::FutureExt as _;
 use pingora::prelude::*;
 use pingora::server::configuration::ServerConf;
 use pingora::services::background::background_service;
@@ -123,9 +124,14 @@ fn start_server(config: config::Config) -> Server {
       system_cell_factory: {
         let node_state = node_state.clone();
         Box::new(move |lock_guard| {
-          let system_cell =
-            system_cell::SystemCell::new(node_state.clone(), lock_guard)?;
-          Ok(Arc::new(system_cell))
+          let node_state = node_state.clone();
+          async move {
+            let system_cell =
+              system_cell::SystemCell::new(node_state.clone(), lock_guard)
+                .await?;
+            Ok(Arc::new(system_cell))
+          }
+          .boxed()
         })
       },
     },
