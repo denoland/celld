@@ -251,13 +251,6 @@ impl ProxyHttp for Proxy {
       ));
     }
 
-    // Only handle GET and HEAD requests
-    if req_header.method != http::Method::GET
-      && req_header.method != http::Method::HEAD
-    {
-      return Ok(false);
-    }
-
     // Get the path
     let path = req_header.uri.path();
 
@@ -292,6 +285,13 @@ impl ProxyHttp for Proxy {
         ctx.cell_id = Some(cell_id.to_string());
         return Ok(false); // Let it be handled by the upstream_peer method
       }
+    }
+
+    // Only handle GET and HEAD requests
+    if req_header.method != http::Method::GET
+      && req_header.method != http::Method::HEAD
+    {
+      return Ok(false);
     }
 
     // Process the path and handle static files for non-cell paths
