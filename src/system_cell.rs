@@ -16,7 +16,7 @@ pub struct SystemCell {
   node_state: Arc<NodeState>,
 
   /// Guard for ensuring the uniqueness of the system cell in the cluster
-  lock_guard: LockGuard,
+  _lock_guard: LockGuard,
 
   /// SQLite replication to S3/MinIO
   /// `None` if S3/MinIO is not configured (i.e. standalone mode)
@@ -47,7 +47,7 @@ impl SystemCell {
 
     Ok(Self {
       node_state,
-      lock_guard,
+      _lock_guard: lock_guard,
       replica: maybe_replica,
       alarm_processor: AlarmProcessor::new(&db_path)?,
     })
