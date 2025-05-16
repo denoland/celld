@@ -5,6 +5,7 @@ mod benchmark_deno_startup;
 mod child_on_parent_exit;
 mod cluster_membership;
 mod config;
+mod control_socket_listener;
 mod distributed_lock;
 mod heartbeat_service;
 mod lock_guard_ttl_updater;
@@ -135,8 +136,17 @@ fn start_server(config: config::Config) -> Server {
     "alarm_scheduler",
     alarm_scheduler::AlarmScheduler {
       node_state: node_state.clone(),
-      system_cell_rx: Mutex::new(Some(system_cell_rx)),
+      system_cell_subscription: Mutex::new(Some(system_cell_rx.resubscribe())),
       interval: node_state.config.alarm_scheduler_interval,
+    },
+  ));
+
+  // Add a background service for control socket listener
+  server.add_service(background_service(
+    "control_socket_listener",
+    control_socket_listener::ControlSocketListener {
+      node_state: node_state.clone(),
+      system_cell_subscription: Mutex::new(Some(system_cell_rx.resubscribe())),
     },
   ));
 

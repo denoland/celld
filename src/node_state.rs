@@ -6,6 +6,7 @@ use crate::cluster_membership::{
   ClusterMembership, S3ClusterMembership, StandaloneClusterMembership,
 };
 use crate::config;
+use crate::control_socket_listener::ControlSocket;
 use crate::distributed_lock::{
   DistributedLock, S3DistributedLock, StandaloneDistributedLock,
 };
@@ -34,13 +35,18 @@ pub struct NodeState {
 
   /// Application configuration
   pub config: Arc<config::Config>,
+
+  pub control_socket: ControlSocket,
 }
 
 impl NodeState {
   /// Creates a new NodeState with the given configuration
   pub fn new(config: config::Config) -> Result<Arc<Self>, anyhow::Error> {
+    let control_socket = ControlSocket::new();
+
     // Create the process manager with the configured data directory
-    let process_manager = ProcessManager::new(config.data_dir.clone());
+    let process_manager =
+      ProcessManager::new(config.data_dir.clone(), &control_socket);
 
     // Generate a unique node ID (UUID) for this instance
     let node_id = uuid::Uuid::new_v4().to_string();
@@ -179,6 +185,7 @@ impl NodeState {
       cluster_membership,
       distributed_lock,
       config: config_arc,
+      control_socket,
     });
 
     Ok(node_state)
@@ -187,7 +194,8 @@ impl NodeState {
   /// Creates a minimal NodeState for benchmarking purposes
   pub fn new_for_benchmark(config: config::Config) -> Arc<Self> {
     let data_dir = PathBuf::from("./data");
-    let process_manager = ProcessManager::new(data_dir);
+    let control_socket = ControlSocket::new();
+    let process_manager = ProcessManager::new(data_dir, &control_socket);
 
     // Create minimal peer manager and node_state for benchmark
     let peer_manager = PeerManager::new(
@@ -205,6 +213,7 @@ impl NodeState {
       )),
       distributed_lock: Arc::new(StandaloneDistributedLock),
       config: Arc::new(config),
+      control_socket,
     })
   }
 }

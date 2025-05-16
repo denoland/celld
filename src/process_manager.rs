@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::active_connections;
 use crate::child_on_parent_exit::ChildOnParentExit;
+use crate::control_socket_listener::ControlSocket;
 use crate::distributed_lock::LockAcquireError;
 use crate::distributed_lock::LockGuard;
 use crate::router::ProxyError;
@@ -81,10 +82,11 @@ impl ProcessKey {
 pub struct ProcessManager {
   pub data_dir: PathBuf,
   pub processes: Mutex<HashMap<ProcessKey, ProcessEntry>>,
+  control_socket_path: PathBuf,
 }
 
 impl ProcessManager {
-  pub fn new(data_dir: PathBuf) -> Self {
+  pub fn new(data_dir: PathBuf, control_socket: &ControlSocket) -> Self {
     let data_dir = data_dir.clone();
     // TODO: Implement a cleanup mechanism for old empty database files
     // This could be done by:
@@ -95,6 +97,7 @@ impl ProcessManager {
     ProcessManager {
       data_dir: std::fs::canonicalize(data_dir.clone()).unwrap(),
       processes: Mutex::new(HashMap::new()),
+      control_socket_path: control_socket.socket_path.clone(),
     }
   }
 
@@ -252,12 +255,12 @@ impl ProcessManager {
     let socket_tempdir = tempfile::tempdir()
       .with_context(|| "Failed to create temporary directory for socket")?;
 
-    let socket_name = {
+    let serve_socket_name = {
       let uuid_string = Uuid::new_v4().to_string();
       let first_segment: &str = &uuid_string[0..8];
       format!("{}.sock", first_segment)
     };
-    let socket_path = socket_tempdir.path().join(socket_name);
+    let serve_socket_path = socket_tempdir.path().join(serve_socket_name);
 
     // Create SQLite directory
     let sqlite_dir = tenant_dir.join("sqlite");
@@ -368,7 +371,7 @@ impl ProcessManager {
     debug!(
       tenant = %host,
       cell_id = %cell_id,
-      socket_path = %socket_path.display(),
+      socket_path = %serve_socket_path.display(),
       main_script = %main_script.display(),
       "About to spawn Deno process"
     );
@@ -378,7 +381,8 @@ impl ProcessManager {
       host,
       cell_id,
       &tenant_dir,
-      &socket_path,
+      &serve_socket_path,
+      &self.control_socket_path,
       &main_script,
     )?;
 
@@ -395,7 +399,7 @@ impl ProcessManager {
     // Create a new ProcessEntry with proper values
     let entry = ProcessEntry {
       pid,
-      socket_path: socket_path.clone(),
+      socket_path: serve_socket_path.clone(),
       last_used: Instant::now(),
       incoming_connections: 0,
       parent_exit_guard: child_guard,
@@ -411,7 +415,7 @@ impl ProcessManager {
     }
 
     // --- Wait for the socket to become available (crucial for cold start) ---
-    let socket_ = socket_path.clone();
+    let socket_ = serve_socket_path.clone();
     let wait_start = Instant::now();
     let wait_timeout = Duration::from_secs(10); // Timeout for socket connection
 
@@ -507,7 +511,7 @@ impl ProcessManager {
       }
     };
 
-    Ok((socket_path, stream, process_key))
+    Ok((serve_socket_path, stream, process_key))
   }
 
   pub async fn terminate_all(&self) {
@@ -603,12 +607,15 @@ fn parse_env_vars(content: &str) -> HashMap<String, String> {
 }
 
 /// Spawn a Deno process for the given host and cell
-#[instrument(skip(socket_path, cell_id), fields(host = %host, cell_id = %cell_id))]
+#[instrument(skip(serve_socket_path, control_socket_path), fields(host = %host, cell_id = %cell_id))]
 fn spawn_deno_process(
   host: &str,
   cell_id: &str,
   tenant_dir: &PathBuf,
-  socket_path: &Path,
+  // The socket path the Deno process will listen on for HTTP requests
+  serve_socket_path: &Path,
+  // The socket path the Deno process will connect to
+  control_socket_path: &Path,
   main_script: &PathBuf,
 ) -> Result<ChildOnParentExit> {
   let mut cmd = std::process::Command::new("deno");
@@ -616,13 +623,23 @@ fn spawn_deno_process(
     .current_dir(tenant_dir)
     .env(
       "DENO_SERVE_ADDRESS",
-      format!("unix:{}", socket_path.display()),
+      format!("unix:{}", serve_socket_path.display()),
     )
-    .env("X-Cell-Id", cell_id); // Pass cell ID to bootstrap.ts
+    .env(
+      "CELL_CONTROL_SOCKET",
+      format!("{}", control_socket_path.display()),
+    )
+    .env("X-Tenant", host)
+    .env("X-Cell-Id", cell_id);
 
   // Load environment variables from prod.env file
   let env_file_path = tenant_dir.join("prod.env");
-  let mut env_vars = Vec::new();
+  // X-Cell-Id and CELL_CONTROL_SOCKET are allowed by default
+  let mut env_vars = vec![
+    "X-Tenant".to_string(),
+    "X-Cell-Id".to_string(),
+    "CELL_CONTROL_SOCKET".to_string(),
+  ];
 
   match fs::read_to_string(&env_file_path) {
     Ok(env_contents) => {
@@ -647,13 +664,10 @@ fn spawn_deno_process(
     }
   }
 
-  // Add X-Cell-Id to allowed env vars
-  env_vars.push("X-Cell-Id".to_string());
-
   debug!(
     host = %host,
     cell_id = %cell_id,
-    socket_path = %socket_path.display(),
+    socket_path = %serve_socket_path.display(),
     main_script = %main_script.display(),
     "Preparing deno command"
   );
@@ -662,23 +676,21 @@ fn spawn_deno_process(
     .arg("run")
     .arg("--no-prompt")
     .arg(format!(
-      "--allow-read={},{}",
+      "--allow-read={},{},{}",
       tenant_dir.display(),
-      socket_path.display()
+      serve_socket_path.display(),
+      control_socket_path.display()
     ))
     .arg(format!(
-      "--allow-write={},{}",
+      "--allow-write={},{},{}",
       tenant_dir.display(),
-      socket_path.display()
+      serve_socket_path.display(),
+      control_socket_path.display()
     ))
     .arg("--allow-net");
 
   // Only allow specifically named environment variables
-  if !env_vars.is_empty() {
-    cmd.arg(format!("--allow-env={}", env_vars.join(",")));
-  } else {
-    cmd.arg("--allow-env=X-Cell-Id"); // Default minimum permission
-  }
+  cmd.arg(format!("--allow-env={}", env_vars.join(",")));
 
   cmd.arg(main_script);
 

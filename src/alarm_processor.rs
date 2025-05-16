@@ -26,7 +26,7 @@ pub struct Alarm {
   pub scheduled_time_unix_ms: u64,
 }
 
-enum AlarmProcessRequest {
+pub enum AlarmProcessRequest {
   Get {
     tenant: String,
     cell_id: String,

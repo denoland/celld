@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
-
 use crate::{
   alarm_processor::AlarmProcessor, distributed_lock::LockGuard,
   node_state::NodeState, sqlite_replica::SqliteReplica,
@@ -50,15 +48,7 @@ impl SystemCell {
     })
   }
 
-  pub async fn dispatch_due_alarms(
-    &self,
-    current_timestamp: DateTime<Utc>,
-    limit: u32,
-  ) -> Result<(), anyhow::Error> {
-    self
-      .alarm_processor
-      .dispatch(self.node_state.clone(), current_timestamp, limit)
-      .await?;
-    Ok(())
+  pub fn alarm_processor(&self) -> &AlarmProcessor {
+    &self.alarm_processor
   }
 }

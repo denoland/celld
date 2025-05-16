@@ -8,7 +8,7 @@ use tracing::{error, info};
 
 pub struct AlarmScheduler {
   pub node_state: Arc<NodeState>,
-  pub system_cell_rx:
+  pub system_cell_subscription:
     StdMutex<Option<tokio::sync::broadcast::Receiver<Arc<SystemCell>>>>,
   pub interval: Duration,
 }
@@ -21,7 +21,8 @@ impl BackgroundService for AlarmScheduler {
       self.interval
     );
 
-    let Some(mut system_cell_rx) = self.system_cell_rx.lock().unwrap().take()
+    let Some(mut system_cell_rx) =
+      self.system_cell_subscription.lock().unwrap().take()
     else {
       return;
     };
@@ -45,7 +46,7 @@ impl BackgroundService for AlarmScheduler {
               break;
           }
           _ = interval.tick() => {
-            if let Err(e) = system_cell.dispatch_due_alarms(Utc::now(), 100).await {
+            if let Err(e) = system_cell.alarm_processor().dispatch(self.node_state.clone(), Utc::now(), 100).await {
               error!(error = ?e, "Error dispatching due alarms");
             }
           }
