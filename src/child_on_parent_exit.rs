@@ -31,8 +31,7 @@ impl ChildOnParentExit {
       use nix::sys::prctl::set_pdeathsig;
       unsafe {
         cmd.pre_exec(|| {
-          set_pdeathsig(Some(Signal::SIGTERM))
-            .map_err(|e| io::Error::other(e))?;
+          set_pdeathsig(Some(Signal::SIGTERM)).map_err(io::Error::other)?;
           Ok(())
         });
       }
