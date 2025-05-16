@@ -7,8 +7,13 @@ cell.request(async (req: Request) => {
       return Response.json(alarm);
     }
     case "POST": {
-      // Set an alarm in 1 minute
-      await cell.setAlarm(Date.now() + 60 * 1000);
+      const alarmSchedule = await req.json();
+      if (typeof alarmSchedule !== "number") {
+        return Response.json({ error: "Invalid alarm schedule" }, {
+          status: 400,
+        });
+      }
+      await cell.setAlarm(Date.now() + alarmSchedule);
       return Response.json({ success: true });
     }
     case "DELETE": {

@@ -3,7 +3,7 @@ mod common;
 use common::TestEnv;
 
 #[tokio::test]
-async fn test_alarm_in_single_node_cluster() {
+async fn test_alarm_crud_in_single_node_cluster() {
   let test_env = TestEnv::new(1);
   let port = test_env.public_ports[0];
 
@@ -44,6 +44,7 @@ async fn test_alarm_in_single_node_cluster() {
     let res = client
       .post(&url)
       .header("host", "alarm.localhost")
+      .body("5000")
       .send()
       .await
       .unwrap();
