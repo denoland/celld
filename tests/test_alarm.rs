@@ -277,3 +277,103 @@ async fn test_multiple_cells_alarm_dispatch_in_single_node_cluster() {
     assert_eq!(content, r#"{"count":1}"#);
   }
 }
+
+#[tokio::test]
+async fn system_cell_takeover() {
+  let client = reqwest::Client::new();
+
+  let mut test_env = TestEnv::new(2);
+
+  let mut system_cell_index = None;
+  let mut secondary_cell_external_ports = Vec::new();
+
+  for (index, internal_port) in test_env.internal_ports.iter().enumerate() {
+    let owner_url = format!(
+      "http://localhost:{internal_port}/_internal/mesh/owner/_system/main"
+    );
+    let owner_resp = client
+      .get(&owner_url)
+      .send()
+      .await
+      .unwrap()
+      .json::<serde_json::Value>()
+      .await
+      .unwrap();
+    if owner_resp["is_local"].as_bool().unwrap() {
+      system_cell_index = Some(index);
+    } else {
+      secondary_cell_external_ports.push(test_env.public_ports[index]);
+    }
+  }
+
+  let system_cell_index = system_cell_index.unwrap();
+  assert!(!secondary_cell_external_ports.is_empty());
+
+  let test_cell_id = uuid::Uuid::new_v4().simple().to_string();
+
+  // Attempt to get an alarm (none should exist)
+  {
+    let test_cell_url = format!(
+      "http://localhost:{}/cell/{}",
+      test_env.public_ports[system_cell_index], test_cell_id
+    );
+
+    let res = client
+      .get(&test_cell_url)
+      .header("host", "alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+
+    let content = res.text().await.unwrap();
+    assert_eq!(content, "null");
+  }
+
+  // Set a new alarm to save something to the system cell's DB
+  {
+    let test_cell_url = format!(
+      "http://localhost:{}/cell/{}",
+      test_env.public_ports[system_cell_index], test_cell_id
+    );
+
+    let res = client
+      .post(&test_cell_url)
+      .header("host", "alarm.localhost")
+      .body(u32::MAX.to_string()) // Will never be dispatched
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+  }
+
+  // Wait for Litestream to replicate data to S3
+  println!("Waiting for Litestream to replicate data to S3...");
+  tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+  // Shutdown the node that the system cell belongs to
+  test_env.graceful_shutdown_cell_instance(system_cell_index);
+
+  // Wait for the shutdown to be detected
+  println!("Waiting for primary node failure to be detected...");
+  tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+
+  // Get the set alarm through the secondary node to see the system cell's DB has been restored
+  {
+    let test_cell_url = format!(
+      "http://localhost:{}/cell/{}",
+      secondary_cell_external_ports[0], test_cell_id
+    );
+
+    let res = client
+      .get(&test_cell_url)
+      .header("host", "alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+
+    let content = res.text().await.unwrap();
+    assert_ne!(content, "null");
+  }
+}
