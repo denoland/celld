@@ -261,6 +261,27 @@ impl ProxyHttp for Proxy {
     // Get the path
     let path = req_header.uri.path();
 
+    // Handle health check endpoint
+    if path == "/_health" {
+      let response = "OK\n";
+      let content_length = response.len();
+      let mut resp =
+        pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
+      resp
+        .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
+        .unwrap();
+      resp
+        .insert_header(http::header::CONTENT_TYPE, "text/plain")
+        .unwrap();
+
+      session.write_response_header(Box::new(resp), false).await?;
+      session
+        .write_response_body(Some(response.into()), true)
+        .await?;
+      session.set_keepalive(None);
+      return Ok(true);
+    }
+
     // Handle requests to the old mesh endpoints - just return 404 to indicate they've moved
     if path.starts_with("/_mesh/") {
       let response = "Mesh endpoints have moved to the internal API";

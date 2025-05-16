@@ -31,8 +31,7 @@ impl ChildOnParentExit {
       use nix::sys::prctl::set_pdeathsig;
       unsafe {
         cmd.pre_exec(|| {
-          set_pdeathsig(Some(Signal::SIGTERM))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+          set_pdeathsig(Some(Signal::SIGTERM)).map_err(io::Error::other)?;
           Ok(())
         });
       }
@@ -50,15 +49,11 @@ impl ChildOnParentExit {
       use nix::unistd::{fork, pipe, read, ForkResult};
 
       // create a pipe; parent holds w, watcher holds r
-      let (r, w) =
-        pipe().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+      let (r, w) = pipe().map_err(io::Error::other)?;
       let flags = FdFlag::FD_CLOEXEC;
-      fcntl(&r, FcntlArg::F_SETFD(flags))
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+      fcntl(&r, FcntlArg::F_SETFD(flags)).map_err(io::Error::other)?;
 
-      match unsafe {
-        fork().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
-      } {
+      match unsafe { fork().map_err(io::Error::other)? } {
         ForkResult::Parent { child } => {
           // proxy parent: close read, keep write
           drop(r); // Close read end
