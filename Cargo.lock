@@ -765,6 +765,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "serde_qs",
  "serde_yaml 0.9.34+deprecated",
  "sha2",
  "tempfile",
@@ -3131,6 +3132,17 @@ dependencies = [
  "memchr",
  "ryu",
  "serde",
+]
+
+[[package]]
+name = "serde_qs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3faaf9e727533a19351a43cc5a8de957372163c7d35cc48c90b75cdda13c352"
+dependencies = [
+ "percent-encoding",
+ "serde",
+ "thiserror 2.0.12",
 ]
 
 [[package]]
