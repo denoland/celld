@@ -147,6 +147,7 @@ In-Progress / Next:
 ### Prerequisites
 
 - Deno v2.3+ (to use `DENO_SERVE_ADDRESS` env var)
+- sqlite3: `brew install sqlite3`
 - [litestream](https://litestream.io/install/)
 - MinIO for testing: `brew install minio`
 - MinIO client for testing: `brew install minio/stable/mc`
