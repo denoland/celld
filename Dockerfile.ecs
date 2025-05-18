@@ -18,17 +18,16 @@ RUN apt-get update && \
 
 COPY ./data /data
 # Remove any sqlite directories inside the copied data directory.
-RUN rm -rf /data/*/sqlite/
-RUN chown -R celld:celld /data
+RUN rm -rf /data/*/sqlite/ && chown -R celld:celld /data
 
 COPY entrypoint-ecs.sh /usr/local/bin/entrypoint.sh
 
 # Make it executable
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# Set the new entrypoint
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+USER celld
 
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 # The CMD from your original image will be passed as arguments to this
 # entrypoint script. If your original image had
 # `CMD ["celld", "--some-default-arg"]`, then "$@" in the script will become
