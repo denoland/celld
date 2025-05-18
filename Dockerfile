@@ -54,7 +54,7 @@ RUN groupadd -g 1000 celld && \
     useradd -u 1000 -g celld -s /bin/bash -m celld
 
 # Create data directory and set permissions
-RUN mkdir -p /var/lib/celld/data && chown -R celld:celld /var/lib/celld
+RUN mkdir -p /data && chown -R celld:celld /data
 
 # Set the working directory
 WORKDIR /app
@@ -69,6 +69,7 @@ USER celld
 
 # Environment variables with defaults
 ENV RUST_LOG=info
+ENV DATA="/data"
 
 # Command to run the application
 CMD ["celld"]
