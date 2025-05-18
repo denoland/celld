@@ -524,17 +524,23 @@ pub fn create_empty_database(db_path: &Path) -> Result<()> {
   }
 
   // Now create the database
-  let output = std::process::Command::new("sqlite3")
+  let output_result = std::process::Command::new("sqlite3")
     .arg(db_path)
     // https://litestream.io/tips/
     .arg("PRAGMA busy_timeout = 5000; PRAGMA journal_mode=WAL;")
-    .output()
-    .with_context(|| {
-      format!(
-        "Failed to execute sqlite3 command for {}",
-        db_path.display()
-      )
-    })?;
+    .output();
+
+  let output = match output_result {
+    Ok(out) => out,
+    Err(e) => {
+      return Err(anyhow!(
+        "Failed to spawn 'sqlite3' command for {}: {}",
+        db_path.display(),
+        e
+      ))
+      .context("Spawning sqlite3 failed");
+    }
+  };
 
   if !output.status.success() {
     let stderr = String::from_utf8_lossy(&output.stderr);
