@@ -121,7 +121,7 @@ impl Config {
       SocketAddr::from_str(&addr_str).ok()
     }).unwrap_or_else(|| {
       // If not set, use advertise_addr with port + 1
-      let mut addr = advertise_addr.clone();
+      let mut addr = advertise_addr;
       addr.set_port(addr.port() + 1);
       // Log a warning for multi-node setups
       info!(

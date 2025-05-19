@@ -559,7 +559,7 @@ impl ProxyHttp for Proxy {
             "Forwarding request to primary active owner"
         );
         let sni = ctx.tenant.clone();
-        let peer = HttpPeer::new(primary_owner_addr.clone(), false, sni);
+        let peer = HttpPeer::new(primary_owner_addr, false, sni);
         return Ok(Box::new(peer));
       } else {
         // This case means no active owners were found according to PeerManager,

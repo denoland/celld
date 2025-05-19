@@ -374,7 +374,7 @@ async fn dispatch_alarms(
     "SELECT tenant, cell_id, scheduled_time_unix_ms FROM global_alarms WHERE scheduled_time_unix_ms <= ? ORDER BY scheduled_time_unix_ms LIMIT ?",
   )?;
   let rows = stmt.query_map(
-    [current_timestamp.timestamp_millis() as i64, limit as i64],
+    [current_timestamp.timestamp_millis(), limit as i64],
     |row| {
       Ok(Alarm {
         tenant: row.get("tenant")?,
@@ -406,10 +406,8 @@ async fn dispatch_alarms(
 
   let mut stmt =
     tx.prepare("DELETE FROM global_alarms WHERE tenant = ? AND cell_id = ?")?;
-  for processed_alarm in futures::future::join_all(futs)
-    .await
-    .into_iter()
-    .filter_map(|r| r)
+  for processed_alarm in
+    futures::future::join_all(futs).await.into_iter().flatten()
   {
     stmt.execute([processed_alarm.tenant, processed_alarm.cell_id])?;
   }

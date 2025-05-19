@@ -9,6 +9,12 @@ use crate::system_cell::{SystemCell, SYSTEM_CELL_ID, SYSTEM_TENANT};
 use std::sync::Arc;
 use std::time::Duration;
 
+type SystemCellFactory = Box<
+  dyn Fn(LockGuard) -> BoxFuture<'static, Result<Arc<SystemCell>, anyhow::Error>>
+    + Send
+    + Sync,
+>;
+
 /// SystemCellTakeover service periodically checks if there is a system cell in
 /// the cluster. If not, it will attempt to take over the system cell.
 /// Once it acquires the lock on the system cell, a [`SystemCell`] instance is created and broadcast via the channel.
@@ -23,13 +29,7 @@ pub struct SystemCellTakeover {
 
   pub node_id: NodeId,
 
-  pub system_cell_factory: Box<
-    dyn Fn(
-        LockGuard,
-      ) -> BoxFuture<'static, Result<Arc<SystemCell>, anyhow::Error>>
-      + Send
-      + Sync,
-  >,
+  pub system_cell_factory: SystemCellFactory,
 }
 
 #[async_trait::async_trait]
@@ -69,7 +69,7 @@ impl BackgroundService for SystemCellTakeover {
                 }
               };
 
-              if let Err(_) = self.broadcast.send(system_cell) {
+              if self.broadcast.send(system_cell).is_err() {
                 error!("No active receivers for system cell broadcast");
               }
               break;

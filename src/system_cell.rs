@@ -103,7 +103,7 @@ async fn setup_sqlite_replica(
     );
 
     // Call ensure_restored to perform the restore with distributed locking
-    replica.ensure_restored(&lock_guard).await;
+    replica.ensure_restored(lock_guard).await;
     replica.start_replication().await?;
   } else if !db_path.exists() {
     // No replica, but we still need a database - create an empty one
@@ -113,7 +113,7 @@ async fn setup_sqlite_replica(
       "No S3 replication, creating empty database"
     );
 
-    if let Err(e) = create_empty_database(&db_path) {
+    if let Err(e) = create_empty_database(db_path) {
       warn!("Failed to create empty database file: {}", e);
     }
   } else {

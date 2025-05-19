@@ -20,11 +20,11 @@ impl PeerManager {
   pub fn new(self_advertise_addr: SocketAddr, self_node_id: NodeId) -> Self {
     // Initialize with just the local node
     let mut ring = HashRing::new();
-    ring.add(self_advertise_addr.clone());
+    ring.add(self_advertise_addr);
 
     let self_node = NodeInfo {
       node_id: self_node_id.clone(),
-      advertise_addr: self_advertise_addr.clone(),
+      advertise_addr: self_advertise_addr,
       heartbeat_timestamp: chrono::Utc::now(),
     };
 
@@ -47,7 +47,7 @@ impl PeerManager {
     state.peers = active_peers;
     let mut new_ring = HashRing::new();
     for peer in &state.peers {
-      new_ring.add(peer.advertise_addr.clone());
+      new_ring.add(peer.advertise_addr);
     }
     state.ring = new_ring;
   }

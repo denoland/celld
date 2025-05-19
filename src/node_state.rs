@@ -71,7 +71,7 @@ impl NodeState {
           // Create membership using from_config with configured staleness threshold
           let membership = match S3ClusterMembership::from_config(
             s3_config.clone(),
-            config.advertise_addr.clone(),
+            config.advertise_addr,
             Some(node_id.clone()),
             Some(config.staleness_threshold),
           )
@@ -161,7 +161,7 @@ impl NodeState {
           (
             Arc::new(StandaloneClusterMembership::new(
               node_id.clone(),
-              config.advertise_addr.clone(),
+              config.advertise_addr,
             )) as Arc<dyn ClusterMembership>,
             Arc::new(StandaloneDistributedLock) as Arc<dyn DistributedLock>,
           )
@@ -170,8 +170,7 @@ impl NodeState {
     };
 
     // Create peer manager with only local node
-    let peer_manager =
-      PeerManager::new(config.advertise_addr.clone(), node_id.clone());
+    let peer_manager = PeerManager::new(config.advertise_addr, node_id.clone());
     debug!("Peer manager initialized in standalone mode");
 
     // Create config Arc for NodeState
