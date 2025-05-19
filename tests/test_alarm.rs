@@ -377,3 +377,161 @@ async fn system_cell_takeover() {
     assert_ne!(content, "null");
   }
 }
+
+#[tokio::test]
+async fn alarm_crud_operations_forwarded_to_system_cell_node() {
+  let client = reqwest::Client::new();
+
+  let test_env = TestEnv::new(2);
+
+  let mut system_cell_index = None;
+  struct Port {
+    internal: u16,
+    external: u16,
+  }
+  let mut secondary_cell_ports = Vec::new();
+
+  // Identify the node where the system cell is running
+  for (index, internal_port) in test_env.internal_ports.iter().enumerate() {
+    let owner_url = format!(
+      "http://localhost:{internal_port}/_internal/mesh/owner/_system/main"
+    );
+    let owner_resp = client
+      .get(&owner_url)
+      .send()
+      .await
+      .unwrap()
+      .json::<serde_json::Value>()
+      .await
+      .unwrap();
+    if owner_resp["is_local"].as_bool().unwrap() {
+      system_cell_index = Some(index);
+    } else {
+      secondary_cell_ports.push(Port {
+        internal: test_env.internal_ports[index],
+        external: test_env.public_ports[index],
+      });
+    }
+  }
+
+  let system_cell_index = system_cell_index.unwrap();
+  assert!(!secondary_cell_ports.is_empty());
+
+  // Find a cell ID that does NOT belong to the system cell's node
+  let test_cell_id = {
+    let mut test_cell_id = None;
+    for i in 0.. {
+      let secondary_cell_internal_port = secondary_cell_ports[0].internal;
+      let tmp_id = format!("test-cell-{i}");
+      let owner_url = format!(
+      "http://localhost:{secondary_cell_internal_port}/_internal/mesh/owner/alarm.localhost/{tmp_id}"
+    );
+      let owner_resp = client
+        .get(&owner_url)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+      if owner_resp["is_local"].as_bool().unwrap() {
+        test_cell_id = Some(tmp_id);
+        break;
+      }
+    }
+
+    test_cell_id.unwrap()
+  };
+
+  // Attempt to get an alarm (none should exist)
+  // Request flow should look like this:
+  // client -> primary node -> secondary node (where test_cell_id runs) -> isolate (which issues GetAlarm request) -> secondary node -> primary node -> system cell -> primary node -> secondary node -> isolate
+  {
+    let test_cell_url = format!(
+      "http://localhost:{}/cell/{}",
+      test_env.public_ports[system_cell_index], test_cell_id
+    );
+
+    let res = client
+      .get(&test_cell_url)
+      .header("host", "alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+
+    let content = res.text().await.unwrap();
+    assert_eq!(content, "null");
+  }
+
+  // Set a new alarm to save something to the system cell's DB
+  {
+    let test_cell_url = format!(
+      "http://localhost:{}/cell/{}",
+      test_env.public_ports[system_cell_index], test_cell_id
+    );
+
+    let res = client
+      .post(&test_cell_url)
+      .header("host", "alarm.localhost")
+      .body(u32::MAX.to_string()) // Will never be dispatched
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+  }
+
+  // Get the alarm through the secondary node to see the system cell's DB has been updated
+  {
+    let test_cell_url = format!(
+      "http://localhost:{}/cell/{}",
+      secondary_cell_ports[0].external, test_cell_id
+    );
+
+    let res = client
+      .get(&test_cell_url)
+      .header("host", "alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+
+    let content = res.text().await.unwrap();
+    assert_ne!(content, "null");
+  }
+
+  // Delete the alarm
+  {
+    let test_cell_url = format!(
+      "http://localhost:{}/cell/{}",
+      secondary_cell_ports[0].external, test_cell_id
+    );
+
+    let res = client
+      .delete(&test_cell_url)
+      .header("host", "alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+  }
+
+  // Try to get an alarm again, should not exist
+  {
+    let test_cell_url = format!(
+      "http://localhost:{}/cell/{}",
+      secondary_cell_ports[0].external, test_cell_id
+    );
+
+    let res = client
+      .get(&test_cell_url)
+      .header("host", "alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+
+    let content = res.text().await.unwrap();
+    assert_eq!(content, "null");
+  }
+}
