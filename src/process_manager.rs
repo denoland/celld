@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use nix::sys::signal::Signal;
 use std::collections::HashMap;
 use std::fs;

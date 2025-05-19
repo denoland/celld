@@ -24,7 +24,7 @@ use futures::FutureExt as _;
 use pingora::prelude::*;
 use pingora::server::configuration::ServerConf;
 use pingora::services::background::background_service;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info};
 

@@ -13,6 +13,7 @@ pub const SYSTEM_TENANT: &str = "_system";
 pub const SYSTEM_CELL_ID: &str = "main";
 
 pub struct SystemCell {
+  #[allow(dead_code)]
   node_state: Arc<NodeState>,
 
   /// Guard for ensuring the uniqueness of the system cell in the cluster
@@ -20,6 +21,7 @@ pub struct SystemCell {
 
   /// SQLite replication to S3/MinIO
   /// `None` if S3/MinIO is not configured (i.e. standalone mode)
+  #[allow(dead_code)]
   replica: Option<SqliteReplica>,
 
   alarm_processor: AlarmProcessor,
