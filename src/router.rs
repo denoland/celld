@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, error, info};
 
+use crate::alarm_processor::{dispatch_alarm_locally, Alarm};
 use crate::control_socket_listener::locally_handle_internal_alarms;
 use crate::node_state::NodeState;
 use crate::process_manager::{ProcessKey, ProcessManagerError};
@@ -235,6 +236,51 @@ impl ProxyHttp for InternalAPI {
           return Ok(true);
         }
       }
+    }
+
+    // Handle the dispatch alarm endpoint
+    if path.starts_with("/_internal/dispatch_alarm")
+      && req_header.method == http::Method::POST
+    {
+      let Some(req_body) = session.read_request_body().await? else {
+        error!("Error reading request body of dispatch_alarm endpoint");
+        let resp = pingora::http::ResponseHeader::build(
+          StatusCode::INTERNAL_SERVER_ERROR,
+          Some(0),
+        )
+        .unwrap();
+        session.write_response_header(Box::new(resp), true).await?;
+        session.set_keepalive(None);
+        return Ok(true);
+      };
+      let dispatched_alarm: Alarm = match serde_json::from_slice(&req_body) {
+        Ok(dispatch_alarm) => dispatch_alarm,
+        Err(e) => {
+          error!(error = ?e, "Error deserializing dispatch alarm");
+          let resp = pingora::http::ResponseHeader::build(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Some(0),
+          )
+          .unwrap();
+          session.write_response_header(Box::new(resp), true).await?;
+          session.set_keepalive(None);
+          return Ok(true);
+        }
+      };
+      let status =
+        match dispatch_alarm_locally(dispatched_alarm, self.node_state.clone())
+          .await
+        {
+          Ok(_) => StatusCode::OK,
+          Err(e) => {
+            error!(error = ?e, "Error dispatching alarm");
+            StatusCode::INTERNAL_SERVER_ERROR
+          }
+        };
+      let resp = pingora::http::ResponseHeader::build(status, Some(0)).unwrap();
+      session.write_response_header(Box::new(resp), true).await?;
+      session.set_keepalive(None);
+      return Ok(true);
     }
 
     // If we didn't match any known internal endpoint, return a 404

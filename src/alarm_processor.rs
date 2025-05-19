@@ -1,6 +1,7 @@
 use std::{path::Path, sync::Arc};
 
 use chrono::{DateTime, Utc};
+use tokio::net::TcpStream;
 use tracing::error;
 
 use crate::node_state::NodeState;
@@ -19,7 +20,7 @@ pub enum AlarmError {
   RecvResponseError(#[from] tokio::sync::oneshot::error::RecvError),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Alarm {
   pub tenant: String,
   pub cell_id: String,
@@ -280,6 +281,87 @@ fn set_alarm(
   Ok(())
 }
 
+pub async fn dispatch_alarm_locally(
+  alarm: Alarm,
+  node_state: Arc<NodeState>,
+) -> anyhow::Result<Alarm> {
+  let (_sock_path, stream, _process_key) = node_state
+    .process_manager
+    .get_or_spawn_process(&alarm.tenant, &alarm.cell_id, node_state.clone())
+    .await?;
+
+  let io = hyper_util::rt::TokioIo::new(stream);
+  let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+    .await
+    .inspect_err(|e| {
+      error!(?alarm, error = ?e, "Failed to handshake with Deno process");
+    })?;
+
+  tokio::spawn({
+    let alarm = alarm.clone();
+    async move {
+      if let Err(e) = conn.await {
+        error!(?alarm, error = ?e, "Connection error");
+      }
+    }
+  });
+
+  let req = hyper::Request::builder()
+    .uri("/_internal/alarm")
+    .method(hyper::Method::POST)
+    .body(http_body_util::Empty::<bytes::Bytes>::new())
+    .unwrap();
+
+  let res = sender.send_request(req).await?;
+
+  if res.status() != http::StatusCode::OK {
+    anyhow::bail!("Non-200 response from Deno process: {}", res.status());
+  }
+
+  Ok(alarm)
+}
+
+async fn dispatch_alarm_remotely(
+  alarm: Alarm,
+  node_state: Arc<NodeState>,
+) -> anyhow::Result<Alarm> {
+  let cell_owner = node_state
+    .peer_manager
+    .get_owner_peer(&alarm.tenant, &alarm.cell_id);
+  // TODO(magurotuna): Can we have a better way to get internal address?
+  let cell_owner_internal_addr = {
+    let mut a = cell_owner;
+    a.set_port(cell_owner.port() + 1);
+    a
+  };
+
+  let tcp_stream = TcpStream::connect(cell_owner_internal_addr).await?;
+  let io = hyper_util::rt::TokioIo::new(tcp_stream);
+  let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+
+  tokio::spawn(async move {
+    if let Err(e) = conn.await {
+      error!(%cell_owner, error = ?e, "Failed to send alarm to system cell owner");
+    }
+  });
+
+  let body = serde_json::to_string(&alarm)?;
+
+  let req = hyper::Request::builder()
+    .uri("/_internal/dispatch_alarm")
+    .method(hyper::Method::POST)
+    .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+    .unwrap();
+
+  let res = sender.send_request(req).await?;
+
+  if res.status() != http::StatusCode::OK {
+    anyhow::bail!("Non-200 response from Deno process: {}", res.status());
+  }
+
+  Ok(alarm)
+}
+
 async fn dispatch_alarms(
   conn: &mut rusqlite::Connection,
   node_state: Arc<NodeState>,
@@ -311,55 +393,13 @@ async fn dispatch_alarms(
     async move {
       if node_state.peer_manager.is_local_owner(&alarm.tenant, &alarm.cell_id) {
         // Dispatch the alarm to the local Deno process.
-        let (_sock_path, stream, _process_key) = node_state
-        .process_manager
-        .get_or_spawn_process(
-          &alarm.tenant,
-          &alarm.cell_id,
-          node_state.clone(),
-        )
-        .await
-        .inspect_err(|e| {
-          error!(?alarm, error = ?e, "Failed to spawn or get Deno process for alarm");
-        }).ok()?;
-
-        let io = hyper_util::rt::TokioIo::new(stream);
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await.inspect_err(|e| {
-          error!(?alarm, error = ?e, "Failed to handshake with Deno process");
-        }).ok()?;
-
-        tokio::spawn({
-          let alarm = alarm.clone();
-          async move {
-            if let Err(e) = conn.await {
-              error!(?alarm, error = ?e, "Connection error");
-            }
-          }
-        });
-
-        let req = hyper::Request::builder()
-        .uri("/_internal/alarm")
-        .method(hyper::Method::POST)
-        .body(http_body_util::Empty::<bytes::Bytes>::new())
-        .unwrap();
-
-        let res = match sender.send_request(req).await {
-          Ok(res) => res,
-          Err(e) => {
-            error!(?alarm, error = ?e, "Failed to send alarm to Deno process");
-            return None;
-          }
-        };
-
-        if res.status() != http::StatusCode::OK {
-          error!(?alarm, status = ?res.status(), "Non-200 response from Deno process");
-          return None;
-        }
-
-        Some(alarm)
+        dispatch_alarm_locally(alarm.clone(), node_state.clone()).await.inspect_err(|e| {
+          error!(?alarm, error = ?e, "Failed to dispatch alarm to local Deno process");
+        }).ok()
       } else {
-        // Send the alarm to the remote node.
-        todo!()
+        dispatch_alarm_remotely(alarm.clone(), node_state.clone()).await.inspect_err(|e| {
+          error!(?alarm, error = ?e, "Failed to dispatch alarm to remote cell owner");
+        }).ok()
       }
     }
   });
