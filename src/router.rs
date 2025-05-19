@@ -1,11 +1,14 @@
+use http_body_util::BodyExt;
 use pingora::http::StatusCode;
 use pingora::prelude::*;
 use pingora::upstreams::peer::HttpPeer;
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
+use crate::control_socket_listener::locally_handle_internal_alarms;
 use crate::node_state::NodeState;
 use crate::process_manager::{ProcessKey, ProcessManagerError};
+use crate::system_cell::SystemCell;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
@@ -24,6 +27,8 @@ pub struct Proxy {
 
 pub struct InternalAPI {
   pub node_state: Arc<NodeState>,
+  pub system_cell_subscription:
+    tokio::sync::broadcast::Receiver<Arc<SystemCell>>,
 }
 
 #[derive(Debug, Default)]
@@ -33,21 +38,42 @@ pub struct Ctx {
   pub process_key: Option<ProcessKey>,
 }
 
-#[derive(Debug, Default)]
-pub struct InternalCtx {}
+pub struct InternalCtx {
+  system_cell_subscription: tokio::sync::broadcast::Receiver<Arc<SystemCell>>,
+  system_cell: Option<Arc<SystemCell>>,
+}
+
+impl std::fmt::Debug for InternalCtx {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("InternalCtx")
+      .field("system_cell_subscription", &"...")
+      .field(
+        "system_cell",
+        if self.system_cell.is_some() {
+          &"Some(...)"
+        } else {
+          &"None"
+        },
+      )
+      .finish()
+  }
+}
 
 #[async_trait::async_trait]
 impl ProxyHttp for InternalAPI {
   type CTX = InternalCtx;
 
   fn new_ctx(&self) -> Self::CTX {
-    InternalCtx::default()
+    InternalCtx {
+      system_cell_subscription: self.system_cell_subscription.resubscribe(),
+      system_cell: None,
+    }
   }
 
   async fn request_filter(
     &self,
     session: &mut Session,
-    _ctx: &mut Self::CTX,
+    ctx: &mut Self::CTX,
   ) -> Result<bool> {
     let req_header = session.req_header();
 
@@ -147,6 +173,64 @@ impl ProxyHttp for InternalAPI {
           session
             .write_response_body(Some(response.into()), true)
             .await?;
+          session.set_keepalive(None);
+          return Ok(true);
+        }
+      }
+    }
+
+    // Handle the alarms endpoint
+    if path.starts_with("/_internal/alarms") {
+      // Attempt to get the system cell from the context. If it's not available
+      // yet, try to receive it from the broadcast channel.
+      let system_cell = match &ctx.system_cell {
+        Some(system_cell) => system_cell.clone(),
+        None => match ctx.system_cell_subscription.try_recv() {
+          Ok(system_cell) => {
+            ctx.system_cell = Some(system_cell.clone());
+            system_cell
+          }
+          Err(e) => {
+            error!(error = ?e, "Error receiving system cell");
+            let resp = pingora::http::ResponseHeader::build(
+              StatusCode::INTERNAL_SERVER_ERROR,
+              Some(0),
+            )
+            .unwrap();
+            session.write_response_header(Box::new(resp), true).await?;
+            session.set_keepalive(None);
+            return Ok(true);
+          }
+        },
+      };
+
+      let parts = session.req_header().as_ref().clone();
+      let req_body = session
+        .read_request_body()
+        .await?
+        .map(|bytes| http_body_util::Full::new(bytes).boxed())
+        .unwrap_or_else(|| http_body_util::Empty::new().boxed());
+      let req = hyper::Request::from_parts(parts, req_body);
+
+      match locally_handle_internal_alarms(req, system_cell).await {
+        Ok(res) => {
+          let (parts, body) = res.into_parts();
+          session
+            .write_response_header(Box::new(parts.into()), false)
+            .await?;
+          let body = body.collect().await.unwrap().to_bytes();
+          session.write_response_body(Some(body), true).await?;
+          session.set_keepalive(None);
+          return Ok(true);
+        }
+        Err(e) => {
+          error!(error = ?e, "Error handling alarms");
+          let resp = pingora::http::ResponseHeader::build(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Some(0),
+          )
+          .unwrap();
+          session.write_response_header(Box::new(resp), true).await?;
           session.set_keepalive(None);
           return Ok(true);
         }

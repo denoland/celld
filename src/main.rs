@@ -72,9 +72,13 @@ fn start_server(config: config::Config) -> Server {
   // Configure the proxy service to listen on the specified address
   proxy_service.add_tcp(&node_state.config.listen_addr.to_string());
 
+  let (system_cell_broadcast, system_cell_rx) =
+    tokio::sync::broadcast::channel(1);
+
   // Create the internal API handler
   let internal_api = InternalAPI {
     node_state: node_state.clone(),
+    system_cell_subscription: system_cell_rx.resubscribe(),
   };
 
   // Create an HTTP service for the internal API
@@ -111,8 +115,6 @@ fn start_server(config: config::Config) -> Server {
     },
   ));
 
-  let (system_cell_broadcast, system_cell_rx) =
-    tokio::sync::broadcast::channel(1);
   // Add a background service for system cell takeover
   server.add_service(background_service(
     "system_cell_takeover",

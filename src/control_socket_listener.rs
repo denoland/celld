@@ -129,10 +129,14 @@ impl BackgroundService for ControlSocketListener {
   }
 }
 
-async fn locally_handle_internal_alarms(
-  req: hyper::Request<hyper::body::Incoming>,
+pub async fn locally_handle_internal_alarms<B, E>(
+  req: hyper::Request<B>,
   system_cell: Arc<SystemCell>,
-) -> anyhow::Result<hyper::Response<BoxBody<Bytes, hyper::Error>>> {
+) -> anyhow::Result<hyper::Response<BoxBody<Bytes, hyper::Error>>>
+where
+  B: hyper::body::Body<Error = E>,
+  E: std::fmt::Debug,
+{
   let (parts, body) = req.into_parts();
   let req_body = match body.collect().await {
     Ok(body) => body,
@@ -260,7 +264,13 @@ async fn send_alarm_to_system_cell_owner(
   system_cell_owner: SocketAddr,
   req: hyper::Request<hyper::body::Incoming>,
 ) -> anyhow::Result<hyper::Response<BoxBody<Bytes, hyper::Error>>> {
-  let tcp_stream = TcpStream::connect(system_cell_owner).await?;
+  // TODO(magurotuna): Can we have a better way to get internal address?
+  let system_cell_owner_internal_addr = {
+    let mut a = system_cell_owner;
+    a.set_port(system_cell_owner.port() + 1);
+    a
+  };
+  let tcp_stream = TcpStream::connect(system_cell_owner_internal_addr).await?;
   let io = hyper_util::rt::TokioIo::new(tcp_stream);
   let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
 
