@@ -5,11 +5,17 @@ use std::{
 };
 
 use bytes::{Buf as _, Bytes};
-use futures::FutureExt as _;
+use futures::{
+  future::{BoxFuture, Shared},
+  FutureExt as _,
+};
 use http_body_util::{combinators::BoxBody, BodyExt as _, Empty, Full};
 use pingora::{server::ShutdownWatch, services::background::BackgroundService};
 use tempfile::TempDir;
-use tokio::net::{TcpStream, UnixListener};
+use tokio::{
+  net::{TcpStream, UnixListener},
+  sync::broadcast::error::RecvError,
+};
 use tracing::{error, info, warn};
 
 use crate::{
@@ -35,29 +41,14 @@ impl ControlSocket {
 
 pub struct ControlSocketListener {
   pub node_state: Arc<NodeState>,
-  pub system_cell_subscription:
-    StdMutex<Option<tokio::sync::broadcast::Receiver<Arc<SystemCell>>>>,
+  pub system_cell_rx:
+    Shared<BoxFuture<'static, Result<Arc<SystemCell>, RecvError>>>,
 }
 
 #[async_trait::async_trait]
 impl BackgroundService for ControlSocketListener {
   async fn start(&self, mut shutdown: ShutdownWatch) {
     info!("Starting control socket listener");
-
-    let Some(mut system_cell_subscription) =
-      self.system_cell_subscription.lock().unwrap().take()
-    else {
-      return;
-    };
-
-    let (system_cell_tx, system_cell_rx) = tokio::sync::oneshot::channel();
-    let mut system_cell_tx = Some(system_cell_tx);
-
-    let system_cell_slot = async move {
-      let system_cell = system_cell_rx.await.unwrap();
-      system_cell
-    }
-    .shared();
 
     let listener =
       UnixListener::bind(&self.node_state.control_socket.socket_path).unwrap();
@@ -71,11 +62,6 @@ impl BackgroundService for ControlSocketListener {
               break;
           }
 
-          Ok(system_cell) = system_cell_subscription.recv(), if system_cell_tx.is_some() => {
-            let system_cell_tx = system_cell_tx.take().unwrap();
-            let _ = system_cell_tx.send(system_cell);
-          },
-
           stream = listener.accept() => {
               let stream = match stream {
                 Ok((stream, _)) => stream,
@@ -86,11 +72,11 @@ impl BackgroundService for ControlSocketListener {
               };
 
               let io = hyper_util::rt::TokioIo::new(stream);
-              let system_cell_slot = system_cell_slot.clone();
+              let system_cell_rx = self.system_cell_rx.clone();
               let node_state = self.node_state.clone();
 
               let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                let system_cell_slot = system_cell_slot.clone();
+                let system_cell_rx = system_cell_rx.clone();
                 let node_state = node_state.clone();
 
                 async move {
@@ -98,8 +84,17 @@ impl BackgroundService for ControlSocketListener {
                     tokio::select! {
                         biased;
 
-                        system_cell = system_cell_slot => {
-                          locally_handle_internal_alarms(req, system_cell).await
+                        system_cell_res = system_cell_rx => {
+                          match system_cell_res {
+                            Ok(system_cell) => {
+                              locally_handle_internal_alarms(req, system_cell).await
+                            }
+                            Err(e) => {
+                              error!(error = ?e, "Control socket listener error");
+                              let res = hyper::Response::builder().status(500).body(empty())?;
+                              Ok(res)
+                            }
+                          }
                         }
 
                         _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {

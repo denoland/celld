@@ -1,15 +1,17 @@
 use crate::{system_cell::SystemCell, NodeState};
 use chrono::Utc;
+use futures::future::{BoxFuture, Shared};
 use pingora::server::ShutdownWatch;
 use pingora::services::background::BackgroundService;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast::error::RecvError;
 use tracing::{error, info};
 
 pub struct AlarmScheduler {
   pub node_state: Arc<NodeState>,
-  pub system_cell_subscription:
-    StdMutex<Option<tokio::sync::broadcast::Receiver<Arc<SystemCell>>>>,
+  pub system_cell_rx:
+    Shared<BoxFuture<'static, Result<Arc<SystemCell>, RecvError>>>,
   pub interval: Duration,
 }
 
@@ -21,18 +23,12 @@ impl BackgroundService for AlarmScheduler {
       self.interval
     );
 
-    let Some(mut system_cell_rx) =
-      self.system_cell_subscription.lock().unwrap().take()
-    else {
-      return;
-    };
-
     let system_cell = tokio::select! {
       _ = shutdown.changed() => {
         info!("Alarm scheduler received shutdown signal before receiving system cell");
         return;
       }
-      system_cell = system_cell_rx.recv() => {
+      system_cell = self.system_cell_rx.clone() => {
         system_cell.unwrap()
       }
     };

@@ -72,13 +72,15 @@ fn start_server(config: config::Config) -> Server {
   // Configure the proxy service to listen on the specified address
   proxy_service.add_tcp(&node_state.config.listen_addr.to_string());
 
-  let (system_cell_broadcast, system_cell_rx) =
+  let (system_cell_broadcast, mut system_cell_rx) =
     tokio::sync::broadcast::channel(1);
+  let system_cell_rx = async move { system_cell_rx.recv().await }.boxed();
+  let system_cell_rx = system_cell_rx.shared();
 
   // Create the internal API handler
   let internal_api = InternalAPI {
     node_state: node_state.clone(),
-    system_cell_subscription: system_cell_rx.resubscribe(),
+    system_cell_rx: system_cell_rx.clone(),
   };
 
   // Create an HTTP service for the internal API
@@ -144,7 +146,7 @@ fn start_server(config: config::Config) -> Server {
     "alarm_scheduler",
     alarm_scheduler::AlarmScheduler {
       node_state: node_state.clone(),
-      system_cell_subscription: Mutex::new(Some(system_cell_rx.resubscribe())),
+      system_cell_rx: system_cell_rx.clone(),
       interval: node_state.config.alarm_scheduler_interval,
     },
   ));
@@ -154,7 +156,7 @@ fn start_server(config: config::Config) -> Server {
     "control_socket_listener",
     control_socket_listener::ControlSocketListener {
       node_state: node_state.clone(),
-      system_cell_subscription: Mutex::new(Some(system_cell_rx.resubscribe())),
+      system_cell_rx: system_cell_rx.clone(),
     },
   ));
 
