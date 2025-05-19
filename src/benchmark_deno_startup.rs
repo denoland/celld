@@ -14,9 +14,9 @@ pub async fn run(iterations: usize) -> Result<()> {
       // Create a minimal default config for benchmark purposes
       Config {
         data_dir: PathBuf::from("./data"),
-        listen_addr: "127.0.0.1:8000".to_string(),
-        advertise_addr: "127.0.0.1:8000".to_string(),
-        internal_listen_addr: "127.0.0.1:8001".to_string(),
+        listen_addr: "127.0.0.1:8000".parse().unwrap(),
+        advertise_addr: "127.0.0.1:8000".parse().unwrap(),
+        internal_listen_addr: "127.0.0.1:8001".parse().unwrap(),
         s3_endpoint: None,
         s3_bucket: None,
         s3_region: None,

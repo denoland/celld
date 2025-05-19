@@ -70,7 +70,7 @@ fn start_server(config: config::Config) -> Server {
   let mut proxy_service = http_proxy_service(&pingora_config2, app);
 
   // Configure the proxy service to listen on the specified address
-  proxy_service.add_tcp(&node_state.config.listen_addr);
+  proxy_service.add_tcp(&node_state.config.listen_addr.to_string());
 
   // Create the internal API handler
   let internal_api = InternalAPI {
@@ -81,7 +81,7 @@ fn start_server(config: config::Config) -> Server {
   let mut internal_service = http_proxy_service(&pingora_config2, internal_api);
 
   // Configure the internal service to listen on the internal address
-  internal_service.add_tcp(&node_state.config.internal_listen_addr);
+  internal_service.add_tcp(&node_state.config.internal_listen_addr.to_string());
 
   server.add_service(background_service(
     "process_reaper",

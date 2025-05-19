@@ -197,19 +197,18 @@ impl NodeState {
     let control_socket = ControlSocket::new();
     let process_manager = ProcessManager::new(data_dir, &control_socket);
 
+    let addr = "127.0.0.1:8000".parse().unwrap();
     let node_id = NodeId::new("benchmark-node");
 
     // Create minimal peer manager and node_state for benchmark
-    let peer_manager =
-      PeerManager::new("127.0.0.1:8000".to_string(), node_id.clone());
+    let peer_manager = PeerManager::new(addr, node_id.clone());
 
     Arc::new(NodeState {
       node_id: node_id.clone(),
       process_manager: Arc::new(process_manager),
       peer_manager: Arc::new(peer_manager),
       cluster_membership: Arc::new(StandaloneClusterMembership::new(
-        node_id,
-        "127.0.0.1:8000".to_string(),
+        node_id, addr,
       )),
       distributed_lock: Arc::new(StandaloneDistributedLock),
       config: Arc::new(config),

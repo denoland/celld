@@ -9,8 +9,8 @@ use aws_sdk_s3::{
 use aws_smithy_types::timeout::TimeoutConfig;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::time::Duration;
+use std::{collections::HashSet, net::SocketAddr};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -40,7 +40,7 @@ pub struct NodeInfo {
   /// Unique ID for this node (UUID)
   pub node_id: NodeId,
   /// Network address other nodes should use to contact this node
-  pub advertise_addr: String,
+  pub advertise_addr: SocketAddr,
   /// Timestamp of the most recent heartbeat
   #[serde(with = "chrono::serde::ts_seconds")]
   pub heartbeat_timestamp: DateTime<Utc>,
@@ -80,7 +80,7 @@ impl S3ClusterMembership {
   /// Create a new S3ClusterMembership instance from Config
   pub async fn from_config(
     cfg: S3Config,
-    advertise_addr: String,
+    advertise_addr: SocketAddr,
     node_id: Option<NodeId>,
     staleness_threshold: Option<Duration>,
   ) -> anyhow::Result<Self> {
@@ -324,7 +324,7 @@ pub struct StandaloneClusterMembership {
 }
 
 impl StandaloneClusterMembership {
-  pub fn new(node_id: NodeId, advertise_addr: String) -> Self {
+  pub fn new(node_id: NodeId, advertise_addr: SocketAddr) -> Self {
     let node_info = NodeInfo {
       node_id,
       advertise_addr,
@@ -379,7 +379,7 @@ mod tests {
 
     S3ClusterMembership::from_config(
       cfg,
-      advertise_addr.to_string(),
+      advertise_addr.parse().unwrap(),
       node_id,
       Some(Duration::from_secs(2)), // Custom short threshold for tests
     )
