@@ -17,11 +17,28 @@ use uuid::Uuid;
 // Default heartbeat interval and staleness threshold
 const DEFAULT_STALENESS_THRESHOLD: Duration = Duration::from_secs(90);
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NodeId(String);
+
+impl NodeId {
+  pub fn new_uuid_v4() -> Self {
+    Self(Uuid::new_v4().to_string())
+  }
+
+  pub fn as_str(&self) -> &str {
+    &self.0
+  }
+
+  pub fn new(id: impl ToString) -> Self {
+    Self(id.to_string())
+  }
+}
+
 /// Represents a node in the cluster
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeInfo {
   /// Unique ID for this node (UUID)
-  pub node_id: String,
+  pub node_id: NodeId,
   /// Network address other nodes should use to contact this node
   pub advertise_addr: String,
   /// Timestamp of the most recent heartbeat
@@ -64,10 +81,10 @@ impl S3ClusterMembership {
   pub async fn from_config(
     cfg: S3Config,
     advertise_addr: String,
-    node_id: Option<String>,
+    node_id: Option<NodeId>,
     staleness_threshold: Option<Duration>,
   ) -> anyhow::Result<Self> {
-    let node_id = node_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let node_id = node_id.unwrap_or_else(NodeId::new_uuid_v4);
 
     let node_info = NodeInfo {
       node_id,
@@ -123,7 +140,7 @@ impl S3ClusterMembership {
 
   /// Get the full S3 key for this node
   fn get_node_key(&self) -> String {
-    format!("{}{}.json", self.prefix, self.node_info.node_id)
+    format!("{}{}.json", self.prefix, self.node_info.node_id.0)
   }
 
   /// Get the bucket name
@@ -149,7 +166,7 @@ impl ClusterMembership for S3ClusterMembership {
     let node_key = self.get_node_key();
 
     debug!(
-      node_id = %self.node_info.node_id,
+      node_id = ?self.node_info.node_id,
       addr = %self.node_info.advertise_addr,
       node = %node_key,
       bucket = %self.bucket,
@@ -168,7 +185,7 @@ impl ClusterMembership for S3ClusterMembership {
       .await?;
 
     info!(
-      node_id = %self.node_info.node_id,
+      node_id = ?self.node_info.node_id,
       addr = %self.node_info.advertise_addr,
       "Node registered successfully in S3"
     );
@@ -185,7 +202,7 @@ impl ClusterMembership for S3ClusterMembership {
     let node_key = self.get_node_key();
 
     debug!(
-      node_id = %self.node_info.node_id,
+      node_id = ?self.node_info.node_id,
       addr = %self.node_info.advertise_addr,
       "Sending heartbeat to S3"
     );
@@ -205,7 +222,7 @@ impl ClusterMembership for S3ClusterMembership {
 
   async fn get_active_nodes(&self) -> anyhow::Result<Vec<NodeInfo>> {
     debug!(
-      node_id = %self.node_info.node_id,
+      node_id = ?self.node_info.node_id,
       "Listing active peers from S3"
     );
 
@@ -266,7 +283,7 @@ impl ClusterMembership for S3ClusterMembership {
     }
 
     debug!(
-      node_id = %self.node_info.node_id,
+      node_id = ?self.node_info.node_id,
       peer_count = peers.len(),
       "Retrieved active peers"
     );
@@ -278,7 +295,7 @@ impl ClusterMembership for S3ClusterMembership {
     let node_key = self.get_node_key();
 
     debug!(
-      node_id = %self.node_info.node_id,
+      node_id = ?self.node_info.node_id,
       addr = %self.node_info.advertise_addr,
       "Unregistering node from S3"
     );
@@ -293,7 +310,7 @@ impl ClusterMembership for S3ClusterMembership {
       .await?;
 
     info!(
-      node_id = %self.node_info.node_id,
+      node_id = ?self.node_info.node_id,
       addr = %self.node_info.advertise_addr,
       "Node unregistered successfully from S3"
     );
@@ -307,7 +324,7 @@ pub struct StandaloneClusterMembership {
 }
 
 impl StandaloneClusterMembership {
-  pub fn new(node_id: String, advertise_addr: String) -> Self {
+  pub fn new(node_id: NodeId, advertise_addr: String) -> Self {
     let node_info = NodeInfo {
       node_id,
       advertise_addr,
@@ -344,7 +361,7 @@ mod tests {
 
   async fn setup_test_membership(
     minio: &MinioTestServer,
-    node_id: Option<String>,
+    node_id: Option<NodeId>,
     advertise_addr: &str,
   ) -> S3ClusterMembership {
     let bucket = "cluster-test".to_string();
@@ -373,7 +390,7 @@ mod tests {
   #[tokio::test]
   async fn test_register_creates_correct_s3_object() {
     let minio = MinioTestServer::start();
-    let node_id = Uuid::new_v4().to_string();
+    let node_id = NodeId::new_uuid_v4();
     let membership =
       setup_test_membership(&minio, Some(node_id.clone()), "127.0.0.1:8080")
         .await;
@@ -414,7 +431,10 @@ mod tests {
 
       // Find our node ID in the keys
       let found = objects.iter().any(|obj| {
-        obj.key().map(|key| key.contains(&node_id)).unwrap_or(false)
+        obj
+          .key()
+          .map(|key| key.contains(node_id.as_str()))
+          .unwrap_or(false)
       });
 
       assert!(found, "Node ID should be in S3 object key");
@@ -424,7 +444,7 @@ mod tests {
   #[tokio::test]
   async fn test_heartbeat_updates_timestamp() {
     let minio = MinioTestServer::start();
-    let node_id = Uuid::new_v4().to_string();
+    let node_id = NodeId::new_uuid_v4();
     let membership =
       setup_test_membership(&minio, Some(node_id.clone()), "127.0.0.1:8080")
         .await;
@@ -488,7 +508,7 @@ mod tests {
     let minio = MinioTestServer::start();
 
     // Create first node (will go stale)
-    let stale_node_id = Uuid::new_v4().to_string();
+    let stale_node_id = NodeId::new_uuid_v4();
     let stale_membership = setup_test_membership(
       &minio,
       Some(stale_node_id.clone()),
@@ -504,7 +524,7 @@ mod tests {
     sleep(Duration::from_secs(3)).await;
 
     // Create a second, active node
-    let active_node_id = Uuid::new_v4().to_string();
+    let active_node_id = NodeId::new_uuid_v4();
     let active_membership = setup_test_membership(
       &minio,
       Some(active_node_id.clone()),
@@ -522,7 +542,7 @@ mod tests {
     assert_eq!(peers.len(), 1);
 
     // Create a third node to verify active node detection works
-    let third_node_id = Uuid::new_v4().to_string();
+    let third_node_id = NodeId::new_uuid_v4();
     let third_membership = setup_test_membership(
       &minio,
       Some(third_node_id.clone()),
@@ -540,7 +560,7 @@ mod tests {
   #[tokio::test]
   async fn test_unregister_deletes_s3_object() {
     let minio = MinioTestServer::start();
-    let node_id = Uuid::new_v4().to_string();
+    let node_id = NodeId::new_uuid_v4();
     let membership =
       setup_test_membership(&minio, Some(node_id.clone()), "127.0.0.1:8080")
         .await;
@@ -583,7 +603,10 @@ mod tests {
 
         // Find our node ID in the keys - should not be found
         let found = objects.iter().any(|obj| {
-          obj.key().map(|key| key.contains(&node_id)).unwrap_or(false)
+          obj
+            .key()
+            .map(|key| key.contains(node_id.as_str()))
+            .unwrap_or(false)
         });
 
         assert!(

@@ -87,9 +87,11 @@ use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
+use crate::cluster_membership::NodeId;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LockInfo {
-  pub node_id: String,
+  pub node_id: NodeId,
   #[serde(with = "chrono::serde::ts_seconds")]
   pub timestamp: DateTime<Utc>,
   pub ttl_secs: u64,
@@ -108,13 +110,13 @@ pub enum LockAcquireError {
 #[derive(Debug, Clone)]
 pub struct LockHandle {
   pub lock_key: String,
-  node_id: String,
+  node_id: NodeId,
 }
 
 // Should not be Clone
 pub struct LockGuard {
   lock_key: String,
-  node_id: String,
+  node_id: NodeId,
   /// Reference back to the manager to call release
   /// Use Arc if the manager itself is shared via Arc
   lock_manager: Arc<dyn DistributedLock>,
@@ -130,7 +132,7 @@ pub struct LockGuard {
 impl LockGuard {
   fn new(
     lock_key: String,
-    node_id: String,
+    node_id: NodeId,
     lock_manager: Arc<dyn DistributedLock>,
   ) -> Self {
     let (ttl_renewal_request_tx, mut ttl_renewal_request_rx) =
@@ -185,7 +187,7 @@ impl LockGuard {
     if let Err(e) = self.ttl_renewal_request_chan.try_send(new_ttl) {
       warn!(
         lock_key = %self.lock_key,
-        node_id = %self.node_id,
+        node_id = ?self.node_id,
         error = ?e,
         "Failed to request lock ttl renewal"
       );
@@ -226,7 +228,7 @@ impl Drop for LockGuard {
 
     tracing::debug!(
       lock_key = %self.lock_key,
-      node_id = %self.node_id,
+      node_id = ?self.node_id,
       "Dropping LockGuard, releasing lock"
     );
 
@@ -253,7 +255,7 @@ pub trait DistributedLock: Send + Sync {
   async fn try_acquire(
     self: Arc<Self>,
     lock_name: &str,
-    node_id: &str,
+    node_id: &NodeId,
     ttl: Duration,
   ) -> Result<LockGuard, LockAcquireError>;
 
@@ -305,14 +307,14 @@ impl DistributedLock for S3DistributedLock {
   async fn try_acquire(
     self: Arc<Self>,
     lock_name: &str,
-    node_id: &str,
+    node_id: &NodeId,
     ttl: Duration,
   ) -> Result<LockGuard, LockAcquireError> {
     let lock_key = self.get_lock_key(lock_name);
-    debug!(lock_key, node_id, ?ttl, "Attempting to acquire S3 lock");
+    debug!(lock_key, ?node_id, ?ttl, "Attempting to acquire S3 lock");
 
     let lock_info = LockInfo {
-      node_id: node_id.to_string(),
+      node_id: node_id.clone(),
       timestamp: Utc::now(),
       ttl_secs: ttl.as_secs(),
     };
@@ -337,13 +339,13 @@ impl DistributedLock for S3DistributedLock {
 
     match put_result {
       Ok(_) => {
-        info!(lock_key, node_id, "Successfully acquired S3 lock");
-        Ok(LockGuard::new(lock_key, node_id.to_string(), self))
+        info!(lock_key, ?node_id, "Successfully acquired S3 lock");
+        Ok(LockGuard::new(lock_key, node_id.clone(), self))
       }
       Err(SdkError::ServiceError(service_err)) => {
         let raw_err = service_err.into_err();
         if raw_err.code() == Some("PreconditionFailed") {
-          warn!(lock_key, node_id, "Lock acquisition failed (precondition failed), checking if existing lock expired");
+          warn!(lock_key, ?node_id, "Lock acquisition failed (precondition failed), checking if existing lock expired");
 
           match self
             .s3_client
@@ -377,7 +379,7 @@ impl DistributedLock for S3DistributedLock {
               let expiry_time = existing_lock_info.timestamp
                 + Duration::from_secs(existing_lock_info.ttl_secs);
               if expiry_time < Utc::now() {
-                warn!(lock_key, existing_node_id = %existing_lock_info.node_id, ?expiry_time, "Existing lock expired, attempting to delete and re-acquire");
+                warn!(lock_key, existing_node_id = ?existing_lock_info.node_id, ?expiry_time, "Existing lock expired, attempting to delete and re-acquire");
 
                 if let Err(e) = self
                   .s3_client
@@ -408,7 +410,7 @@ impl DistributedLock for S3DistributedLock {
 
                 info!(
                   lock_key,
-                  node_id,
+                  ?node_id,
                   "Retrying lock acquisition after deleting expired lock"
                 );
                 match self
@@ -424,16 +426,17 @@ impl DistributedLock for S3DistributedLock {
                   Ok(_) => {
                     info!(
                       lock_key,
-                      node_id, "Successfully acquired S3 lock on retry"
+                      ?node_id,
+                      "Successfully acquired S3 lock on retry"
                     );
-                    Ok(LockGuard::new(lock_key, node_id.to_string(), self))
+                    Ok(LockGuard::new(lock_key, node_id.clone(), self))
                   }
                   Err(SdkError::ServiceError(retry_service_err)) => {
                     let retry_put_err = retry_service_err.into_err();
                     if retry_put_err.code() == Some("PreconditionFailed") {
                       warn!(
                         lock_key,
-                        node_id,
+                        ?node_id,
                         "Lock was acquired by another node during retry"
                       );
                       return Err(LockAcquireError::LockHeld(None));
@@ -449,7 +452,7 @@ impl DistributedLock for S3DistributedLock {
                   ))),
                 }
               } else {
-                info!(lock_key, existing_node_id = %existing_lock_info.node_id, ?expiry_time, "Existing lock is still valid");
+                info!(lock_key, existing_node_id = ?existing_lock_info.node_id, ?expiry_time, "Existing lock is still valid");
                 Err(LockAcquireError::LockHeld(Some(existing_lock_info)))
               }
             }
@@ -458,7 +461,7 @@ impl DistributedLock for S3DistributedLock {
               if get_err.code() == Some("NoSuchKey") {
                 warn!(
                   lock_key,
-                  node_id,
+                  ?node_id,
                   "Lock disappeared between Put failure and Get, retrying Put"
                 );
                 match self
@@ -474,15 +477,15 @@ impl DistributedLock for S3DistributedLock {
                   Ok(_) => {
                     info!(
                       lock_key,
-                      node_id,
+                      ?node_id,
                       "Successfully acquired S3 lock on retry (after NoSuchKey)"
                     );
-                    Ok(LockGuard::new(lock_key, node_id.to_string(), self))
+                    Ok(LockGuard::new(lock_key, node_id.clone(), self))
                   }
                   Err(SdkError::ServiceError(retry_service_err)) => {
                     let retry_put_err = retry_service_err.into_err();
                     if retry_put_err.code() == Some("PreconditionFailed") {
-                      warn!(lock_key, node_id, "Lock was acquired by another node during retry (after NoSuchKey)");
+                      warn!(lock_key, ?node_id, "Lock was acquired by another node during retry (after NoSuchKey)");
                       return Err(LockAcquireError::LockHeld(None));
                     }
                     Err(LockAcquireError::S3Error(format!(
@@ -512,7 +515,7 @@ impl DistributedLock for S3DistributedLock {
             }
           }
         } else {
-          warn!(error = ?raw_err, lock_key, node_id, "Unhandled S3 PutObject error during lock acquisition");
+          warn!(error = ?raw_err, lock_key, ?node_id, "Unhandled S3 PutObject error during lock acquisition");
           Err(LockAcquireError::S3Error(format!(
             "Unhandled S3 PutObject error for key '{}': {:?}",
             lock_key, raw_err
@@ -520,7 +523,7 @@ impl DistributedLock for S3DistributedLock {
         }
       }
       Err(e) => {
-        warn!(error = ?e, lock_key, node_id, "SDK error during lock acquisition");
+        warn!(error = ?e, lock_key, ?node_id, "SDK error during lock acquisition");
         let source_msg = e
           .source()
           .map_or_else(|| "Unknown source".to_string(), |s| s.to_string());
@@ -533,7 +536,7 @@ impl DistributedLock for S3DistributedLock {
   }
 
   async fn release(&self, handle: LockHandle) -> Result<(), AnyhowError> {
-    debug!(lock_key = %handle.lock_key, node_id = %handle.node_id, "Releasing S3 lock");
+    debug!(lock_key = %handle.lock_key, node_id = ?handle.node_id, "Releasing S3 lock");
     match self
       .s3_client
       .delete_object()
@@ -543,22 +546,22 @@ impl DistributedLock for S3DistributedLock {
       .await
     {
       Ok(_) => {
-        info!(lock_key = %handle.lock_key, node_id = %handle.node_id, "Successfully released S3 lock");
+        info!(lock_key = %handle.lock_key, node_id = ?handle.node_id, "Successfully released S3 lock");
         Ok(())
       }
       Err(SdkError::ServiceError(service_err)) => {
         let del_err = service_err.into_err();
         if del_err.code() == Some("NoSuchKey") {
-          warn!(lock_key = %handle.lock_key, node_id = %handle.node_id, "Attempted to release a lock that does not exist (or was already released)");
+          warn!(lock_key = %handle.lock_key, node_id = ?handle.node_id, "Attempted to release a lock that does not exist (or was already released)");
           Ok(())
         } else {
-          warn!(error = ?del_err, lock_key = %handle.lock_key, node_id = %handle.node_id, "Failed to release S3 lock (Service Error)");
+          warn!(error = ?del_err, lock_key = %handle.lock_key, node_id = ?handle.node_id, "Failed to release S3 lock (Service Error)");
           Err(AnyhowError::new(del_err))
             .context(format!("Failed to release S3 lock: {}", handle.lock_key))
         }
       }
       Err(e) => {
-        warn!(error = ?e, lock_key = %handle.lock_key, node_id = %handle.node_id, "Failed to release S3 lock (SDK Error)");
+        warn!(error = ?e, lock_key = %handle.lock_key, node_id = ?handle.node_id, "Failed to release S3 lock (SDK Error)");
         Err(AnyhowError::new(e))
           .context(format!("SDK Error releasing S3 lock: {}", handle.lock_key))
       }
@@ -573,7 +576,7 @@ impl DistributedLock for S3DistributedLock {
     let lock_key = &handle.lock_key;
     let node_id = &handle.node_id;
 
-    debug!(lock_key, node_id, ?new_ttl, "Attempting to renew S3 lock");
+    debug!(lock_key, ?node_id, ?new_ttl, "Attempting to renew S3 lock");
 
     // First check if we actually own this lock
     match self
@@ -612,8 +615,8 @@ impl DistributedLock for S3DistributedLock {
         if existing_lock_info.node_id != *node_id {
           warn!(
             lock_key,
-            attempted_node_id = %node_id,
-            actual_node_id = %existing_lock_info.node_id,
+            attempted_node_id = ?node_id,
+            actual_node_id = ?existing_lock_info.node_id,
             "Cannot renew lock owned by different node"
           );
           return Err(LockAcquireError::LockHeld(Some(existing_lock_info)));
@@ -621,7 +624,7 @@ impl DistributedLock for S3DistributedLock {
 
         // Create updated lock info with new timestamp and TTL
         let updated_lock_info = LockInfo {
-          node_id: node_id.to_string(),
+          node_id: node_id.clone(),
           timestamp: Utc::now(),
           ttl_secs: new_ttl.as_secs(),
         };
@@ -653,7 +656,7 @@ impl DistributedLock for S3DistributedLock {
 
         match put_request.send().await {
           Ok(_) => {
-            info!(lock_key, node_id, ?new_ttl, "Successfully renewed S3 lock");
+            info!(lock_key, ?node_id, ?new_ttl, "Successfully renewed S3 lock");
             Ok(LockHandle {
               lock_key: lock_key.clone(),
               node_id: node_id.clone(),
@@ -665,7 +668,7 @@ impl DistributedLock for S3DistributedLock {
             if err.code() == Some("PreconditionFailed") {
               warn!(
                 lock_key,
-                node_id,
+                ?node_id,
                 "Failed to renew lock: object was modified between read and update"
               );
               return Err(LockAcquireError::S3Error(format!(
@@ -674,14 +677,14 @@ impl DistributedLock for S3DistributedLock {
               )));
             }
 
-            warn!(error = ?err, lock_key, node_id, "Failed to update lock object during renewal");
+            warn!(error = ?err, lock_key, ?node_id, "Failed to update lock object during renewal");
             Err(LockAcquireError::S3Error(format!(
               "Failed to update lock object for key '{}' during renewal: {:?}",
               lock_key, err
             )))
           }
           Err(e) => {
-            warn!(error = ?e, lock_key, node_id, "Failed to update lock object during renewal");
+            warn!(error = ?e, lock_key, ?node_id, "Failed to update lock object during renewal");
             Err(LockAcquireError::S3Error(format!(
               "Failed to update lock object for key '{}' during renewal: {:?}",
               lock_key, e
@@ -692,13 +695,13 @@ impl DistributedLock for S3DistributedLock {
       Err(SdkError::ServiceError(service_err)) => {
         let get_err = service_err.into_err();
         if get_err.code() == Some("NoSuchKey") {
-          warn!(lock_key, node_id, "Cannot renew lock: lock does not exist");
+          warn!(lock_key, ?node_id, "Cannot renew lock: lock does not exist");
           Err(LockAcquireError::S3Error(format!(
             "Cannot renew lock for key '{}': lock does not exist",
             lock_key
           )))
         } else {
-          warn!(error = ?get_err, lock_key, node_id, "Failed to get lock during renewal");
+          warn!(error = ?get_err, lock_key, ?node_id, "Failed to get lock during renewal");
           Err(LockAcquireError::S3Error(format!(
             "Failed to get lock for key '{}' during renewal: {:?}",
             lock_key, get_err
@@ -706,7 +709,7 @@ impl DistributedLock for S3DistributedLock {
         }
       }
       Err(e) => {
-        warn!(error = ?e, lock_key, node_id, "SDK error during lock renewal");
+        warn!(error = ?e, lock_key, ?node_id, "SDK error during lock renewal");
         Err(LockAcquireError::S3Error(format!(
           "SDK error during renewal of lock for key '{}': {:?}",
           lock_key, e
@@ -723,14 +726,10 @@ impl DistributedLock for StandaloneDistributedLock {
   async fn try_acquire(
     self: Arc<Self>,
     lock_name: &str,
-    node_id: &str,
+    node_id: &NodeId,
     _ttl: Duration,
   ) -> Result<LockGuard, LockAcquireError> {
-    Ok(LockGuard::new(
-      lock_name.to_string(),
-      node_id.to_string(),
-      self,
-    ))
+    Ok(LockGuard::new(lock_name.to_string(), node_id.clone(), self))
   }
 
   async fn release(&self, _handle: LockHandle) -> Result<(), AnyhowError> {
@@ -816,12 +815,12 @@ mod tests {
     let (lock_manager, bucket, _minio) = setup_test_env().await;
 
     let lock_name = "test_lock_1";
-    let node_id = "node_a";
+    let node_id = NodeId::new("node_a");
     let ttl = Duration::from_secs(60);
 
     let mut guard = lock_manager
       .clone()
-      .try_acquire(lock_name, node_id, ttl)
+      .try_acquire(lock_name, &node_id, ttl)
       .await
       .expect("Failed to acquire lock");
 
@@ -855,13 +854,13 @@ mod tests {
     let (lock_manager, _bucket, _minio) = setup_test_env().await;
 
     let lock_name = "test_lock_2";
-    let node_a = "node_a";
-    let node_b = "node_b";
+    let node_a = NodeId::new("node_a");
+    let node_b = NodeId::new("node_b");
     let ttl = Duration::from_secs(60);
 
     let mut guard_a = lock_manager
       .clone()
-      .try_acquire(lock_name, node_a, ttl)
+      .try_acquire(lock_name, &node_a, ttl)
       .await
       .expect("Node A failed to acquire lock");
 
@@ -870,7 +869,7 @@ mod tests {
 
     let guard_b = lock_manager
       .clone()
-      .try_acquire(lock_name, node_b, ttl)
+      .try_acquire(lock_name, &node_b, ttl)
       .await;
 
     match guard_b {
@@ -887,7 +886,7 @@ mod tests {
 
     // Now node B should be able to acquire the lock
     let mut guard_b = lock_manager
-      .try_acquire(lock_name, node_b, ttl)
+      .try_acquire(lock_name, &node_b, ttl)
       .await
       .expect("Node B failed to acquire lock after release");
 
@@ -905,14 +904,14 @@ mod tests {
     let (lock_manager, _bucket, _minio) = setup_test_env().await;
 
     let lock_name = "test_lock_3";
-    let node_a = "node_a";
-    let node_b = "node_b";
+    let node_a = NodeId::new("node_a");
+    let node_b = NodeId::new("node_b");
     let short_ttl = Duration::from_secs(2);
     let long_ttl = Duration::from_secs(60);
 
     let mut guard_a = lock_manager
       .clone()
-      .try_acquire(lock_name, node_a, short_ttl)
+      .try_acquire(lock_name, &node_a, short_ttl)
       .await
       .expect("Node A failed to acquire lock with short TTL");
 
@@ -922,7 +921,7 @@ mod tests {
     sleep(short_ttl + Duration::from_secs(1)).await;
 
     let mut guard_b = lock_manager
-      .try_acquire(lock_name, node_b, long_ttl)
+      .try_acquire(lock_name, &node_b, long_ttl)
       .await
       .expect("Node B failed to acquire expired lock");
 
@@ -950,11 +949,11 @@ mod tests {
     let (lock_manager, _bucket, _minio) = setup_test_env().await;
 
     let lock_name = "test_lock_non_existent";
-    let node_id = "node_a";
+    let node_id = NodeId::new("node_a");
 
     let fake_handle = LockHandle {
       lock_key: lock_manager.get_lock_key(lock_name),
-      node_id: node_id.to_string(),
+      node_id,
     };
 
     let result = lock_manager.release(fake_handle).await;
@@ -971,14 +970,19 @@ mod tests {
     let (lock_manager, _bucket, _minio) = setup_test_env().await;
 
     let lock_name = "test_lock_concurrent";
-    let node_ids = vec!["node_1", "node_2", "node_3"];
+    let node_ids = vec![
+      NodeId::new("node_1"),
+      NodeId::new("node_2"),
+      NodeId::new("node_3"),
+    ];
     let ttl = Duration::from_secs(10);
 
     let mut handles = vec![];
-    for &node_id in &node_ids {
+    for node_id in &node_ids {
       let lock_manager_ = lock_manager.clone();
+      let node_id = node_id.clone();
       let handle = tokio::spawn(async move {
-        lock_manager_.try_acquire(lock_name, node_id, ttl).await
+        lock_manager_.try_acquire(lock_name, &node_id, ttl).await
       });
       handles.push(handle);
     }
@@ -1031,14 +1035,14 @@ mod tests {
     let (lock_manager, bucket, _minio) = setup_test_env().await;
 
     let lock_name = "test_lock_renewal";
-    let node_id = "node_a";
+    let node_id = NodeId::new("node_a");
     let initial_ttl = Duration::from_secs(10);
     let new_ttl = Duration::from_secs(60);
 
     // First acquire the lock
     let mut guard = lock_manager
       .clone()
-      .try_acquire(lock_name, node_id, initial_ttl)
+      .try_acquire(lock_name, &node_id, initial_ttl)
       .await
       .expect("Failed to acquire lock initially");
 
@@ -1103,10 +1107,10 @@ mod tests {
     );
 
     // Test that another node can't renew our lock
-    let different_node_id = "node_b";
+    let different_node_id = NodeId::new("node_b");
     let invalid_handle = LockHandle {
       lock_key: guard.lock_key.clone(),
-      node_id: different_node_id.to_string(),
+      node_id: different_node_id,
     };
 
     match lock_manager.renew(invalid_handle, new_ttl).await {

@@ -220,14 +220,14 @@ impl ProcessManager {
           tenant = host,
           cell_id,
           lock_name,
-          node_id,
+          ?node_id,
           error = ?e,
           "Failed to acquire lock on cell"
         );
         match e {
           LockAcquireError::LockHeld(maybe_lock_info) => {
             match maybe_lock_info {
-              Some(lock_info) if lock_info.node_id == node_id => {
+              Some(lock_info) if lock_info.node_id == *node_id => {
                 ProcessManagerError::ProcessCreationInProgress
               }
               _ => ProcessManagerError::LockContention,

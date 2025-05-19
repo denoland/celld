@@ -68,10 +68,10 @@ impl ProxyHttp for InternalAPI {
           peer_json.push(',');
         }
         let is_local =
-          info.node_id == self.node_state.peer_manager.get_local_node_id();
+          info.node_id == *self.node_state.peer_manager.get_local_node_id();
         peer_json.push_str(&format!(
             "{{\"node_id\":\"{}\",\"address\":\"{}\",\"is_local\":{},\"last_heartbeat\":\"{}\"}}",
-            info.node_id,
+            info.node_id.as_str(),
             info.advertise_addr,
             is_local,
             info.heartbeat_timestamp
@@ -422,7 +422,7 @@ impl ProxyHttp for Proxy {
         .get_cell_owners(&ctx.tenant, cell_id);
       if let Some(primary_owner_addr) = owners.first() {
         info!(
-            my_node_id = %self.node_state.node_id,
+            my_node_id = ?self.node_state.node_id,
             host = %ctx.tenant,
             cell_id = %cell_id,
             responsible_peer = %primary_owner_addr,
@@ -449,7 +449,7 @@ impl ProxyHttp for Proxy {
 
     // We are the responsible peer, so handle the request locally
     debug!(
-      my_node_id = %self.node_state.node_id,
+      my_node_id = ?self.node_state.node_id,
       host = %ctx.tenant,
       cell_id = %cell_id,
       "This instance is responsible for handling the request"
@@ -482,7 +482,7 @@ impl ProxyHttp for Proxy {
         }
         Err(ProcessManagerError::ProcessCreationInProgress) => {
           info!(
-            node_id = %self.node_state.node_id,
+            node_id = ?self.node_state.node_id,
             "Lock is held by this node, meaning a deno process creation is already in progress. Retry in {:?}",
             RETRY_INTERVAL
           );

@@ -1,4 +1,4 @@
-use crate::cluster_membership::NodeInfo;
+use crate::cluster_membership::{NodeId, NodeInfo};
 use hashring::HashRing;
 use std::sync::RwLock;
 
@@ -10,14 +10,14 @@ struct PeerManagerState {
 
 pub struct PeerManager {
   state: RwLock<PeerManagerState>,
-  self_node_id: String,
+  self_node_id: NodeId,
   self_advertise_addr: String,
 }
 
 impl PeerManager {
   /// Create a new PeerManager with the given node_id and advertise_addr
   /// This creates a peer manager with just the local node initially
-  pub fn new(self_advertise_addr: String, self_node_id: String) -> Self {
+  pub fn new(self_advertise_addr: String, self_node_id: NodeId) -> Self {
     // Initialize with just the local node
     let mut ring = HashRing::new();
     ring.add(self_advertise_addr.clone());
@@ -132,7 +132,7 @@ impl PeerManager {
   }
 
   /// Get the local peer's node ID
-  pub fn get_local_node_id(&self) -> &str {
+  pub fn get_local_node_id(&self) -> &NodeId {
     &self.self_node_id
   }
 }

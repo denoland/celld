@@ -3,6 +3,7 @@ use pingora::server::ShutdownWatch;
 use pingora::services::background::BackgroundService;
 use tracing::{debug, error, info};
 
+use crate::cluster_membership::NodeId;
 use crate::distributed_lock::{DistributedLock, LockGuard};
 use crate::system_cell::{SystemCell, SYSTEM_CELL_ID, SYSTEM_TENANT};
 use std::sync::Arc;
@@ -20,7 +21,7 @@ pub struct SystemCellTakeover {
 
   pub lock_manager: Arc<dyn DistributedLock + Send + Sync>,
 
-  pub node_id: String,
+  pub node_id: NodeId,
 
   pub system_cell_factory: Box<
     dyn Fn(
