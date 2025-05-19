@@ -420,9 +420,9 @@ async fn alarm_crud_operations_forwarded_to_system_cell_node() {
   // Find a cell ID that does NOT belong to the system cell's node
   let test_cell_id = {
     let mut test_cell_id = None;
-    for i in 0.. {
+    for _ in 0.. {
       let secondary_cell_internal_port = secondary_cell_ports[0].internal;
-      let tmp_id = format!("test-cell-{i}");
+      let tmp_id = uuid::Uuid::new_v4().simple().to_string();
       let owner_url = format!(
       "http://localhost:{secondary_cell_internal_port}/_internal/mesh/owner/alarm.localhost/{tmp_id}"
     );
@@ -533,5 +533,125 @@ async fn alarm_crud_operations_forwarded_to_system_cell_node() {
 
     let content = res.text().await.unwrap();
     assert_eq!(content, "null");
+  }
+}
+
+// There are two celld nodes in the cluster:
+// 1. A primary node (where the system cell is running)
+// 2. A secondary node (where "alarm.localhost/<some-cell-id>" is running)
+// This test verifies that the primary node will dispatch an alarm to the secondary node and then alarm.localhost's alarm handler will be triggered.
+#[tokio::test]
+async fn alarm_dispatch_to_remote_cell_owner() {
+  let client = reqwest::Client::new();
+
+  let test_env = TestEnv::new(2);
+
+  let mut system_cell_index = None;
+  struct Port {
+    internal: u16,
+    #[allow(dead_code)]
+    external: u16,
+  }
+  let mut secondary_cell_ports = Vec::new();
+
+  // Identify the node where the system cell is running
+  for (index, internal_port) in test_env.internal_ports.iter().enumerate() {
+    let owner_url = format!(
+      "http://localhost:{internal_port}/_internal/mesh/owner/_system/main"
+    );
+    let owner_resp = client
+      .get(&owner_url)
+      .send()
+      .await
+      .unwrap()
+      .json::<serde_json::Value>()
+      .await
+      .unwrap();
+    if owner_resp["is_local"].as_bool().unwrap() {
+      system_cell_index = Some(index);
+    } else {
+      secondary_cell_ports.push(Port {
+        internal: test_env.internal_ports[index],
+        external: test_env.public_ports[index],
+      });
+    }
+  }
+
+  let system_cell_index = system_cell_index.unwrap();
+  assert!(!secondary_cell_ports.is_empty());
+
+  // Find a cell ID that does NOT belong to the system cell's node
+  let test_cell_id = {
+    let mut test_cell_id = None;
+    for _ in 0.. {
+      let secondary_cell_internal_port = secondary_cell_ports[0].internal;
+      let tmp_id = uuid::Uuid::new_v4().simple().to_string();
+      let owner_url = format!(
+      "http://localhost:{secondary_cell_internal_port}/_internal/mesh/owner/alarm.localhost/{tmp_id}"
+    );
+      let owner_resp = client
+        .get(&owner_url)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+      if owner_resp["is_local"].as_bool().unwrap() {
+        test_cell_id = Some(tmp_id);
+        break;
+      }
+    }
+
+    test_cell_id.unwrap()
+  };
+
+  let cell_url = format!(
+    "http://localhost:{}/cell/{}",
+    test_env.public_ports[system_cell_index], test_cell_id
+  );
+  let alarm_count_url = format!("{cell_url}/getAlarmCount");
+
+  // Get initial alarm count, which must be 0
+  {
+    let res = client
+      .get(&alarm_count_url)
+      .header("host", "alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+
+    let content = res.text().await.unwrap();
+    assert_eq!(content, r#"{"count":0}"#);
+  }
+
+  // Set a new alarm scheduled 1 second from now
+  {
+    let res = client
+      .post(&cell_url)
+      .header("host", "alarm.localhost")
+      .body("1000")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+  }
+
+  // Wait for the alarm to be dispatched
+  tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+  // Get alarm count, should be 1 now
+  {
+    let res = client
+      .get(&alarm_count_url)
+      .header("host", "alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+
+    let content = res.text().await.unwrap();
+    assert_eq!(content, r#"{"count":1}"#);
   }
 }
