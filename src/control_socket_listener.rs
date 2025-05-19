@@ -9,7 +9,7 @@ use futures::FutureExt as _;
 use http_body_util::{combinators::BoxBody, BodyExt as _, Empty, Full};
 use pingora::{server::ShutdownWatch, services::background::BackgroundService};
 use tempfile::TempDir;
-use tokio::net::UnixListener;
+use tokio::net::{TcpStream, UnixListener};
 use tracing::{error, info, warn};
 
 use crate::{
@@ -105,12 +105,13 @@ impl BackgroundService for ControlSocketListener {
                         _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
                           // Forward to the owner of the system cell
                           let system_cell_owner = node_state.peer_manager.get_owner_peer(SYSTEM_TENANT, SYSTEM_CELL_ID);
-                          todo!("Forward req to the owner of the system cell")
+                          send_alarm_to_system_cell_owner(system_cell_owner, req).await
                         }
                     }
                   } else {
                     // Paths other than /_internal/alarms are not supported now
-                    hyper::Response::builder().status(404).body(empty())
+                    let res = hyper::Response::builder().status(404).body(empty())?;
+                    Ok(res)
                   }
                 }
               });
@@ -131,13 +132,14 @@ impl BackgroundService for ControlSocketListener {
 async fn locally_handle_internal_alarms(
   req: hyper::Request<hyper::body::Incoming>,
   system_cell: Arc<SystemCell>,
-) -> Result<hyper::Response<BoxBody<Bytes, hyper::Error>>, http::Error> {
+) -> anyhow::Result<hyper::Response<BoxBody<Bytes, hyper::Error>>> {
   let (parts, body) = req.into_parts();
   let req_body = match body.collect().await {
     Ok(body) => body,
     Err(e) => {
       error!(error = ?e, "Failed to collect request body");
-      return hyper::Response::builder().status(500).body(empty());
+      let res = hyper::Response::builder().status(500).body(empty())?;
+      return Ok(res);
     }
   };
 
@@ -168,16 +170,18 @@ async fn locally_handle_internal_alarms(
   match parts.method {
     hyper::Method::GET => {
       let Some(query) = parts.uri.query() else {
-        return hyper::Response::builder()
+        let res = hyper::Response::builder()
           .status(400)
-          .body(full("tenant and cell_id are required in the query params"));
+          .body(full("tenant and cell_id are required in the query params"))?;
+        return Ok(res);
       };
 
       let data: GetAlarmRequest = match serde_qs::from_str(query) {
         Ok(data) => data,
         Err(e) => {
           error!(%query, error = ?e, "Failed to parse query string");
-          return hyper::Response::builder().status(400).body(empty());
+          let res = hyper::Response::builder().status(400).body(empty())?;
+          return Ok(res);
         }
       };
       let alarm = match system_cell
@@ -188,16 +192,18 @@ async fn locally_handle_internal_alarms(
         Ok(alarm) => alarm,
         Err(e) => {
           error!(error = ?e, "Failed to get alarm");
-          return hyper::Response::builder()
+          let res = hyper::Response::builder()
             .status(500)
-            .body(full(e.to_string()));
+            .body(full(e.to_string()))?;
+          return Ok(res);
         }
       };
       let response = GetAlarmResponse {
         scheduled_time_unix_ms: alarm.scheduled_time_unix_ms,
       };
       let body = serde_json::to_string(&response).unwrap();
-      hyper::Response::builder().status(200).body(full(body))
+      let res = hyper::Response::builder().status(200).body(full(body))?;
+      Ok(res)
     }
     hyper::Method::DELETE => {
       let data: DeleteAlarmRequest =
@@ -205,7 +211,8 @@ async fn locally_handle_internal_alarms(
           Ok(data) => data,
           Err(e) => {
             error!(error = ?e, "Failed to parse request body");
-            return hyper::Response::builder().status(400).body(empty());
+            let res = hyper::Response::builder().status(400).body(empty())?;
+            return Ok(res);
           }
         };
       if let Err(e) = system_cell
@@ -214,9 +221,11 @@ async fn locally_handle_internal_alarms(
         .await
       {
         error!(error = ?e, "Failed to delete alarm");
-        return hyper::Response::builder().status(500).body(empty());
+        let res = hyper::Response::builder().status(500).body(empty())?;
+        return Ok(res);
       }
-      hyper::Response::builder().status(200).body(empty())
+      let res = hyper::Response::builder().status(200).body(empty())?;
+      Ok(res)
     }
     hyper::Method::POST => {
       let data: SetAlarmRequest =
@@ -224,7 +233,8 @@ async fn locally_handle_internal_alarms(
           Ok(data) => data,
           Err(e) => {
             error!(error = ?e, "Failed to parse request body");
-            return hyper::Response::builder().status(400).body(empty());
+            let res = hyper::Response::builder().status(400).body(empty())?;
+            return Ok(res);
           }
         };
       if let Err(e) = system_cell
@@ -233,12 +243,35 @@ async fn locally_handle_internal_alarms(
         .await
       {
         error!(error = ?e, "Failed to set alarm");
-        return hyper::Response::builder().status(500).body(empty());
+        let res = hyper::Response::builder().status(500).body(empty())?;
+        return Ok(res);
       }
-      hyper::Response::builder().status(200).body(empty())
+      let res = hyper::Response::builder().status(200).body(empty())?;
+      Ok(res)
     }
-    _ => hyper::Response::builder().status(405).body(empty()),
+    _ => {
+      let res = hyper::Response::builder().status(405).body(empty())?;
+      Ok(res)
+    }
   }
+}
+
+async fn send_alarm_to_system_cell_owner(
+  system_cell_owner: SocketAddr,
+  req: hyper::Request<hyper::body::Incoming>,
+) -> anyhow::Result<hyper::Response<BoxBody<Bytes, hyper::Error>>> {
+  let tcp_stream = TcpStream::connect(system_cell_owner).await?;
+  let io = hyper_util::rt::TokioIo::new(tcp_stream);
+  let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+
+  tokio::spawn(async move {
+    if let Err(e) = conn.await {
+      error!(error = ?e, ?system_cell_owner, "Failed to send alarm to system cell owner");
+    }
+  });
+
+  let (parts, body) = sender.send_request(req).await?.into_parts();
+  Ok(hyper::Response::from_parts(parts, body.boxed()))
 }
 
 fn empty() -> BoxBody<Bytes, hyper::Error> {
