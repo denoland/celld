@@ -575,6 +575,8 @@ fn spawn_deno_process(
   control_socket_path: &Path,
   main_script: &PathBuf,
 ) -> Result<ChildOnParentExit> {
+  let ctl_socket_canonicalized = std::fs::canonicalize(control_socket_path)?;
+
   let mut cmd = std::process::Command::new("deno");
   cmd
     .current_dir(tenant_dir)
@@ -584,7 +586,7 @@ fn spawn_deno_process(
     )
     .env(
       "CELL_CONTROL_SOCKET",
-      format!("{}", control_socket_path.display()),
+      format!("{}", ctl_socket_canonicalized.display()),
     )
     .env("X-Tenant", host)
     .env("X-Cell-Id", cell_id);
@@ -636,13 +638,13 @@ fn spawn_deno_process(
       "--allow-read={},{},{}",
       tenant_dir.display(),
       serve_socket_path.display(),
-      control_socket_path.display()
+      ctl_socket_canonicalized.display()
     ))
     .arg(format!(
       "--allow-write={},{},{}",
       tenant_dir.display(),
       serve_socket_path.display(),
-      control_socket_path.display()
+      ctl_socket_canonicalized.display()
     ))
     .arg("--allow-net");
 

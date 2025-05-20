@@ -35,11 +35,10 @@ export class Cell {
     this.tenant = Deno.env.get("X-Tenant")!;
     this.id = Deno.env.get("X-Cell-Id")!;
     const ctlSockPath = Deno.env.get("CELL_CONTROL_SOCKET")!;
-    const resolvedCtlSockPath = Deno.realPathSync(ctlSockPath);
     this.ctlClient = Deno.createHttpClient({
       proxy: {
         transport: "unix",
-        path: resolvedCtlSockPath,
+        path: ctlSockPath,
       },
     });
     this.sockets = new Map<string, WebSocket>();
