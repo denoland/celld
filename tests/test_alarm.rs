@@ -279,7 +279,7 @@ async fn test_multiple_cells_alarm_dispatch_in_single_node_cluster() {
 }
 
 #[tokio::test]
-async fn system_cell_takeover() {
+async fn test_system_cell_takeover() {
   let client = reqwest::Client::new();
 
   let mut test_env = TestEnv::new(2);
@@ -541,7 +541,7 @@ async fn alarm_crud_operations_forwarded_to_system_cell_node() {
 // 2. A secondary node (where "alarm.localhost/<some-cell-id>" is running)
 // This test verifies that the primary node will dispatch an alarm to the secondary node and then alarm.localhost's alarm handler will be triggered.
 #[tokio::test]
-async fn alarm_dispatch_to_remote_cell_owner() {
+async fn test_alarm_dispatch_to_remote_cell_owner() {
   let client = reqwest::Client::new();
 
   let test_env = TestEnv::new(2);
