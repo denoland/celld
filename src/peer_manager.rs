@@ -3,7 +3,7 @@ use chrono::Utc;
 use hashring::HashRing;
 use std::sync::RwLock;
 use std::time::Duration;
-use tracing::{error, warn};
+use tracing::{error, trace, warn};
 
 // A separate struct to hold the state that will be updated via RwLock
 struct PeerManagerState {
@@ -117,7 +117,7 @@ impl PeerManager {
   pub fn is_peer_active(&self, node_addr: &str) -> bool {
     let state = self.state.read().unwrap();
     // Debug output for troubleshooting
-    println!(">> is_peer_active state.peers {:?}", state.peers);
+    trace!(peers = ?state.peers, "Checking peer activity");
 
     // First check if the node exists in our peers list
     if let Some(node_info) = state
