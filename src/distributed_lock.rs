@@ -810,7 +810,7 @@ mod tests {
       .is_ok()
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_acquire_release() {
     let (lock_manager, bucket, _minio) = setup_test_env().await;
 
@@ -849,7 +849,7 @@ mod tests {
     );
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_acquire_fails_if_held() {
     let (lock_manager, _bucket, _minio) = setup_test_env().await;
 
@@ -899,7 +899,7 @@ mod tests {
     rx.await.unwrap().unwrap();
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_acquire_succeeds_if_expired() {
     let (lock_manager, _bucket, _minio) = setup_test_env().await;
 
@@ -944,7 +944,7 @@ mod tests {
     rx_guard_b.await.unwrap().unwrap();
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_release_non_existent_lock() {
     let (lock_manager, _bucket, _minio) = setup_test_env().await;
 
@@ -965,7 +965,7 @@ mod tests {
     );
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_concurrent_acquisition_attempts() {
     let (lock_manager, _bucket, _minio) = setup_test_env().await;
 
@@ -1030,7 +1030,7 @@ mod tests {
     }
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_lock_renewal() {
     let (lock_manager, bucket, _minio) = setup_test_env().await;
 

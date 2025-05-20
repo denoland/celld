@@ -40,3 +40,4 @@ tokio-tungstenite = "0.26"
 futures-util = "0.3"
 reqwest = { version = "0.12", features = ["json"] } # Do not use reqwest in the main code, only in tests
 url = "2.5"
+test-log = { version = "0.2.17", features = ["trace"] }
