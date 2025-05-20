@@ -72,7 +72,7 @@
 //! operations like `litestream restore`.
 
 use crate::s3_utils::log_s3_error;
-use anyhow::{Context, Error as AnyhowError};
+use anyhow::Error as AnyhowError;
 use async_trait::async_trait;
 use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::error::SdkError;

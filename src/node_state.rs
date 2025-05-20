@@ -102,10 +102,11 @@ impl NodeState {
           }
 
           // Initialize the S3 client for distributed lock
-          // Configure builder with region
+          // Configure builder with region and retry policy
           let builder =
             aws_config::defaults(aws_config::BehaviorVersion::latest())
-              .region(aws_config::Region::new(s3_config.region.clone()));
+              .region(aws_config::Region::new(s3_config.region.clone()))
+              .retry_config(aws_config::retry::RetryConfig::standard().with_max_attempts(5));
 
           // Load the AWS config
           let aws_config = builder.load().await;
@@ -135,6 +136,13 @@ impl NodeState {
               ),
             );
           }
+
+          // Add timeout configuration
+          s3_client_builder = s3_client_builder.timeout_config(
+            aws_smithy_types::timeout::TimeoutConfig::builder()
+              .operation_timeout(Duration::from_secs(10)) // Consistent timeout
+              .build(),
+          );
 
           let cfg = s3_client_builder.build();
 
