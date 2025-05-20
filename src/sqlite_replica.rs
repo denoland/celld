@@ -324,7 +324,7 @@ impl SqliteReplica {
   ) {
     // Check if database already exists locally
     if self.db_path.exists() {
-      debug!(
+      warn!(
         tenant = %self.tenant,
         cell_id = %self.cell_id,
         "Database already exists locally, no restore needed"
@@ -440,7 +440,7 @@ impl SqliteReplica {
     // Check if replication is already running
     let mut process_guard = self.replication_process.lock().unwrap();
     if let Some(_child) = &mut *process_guard {
-      debug!("Replication already running");
+      warn!("Replication already running");
       return Err(anyhow!("Replication already running"));
     }
 
