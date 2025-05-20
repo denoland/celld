@@ -368,7 +368,9 @@ mod tests {
 
     let (mut ws_stream, _) = tokio_tungstenite::connect_async(url)
       .await
-      .unwrap_or_else(|_| panic!("Failed to connect to cell {}", cell_id));
+      .unwrap_or_else(|e| {
+        panic!("Failed to connect to cell {}: {}", cell_id, e)
+      });
 
     // Read welcome message
     let welcome_msg = ws_stream.next().await.unwrap().unwrap();
