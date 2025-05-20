@@ -69,7 +69,7 @@ export class Cell {
     this.onRequestCallback = cb;
   }
 
-  onAlarm(cb: () => Promise<void> | void): void {
+  alarm(cb: () => Promise<void> | void): void {
     this.onAlarmCallback = cb;
   }
 
@@ -184,7 +184,7 @@ export class Cell {
       const url = new URL(req.url);
 
       if (req.method === "POST" && url.pathname === "/_internal/alarm") {
-        // Invoke the onAlarm callback
+        // Invoke the alarm callback
         if (this.onAlarmCallback) {
           await this.onAlarmCallback();
         }

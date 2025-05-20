@@ -35,6 +35,6 @@ cell.request(async (req: Request) => {
   }
 });
 
-cell.onAlarm(() => {
+cell.alarm(() => {
   alarmCount++;
 });
