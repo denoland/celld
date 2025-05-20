@@ -327,6 +327,7 @@ impl SqliteReplica {
       warn!(
         tenant = %self.tenant,
         cell_id = %self.cell_id,
+        db_path = %self.db_path.display(),
         "Database already exists locally, no restore needed"
       );
       return;

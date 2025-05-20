@@ -95,13 +95,11 @@ jobs:
         127.0.0.1 hello.localhost
         127.0.0.1 llm-chat.localhost
         127.0.0.1 ws-echo.localhost
+        127.0.0.1 alarm.localhost
         EOF'
 
     - name: Build
       run: cargo build --verbose
-
-    - name: Run tests (test_alarm, single-threaded)
-      run: cargo test --test test_alarm -- --test-threads=1
 
     - name: Run tests
       run: cargo test --verbose
