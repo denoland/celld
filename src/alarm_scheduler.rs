@@ -49,6 +49,6 @@ impl BackgroundService for AlarmScheduler {
       }
     }
 
-    info!("Process reaper service stopped");
+    info!("Alarm scheduler service stopped");
   }
 }
