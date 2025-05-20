@@ -130,6 +130,7 @@ impl TestEnv {
     let server_cmd = Command::new(env!("CARGO_BIN_EXE_celld"));
     let server_cmd_setup = |cmd: &mut Command| {
       cmd
+        .env("RUST_LOG", "info")
         .env("ADVERTISE_ADDR", &advertise_addr)
         .env("INTERNAL_LISTEN_ADDR", &internal_addr)
         .env("DATA", "./data")
