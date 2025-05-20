@@ -131,7 +131,7 @@ async fn test_alarm_dispatch_in_single_node_cluster() {
   }
 
   // Wait for the alarm to be dispatched
-  tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+  tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
   // Get alarm count, should be 1 now
   {
@@ -216,7 +216,7 @@ async fn test_multiple_cells_alarm_dispatch_in_single_node_cluster() {
   }
 
   // Wait for the alarm to be dispatched
-  tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+  tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
   // Get alarm count for cell1, should be 1 now
   {
