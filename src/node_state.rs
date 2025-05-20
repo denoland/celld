@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, error, info};
 
 use crate::cluster_membership::{
@@ -164,8 +165,11 @@ impl NodeState {
     };
 
     // Create peer manager with only local node
-    let peer_manager =
-      PeerManager::new(config.advertise_addr.clone(), node_id.clone());
+    let peer_manager = PeerManager::new(
+      config.advertise_addr.clone(),
+      node_id.clone(),
+      config.staleness_threshold,
+    );
     debug!("Peer manager initialized in standalone mode");
 
     // Create config Arc for NodeState
@@ -190,9 +194,11 @@ impl NodeState {
     let process_manager = ProcessManager::new(data_dir);
 
     // Create minimal peer manager and node_state for benchmark
+    let benchmark_staleness_threshold = Duration::from_secs(90); // Default threshold for benchmark
     let peer_manager = PeerManager::new(
       "127.0.0.1:8000".to_string(),
       "benchmark-node".to_string(),
+      benchmark_staleness_threshold,
     );
 
     Arc::new(NodeState {
