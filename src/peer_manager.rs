@@ -1,7 +1,9 @@
 use crate::cluster_membership::NodeInfo;
+use chrono::Utc;
 use hashring::HashRing;
 use std::sync::RwLock;
 use std::time::Duration;
+use tracing::{error, warn};
 
 // A separate struct to hold the state that will be updated via RwLock
 struct PeerManagerState {
@@ -110,15 +112,52 @@ impl PeerManager {
   }
 
   /// Check if a node is considered active, meaning it was present in the
-  /// latest list of active nodes received from the ClusterMembership service.
+  /// latest list of active nodes received from the ClusterMembership service
+  /// AND its heartbeat timestamp is not stale.
   pub fn is_peer_active(&self, node_addr: &str) -> bool {
     let state = self.state.read().unwrap();
-    // The `state.peers` list only contains nodes deemed active by ClusterMembership
+    // Debug output for troubleshooting
     println!(">> is_peer_active state.peers {:?}", state.peers);
-    state
+
+    // First check if the node exists in our peers list
+    if let Some(node_info) = state
       .peers
       .iter()
-      .any(|node| node.advertise_addr == node_addr)
+      .find(|node| node.advertise_addr == node_addr)
+    {
+      // Now check if the node's heartbeat timestamp is stale
+      let now = Utc::now();
+      let node_time = node_info.heartbeat_timestamp;
+
+      // Convert standard Duration to chrono::Duration for timestamp comparison
+      let threshold_as_chrono = match chrono::Duration::from_std(
+        self.staleness_threshold,
+      ) {
+        Ok(d) => d,
+        Err(e) => {
+          // This should not happen with normal Duration values
+          error!(
+            "Failed to convert std::time::Duration (staleness_threshold) to chrono::Duration: {}. Using default of 90s for this check.",
+            e
+          );
+          chrono::Duration::seconds(90) // Default fallback
+        }
+      };
+
+      let time_since_heartbeat = now.signed_duration_since(node_time);
+      let is_stale = time_since_heartbeat > threshold_as_chrono;
+
+      if is_stale {
+        warn!(
+          "Peer {} (Addr: {}) considered STALE. Last heartbeat: {}, Current time: {}, Threshold: {:?}",
+          node_info.node_id, node_addr, node_time, now, self.staleness_threshold
+        );
+      }
+
+      !is_stale // Return true if NOT stale
+    } else {
+      false // Node not found in peers list
+    }
   }
 
   /// Get the number of peers in the mesh
