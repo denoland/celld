@@ -71,6 +71,7 @@
 //! injected via `NodeState`) to acquire and release locks before performing
 //! operations like `litestream restore`.
 
+use crate::s3_utils::log_s3_error;
 use anyhow::{Context, Error as AnyhowError};
 use async_trait::async_trait;
 use aws_sdk_s3::error::ProvideErrorMetadata;
@@ -341,7 +342,13 @@ impl DistributedLock for S3DistributedLock {
         Ok(LockGuard::new(lock_key, node_id.to_string(), self))
       }
       Err(SdkError::ServiceError(service_err)) => {
-        let raw_err = service_err.into_err();
+        log_s3_error(
+          "acquire_lock_initial_put",
+          &service_err,
+          Some(&self.bucket),
+          Some(&lock_key),
+        );
+        let raw_err = service_err.err();
         if raw_err.code() == Some("PreconditionFailed") {
           warn!(lock_key, node_id, "Lock acquisition failed (precondition failed), checking if existing lock expired");
 
@@ -387,18 +394,33 @@ impl DistributedLock for S3DistributedLock {
                   .send()
                   .await
                 {
-                  if let SdkError::ServiceError(del_err_sdk) = e {
-                    let del_err = del_err_sdk.into_err();
-                    if del_err.code() != Some("NoSuchKey") {
-                      warn!(error = ?del_err, lock_key, "Failed to delete expired lock, acquisition fails");
+                  if let SdkError::ServiceError(ref del_err_sdk) = e {
+                    // Access error code without moving out of the reference
+                    if del_err_sdk.err().code() != Some("NoSuchKey") {
+                      log_s3_error(
+                        "acquire_lock_delete_expired",
+                        &e,
+                        Some(&self.bucket),
+                        Some(&lock_key),
+                      );
+                      warn!(
+                        lock_key,
+                        "Failed to delete expired lock, acquisition fails"
+                      );
                       return Err(LockAcquireError::S3Error(format!(
                         "Failed to delete expired lock for key '{}': {:?}",
-                        lock_key, del_err
+                        lock_key, e
                       )));
                     } else {
                       warn!(lock_key, "Expired lock was already deleted, proceeding to retry put");
                     }
                   } else {
+                    log_s3_error(
+                      "acquire_lock_delete_expired",
+                      &e,
+                      Some(&self.bucket),
+                      Some(&lock_key),
+                    );
                     return Err(LockAcquireError::S3Error(format!(
                       "Failed to delete expired lock for key '{}' (SDK Error): {:?}",
                       lock_key, e
@@ -429,7 +451,13 @@ impl DistributedLock for S3DistributedLock {
                     Ok(LockGuard::new(lock_key, node_id.to_string(), self))
                   }
                   Err(SdkError::ServiceError(retry_service_err)) => {
-                    let retry_put_err = retry_service_err.into_err();
+                    log_s3_error(
+                      "acquire_lock_retry_put",
+                      &retry_service_err,
+                      Some(&self.bucket),
+                      Some(&lock_key),
+                    );
+                    let retry_put_err = retry_service_err.err();
                     if retry_put_err.code() == Some("PreconditionFailed") {
                       warn!(
                         lock_key,
@@ -443,10 +471,18 @@ impl DistributedLock for S3DistributedLock {
                       lock_key, retry_put_err
                     )))
                   }
-                  Err(e) => Err(LockAcquireError::S3Error(format!(
-                    "Retry put failed for key '{}' (SDK Error): {:?}",
-                    lock_key, e
-                  ))),
+                  Err(e) => {
+                    log_s3_error(
+                      "acquire_lock_retry_put",
+                      &e,
+                      Some(&self.bucket),
+                      Some(&lock_key),
+                    );
+                    Err(LockAcquireError::S3Error(format!(
+                      "Retry put failed for key '{}' (SDK Error): {:?}",
+                      lock_key, e
+                    )))
+                  }
                 }
               } else {
                 info!(lock_key, existing_node_id = %existing_lock_info.node_id, ?expiry_time, "Existing lock is still valid");
@@ -454,7 +490,13 @@ impl DistributedLock for S3DistributedLock {
               }
             }
             Err(SdkError::ServiceError(get_service_err)) => {
-              let get_err = get_service_err.into_err();
+              log_s3_error(
+                "acquire_lock_get_existing",
+                &get_service_err,
+                Some(&self.bucket),
+                Some(&lock_key),
+              );
+              let get_err = get_service_err.err();
               if get_err.code() == Some("NoSuchKey") {
                 warn!(
                   lock_key,
@@ -480,7 +522,13 @@ impl DistributedLock for S3DistributedLock {
                     Ok(LockGuard::new(lock_key, node_id.to_string(), self))
                   }
                   Err(SdkError::ServiceError(retry_service_err)) => {
-                    let retry_put_err = retry_service_err.into_err();
+                    log_s3_error(
+                      "acquire_lock_retry_put_after_no_such_key",
+                      &retry_service_err,
+                      Some(&self.bucket),
+                      Some(&lock_key),
+                    );
+                    let retry_put_err = retry_service_err.err();
                     if retry_put_err.code() == Some("PreconditionFailed") {
                       warn!(lock_key, node_id, "Lock was acquired by another node during retry (after NoSuchKey)");
                       return Err(LockAcquireError::LockHeld(None));
@@ -490,13 +538,21 @@ impl DistributedLock for S3DistributedLock {
                       lock_key, retry_put_err
                     )))
                   }
-                  Err(e) => Err(LockAcquireError::S3Error(format!(
-                    "Retry put failed after NoSuchKey for key '{}' (SDK Error): {:?}",
-                    lock_key, e
-                  ))),
+                  Err(e) => {
+                    log_s3_error(
+                      "acquire_lock_retry_put_after_no_such_key",
+                      &e,
+                      Some(&self.bucket),
+                      Some(&lock_key),
+                    );
+                    Err(LockAcquireError::S3Error(format!(
+                      "Retry put failed after NoSuchKey for key '{}' (SDK Error): {:?}",
+                      lock_key, e
+                    )))
+                  }
                 }
               } else {
-                warn!(error = ?get_err, lock_key, "Failed to get existing lock details");
+                warn!(lock_key, "Failed to get existing lock details");
                 Err(LockAcquireError::S3Error(format!(
                   "Failed to get lock for key '{}': {:?}",
                   lock_key, get_err
@@ -504,7 +560,13 @@ impl DistributedLock for S3DistributedLock {
               }
             }
             Err(e) => {
-              warn!(error = ?e, lock_key, "SDK error during get existing lock details");
+              log_s3_error(
+                "acquire_lock_get_existing",
+                &e,
+                Some(&self.bucket),
+                Some(&lock_key),
+              );
+              warn!(lock_key, "SDK error during get existing lock details");
               Err(LockAcquireError::S3Error(format!(
                 "SDK error getting lock for key '{}': {:?}",
                 lock_key, e
@@ -512,7 +574,10 @@ impl DistributedLock for S3DistributedLock {
             }
           }
         } else {
-          warn!(error = ?raw_err, lock_key, node_id, "Unhandled S3 PutObject error during lock acquisition");
+          warn!(
+            lock_key,
+            node_id, "Unhandled S3 PutObject error during lock acquisition"
+          );
           Err(LockAcquireError::S3Error(format!(
             "Unhandled S3 PutObject error for key '{}': {:?}",
             lock_key, raw_err
@@ -520,7 +585,13 @@ impl DistributedLock for S3DistributedLock {
         }
       }
       Err(e) => {
-        warn!(error = ?e, lock_key, node_id, "SDK error during lock acquisition");
+        log_s3_error(
+          "acquire_lock_initial_put",
+          &e,
+          Some(&self.bucket),
+          Some(&lock_key),
+        );
+        warn!(lock_key, node_id, "SDK error during lock acquisition");
         let source_msg = e
           .source()
           .map_or_else(|| "Unknown source".to_string(), |s| s.to_string());
@@ -547,20 +618,40 @@ impl DistributedLock for S3DistributedLock {
         Ok(())
       }
       Err(SdkError::ServiceError(service_err)) => {
-        let del_err = service_err.into_err();
-        if del_err.code() == Some("NoSuchKey") {
+        log_s3_error(
+          "release_lock",
+          &service_err,
+          Some(&self.bucket),
+          Some(&handle.lock_key),
+        );
+
+        // Check for NoSuchKey error
+        let is_no_such_key = service_err.err().code() == Some("NoSuchKey");
+
+        if is_no_such_key {
           warn!(lock_key = %handle.lock_key, node_id = %handle.node_id, "Attempted to release a lock that does not exist (or was already released)");
           Ok(())
         } else {
-          warn!(error = ?del_err, lock_key = %handle.lock_key, node_id = %handle.node_id, "Failed to release S3 lock (Service Error)");
-          Err(AnyhowError::new(del_err))
-            .context(format!("Failed to release S3 lock: {}", handle.lock_key))
+          warn!(lock_key = %handle.lock_key, node_id = %handle.node_id, "Failed to release S3 lock (Service Error)");
+          // Create a new error with the formatted message
+          Err(anyhow::anyhow!(
+            "Failed to release S3 lock: {}",
+            handle.lock_key
+          ))
         }
       }
       Err(e) => {
-        warn!(error = ?e, lock_key = %handle.lock_key, node_id = %handle.node_id, "Failed to release S3 lock (SDK Error)");
-        Err(AnyhowError::new(e))
-          .context(format!("SDK Error releasing S3 lock: {}", handle.lock_key))
+        log_s3_error(
+          "release_lock",
+          &e,
+          Some(&self.bucket),
+          Some(&handle.lock_key),
+        );
+        warn!(lock_key = %handle.lock_key, node_id = %handle.node_id, "Failed to release S3 lock (SDK Error)");
+        Err(anyhow::anyhow!(
+          "SDK Error releasing S3 lock: {}",
+          handle.lock_key
+        ))
       }
     }
   }
@@ -660,7 +751,13 @@ impl DistributedLock for S3DistributedLock {
             })
           }
           Err(SdkError::ServiceError(service_err)) => {
-            let err = service_err.into_err();
+            log_s3_error(
+              "renew_lock_put",
+              &service_err,
+              Some(&self.bucket),
+              Some(lock_key),
+            );
+            let err = service_err.err();
             // Check if this was a precondition failure (ETag mismatch)
             if err.code() == Some("PreconditionFailed") {
               warn!(
@@ -674,14 +771,26 @@ impl DistributedLock for S3DistributedLock {
               )));
             }
 
-            warn!(error = ?err, lock_key, node_id, "Failed to update lock object during renewal");
+            warn!(
+              lock_key,
+              node_id, "Failed to update lock object during renewal"
+            );
             Err(LockAcquireError::S3Error(format!(
               "Failed to update lock object for key '{}' during renewal: {:?}",
               lock_key, err
             )))
           }
           Err(e) => {
-            warn!(error = ?e, lock_key, node_id, "Failed to update lock object during renewal");
+            log_s3_error(
+              "renew_lock_put",
+              &e,
+              Some(&self.bucket),
+              Some(lock_key),
+            );
+            warn!(
+              lock_key,
+              node_id, "Failed to update lock object during renewal"
+            );
             Err(LockAcquireError::S3Error(format!(
               "Failed to update lock object for key '{}' during renewal: {:?}",
               lock_key, e
@@ -690,7 +799,13 @@ impl DistributedLock for S3DistributedLock {
         }
       }
       Err(SdkError::ServiceError(service_err)) => {
-        let get_err = service_err.into_err();
+        log_s3_error(
+          "renew_lock_get",
+          &service_err,
+          Some(&self.bucket),
+          Some(lock_key),
+        );
+        let get_err = service_err.err();
         if get_err.code() == Some("NoSuchKey") {
           warn!(lock_key, node_id, "Cannot renew lock: lock does not exist");
           Err(LockAcquireError::S3Error(format!(
@@ -698,7 +813,7 @@ impl DistributedLock for S3DistributedLock {
             lock_key
           )))
         } else {
-          warn!(error = ?get_err, lock_key, node_id, "Failed to get lock during renewal");
+          warn!(lock_key, node_id, "Failed to get lock during renewal");
           Err(LockAcquireError::S3Error(format!(
             "Failed to get lock for key '{}' during renewal: {:?}",
             lock_key, get_err
@@ -706,7 +821,8 @@ impl DistributedLock for S3DistributedLock {
         }
       }
       Err(e) => {
-        warn!(error = ?e, lock_key, node_id, "SDK error during lock renewal");
+        log_s3_error("renew_lock_get", &e, Some(&self.bucket), Some(lock_key));
+        warn!(lock_key, node_id, "SDK error during lock renewal");
         Err(LockAcquireError::S3Error(format!(
           "SDK error during renewal of lock for key '{}': {:?}",
           lock_key, e

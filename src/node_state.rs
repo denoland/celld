@@ -61,6 +61,16 @@ impl NodeState {
           info!("S3 cluster membership configured, initializing...");
           debug!("S3 cluster membership config: {:?}", config);
           let s3_config = config.to_s3_config().unwrap();
+          // Enhanced S3 configuration logging
+          info!(
+            target: "celld::config",
+            s3_endpoint = s3_config.endpoint.as_deref().unwrap_or("AWS Default"),
+            s3_bucket = %s3_config.bucket,
+            s3_region = %s3_config.region,
+            s3_path_prefix = s3_config.path.as_deref().unwrap_or("N/A"),
+            s3_force_path_style = s3_config.endpoint.is_some(), // Path style is typically forced if endpoint is custom
+            "S3 Configuration Loaded"
+          );
 
           // Create membership using from_config with configured staleness threshold
           let membership = match S3ClusterMembership::from_config(

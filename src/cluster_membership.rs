@@ -1,4 +1,5 @@
 use crate::config::S3Config;
+use crate::s3_utils::log_s3_error;
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::{
@@ -158,22 +159,33 @@ impl ClusterMembership for S3ClusterMembership {
     );
 
     // Upload node information to S3
-    self
+    match self
       .s3_client
       .put_object()
       .bucket(&self.bucket)
       .key(&node_key)
       .body(ByteStream::from(node_json.into_bytes()))
       .send()
-      .await?;
-
-    info!(
-      node_id = %self.node_info.node_id,
-      addr = %self.node_info.advertise_addr,
-      "Node registered successfully in S3"
-    );
-
-    Ok(())
+      .await
+    {
+      Ok(_) => {
+        info!(
+          node_id = %self.node_info.node_id,
+          addr = %self.node_info.advertise_addr,
+          "Node registered successfully in S3"
+        );
+        Ok(())
+      }
+      Err(e) => {
+        log_s3_error(
+          "S3ClusterMembership::register (PutObject)",
+          &e,
+          Some(&self.bucket),
+          Some(&node_key),
+        );
+        Err(anyhow::Error::new(e).context("Failed to register node in S3"))
+      }
+    }
   }
 
   async fn heartbeat(&self) -> anyhow::Result<()> {
@@ -191,16 +203,26 @@ impl ClusterMembership for S3ClusterMembership {
     );
 
     // Upload updated node information to S3
-    self
+    match self
       .s3_client
       .put_object()
       .bucket(&self.bucket)
       .key(&node_key)
       .body(ByteStream::from(node_json.into_bytes()))
       .send()
-      .await?;
-
-    Ok(())
+      .await
+    {
+      Ok(_) => Ok(()),
+      Err(e) => {
+        log_s3_error(
+          "S3ClusterMembership::heartbeat (PutObject)",
+          &e,
+          Some(&self.bucket),
+          Some(&node_key),
+        );
+        Err(anyhow::Error::new(e).context("Failed to send S3 heartbeat"))
+      }
+    }
   }
 
   async fn get_active_nodes(&self) -> anyhow::Result<Vec<NodeInfo>> {
@@ -210,13 +232,27 @@ impl ClusterMembership for S3ClusterMembership {
     );
 
     // List objects with the cluster nodes prefix
-    let list_result = self
+    let list_result = match self
       .s3_client
       .list_objects_v2()
       .bucket(&self.bucket)
       .prefix(&self.prefix)
       .send()
-      .await?;
+      .await
+    {
+      Ok(result) => result,
+      Err(e) => {
+        log_s3_error(
+          "S3ClusterMembership::get_active_nodes (ListObjectsV2)",
+          &e,
+          Some(&self.bucket),
+          Some(&self.prefix),
+        );
+        return Err(
+          anyhow::Error::new(e).context("Failed to list nodes from S3"),
+        );
+      }
+    };
 
     let mut peers = Vec::new();
     let mut found_nodes = HashSet::new();
@@ -258,7 +294,13 @@ impl ClusterMembership for S3ClusterMembership {
               }
             }
             Err(e) => {
-              warn!(key = %key, error = %e, "Failed to get node object");
+              log_s3_error(
+                "S3ClusterMembership::get_active_nodes (GetObject)",
+                &e,
+                Some(&self.bucket),
+                Some(key),
+              );
+              warn!(key = %key, "Failed to get node object");
             }
           }
         }
@@ -284,21 +326,32 @@ impl ClusterMembership for S3ClusterMembership {
     );
 
     // Delete the node object from S3
-    self
+    match self
       .s3_client
       .delete_object()
       .bucket(&self.bucket)
       .key(&node_key)
       .send()
-      .await?;
-
-    info!(
-      node_id = %self.node_info.node_id,
-      addr = %self.node_info.advertise_addr,
-      "Node unregistered successfully from S3"
-    );
-
-    Ok(())
+      .await
+    {
+      Ok(_) => {
+        info!(
+          node_id = %self.node_info.node_id,
+          addr = %self.node_info.advertise_addr,
+          "Node unregistered successfully from S3"
+        );
+        Ok(())
+      }
+      Err(e) => {
+        log_s3_error(
+          "S3ClusterMembership::unregister (DeleteObject)",
+          &e,
+          Some(&self.bucket),
+          Some(&node_key),
+        );
+        Err(anyhow::Error::new(e).context("Failed to unregister node from S3"))
+      }
+    }
   }
 }
 

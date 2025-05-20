@@ -11,6 +11,7 @@ mod peer_manager;
 mod process_manager;
 mod process_reaper;
 mod router;
+mod s3_utils;
 mod sqlite_replica;
 #[cfg(test)]
 pub mod test_utils;
