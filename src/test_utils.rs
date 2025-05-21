@@ -1,6 +1,7 @@
 use std::io::{self, BufRead, BufReader};
 use std::process::{Child, Command};
 use tempfile::TempDir;
+use tracing::trace;
 
 // Simple wrapper to manage the MinIO test server for tests
 #[allow(dead_code)]
@@ -39,7 +40,7 @@ impl MinioTestServer {
     std::thread::spawn(move || {
       for line in reader.lines() {
         let line = line.unwrap();
-        eprintln!("[minio] {line}");
+        trace!("[minio] {line}");
       }
     });
 
@@ -49,7 +50,7 @@ impl MinioTestServer {
     std::thread::spawn(move || {
       for line in reader.lines() {
         let line = line.unwrap();
-        eprintln!("[minio] {line}");
+        trace!("[minio] {line}");
         if let Some(port) = extract_minio_api_port(&line) {
           port_tx.send(port).unwrap();
         }
@@ -83,6 +84,8 @@ impl MinioTestServer {
         &format!("minio/{}", bucket_name),
         "--ignore-existing", // Don't fail if bucket already exists
       ])
+      .stdout(std::process::Stdio::null())
+      .stderr(std::process::Stdio::null())
       .spawn()
       .unwrap()
       .wait()
