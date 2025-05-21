@@ -16,14 +16,49 @@ use tempfile::TempDir;
 use test_utils::MinioTestServer;
 use uuid::Uuid;
 
-/// Recursively copies all contents from src directory to dst directory,
+/// Copies the project's data directory to a specified destination,
 /// skipping any 'sqlite' directories to ensure tests start with clean databases
-fn copy_dir_all(
-  src: impl AsRef<Path>,
-  dst: impl AsRef<Path>,
-) -> io::Result<()> {
+fn copy_data_dir_without_sqlite(dst: impl AsRef<Path>) -> io::Result<()> {
+  let src_data_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    .join("data")
+    .canonicalize()
+    .expect("Failed to find project's ./data directory");
+
+  // Create the destination directory
   fs::create_dir_all(&dst)?;
-  for entry in fs::read_dir(src)? {
+
+  /// Helper function for recursive directory copying
+  fn copy_data_dir_without_sqlite_recursive(
+    src: impl AsRef<Path>,
+    dst: impl AsRef<Path>,
+  ) -> io::Result<()> {
+    fs::create_dir_all(&dst)?;
+    for entry in fs::read_dir(src)? {
+      let entry = entry?;
+      let file_name = entry.file_name();
+      let path = entry.path();
+
+      // Skip sqlite directories
+      if path.ends_with("sqlite") || path.to_string_lossy().contains("/sqlite/")
+      {
+        continue;
+      }
+
+      let ty = entry.file_type()?;
+      if ty.is_dir() {
+        copy_data_dir_without_sqlite_recursive(
+          &path,
+          dst.as_ref().join(&file_name),
+        )?;
+      } else {
+        fs::copy(&path, dst.as_ref().join(&file_name))?;
+      }
+    }
+    Ok(())
+  }
+
+  // Recursively copy files and directories
+  for entry in fs::read_dir(&src_data_path)? {
     let entry = entry?;
     let file_name = entry.file_name();
     let path = entry.path();
@@ -35,11 +70,15 @@ fn copy_dir_all(
 
     let ty = entry.file_type()?;
     if ty.is_dir() {
-      copy_dir_all(&path, dst.as_ref().join(&file_name))?;
+      copy_data_dir_without_sqlite_recursive(
+        &path,
+        dst.as_ref().join(&file_name),
+      )?;
     } else {
       fs::copy(&path, dst.as_ref().join(&file_name))?;
     }
   }
+
   Ok(())
 }
 
@@ -62,8 +101,6 @@ pub struct TestEnv {
   pub internal_ports: Vec<u16>,
   /// Temporary directories for each server instance's data
   pub server_data_dirs: Vec<TempDir>,
-  /// Path to the original source data directory
-  source_data_path: PathBuf,
 }
 
 impl TestEnv {
@@ -116,13 +153,6 @@ impl TestEnv {
     let servers = Vec::new();
     let test_id = Uuid::new_v4().simple().to_string();
 
-    // Determine the project's root data directory
-    // This assumes mod.rs is in tests/common/mod.rs
-    let source_data_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-      .join("data")
-      .canonicalize()
-      .expect("Failed to find project's ./data directory. Path expected: <project_root>/data");
-
     let mut test_env = TestEnv {
       servers,
       ports: ports.to_vec(),
@@ -132,7 +162,6 @@ impl TestEnv {
       public_ports: public_ports.clone(),
       internal_ports: internal_ports.clone(),
       server_data_dirs: Vec::new(),
-      source_data_path,
     };
 
     for &port in ports.iter() {
@@ -181,21 +210,14 @@ impl TestEnv {
     let temp_data_dir =
       TempDir::new().expect("Failed to create temp dir for server data");
 
-    // Copy contents from the source ./data directory to the new temp_data_dir
-    if !self.source_data_path.exists() {
-      panic!(
-        "Source data directory not found at {:?}",
-        self.source_data_path
-      );
-    }
-
     // Get the path before copying to avoid borrowing issues
     let temp_data_dir_path = temp_data_dir.path().to_path_buf();
     let temp_data_dir_path_str = temp_data_dir_path
       .to_str()
       .expect("Temp dir path is not valid UTF-8");
 
-    copy_dir_all(&self.source_data_path, &temp_data_dir_path)
+    // Copy data directory contents without sqlite directories
+    copy_data_dir_without_sqlite(&temp_data_dir_path)
       .expect("Failed to copy source data to temp dir");
 
     let server_cmd = Command::new(env!("CARGO_BIN_EXE_celld"));
