@@ -16,72 +16,6 @@ use tempfile::TempDir;
 use test_utils::MinioTestServer;
 use uuid::Uuid;
 
-/// Copies the project's data directory to a specified destination,
-/// skipping any 'sqlite' directories to ensure tests start with clean databases
-fn copy_data_dir_without_sqlite(dst: impl AsRef<Path>) -> io::Result<()> {
-  let src_data_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-    .join("data")
-    .canonicalize()
-    .expect("Failed to find project's ./data directory");
-
-  // Create the destination directory
-  fs::create_dir_all(&dst)?;
-
-  /// Helper function for recursive directory copying
-  fn copy_data_dir_without_sqlite_recursive(
-    src: impl AsRef<Path>,
-    dst: impl AsRef<Path>,
-  ) -> io::Result<()> {
-    fs::create_dir_all(&dst)?;
-    for entry in fs::read_dir(src)? {
-      let entry = entry?;
-      let file_name = entry.file_name();
-      let path = entry.path();
-
-      // Skip sqlite directories
-      if path.ends_with("sqlite") || path.to_string_lossy().contains("/sqlite/")
-      {
-        continue;
-      }
-
-      let ty = entry.file_type()?;
-      if ty.is_dir() {
-        copy_data_dir_without_sqlite_recursive(
-          &path,
-          dst.as_ref().join(&file_name),
-        )?;
-      } else {
-        fs::copy(&path, dst.as_ref().join(&file_name))?;
-      }
-    }
-    Ok(())
-  }
-
-  // Recursively copy files and directories
-  for entry in fs::read_dir(&src_data_path)? {
-    let entry = entry?;
-    let file_name = entry.file_name();
-    let path = entry.path();
-
-    // Skip sqlite directories
-    if path.ends_with("sqlite") || path.to_string_lossy().contains("/sqlite/") {
-      continue;
-    }
-
-    let ty = entry.file_type()?;
-    if ty.is_dir() {
-      copy_data_dir_without_sqlite_recursive(
-        &path,
-        dst.as_ref().join(&file_name),
-      )?;
-    } else {
-      fs::copy(&path, dst.as_ref().join(&file_name))?;
-    }
-  }
-
-  Ok(())
-}
-
 lazy_static::lazy_static! {
   static ref USED_PORTS: Mutex<HashSet<u16>> = Mutex::new(HashSet::new());
 }
@@ -206,19 +140,10 @@ impl TestEnv {
     let advertise_addr = format!("127.0.0.1:{}", port);
     let internal_addr = format!("127.0.0.1:{}", port + 1);
 
-    // Create a new temporary directory for this server instance
-    let temp_data_dir =
-      TempDir::new().expect("Failed to create temp dir for server data");
-
-    // Get the path before copying to avoid borrowing issues
-    let temp_data_dir_path = temp_data_dir.path().to_path_buf();
-    let temp_data_dir_path_str = temp_data_dir_path
-      .to_str()
-      .expect("Temp dir path is not valid UTF-8");
-
-    // Copy data directory contents without sqlite directories
-    copy_data_dir_without_sqlite(&temp_data_dir_path)
-      .expect("Failed to copy source data to temp dir");
+    // Prepare a properly structured temporary directory
+    // This creates a temp dir with both jsr-cells/ and data/ to maintain relative imports
+    let (temp_dir, data_dir_path) = prepare_test_directory()
+      .expect("Failed to prepare temp directory with proper structure");
 
     let server_cmd = Command::new(env!("CARGO_BIN_EXE_celld"));
     let server_cmd_setup = |cmd: &mut Command| {
@@ -226,8 +151,10 @@ impl TestEnv {
         .env("RUST_LOG", "info")
         .env("ADVERTISE_ADDR", &advertise_addr)
         .env("INTERNAL_LISTEN_ADDR", &internal_addr)
-        // Use the populated temp data directory path instead of "./data"
-        .env("DATA", temp_data_dir_path_str)
+        // Set the current working directory to the temp dir so relative imports work
+        .current_dir(temp_dir.path())
+        // Point DATA to the data subdirectory
+        .env("DATA", &data_dir_path)
         .env("CELL_HEARTBEAT_INTERVAL", "2")
         .env("CELL_GRACE_PERIOD_SECONDS", "5")
         // Use a shorter staleness threshold for tests to detect failures faster
@@ -253,11 +180,11 @@ impl TestEnv {
 
     self.servers.push(server);
     self.ports.push(port);
-    self.server_data_dirs.push(temp_data_dir); // Store the TempDir
+    self.server_data_dirs.push(temp_dir); // Store the TempDir
 
     println!(
-      "Started server on port {} with ADVERTISE_ADDR={}, S3 mesh, DATA_DIR={}",
-      port, advertise_addr, temp_data_dir_path_str
+      "Started server on port {} with ADVERTISE_ADDR={}, S3 mesh, DATA_DIR={:?}",
+      port, advertise_addr, data_dir_path
     );
   }
 
@@ -306,6 +233,106 @@ impl Drop for TestEnv {
       lock.remove(&(port + 1));
     }
   }
+}
+
+/// Prepares a temporary directory with the correct project structure
+/// to ensure relative imports like "../../../jsr-cells/mod.ts" work correctly
+///
+/// The structure created is:
+/// temp_dir/
+/// ├── jsr-cells/  (copied from CARGO_MANIFEST_DIR/jsr-cells)
+/// └── data/       (copied from CARGO_MANIFEST_DIR/data, skipping sqlite directories)
+///
+/// Returns the temp directory and the path to the data directory within it
+fn prepare_test_directory() -> io::Result<(TempDir, PathBuf)> {
+  // Create a new temporary directory
+  let temp_dir =
+    TempDir::new().expect("Failed to create temp dir for test environment");
+
+  let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    .canonicalize()
+    .expect("Failed to find project root directory");
+
+  // Create paths for source and destination directories
+  let src_data_path = project_root.join("data");
+  let src_jsr_cells_path = project_root.join("jsr-cells");
+
+  let dst_data_path = temp_dir.path().join("data");
+  let dst_jsr_cells_path = temp_dir.path().join("jsr-cells");
+
+  // Verify source directories exist
+  if !src_data_path.exists() {
+    panic!("Source data directory not found at {:?}", src_data_path);
+  }
+
+  if !src_jsr_cells_path.exists() {
+    panic!(
+      "Source jsr-cells directory not found at {:?}",
+      src_jsr_cells_path
+    );
+  }
+
+  // Create data directory in temp dir
+  fs::create_dir_all(&dst_data_path)?;
+
+  // Copy jsr-cells directory (needed for relative imports)
+  copy_directory_recursive(&src_jsr_cells_path, &dst_jsr_cells_path)?;
+
+  // Copy data directory, skipping sqlite directories
+  copy_directory_without_sqlite(&src_data_path, &dst_data_path)?;
+
+  Ok((temp_dir, dst_data_path))
+}
+
+/// Recursively copies a directory and all its contents
+fn copy_directory_recursive(
+  src: impl AsRef<Path>,
+  dst: impl AsRef<Path>,
+) -> io::Result<()> {
+  fs::create_dir_all(&dst)?;
+
+  for entry in fs::read_dir(src)? {
+    let entry = entry?;
+    let file_name = entry.file_name();
+    let path = entry.path();
+
+    let ty = entry.file_type()?;
+    if ty.is_dir() {
+      copy_directory_recursive(&path, dst.as_ref().join(&file_name))?;
+    } else {
+      fs::copy(&path, dst.as_ref().join(&file_name))?;
+    }
+  }
+
+  Ok(())
+}
+
+/// Recursively copies a directory and all its contents, skipping sqlite directories
+fn copy_directory_without_sqlite(
+  src: impl AsRef<Path>,
+  dst: impl AsRef<Path>,
+) -> io::Result<()> {
+  fs::create_dir_all(&dst)?;
+
+  for entry in fs::read_dir(src)? {
+    let entry = entry?;
+    let file_name = entry.file_name();
+    let path = entry.path();
+
+    // Skip sqlite directories
+    if path.ends_with("sqlite") || path.to_string_lossy().contains("/sqlite/") {
+      continue;
+    }
+
+    let ty = entry.file_type()?;
+    if ty.is_dir() {
+      copy_directory_without_sqlite(&path, dst.as_ref().join(&file_name))?;
+    } else {
+      fs::copy(&path, dst.as_ref().join(&file_name))?;
+    }
+  }
+
+  Ok(())
 }
 
 /// Example of using the port allocation mechanism to get non-conflicting ports
