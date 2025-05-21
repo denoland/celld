@@ -1,4 +1,4 @@
-import { cell } from "jsr:@ry/cells";
+import { cell } from "../../../jsr-cells/mod.ts";
 
 console.log(`[${cell.id}] Initializing environment test server...`);
 
