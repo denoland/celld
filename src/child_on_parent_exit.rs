@@ -2,6 +2,7 @@ use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::waitpid;
 use nix::unistd::Pid;
 use std::io;
+use std::io::Error;
 use std::os::fd::OwnedFd;
 use std::process::Command;
 
@@ -18,8 +19,10 @@ use std::os::unix::process::CommandExt;
 /// Windows is not supported.
 #[derive(Debug)]
 pub struct ChildOnParentExit {
-  watcher_pid: Pid,
+  actual_child_pid: Pid, // PID of the 'real' child process (e.g., Deno)
   death_pipe_w: Option<OwnedFd>,
+  #[cfg(all(unix, not(target_os = "linux")))]
+  watcher_pid: Pid,
 }
 
 impl ChildOnParentExit {
@@ -31,14 +34,14 @@ impl ChildOnParentExit {
       use nix::sys::prctl::set_pdeathsig;
       unsafe {
         cmd.pre_exec(|| {
-          set_pdeathsig(Some(Signal::SIGTERM)).map_err(io::Error::other)?;
+          set_pdeathsig(Some(Signal::SIGTERM)).map_err(Error::other)?;
           Ok(())
         });
       }
 
       let child = cmd.spawn()?;
       Ok(ChildOnParentExit {
-        watcher_pid: Pid::from_raw(child.id() as i32),
+        actual_child_pid: Pid::from_raw(child.id() as i32),
         death_pipe_w: None,
       })
     }
@@ -46,33 +49,73 @@ impl ChildOnParentExit {
     #[cfg(all(unix, not(target_os = "linux")))]
     {
       use nix::fcntl::{fcntl, FcntlArg, FdFlag};
-      use nix::unistd::{fork, pipe, read, ForkResult};
+      use nix::unistd::{close, fork, pipe, read, write, ForkResult};
 
-      // create a pipe; parent holds w, watcher holds r
-      let (r, w) = pipe().map_err(io::Error::other)?;
-      let flags = FdFlag::FD_CLOEXEC;
-      fcntl(&r, FcntlArg::F_SETFD(flags)).map_err(io::Error::other)?;
+      // Pipe for parent death detection (main process -> watcher)
+      let (death_pipe_r, death_pipe_w) = pipe().map_err(Error::other)?;
+      // Pipe for watcher to send real child's PID to parent (watcher -> main celld process)
+      let (pid_exchange_r, pid_exchange_w) = pipe().map_err(Error::other)?;
 
-      match unsafe { fork().map_err(io::Error::other)? } {
-        ForkResult::Parent { child } => {
-          // proxy parent: close read, keep write
-          drop(r); // Close read end
-          Ok(ChildOnParentExit {
-            watcher_pid: child,
-            death_pipe_w: Some(w),
-          })
+      // Set CLOEXEC on all pipe ends that will be held by ChildOnParentExit or passed around
+      fcntl(&death_pipe_r, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
+      fcntl(&death_pipe_w, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
+      fcntl(&pid_exchange_r, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
+      fcntl(&pid_exchange_w, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
+
+      match unsafe { fork()? } {
+        ForkResult::Parent {
+          child: watcher_process_pid,
+        } => {
+          close(death_pipe_r)?;
+          close(pid_exchange_w)?;
+
+          let mut pid_buf = [0u8; 4]; // Buffer for i32 PID
+          match read(&pid_exchange_r, &mut pid_buf) {
+            Ok(n) if n == pid_buf.len() => {
+              // Successfully read the PID
+              let real_child_pid_val = i32::from_ne_bytes(pid_buf);
+              close(pid_exchange_r)?; // Close read end after use
+
+              Ok(ChildOnParentExit {
+                actual_child_pid: Pid::from_raw(real_child_pid_val),
+                watcher_pid: watcher_process_pid,
+                death_pipe_w: Some(death_pipe_w),
+              })
+            }
+            Ok(_) => Err(Error::new(
+              io::ErrorKind::Other,
+              "Failed to read full PID from watcher",
+            )),
+            Err(e) => Err(Error::other(e)),
+          }
         }
         ForkResult::Child => {
-          // watcher child: close write, spawn real child
-          drop(w); // Close write end
+          // This is the watcher process
+          close(death_pipe_w)?;
+          close(pid_exchange_r)?;
+
           let mut real_child = cmd.spawn()?;
+          let real_child_pid_val = real_child.id() as i32;
 
-          // block until parent exits
+          // Send child pid to parent
+          match write(&pid_exchange_w, &real_child_pid_val.to_ne_bytes()) {
+            Ok(n) if n == 4 => {
+              // Successfully wrote PID
+            }
+            _ => {
+              eprintln!(
+                "ChildOnParentExit: Watcher failed to send PID to parent"
+              );
+              // Handle error or partial write
+              let _ = kill(Pid::from_raw(real_child_pid_val), Signal::SIGKILL);
+              real_child.wait().ok();
+              std::process::exit(1); // Watcher exits with error
+            }
+          }
+          close(pid_exchange_w)?; // Close write end after sending PID
+
           let mut buf = [0u8; 1];
-          let _ = read(&r, &mut buf);
-
-          // parent gone → kill real child
-          let _ = kill(Pid::from_raw(real_child.id() as i32), Signal::SIGINT);
+          let _ = read(&death_pipe_r, &mut buf); // Blocks until pipe is closed or error
           let _ = real_child.wait();
           std::process::exit(0);
         }
@@ -82,12 +125,16 @@ impl ChildOnParentExit {
 
   /// Send SIGTERM to the watcher (and thus the real child on macOS).
   pub fn kill(&self, sig: Signal) {
-    let _ = kill(self.watcher_pid, sig);
+    let _ = kill(self.actual_child_pid, sig);
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+      let _ = kill(self.watcher_pid, Signal::SIGKILL);
+    }
   }
 
   /// Get the PID of the child process
   pub fn pid(&self) -> Option<i32> {
-    Some(self.watcher_pid.as_raw())
+    Some(self.actual_child_pid.as_raw())
   }
 
   /// Close the pipe (triggering kill on macOS) and wait for the watcher.
@@ -96,7 +143,11 @@ impl ChildOnParentExit {
     if let Some(w) = self.death_pipe_w.take() {
       drop(w); // Close the pipe by dropping OwnedFd
     }
-    let _ = waitpid(self.watcher_pid, None);
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+      let _ = waitpid(self.watcher_pid, None);
+    }
+    let _ = waitpid(self.actual_child_pid, None);
   }
 }
 
@@ -105,7 +156,11 @@ impl Drop for ChildOnParentExit {
     if let Some(w) = self.death_pipe_w.take() {
       drop(w); // Close the pipe by dropping OwnedFd
     }
-    let _ = waitpid(self.watcher_pid, None);
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+      let _ = waitpid(self.watcher_pid, None);
+    }
+    let _ = waitpid(self.actual_child_pid, None);
   }
 }
 
