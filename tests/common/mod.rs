@@ -151,9 +151,7 @@ impl TestEnv {
         .env("RUST_LOG", "info")
         .env("ADVERTISE_ADDR", &advertise_addr)
         .env("INTERNAL_LISTEN_ADDR", &internal_addr)
-        // Set the current working directory to the temp dir so relative imports work
         .current_dir(temp_dir.path())
-        // Point DATA to the data subdirectory
         .env("DATA", &data_dir_path)
         .env("CELL_HEARTBEAT_INTERVAL", "2")
         .env("CELL_GRACE_PERIOD_SECONDS", "5")
@@ -276,35 +274,14 @@ fn prepare_test_directory() -> io::Result<(TempDir, PathBuf)> {
   fs::create_dir_all(&dst_data_path)?;
 
   // Copy jsr-cells directory (needed for relative imports)
-  copy_directory_recursive(&src_jsr_cells_path, &dst_jsr_cells_path)?;
+  // Note jsr-cells does not contain sqlite directories, but we can reuse the
+  // same function.
+  copy_directory_without_sqlite(&src_jsr_cells_path, &dst_jsr_cells_path)?;
 
   // Copy data directory, skipping sqlite directories
   copy_directory_without_sqlite(&src_data_path, &dst_data_path)?;
 
   Ok((temp_dir, dst_data_path))
-}
-
-/// Recursively copies a directory and all its contents
-fn copy_directory_recursive(
-  src: impl AsRef<Path>,
-  dst: impl AsRef<Path>,
-) -> io::Result<()> {
-  fs::create_dir_all(&dst)?;
-
-  for entry in fs::read_dir(src)? {
-    let entry = entry?;
-    let file_name = entry.file_name();
-    let path = entry.path();
-
-    let ty = entry.file_type()?;
-    if ty.is_dir() {
-      copy_directory_recursive(&path, dst.as_ref().join(&file_name))?;
-    } else {
-      fs::copy(&path, dst.as_ref().join(&file_name))?;
-    }
-  }
-
-  Ok(())
 }
 
 /// Recursively copies a directory and all its contents, skipping sqlite directories
