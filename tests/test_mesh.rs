@@ -777,8 +777,11 @@ async fn test_restore_coordination() {
   assert_eq!(content_a2.trim(), "2");
 
   // Verify SQLite database exists
-  let db_path = format!("data/basic-db.localhost/sqlite/{}.db", test_cell_id);
-  assert!(std::path::Path::new(&db_path).exists());
+  let db_path = test_env.server_data_dirs[0].path().join(format!(
+    "data/basic-db.localhost/sqlite/{}.db",
+    test_cell_id
+  ));
+  assert!(db_path.exists());
 
   println!("Waiting for Litestream to replicate data to S3...");
   sleep(Duration::from_secs(5)).await;
@@ -786,13 +789,6 @@ async fn test_restore_coordination() {
   // Stop Node A gracefully
   println!("Stopping Node A...");
   test_env.graceful_shutdown_cell_instance(0);
-
-  // Remove the local database file to force restore from S3
-  std::fs::remove_file(&db_path).unwrap();
-
-  // Also remove any WAL or SHM files that might exist
-  let _ = std::fs::remove_file(format!("{}-wal", db_path));
-  let _ = std::fs::remove_file(format!("{}-shm", db_path));
 
   // Rest of the test remains unchanged
   // Spawn two more nodes with auto-allocated ports
