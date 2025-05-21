@@ -119,11 +119,7 @@ impl ProxyHttp for InternalAPI {
         .insert_header(http::header::CONTENT_TYPE, "application/json")
         .unwrap();
 
-      session.set_keepalive(None);
-      session.write_response_header(Box::new(resp), false).await?;
-      session
-        .write_response_body(Some(response.into()), true)
-        .await?;
+      write_response_close_conn(session, resp, response.into()).await?;
       return Ok(true);
     }
 
@@ -138,11 +134,7 @@ impl ProxyHttp for InternalAPI {
           pingora::http::ResponseHeader::build(StatusCode::BAD_REQUEST, None)
             .unwrap();
 
-        session.set_keepalive(None);
-        session.write_response_header(Box::new(resp), false).await?;
-        session
-          .write_response_body(Some("Bad Request".into()), true)
-          .await?;
+        write_response_close_conn(session, resp, "Bad Request".into()).await?;
         return Ok(true);
       }
 
@@ -159,11 +151,7 @@ impl ProxyHttp for InternalAPI {
           pingora::http::ResponseHeader::build(StatusCode::BAD_REQUEST, None)
             .unwrap();
 
-        session.set_keepalive(None);
-        session.write_response_header(Box::new(resp), false).await?;
-        session
-          .write_response_body(Some("Bad Request".into()), true)
-          .await?;
+        write_response_close_conn(session, resp, "Bad Request".into()).await?;
         return Ok(true);
       }
 
@@ -192,11 +180,7 @@ impl ProxyHttp for InternalAPI {
       resp
         .insert_header(http::header::CONTENT_TYPE, "application/json")
         .unwrap();
-      session.set_keepalive(None);
-      session.write_response_header(Box::new(resp), false).await?;
-      session
-        .write_response_body(Some(response.into()), true)
-        .await?;
+      write_response_close_conn(session, resp, response.into()).await?;
       return Ok(true);
     }
 
@@ -213,8 +197,8 @@ impl ProxyHttp for InternalAPI {
                 Some(0),
               )
               .unwrap();
-              session.write_response_header(Box::new(resp), true).await?;
               session.set_keepalive(None);
+              session.write_response_header(Box::new(resp), true).await?;
               return Ok(true);
             }
           }
@@ -226,8 +210,8 @@ impl ProxyHttp for InternalAPI {
             StatusCode::INTERNAL_SERVER_ERROR,
             Some(0),
           ).unwrap();
-          session.write_response_header(Box::new(resp), true).await?;
           session.set_keepalive(None);
+          session.write_response_header(Box::new(resp), true).await?;
           return Ok(true);
         }
       };
@@ -323,11 +307,7 @@ impl ProxyHttp for InternalAPI {
       .insert_header(http::header::CONTENT_TYPE, "text/plain")
       .unwrap();
 
-    session.set_keepalive(None);
-    session.write_response_header(Box::new(resp), false).await?;
-    session
-      .write_response_body(Some(response.into()), true)
-      .await?;
+    write_response_close_conn(session, resp, response.into()).await?;
 
     Ok(true)
   }
@@ -344,6 +324,22 @@ impl ProxyHttp for InternalAPI {
       "Internal control plane does not support proxying",
     ))
   }
+}
+
+/// Helper function to write a response and close the connection.
+/// Note: we believe here and elsewhere that set_keepalive(None) should come before
+/// write_response_header.
+async fn write_response_close_conn(
+  session: &mut Session,
+  header: pingora::http::ResponseHeader,
+  body: bytes::Bytes,
+) -> pingora::Result<()> {
+  session.set_keepalive(None);
+  session
+    .write_response_header(Box::new(header), false)
+    .await?;
+  session.write_response_body(Some(body), true).await?;
+  Ok(())
 }
 
 #[async_trait::async_trait]
@@ -424,11 +420,7 @@ impl ProxyHttp for Proxy {
         .insert_header(http::header::CONTENT_TYPE, "text/plain")
         .unwrap();
 
-      session.write_response_header(Box::new(resp), false).await?;
-      session.set_keepalive(None);
-      session
-        .write_response_body(Some(response.into()), true)
-        .await?;
+      write_response_close_conn(session, resp, response.into()).await?;
       return Ok(true);
     }
 
@@ -446,11 +438,7 @@ impl ProxyHttp for Proxy {
         .insert_header(http::header::CONTENT_TYPE, "text/plain")
         .unwrap();
 
-      session.set_keepalive(None);
-      session.write_response_header(Box::new(resp), false).await?;
-      session
-        .write_response_body(Some(response.into()), true)
-        .await?;
+      write_response_close_conn(session, resp, response.into()).await?;
       return Ok(true);
     }
 
