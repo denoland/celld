@@ -653,12 +653,12 @@ fn spawn_deno_process(
 
   cmd.arg(main_script);
 
-  // Disable this for debugging. Eventually we'll want to collect Deno stdio
-  // output into an otel stream.
-  #[cfg(not(debug_assertions))]
-  cmd
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null());
+  // Eventually we'll want to collect Deno stdio output into an otel stream.
+  if std::env::var_os("CELL_DENO_OUTPUT").is_none() {
+    cmd
+      .stdout(std::process::Stdio::null())
+      .stderr(std::process::Stdio::null());
+  }
 
   // Spawn with ChildOnParentExit for automatic termination when parent exits
   ChildOnParentExit::spawn(cmd).with_context(|| {
