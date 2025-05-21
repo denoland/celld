@@ -777,7 +777,7 @@ async fn test_restore_coordination() {
   assert_eq!(content_a2.trim(), "2");
 
   // Verify SQLite database exists
-  let db_path = test_env.server_data_dirs[0].path().join(format!(
+  let db_path = test_env.server_dirs[0].path().join(format!(
     "data/basic-db.localhost/sqlite/{}.db",
     test_cell_id
   ));

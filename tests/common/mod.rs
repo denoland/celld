@@ -34,7 +34,7 @@ pub struct TestEnv {
   /// Celld server ports (internal ports)
   pub internal_ports: Vec<u16>,
   /// Temporary directories for each server instance's data
-  pub server_data_dirs: Vec<TempDir>,
+  pub server_dirs: Vec<TempDir>,
 }
 
 impl TestEnv {
@@ -95,7 +95,7 @@ impl TestEnv {
       test_id: test_id.to_string(),
       public_ports: public_ports.clone(),
       internal_ports: internal_ports.clone(),
-      server_data_dirs: Vec::new(),
+      server_dirs: Vec::new(),
     };
 
     for &port in ports.iter() {
@@ -118,7 +118,7 @@ impl TestEnv {
   pub fn kill_cell_instance(&mut self, index: usize) {
     let mut server = self.servers.remove(index);
     let _ = self.ports.remove(index);
-    let _data_dir = self.server_data_dirs.remove(index); // Remove and drop TempDir
+    let _tmp_dir = self.server_dirs.remove(index); // Remove and drop TempDir
 
     let pid = Pid::from_raw(server.child().id() as i32);
     // Use SIGKILL to avoid long graceful shutdown times
@@ -129,7 +129,7 @@ impl TestEnv {
   pub fn graceful_shutdown_cell_instance(&mut self, index: usize) {
     let mut server = self.servers.remove(index);
     let _ = self.ports.remove(index);
-    let _data_dir = self.server_data_dirs.remove(index); // Remove and drop TempDir
+    let _tmp_dir = self.server_dirs.remove(index); // Remove and drop TempDir
 
     let pid = Pid::from_raw(server.child().id() as i32);
     kill(pid, Signal::SIGTERM).unwrap();
@@ -182,7 +182,7 @@ impl TestEnv {
 
     self.servers.push(server);
     self.ports.push(port);
-    self.server_data_dirs.push(temp_dir); // Store the TempDir
+    self.server_dirs.push(temp_dir); // Store the TempDir
 
     println!(
       "Started server on port {} with ADVERTISE_ADDR={}, S3 mesh, DATA_DIR={:?}",
