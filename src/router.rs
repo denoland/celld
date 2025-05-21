@@ -192,12 +192,11 @@ impl ProxyHttp for InternalAPI {
       resp
         .insert_header(http::header::CONTENT_TYPE, "application/json")
         .unwrap();
-
+      session.set_keepalive(None);
       session.write_response_header(Box::new(resp), false).await?;
       session
         .write_response_body(Some(response.into()), true)
         .await?;
-      session.set_keepalive(None);
       return Ok(true);
     }
 
