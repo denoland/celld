@@ -7,7 +7,7 @@ use std::{
 
 /// A wrapper around [`Child`] that captures its stdout and stderr and emits them when the test fails.
 pub struct CapturedSubprocess {
-  program: String,
+  process_name: String,
   child: Child,
   captured_stdout: Arc<Mutex<String>>,
   captured_stderr: Arc<Mutex<String>>,
@@ -16,9 +16,11 @@ pub struct CapturedSubprocess {
 }
 
 impl CapturedSubprocess {
-  pub fn new(mut cmd: Command, setup_cmd: impl FnOnce(&mut Command)) -> Self {
-    let program = cmd.get_program().to_string_lossy().to_string();
-
+  pub fn new(
+    process_name: String,
+    mut cmd: Command,
+    setup_cmd: impl FnOnce(&mut Command),
+  ) -> Self {
     setup_cmd(&mut cmd);
     cmd
       .stdout(std::process::Stdio::piped())
@@ -56,7 +58,7 @@ impl CapturedSubprocess {
     });
 
     Self {
-      program,
+      process_name,
       child,
       captured_stdout,
       captured_stderr,
@@ -91,12 +93,12 @@ impl Drop for CapturedSubprocess {
     if std::thread::panicking() {
       println!(
         "---- {} stdout ----\n{}",
-        self.program,
+        self.process_name,
         self.captured_stdout.lock().unwrap()
       );
       eprintln!(
         "---- {} stderr ----\n{}",
-        self.program,
+        self.process_name,
         self.captured_stderr.lock().unwrap()
       );
     }

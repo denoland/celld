@@ -74,6 +74,8 @@ impl ProxyHttp for InternalAPI {
     // Get the path
     let path = req_header.uri.path();
 
+    info!(path, method = %req_header.method, "Internal API request received");
+
     // Handle internal endpoints
     if path == "/_internal/mesh/peers" {
       let local_peer = self.node_state.peer_manager.get_local_peer();
@@ -117,60 +119,69 @@ impl ProxyHttp for InternalAPI {
         .insert_header(http::header::CONTENT_TYPE, "application/json")
         .unwrap();
 
-      session.write_response_header(Box::new(resp), false).await?;
-      session
-        .write_response_body(Some(response.into()), true)
-        .await?;
-      session.set_keepalive(None);
+      write_response_close_conn(session, resp, response.into()).await?;
       return Ok(true);
     }
 
     // Handle the owner endpoint
     if let Some(path_part) = path.strip_prefix("/_internal/mesh/owner/") {
-      if !path_part.is_empty() {
-        // Extract tenant and cell_id from the path
-        // Expected format: /_internal/mesh/owner/{tenant}/{cell_id}
-        let parts: Vec<&str> = path_part.split('/').collect();
-        if parts.len() == 2 {
-          let tenant = parts[0];
-          let cell_id = parts[1];
-
-          let owner =
-            self.node_state.peer_manager.get_owner_peer(tenant, cell_id);
-          let is_local =
-            self.node_state.peer_manager.is_local_owner(tenant, cell_id);
-
-          // Return a simple JSON response with owner information
-          let response = serde_json::to_string(&serde_json::json!({
-            "tenant": tenant,
-            "cell_id": cell_id,
-            "owner": owner,
-            "is_local": is_local
-          }))
-          .unwrap();
-
-          let content_length = response.len();
-          let mut resp =
-            pingora::http::ResponseHeader::build(StatusCode::OK, Some(2))
-              .unwrap();
-          resp
-            .insert_header(
-              http::header::CONTENT_LENGTH,
-              content_length.to_string(),
-            )
-            .unwrap();
-          resp
-            .insert_header(http::header::CONTENT_TYPE, "application/json")
+      if path_part.is_empty() {
+        error!(
+          path,
+          "/_internal/mesh/owner should be followed by `{{tenant}}/{{cell_id}}`"
+        );
+        let resp =
+          pingora::http::ResponseHeader::build(StatusCode::BAD_REQUEST, None)
             .unwrap();
 
-          session.write_response_header(Box::new(resp), false).await?;
-          session
-            .write_response_body(Some(response.into()), true)
-            .await?;
-          session.set_keepalive(None);
-          return Ok(true);
-        }
+        write_response_close_conn(session, resp, "Bad Request".into()).await?;
+        return Ok(true);
       }
+
+      // Extract tenant and cell_id from the path
+      // Expected format: /_internal/mesh/owner/{tenant}/{cell_id}
+      let parts: Vec<&str> = path_part.split('/').collect();
+
+      if parts.len() != 2 {
+        error!(
+          path,
+          "/_internal/mesh/owner should be followed by `{{tenant}}/{{cell_id}}`"
+        );
+        let resp =
+          pingora::http::ResponseHeader::build(StatusCode::BAD_REQUEST, None)
+            .unwrap();
+
+        write_response_close_conn(session, resp, "Bad Request".into()).await?;
+        return Ok(true);
+      }
+
+      let tenant = parts[0];
+      let cell_id = parts[1];
+
+      let owner = self.node_state.peer_manager.get_owner_peer(tenant, cell_id);
+      let is_local =
+        self.node_state.peer_manager.is_local_owner(tenant, cell_id);
+
+      // Return a simple JSON response with owner information
+      let response = serde_json::to_string(&serde_json::json!({
+        "tenant": tenant,
+        "cell_id": cell_id,
+        "owner": owner,
+        "is_local": is_local
+      }))
+      .unwrap();
+
+      let content_length = response.len();
+      let mut resp =
+        pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
+      resp
+        .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
+        .unwrap();
+      resp
+        .insert_header(http::header::CONTENT_TYPE, "application/json")
+        .unwrap();
+      write_response_close_conn(session, resp, response.into()).await?;
+      return Ok(true);
     }
 
     // Handle the alarms endpoint
@@ -186,8 +197,8 @@ impl ProxyHttp for InternalAPI {
                 Some(0),
               )
               .unwrap();
-              session.write_response_header(Box::new(resp), true).await?;
               session.set_keepalive(None);
+              session.write_response_header(Box::new(resp), true).await?;
               return Ok(true);
             }
           }
@@ -199,8 +210,8 @@ impl ProxyHttp for InternalAPI {
             StatusCode::INTERNAL_SERVER_ERROR,
             Some(0),
           ).unwrap();
-          session.write_response_header(Box::new(resp), true).await?;
           session.set_keepalive(None);
+          session.write_response_header(Box::new(resp), true).await?;
           return Ok(true);
         }
       };
@@ -219,9 +230,9 @@ impl ProxyHttp for InternalAPI {
           session
             .write_response_header(Box::new(parts.into()), false)
             .await?;
+          session.set_keepalive(None);
           let body = body.collect().await.unwrap().to_bytes();
           session.write_response_body(Some(body), true).await?;
-          session.set_keepalive(None);
           return Ok(true);
         }
         Err(e) => {
@@ -231,8 +242,8 @@ impl ProxyHttp for InternalAPI {
             Some(0),
           )
           .unwrap();
-          session.write_response_header(Box::new(resp), true).await?;
           session.set_keepalive(None);
+          session.write_response_header(Box::new(resp), true).await?;
           return Ok(true);
         }
       }
@@ -249,8 +260,8 @@ impl ProxyHttp for InternalAPI {
           Some(0),
         )
         .unwrap();
-        session.write_response_header(Box::new(resp), true).await?;
         session.set_keepalive(None);
+        session.write_response_header(Box::new(resp), true).await?;
         return Ok(true);
       };
       let dispatched_alarm: Alarm = match serde_json::from_slice(&req_body) {
@@ -262,8 +273,8 @@ impl ProxyHttp for InternalAPI {
             Some(0),
           )
           .unwrap();
-          session.write_response_header(Box::new(resp), true).await?;
           session.set_keepalive(None);
+          session.write_response_header(Box::new(resp), true).await?;
           return Ok(true);
         }
       };
@@ -278,8 +289,8 @@ impl ProxyHttp for InternalAPI {
           }
         };
       let resp = pingora::http::ResponseHeader::build(status, Some(0)).unwrap();
-      session.write_response_header(Box::new(resp), true).await?;
       session.set_keepalive(None);
+      session.write_response_header(Box::new(resp), true).await?;
       return Ok(true);
     }
 
@@ -296,11 +307,7 @@ impl ProxyHttp for InternalAPI {
       .insert_header(http::header::CONTENT_TYPE, "text/plain")
       .unwrap();
 
-    session.write_response_header(Box::new(resp), false).await?;
-    session
-      .write_response_body(Some(response.into()), true)
-      .await?;
-    session.set_keepalive(None);
+    write_response_close_conn(session, resp, response.into()).await?;
 
     Ok(true)
   }
@@ -317,6 +324,22 @@ impl ProxyHttp for InternalAPI {
       "Internal control plane does not support proxying",
     ))
   }
+}
+
+/// Helper function to write a response and close the connection.
+/// Note: we believe here and elsewhere that set_keepalive(None) should come before
+/// write_response_header.
+async fn write_response_close_conn(
+  session: &mut Session,
+  header: pingora::http::ResponseHeader,
+  body: bytes::Bytes,
+) -> pingora::Result<()> {
+  session.set_keepalive(None);
+  session
+    .write_response_header(Box::new(header), false)
+    .await?;
+  session.write_response_body(Some(body), true).await?;
+  Ok(())
 }
 
 #[async_trait::async_trait]
@@ -397,11 +420,7 @@ impl ProxyHttp for Proxy {
         .insert_header(http::header::CONTENT_TYPE, "text/plain")
         .unwrap();
 
-      session.write_response_header(Box::new(resp), false).await?;
-      session
-        .write_response_body(Some(response.into()), true)
-        .await?;
-      session.set_keepalive(None);
+      write_response_close_conn(session, resp, response.into()).await?;
       return Ok(true);
     }
 
@@ -419,11 +438,7 @@ impl ProxyHttp for Proxy {
         .insert_header(http::header::CONTENT_TYPE, "text/plain")
         .unwrap();
 
-      session.write_response_header(Box::new(resp), false).await?;
-      session
-        .write_response_body(Some(response.into()), true)
-        .await?;
-      session.set_keepalive(None);
+      write_response_close_conn(session, resp, response.into()).await?;
       return Ok(true);
     }
 
@@ -506,6 +521,7 @@ impl ProxyHttp for Proxy {
       .unwrap();
 
     let end_of_stream = req_header.method == http::Method::HEAD;
+    session.set_keepalive(None);
     session
       .write_response_header(Box::new(resp), end_of_stream)
       .await?;
@@ -514,7 +530,6 @@ impl ProxyHttp for Proxy {
       session.write_response_body(Some(file.into()), true).await?;
     }
 
-    session.set_keepalive(None);
     Ok(true)
   }
 
