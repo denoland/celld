@@ -6,6 +6,7 @@ export class Cell {
   id: string;
   ctlClient: Deno.HttpClient;
   sockets: Map<string, WebSocket>;
+  private server: Deno.HttpServer | null = null;
   private dbInstance: DatabaseSync | null = null;
   private onRequestCallback:
     | ((req: Request) => Promise<Response> | Response | void)
@@ -141,7 +142,7 @@ export class Cell {
   }
 
   private setupServer(): void {
-    Deno.serve(async (req) => {
+    this.server = Deno.serve(async (req) => {
       // Handle WebSocket connections
       if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
         const { response, socket } = Deno.upgradeWebSocket(req);
@@ -205,6 +206,33 @@ export class Cell {
 
       return new Response("Not Found", { status: 404 });
     });
+
+    // Handle SIGTERM for graceful shutdown
+    Deno.addSignalListener("SIGTERM", () => {
+      console.log("SIGTERM received, shutting down gracefully...");
+      cell.shutdown();
+    });
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.server) {
+      await this.server.shutdown();
+      this.server = null;
+    }
+
+    // Close all WebSocket connections
+    for (const socket of this.sockets.values()) {
+      socket.close(1000, "Server shutting down");
+    }
+    this.sockets.clear();
+
+    // Close database connection if open
+    if (this.dbInstance) {
+      this.dbInstance.close();
+      this.dbInstance = null;
+    }
+
+    console.log("Shutdown complete");
   }
 }
 
