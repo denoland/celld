@@ -74,6 +74,8 @@ impl ProxyHttp for InternalAPI {
     // Get the path
     let path = req_header.uri.path();
 
+    info!(path, method = %req_header.method, "Internal API request received");
+
     // Handle internal endpoints
     if path == "/_internal/mesh/peers" {
       let local_peer = self.node_state.peer_manager.get_local_peer();
@@ -127,50 +129,76 @@ impl ProxyHttp for InternalAPI {
 
     // Handle the owner endpoint
     if let Some(path_part) = path.strip_prefix("/_internal/mesh/owner/") {
-      if !path_part.is_empty() {
-        // Extract tenant and cell_id from the path
-        // Expected format: /_internal/mesh/owner/{tenant}/{cell_id}
-        let parts: Vec<&str> = path_part.split('/').collect();
-        if parts.len() == 2 {
-          let tenant = parts[0];
-          let cell_id = parts[1];
-
-          let owner =
-            self.node_state.peer_manager.get_owner_peer(tenant, cell_id);
-          let is_local =
-            self.node_state.peer_manager.is_local_owner(tenant, cell_id);
-
-          // Return a simple JSON response with owner information
-          let response = serde_json::to_string(&serde_json::json!({
-            "tenant": tenant,
-            "cell_id": cell_id,
-            "owner": owner,
-            "is_local": is_local
-          }))
-          .unwrap();
-
-          let content_length = response.len();
-          let mut resp =
-            pingora::http::ResponseHeader::build(StatusCode::OK, Some(2))
-              .unwrap();
-          resp
-            .insert_header(
-              http::header::CONTENT_LENGTH,
-              content_length.to_string(),
-            )
-            .unwrap();
-          resp
-            .insert_header(http::header::CONTENT_TYPE, "application/json")
+      if path_part.is_empty() {
+        error!(
+          path,
+          "/_internal/mesh/owner should be followed by `{{tenant}}/{{cell_id}}`"
+        );
+        let resp =
+          pingora::http::ResponseHeader::build(StatusCode::BAD_REQUEST, None)
             .unwrap();
 
-          session.write_response_header(Box::new(resp), false).await?;
-          session
-            .write_response_body(Some(response.into()), true)
-            .await?;
-          session.set_keepalive(None);
-          return Ok(true);
-        }
+        session.write_response_header(Box::new(resp), false).await?;
+        session
+          .write_response_body(Some("Bad Request".into()), true)
+          .await?;
+        session.set_keepalive(None);
+        return Ok(true);
       }
+
+      // Extract tenant and cell_id from the path
+      // Expected format: /_internal/mesh/owner/{tenant}/{cell_id}
+      let parts: Vec<&str> = path_part.split('/').collect();
+
+      if parts.len() != 2 {
+        error!(
+          path,
+          "/_internal/mesh/owner should be followed by `{{tenant}}/{{cell_id}}`"
+        );
+        let resp =
+          pingora::http::ResponseHeader::build(StatusCode::BAD_REQUEST, None)
+            .unwrap();
+
+        session.write_response_header(Box::new(resp), false).await?;
+        session
+          .write_response_body(Some("Bad Request".into()), true)
+          .await?;
+        session.set_keepalive(None);
+        return Ok(true);
+      }
+
+      let tenant = parts[0];
+      let cell_id = parts[1];
+
+      let owner = self.node_state.peer_manager.get_owner_peer(tenant, cell_id);
+      let is_local =
+        self.node_state.peer_manager.is_local_owner(tenant, cell_id);
+
+      // Return a simple JSON response with owner information
+      let response = serde_json::to_string(&serde_json::json!({
+        "tenant": tenant,
+        "cell_id": cell_id,
+        "owner": owner,
+        "is_local": is_local
+      }))
+      .unwrap();
+
+      let content_length = response.len();
+      let mut resp =
+        pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
+      resp
+        .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
+        .unwrap();
+      resp
+        .insert_header(http::header::CONTENT_TYPE, "application/json")
+        .unwrap();
+
+      session.write_response_header(Box::new(resp), false).await?;
+      session
+        .write_response_body(Some(response.into()), true)
+        .await?;
+      session.set_keepalive(None);
+      return Ok(true);
     }
 
     // Handle the alarms endpoint
