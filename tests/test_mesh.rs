@@ -882,7 +882,6 @@ async fn test_restore_single() {
   let port = test_env.public_ports[0];
 
   let test_cell_id = "test-restore";
-  clean_cell_workspace(test_cell_id, &test_env);
 
   let url = format!("http://basic-db.localhost:{}/cell/{}", port, test_cell_id);
   let client = reqwest::Client::builder().build().unwrap();
@@ -896,9 +895,6 @@ async fn test_restore_single() {
 
   println!("Shutting down celld instance...");
   test_env.graceful_shutdown_cell_instance(0);
-
-  println!("Removing local database files...");
-  clean_cell_workspace(test_cell_id, &test_env);
 
   let new_port = TestEnv::allocate_ports(7620, 1, 2)[0];
   test_env.spawn_cell_instance(new_port);
@@ -921,36 +917,6 @@ async fn test_restore_single() {
   assert_eq!(response3.status(), 200);
   let content3 = response3.text().await.unwrap();
   assert_eq!(content3.trim(), "3", "Third request should return 3");
-}
-
-/// Helper function to clean up all files related to a cell
-fn clean_cell_workspace(cell_id: &str, test_env: &TestEnv) {
-  let tenant = "basic-db.localhost";
-  let base_path = format!("data/{}/sqlite", tenant);
-
-  // Regular database files
-  let db_path = format!("{}/{}.db", base_path, cell_id);
-  let db_path_wal = format!("{}-wal", db_path);
-  let db_path_shm = format!("{}-shm", db_path);
-  let db_yml = format!("{}/{}.yml", base_path, cell_id);
-
-  // Litestream metadata directory
-  let litestream_dir = format!("{}/.{}.db-litestream", base_path, cell_id);
-
-  // Remove all files
-  let _ = std::fs::remove_file(&db_path);
-  let _ = std::fs::remove_file(&db_path_wal);
-  let _ = std::fs::remove_file(&db_path_shm);
-  let _ = std::fs::remove_file(&db_yml);
-  let _ = std::fs::remove_dir_all(&litestream_dir);
-
-  // Also clear bucket contents
-  let _ = test_env.minio_server.clear_bucket_files(
-    "test-mesh-bucket",
-    &format!("sqlite/{}/{}", tenant, cell_id),
-  );
-
-  println!("Cleaned workspace for cell: {}", cell_id);
 }
 
 /// Helper function to read a message of a specific type from a WebSocket stream
