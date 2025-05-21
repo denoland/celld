@@ -157,7 +157,11 @@ impl TestEnv {
           &self.minio_server.secret_access_key,
         );
     };
-    let server = CapturedSubprocess::new(server_cmd, server_cmd_setup);
+    let server = CapturedSubprocess::new(
+      format!("celld({port})"),
+      server_cmd,
+      server_cmd_setup,
+    );
 
     self.servers.push(server);
     self.ports.push(port);
