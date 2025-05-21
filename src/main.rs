@@ -1,8 +1,11 @@
 mod active_connections;
+mod alarm_processor;
+mod alarm_scheduler;
 mod benchmark_deno_startup;
 mod child_on_parent_exit;
 mod cluster_membership;
 mod config;
+mod control_socket_listener;
 mod distributed_lock;
 mod heartbeat_service;
 mod lock_guard_ttl_updater;
@@ -12,9 +15,12 @@ mod process_manager;
 mod process_reaper;
 mod router;
 mod sqlite_replica;
+mod system_cell;
+mod system_cell_takeover;
 #[cfg(test)]
 pub mod test_utils;
 
+use futures::FutureExt as _;
 use pingora::prelude::*;
 use pingora::server::configuration::ServerConf;
 use pingora::services::background::background_service;
@@ -64,18 +70,24 @@ fn start_server(config: config::Config) -> Server {
   let mut proxy_service = http_proxy_service(&pingora_config2, app);
 
   // Configure the proxy service to listen on the specified address
-  proxy_service.add_tcp(&node_state.config.listen_addr);
+  proxy_service.add_tcp(&node_state.config.listen_addr.to_string());
+
+  let (system_cell_broadcast, mut system_cell_rx) =
+    tokio::sync::broadcast::channel(1);
+  let system_cell_rx = async move { system_cell_rx.recv().await }.boxed();
+  let system_cell_rx = system_cell_rx.shared();
 
   // Create the internal API handler
   let internal_api = InternalAPI {
     node_state: node_state.clone(),
+    system_cell_rx: system_cell_rx.clone(),
   };
 
   // Create an HTTP service for the internal API
   let mut internal_service = http_proxy_service(&pingora_config2, internal_api);
 
   // Configure the internal service to listen on the internal address
-  internal_service.add_tcp(&node_state.config.internal_listen_addr);
+  internal_service.add_tcp(&node_state.config.internal_listen_addr.to_string());
 
   server.add_service(background_service(
     "process_reaper",
@@ -102,6 +114,49 @@ fn start_server(config: config::Config) -> Server {
       cluster_membership: node_state.cluster_membership.clone(),
       peer_manager: node_state.peer_manager.clone(),
       interval: node_state.config.heartbeat_interval,
+    },
+  ));
+
+  // Add a background service for system cell takeover
+  server.add_service(background_service(
+    "system_cell_takeover",
+    system_cell_takeover::SystemCellTakeover {
+      interval: node_state.config.system_cell_takeover_interval,
+      broadcast: system_cell_broadcast,
+      lock_manager: node_state.distributed_lock.clone(),
+      node_id: node_state.peer_manager.get_local_node_id().clone(),
+      system_cell_factory: {
+        let node_state = node_state.clone();
+        Box::new(move |lock_guard| {
+          let node_state = node_state.clone();
+          async move {
+            let system_cell =
+              system_cell::SystemCell::new(node_state.clone(), lock_guard)
+                .await?;
+            Ok(Arc::new(system_cell))
+          }
+          .boxed()
+        })
+      },
+    },
+  ));
+
+  // Add a background service for alarm scheduler
+  server.add_service(background_service(
+    "alarm_scheduler",
+    alarm_scheduler::AlarmScheduler {
+      node_state: node_state.clone(),
+      system_cell_rx: system_cell_rx.clone(),
+      interval: node_state.config.alarm_scheduler_interval,
+    },
+  ));
+
+  // Add a background service for control socket listener
+  server.add_service(background_service(
+    "control_socket_listener",
+    control_socket_listener::ControlSocketListener {
+      node_state: node_state.clone(),
+      system_cell_rx: system_cell_rx.clone(),
     },
   ));
 
@@ -313,7 +368,9 @@ mod tests {
 
     let (mut ws_stream, _) = tokio_tungstenite::connect_async(url)
       .await
-      .unwrap_or_else(|_| panic!("Failed to connect to cell {}", cell_id));
+      .unwrap_or_else(|e| {
+        panic!("Failed to connect to cell {}: {}", cell_id, e)
+      });
 
     // Read welcome message
     let welcome_msg = ws_stream.next().await.unwrap().unwrap();

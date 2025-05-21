@@ -1,7 +1,11 @@
 use serde::Deserialize;
 use serde::Serialize;
 use std::env::var;
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::str::FromStr as _;
 use std::time::Duration;
 use tracing::info;
 
@@ -10,11 +14,11 @@ pub struct Config {
   /// Directory to store data in
   pub data_dir: PathBuf,
   /// IP:port to listen on
-  pub listen_addr: String,
+  pub listen_addr: SocketAddr,
   /// IP:port to advertise to other nodes
-  pub advertise_addr: String,
+  pub advertise_addr: SocketAddr,
   /// IP:port for internal control plane communication
-  pub internal_listen_addr: String,
+  pub internal_listen_addr: SocketAddr,
   /// S3 endpoint for cluster membership and distributed locking
   pub s3_endpoint: Option<String>,
   /// S3 bucket for cluster membership and distributed locking
@@ -36,6 +40,10 @@ pub struct Config {
   /// For example, if the value is 30 seconds, the lock guard will be renewed
   /// every 10 seconds.
   pub lock_guard_ttl: Duration,
+  /// Interval for system cell takeover
+  pub system_cell_takeover_interval: Duration,
+  /// Interval for alarm scheduler
+  pub alarm_scheduler_interval: Duration,
 }
 
 /// Configuration for a MinIO or S3 replica target
@@ -88,37 +96,38 @@ impl S3Config {
 
 impl Config {
   pub fn from_env() -> Result<Self, String> {
-    let advertise_addr = match var("ADVERTISE_ADDR") {
-      Ok(addr) if !addr.is_empty() => addr,
-      _ => {
+    let advertise_addr = var("ADVERTISE_ADDR")
+      .ok()
+      .and_then(|addr_str| SocketAddr::from_str(&addr_str).ok())
+      .unwrap_or_else(|| {
         info!("ADVERTISE_ADDR not set, using 127.0.0.1:8000");
-        "127.0.0.1:8000".to_string()
-      }
-    };
+        "127.0.0.1:8000".parse().unwrap()
+      });
 
     // Get listen_addr with fallback to advertise_addr port
-    let listen_addr = var("LISTEN_ADDR").unwrap_or_else(|_| {
-      // If not set, use the port from ADVERTISE_ADDR or a default
-      let port = advertise_addr.split(':').nth(1).unwrap_or("3000");
-      format!("0.0.0.0:{}", port)
-    });
+    let listen_addr = var("LISTEN_ADDR")
+      .ok()
+      .and_then(|addr_str| SocketAddr::from_str(&addr_str).ok())
+      .unwrap_or_else(|| {
+        // If not set, use the port from ADVERTISE_ADDR
+        SocketAddr::new(
+          IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+          advertise_addr.port(),
+        )
+      });
 
     // Get internal_listen_addr with fallback to advertise_addr + 1
-    let internal_listen_addr = var("INTERNAL_LISTEN_ADDR").unwrap_or_else(|_| {
+    let internal_listen_addr = var("INTERNAL_LISTEN_ADDR").ok().and_then(|addr_str| {
+      SocketAddr::from_str(&addr_str).ok()
+    }).unwrap_or_else(|| {
       // If not set, use advertise_addr with port + 1
-      let host = advertise_addr.split(':').next().unwrap_or("127.0.0.1");
-      let port = advertise_addr
-        .split(':')
-        .nth(1)
-        .and_then(|p| p.parse::<u16>().ok())
-        .map(|p| p + 1)
-        .unwrap_or(3001);
+      let mut addr = advertise_addr;
+      addr.set_port(addr.port() + 1);
       // Log a warning for multi-node setups
       info!(
-        "INTERNAL_LISTEN_ADDR not set, using {}:{} (derived from ADVERTISE_ADDR). For production clusters, explicitly set INTERNAL_LISTEN_ADDR.",
-        host, port
+        "INTERNAL_LISTEN_ADDR not set, using {addr} (derived from ADVERTISE_ADDR). For production clusters, explicitly set INTERNAL_LISTEN_ADDR.",
       );
-      format!("{}:{}", host, port)
+      addr
     });
 
     // Get data_dir with fallback to ./data
@@ -153,6 +162,22 @@ impl Config {
       .unwrap_or(30);
     let lock_guard_ttl = Duration::from_secs(lock_guard_ttl_secs);
 
+    let system_cell_takeover_interval_secs =
+      var("CELL_SYSTEM_CELL_TAKEOVER_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(10);
+    let system_cell_takeover_interval =
+      Duration::from_secs(system_cell_takeover_interval_secs);
+
+    let alarm_scheduler_interval_secs =
+      var("CELL_ALARM_SCHEDULER_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(5);
+    let alarm_scheduler_interval =
+      Duration::from_secs(alarm_scheduler_interval_secs);
+
     // Get optional S3 configuration
     // Prioritize CELL_S3 specific variables over standard AWS variables
     let s3_endpoint = var("CELL_S3_ENDPOINT").ok();
@@ -174,6 +199,8 @@ impl Config {
       heartbeat_interval,
       staleness_threshold,
       lock_guard_ttl,
+      system_cell_takeover_interval,
+      alarm_scheduler_interval,
       s3_endpoint,
       s3_bucket,
       s3_region,

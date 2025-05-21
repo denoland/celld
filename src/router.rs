@@ -1,11 +1,17 @@
+use futures::future::{BoxFuture, Shared};
+use http_body_util::BodyExt;
 use pingora::http::StatusCode;
 use pingora::prelude::*;
 use pingora::upstreams::peer::HttpPeer;
 use std::sync::Arc;
+use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, error, info};
 
+use crate::alarm_processor::{dispatch_alarm_locally, Alarm};
+use crate::control_socket_listener::locally_handle_internal_alarms;
 use crate::node_state::NodeState;
 use crate::process_manager::{ProcessKey, ProcessManagerError};
+use crate::system_cell::SystemCell;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
@@ -24,6 +30,8 @@ pub struct Proxy {
 
 pub struct InternalAPI {
   pub node_state: Arc<NodeState>,
+  pub system_cell_rx:
+    Shared<BoxFuture<'static, Result<Arc<SystemCell>, RecvError>>>,
 }
 
 #[derive(Debug, Default)]
@@ -33,21 +41,33 @@ pub struct Ctx {
   pub process_key: Option<ProcessKey>,
 }
 
-#[derive(Debug, Default)]
-pub struct InternalCtx {}
+pub struct InternalCtx {
+  system_cell_rx:
+    Shared<BoxFuture<'static, Result<Arc<SystemCell>, RecvError>>>,
+}
+
+impl std::fmt::Debug for InternalCtx {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("InternalCtx")
+      .field("system_cell_subscription", &"...")
+      .finish()
+  }
+}
 
 #[async_trait::async_trait]
 impl ProxyHttp for InternalAPI {
   type CTX = InternalCtx;
 
   fn new_ctx(&self) -> Self::CTX {
-    InternalCtx::default()
+    InternalCtx {
+      system_cell_rx: self.system_cell_rx.clone(),
+    }
   }
 
   async fn request_filter(
     &self,
     session: &mut Session,
-    _ctx: &mut Self::CTX,
+    ctx: &mut Self::CTX,
   ) -> Result<bool> {
     let req_header = session.req_header();
 
@@ -68,10 +88,10 @@ impl ProxyHttp for InternalAPI {
           peer_json.push(',');
         }
         let is_local =
-          info.node_id == self.node_state.peer_manager.get_local_node_id();
+          info.node_id == *self.node_state.peer_manager.get_local_node_id();
         peer_json.push_str(&format!(
             "{{\"node_id\":\"{}\",\"address\":\"{}\",\"is_local\":{},\"last_heartbeat\":\"{}\"}}",
-            info.node_id,
+            info.node_id.as_str(),
             info.advertise_addr,
             is_local,
             info.heartbeat_timestamp
@@ -151,6 +171,116 @@ impl ProxyHttp for InternalAPI {
           return Ok(true);
         }
       }
+    }
+
+    // Handle the alarms endpoint
+    if path.starts_with("/_internal/alarms") {
+      let system_cell = tokio::select! {
+        system_cell_res = ctx.system_cell_rx.clone() => {
+          match system_cell_res {
+            Ok(system_cell) => system_cell,
+            Err(e) => {
+              error!(error = ?e, "Error receiving system cell");
+              let resp = pingora::http::ResponseHeader::build(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Some(0),
+              )
+              .unwrap();
+              session.write_response_header(Box::new(resp), true).await?;
+              session.set_keepalive(None);
+              return Ok(true);
+            }
+          }
+        }
+
+        _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
+          error!("Timeout waiting for system cell; most likely the system cell is running on another node");
+          let resp = pingora::http::ResponseHeader::build(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Some(0),
+          ).unwrap();
+          session.write_response_header(Box::new(resp), true).await?;
+          session.set_keepalive(None);
+          return Ok(true);
+        }
+      };
+
+      let parts = session.req_header().as_ref().clone();
+      let req_body = session
+        .read_request_body()
+        .await?
+        .map(|bytes| http_body_util::Full::new(bytes).boxed())
+        .unwrap_or_else(|| http_body_util::Empty::new().boxed());
+      let req = hyper::Request::from_parts(parts, req_body);
+
+      match locally_handle_internal_alarms(req, system_cell).await {
+        Ok(res) => {
+          let (parts, body) = res.into_parts();
+          session
+            .write_response_header(Box::new(parts.into()), false)
+            .await?;
+          let body = body.collect().await.unwrap().to_bytes();
+          session.write_response_body(Some(body), true).await?;
+          session.set_keepalive(None);
+          return Ok(true);
+        }
+        Err(e) => {
+          error!(error = ?e, "Error handling alarms");
+          let resp = pingora::http::ResponseHeader::build(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Some(0),
+          )
+          .unwrap();
+          session.write_response_header(Box::new(resp), true).await?;
+          session.set_keepalive(None);
+          return Ok(true);
+        }
+      }
+    }
+
+    // Handle the dispatch alarm endpoint
+    if path.starts_with("/_internal/dispatch_alarm")
+      && req_header.method == http::Method::POST
+    {
+      let Some(req_body) = session.read_request_body().await? else {
+        error!("Error reading request body of dispatch_alarm endpoint");
+        let resp = pingora::http::ResponseHeader::build(
+          StatusCode::INTERNAL_SERVER_ERROR,
+          Some(0),
+        )
+        .unwrap();
+        session.write_response_header(Box::new(resp), true).await?;
+        session.set_keepalive(None);
+        return Ok(true);
+      };
+      let dispatched_alarm: Alarm = match serde_json::from_slice(&req_body) {
+        Ok(dispatch_alarm) => dispatch_alarm,
+        Err(e) => {
+          error!(error = ?e, "Error deserializing dispatch alarm");
+          let resp = pingora::http::ResponseHeader::build(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Some(0),
+          )
+          .unwrap();
+          session.write_response_header(Box::new(resp), true).await?;
+          session.set_keepalive(None);
+          return Ok(true);
+        }
+      };
+      let status =
+        match dispatch_alarm_locally(dispatched_alarm, self.node_state.clone())
+          .await
+        {
+          Ok(_) => StatusCode::OK,
+          Err(e) => {
+            error!(error = ?e, "Error dispatching alarm");
+            StatusCode::INTERNAL_SERVER_ERROR
+          }
+        };
+      let resp = pingora::http::ResponseHeader::build(status, Some(0)).unwrap();
+      session.write_response_header(Box::new(resp), true).await?;
+      session.set_keepalive(None);
+      return Ok(true);
     }
 
     // If we didn't match any known internal endpoint, return a 404
@@ -251,13 +381,6 @@ impl ProxyHttp for Proxy {
       ));
     }
 
-    // Only handle GET and HEAD requests
-    if req_header.method != http::Method::GET
-      && req_header.method != http::Method::HEAD
-    {
-      return Ok(false);
-    }
-
     // Get the path
     let path = req_header.uri.path();
 
@@ -313,6 +436,13 @@ impl ProxyHttp for Proxy {
         ctx.cell_id = Some(cell_id.to_string());
         return Ok(false); // Let it be handled by the upstream_peer method
       }
+    }
+
+    // Only handle GET and HEAD requests
+    if req_header.method != http::Method::GET
+      && req_header.method != http::Method::HEAD
+    {
+      return Ok(false);
     }
 
     // Process the path and handle static files for non-cell paths
@@ -422,14 +552,14 @@ impl ProxyHttp for Proxy {
         .get_cell_owners(&ctx.tenant, cell_id);
       if let Some(primary_owner_addr) = owners.first() {
         info!(
-            my_node_id = %self.node_state.node_id,
+            my_node_id = ?self.node_state.node_id,
             host = %ctx.tenant,
             cell_id = %cell_id,
             responsible_peer = %primary_owner_addr,
             "Forwarding request to primary active owner"
         );
         let sni = ctx.tenant.clone();
-        let peer = HttpPeer::new(primary_owner_addr.clone(), false, sni);
+        let peer = HttpPeer::new(primary_owner_addr, false, sni);
         return Ok(Box::new(peer));
       } else {
         // This case means no active owners were found according to PeerManager,
@@ -449,7 +579,7 @@ impl ProxyHttp for Proxy {
 
     // We are the responsible peer, so handle the request locally
     debug!(
-      my_node_id = %self.node_state.node_id,
+      my_node_id = ?self.node_state.node_id,
       host = %ctx.tenant,
       cell_id = %cell_id,
       "This instance is responsible for handling the request"
@@ -482,7 +612,7 @@ impl ProxyHttp for Proxy {
         }
         Err(ProcessManagerError::ProcessCreationInProgress) => {
           info!(
-            node_id = %self.node_state.node_id,
+            node_id = ?self.node_state.node_id,
             "Lock is held by this node, meaning a deno process creation is already in progress. Retry in {:?}",
             RETRY_INTERVAL
           );

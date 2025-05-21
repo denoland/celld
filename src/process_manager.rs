@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use nix::sys::signal::Signal;
 use std::collections::HashMap;
 use std::fs;
@@ -15,21 +15,12 @@ use uuid::Uuid;
 
 use crate::active_connections;
 use crate::child_on_parent_exit::ChildOnParentExit;
+use crate::control_socket_listener::ControlSocket;
 use crate::distributed_lock::LockAcquireError;
 use crate::distributed_lock::LockGuard;
 use crate::router::ProxyError;
 use crate::sqlite_replica::{create_empty_database, SqliteReplica};
 use crate::NodeState;
-
-/// Represents the current state of a database restore operation
-#[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
-pub enum RestoreState {
-  /// Restore process completed (bool indicates if data was actually restored)
-  Complete(bool),
-  /// Restore failed with the specified error message
-  Failed(String),
-}
 
 #[derive(Debug)]
 pub struct ProcessEntry {
@@ -42,21 +33,17 @@ pub struct ProcessEntry {
   incoming_connections: usize,
 
   /// Guard for automatic termination on parent exit
-  pub parent_exit_guard: ChildOnParentExit,
+  parent_exit_guard: ChildOnParentExit,
 
   /// Guard for ensuring the uniqueness of the tenant/cellId in the cluster
   lock_guard: LockGuard,
 
   /// Keep tempdir alive as long as process exists
-  pub _socket_tempdir: TempDir,
+  _socket_tempdir: TempDir,
 
   /// SQLite replication to S3/MinIO
   /// `None` if S3/MinIO is not configured
   pub replica: Option<SqliteReplica>,
-
-  /// State of the database restore operation
-  #[allow(dead_code)]
-  pub restore_state: RestoreState,
 }
 
 impl ProcessEntry {
@@ -85,10 +72,11 @@ impl ProcessKey {
 pub struct ProcessManager {
   pub data_dir: PathBuf,
   pub processes: Mutex<HashMap<ProcessKey, ProcessEntry>>,
+  control_socket_path: PathBuf,
 }
 
 impl ProcessManager {
-  pub fn new(data_dir: PathBuf) -> Self {
+  pub fn new(data_dir: PathBuf, control_socket: &ControlSocket) -> Self {
     let data_dir = data_dir.clone();
     // TODO: Implement a cleanup mechanism for old empty database files
     // This could be done by:
@@ -99,6 +87,7 @@ impl ProcessManager {
     ProcessManager {
       data_dir: std::fs::canonicalize(data_dir.clone()).unwrap(),
       processes: Mutex::new(HashMap::new()),
+      control_socket_path: control_socket.socket_path.clone(),
     }
   }
 
@@ -231,14 +220,14 @@ impl ProcessManager {
           tenant = host,
           cell_id,
           lock_name,
-          node_id,
+          ?node_id,
           error = ?e,
           "Failed to acquire lock on cell"
         );
         match e {
           LockAcquireError::LockHeld(maybe_lock_info) => {
             match maybe_lock_info {
-              Some(lock_info) if lock_info.node_id == node_id => {
+              Some(lock_info) if lock_info.node_id == *node_id => {
                 ProcessManagerError::ProcessCreationInProgress
               }
               _ => ProcessManagerError::LockContention,
@@ -256,12 +245,12 @@ impl ProcessManager {
     let socket_tempdir = tempfile::tempdir()
       .with_context(|| "Failed to create temporary directory for socket")?;
 
-    let socket_name = {
+    let serve_socket_name = {
       let uuid_string = Uuid::new_v4().to_string();
       let first_segment: &str = &uuid_string[0..8];
       format!("{}.sock", first_segment)
     };
-    let socket_path = socket_tempdir.path().join(socket_name);
+    let serve_socket_path = socket_tempdir.path().join(serve_socket_name);
 
     // Create SQLite directory
     let sqlite_dir = tenant_dir.join("sqlite");
@@ -302,9 +291,6 @@ impl ProcessManager {
       }
     };
 
-    // Initialize restore state variable
-    let restore_state;
-
     // Handle database restoration if necessary
     if let Some(ref replica) = replica {
       info!(
@@ -314,42 +300,7 @@ impl ProcessManager {
       );
 
       // Call ensure_restored to perform the restore with distributed locking
-      let restore_result = replica.ensure_restored(&lock_guard).await;
-
-      // Update the restore state based on the result
-      match restore_result {
-        state @ RestoreState::Complete(_) => {
-          info!(
-            tenant = %host,
-            cell_id = %cell_id,
-            restored = match &state {
-              RestoreState::Complete(restored) => *restored,
-              _ => false
-            },
-            "Database restore completed successfully"
-          );
-          // Update state and continue to spawn Deno
-          restore_state = state;
-        }
-        state @ RestoreState::Failed(_) => {
-          let err_msg = match &state {
-            RestoreState::Failed(msg) => msg.clone(),
-            _ => "Unknown error".to_string(),
-          };
-          error!(
-            tenant = %host,
-            cell_id = %cell_id,
-            error = %err_msg,
-            "Database restore failed"
-          );
-          // Update state and return error
-          return Err(ProcessManagerError::Internal(anyhow!(
-            "Database restore failed: {}",
-            err_msg
-          )));
-        }
-      }
-
+      replica.ensure_restored(&lock_guard).await;
       replica.start_replication().await?;
     } else if !db_path.exists() {
       // No replica, but we still need a database - create an empty one
@@ -362,9 +313,6 @@ impl ProcessManager {
       if let Err(e) = create_empty_database(&db_path) {
         warn!("Failed to create empty database file: {}", e);
       }
-
-      // Update state to Complete(false) since we created a new empty DB
-      restore_state = RestoreState::Complete(false);
     } else {
       // No replica and the database already exists
       debug!(
@@ -373,7 +321,6 @@ impl ProcessManager {
         db_path = %db_path.display(),
         "No replica and database already exists, using existing database"
       );
-      restore_state = RestoreState::Complete(false);
     }
 
     let spawn_start = Instant::now();
@@ -381,7 +328,7 @@ impl ProcessManager {
     debug!(
       tenant = %host,
       cell_id = %cell_id,
-      socket_path = %socket_path.display(),
+      socket_path = %serve_socket_path.display(),
       main_script = %main_script.display(),
       "About to spawn Deno process"
     );
@@ -391,7 +338,8 @@ impl ProcessManager {
       host,
       cell_id,
       &tenant_dir,
-      &socket_path,
+      &serve_socket_path,
+      &self.control_socket_path,
       &main_script,
     )?;
 
@@ -408,14 +356,13 @@ impl ProcessManager {
     // Create a new ProcessEntry with proper values
     let entry = ProcessEntry {
       pid,
-      socket_path: socket_path.clone(),
+      socket_path: serve_socket_path.clone(),
       last_used: Instant::now(),
       incoming_connections: 0,
       parent_exit_guard: child_guard,
       lock_guard,
       _socket_tempdir: socket_tempdir,
       replica: replica.clone(),
-      restore_state,
     };
 
     // Insert the entry into the processes map using a short-lived lock
@@ -425,7 +372,7 @@ impl ProcessManager {
     }
 
     // --- Wait for the socket to become available (crucial for cold start) ---
-    let socket_ = socket_path.clone();
+    let socket_ = serve_socket_path.clone();
     let wait_start = Instant::now();
     let wait_timeout = Duration::from_secs(10); // Timeout for socket connection
 
@@ -521,7 +468,7 @@ impl ProcessManager {
       }
     };
 
-    Ok((socket_path, stream, process_key))
+    Ok((serve_socket_path, stream, process_key))
   }
 
   pub async fn terminate_all(&self) {
@@ -617,26 +564,41 @@ fn parse_env_vars(content: &str) -> HashMap<String, String> {
 }
 
 /// Spawn a Deno process for the given host and cell
-#[instrument(skip(socket_path, cell_id), fields(host = %host, cell_id = %cell_id))]
+#[instrument(skip(serve_socket_path, control_socket_path), fields(host = %host, cell_id = %cell_id))]
 fn spawn_deno_process(
   host: &str,
   cell_id: &str,
   tenant_dir: &PathBuf,
-  socket_path: &Path,
+  // The socket path the Deno process will listen on for HTTP requests
+  serve_socket_path: &Path,
+  // The socket path the Deno process will connect to
+  control_socket_path: &Path,
   main_script: &PathBuf,
 ) -> Result<ChildOnParentExit> {
+  let ctl_socket_canonicalized = std::fs::canonicalize(control_socket_path)?;
+
   let mut cmd = std::process::Command::new("deno");
   cmd
     .current_dir(tenant_dir)
     .env(
       "DENO_SERVE_ADDRESS",
-      format!("unix:{}", socket_path.display()),
+      format!("unix:{}", serve_socket_path.display()),
     )
-    .env("X-Cell-Id", cell_id); // Pass cell ID to bootstrap.ts
+    .env(
+      "CELL_CONTROL_SOCKET",
+      format!("{}", ctl_socket_canonicalized.display()),
+    )
+    .env("X-Tenant", host)
+    .env("X-Cell-Id", cell_id);
 
   // Load environment variables from prod.env file
   let env_file_path = tenant_dir.join("prod.env");
-  let mut env_vars = Vec::new();
+  // X-Cell-Id and CELL_CONTROL_SOCKET are allowed by default
+  let mut env_vars = vec![
+    "X-Tenant".to_string(),
+    "X-Cell-Id".to_string(),
+    "CELL_CONTROL_SOCKET".to_string(),
+  ];
 
   match fs::read_to_string(&env_file_path) {
     Ok(env_contents) => {
@@ -661,13 +623,10 @@ fn spawn_deno_process(
     }
   }
 
-  // Add X-Cell-Id to allowed env vars
-  env_vars.push("X-Cell-Id".to_string());
-
   debug!(
     host = %host,
     cell_id = %cell_id,
-    socket_path = %socket_path.display(),
+    socket_path = %serve_socket_path.display(),
     main_script = %main_script.display(),
     "Preparing deno command"
   );
@@ -676,23 +635,21 @@ fn spawn_deno_process(
     .arg("run")
     .arg("--no-prompt")
     .arg(format!(
-      "--allow-read={},{}",
+      "--allow-read={},{},{}",
       tenant_dir.display(),
-      socket_path.display()
+      serve_socket_path.display(),
+      ctl_socket_canonicalized.display()
     ))
     .arg(format!(
-      "--allow-write={},{}",
+      "--allow-write={},{},{}",
       tenant_dir.display(),
-      socket_path.display()
+      serve_socket_path.display(),
+      ctl_socket_canonicalized.display()
     ))
     .arg("--allow-net");
 
   // Only allow specifically named environment variables
-  if !env_vars.is_empty() {
-    cmd.arg(format!("--allow-env={}", env_vars.join(",")));
-  } else {
-    cmd.arg("--allow-env=X-Cell-Id"); // Default minimum permission
-  }
+  cmd.arg(format!("--allow-env={}", env_vars.join(",")));
 
   cmd.arg(main_script);
 

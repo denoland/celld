@@ -1,10 +1,6 @@
 .DS_Store
 /target
-data/basic-db.localhost/sqlite
-data/hello.localhost/sqlite/
-data/ws-echo.localhost/sqlite/
-data/llm-chat.localhost/sqlite/
-data/env-test.localhost/sqlite/
+data/*/sqlite/
 data/llm-chat.localhost/prod.env
 
 **/.claude/settings.local.json

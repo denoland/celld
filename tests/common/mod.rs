@@ -1,10 +1,12 @@
+mod captured_subprocess;
 #[path = "../../src/test_utils.rs"]
 mod test_utils;
 
+use captured_subprocess::CapturedSubprocess;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::collections::HashSet;
-use std::process::{Child, Command};
+use std::process::Command;
 use std::sync::Mutex;
 use std::time::Duration;
 use test_utils::MinioTestServer;
@@ -16,7 +18,7 @@ lazy_static::lazy_static! {
 
 pub struct TestEnv {
   /// Celld servers
-  servers: Vec<Child>,
+  servers: Vec<CapturedSubprocess>,
   /// Celld server ports (external ports)
   ports: Vec<u16>,
   pub minio_server: MinioTestServer,
@@ -108,49 +110,54 @@ impl TestEnv {
   pub fn kill_cell_instance(&mut self, index: usize) {
     let mut server = self.servers.remove(index);
     let _ = self.ports.remove(index);
-    let pid = Pid::from_raw(server.id() as i32);
+    let pid = Pid::from_raw(server.child().id() as i32);
     // Use SIGKILL to avoid long graceful shutdown times
     kill(pid, Signal::SIGKILL).unwrap();
-    server.wait().unwrap();
+    server.child_mut().wait().unwrap();
   }
 
   pub fn graceful_shutdown_cell_instance(&mut self, index: usize) {
     let mut server = self.servers.remove(index);
     let _ = self.ports.remove(index);
-    let pid = Pid::from_raw(server.id() as i32);
+    let pid = Pid::from_raw(server.child().id() as i32);
     kill(pid, Signal::SIGTERM).unwrap();
-    server.wait().unwrap();
+    server.child_mut().wait().unwrap();
   }
 
   pub fn spawn_cell_instance(&mut self, port: u16) {
     let advertise_addr = format!("127.0.0.1:{}", port);
     let internal_addr = format!("127.0.0.1:{}", port + 1);
-    let server = Command::new(env!("CARGO_BIN_EXE_celld"))
-      .env("ADVERTISE_ADDR", &advertise_addr)
-      .env("INTERNAL_LISTEN_ADDR", &internal_addr)
-      .env("DATA", "./data")
-      .env("CELL_HEARTBEAT_INTERVAL", "2")
-      .env("CELL_GRACE_PERIOD_SECONDS", "5")
-      // Use a shorter staleness threshold for tests to detect failures faster
-      .env("CELL_STALENESS_THRESHOLD_SECS", "6")
-      .env("CELL_LOCK_GUARD_TTL_SECS", "6")
-      .env(
-        "CELL_S3_ENDPOINT",
-        format!("http://localhost:{}", self.minio_server.port),
-      )
-      .env("CELL_S3_BUCKET", &self.bucket_name)
-      .env("CELL_S3_REGION", "us-east-1")
-      .env("CELL_S3_PREFIX", format!("celld-test-{}", self.test_id))
-      .env("CELL_S3_ACCESS_KEY_ID", &self.minio_server.access_key_id)
-      .env(
-        "CELL_S3_SECRET_ACCESS_KEY",
-        &self.minio_server.secret_access_key,
-      )
-      //.env("RUST_LOG", "debug")
-      //.stdout(std::process::Stdio::null())
-      //.stderr(std::process::Stdio::null())
-      .spawn()
-      .unwrap_or_else(|_| panic!("Failed to start server on port {}", port));
+    let server_cmd = Command::new(env!("CARGO_BIN_EXE_celld"));
+    let server_cmd_setup = |cmd: &mut Command| {
+      cmd
+        .env("RUST_LOG", "info")
+        .env("ADVERTISE_ADDR", &advertise_addr)
+        .env("INTERNAL_LISTEN_ADDR", &internal_addr)
+        // TODO: Each TestEnv instance should have its own data directory to
+        // avoid conflicts between test cases running in parallel
+        .env("DATA", "./data")
+        .env("CELL_HEARTBEAT_INTERVAL", "2")
+        .env("CELL_GRACE_PERIOD_SECONDS", "5")
+        // Use a shorter staleness threshold for tests to detect failures faster
+        .env("CELL_STALENESS_THRESHOLD_SECS", "6")
+        .env("CELL_LOCK_GUARD_TTL_SECS", "6")
+        .env("CELL_SYSTEM_CELL_TAKEOVER_INTERVAL_SECS", "2")
+        // Configure alarm scheduler to check alarms every second
+        .env("CELL_ALARM_SCHEDULER_INTERVAL_SECS", "1")
+        .env(
+          "CELL_S3_ENDPOINT",
+          format!("http://localhost:{}", self.minio_server.port),
+        )
+        .env("CELL_S3_BUCKET", &self.bucket_name)
+        .env("CELL_S3_REGION", "us-east-1")
+        .env("CELL_S3_PREFIX", format!("celld-test-{}", self.test_id))
+        .env("CELL_S3_ACCESS_KEY_ID", &self.minio_server.access_key_id)
+        .env(
+          "CELL_S3_SECRET_ACCESS_KEY",
+          &self.minio_server.secret_access_key,
+        );
+    };
+    let server = CapturedSubprocess::new(server_cmd, server_cmd_setup);
 
     self.servers.push(server);
     self.ports.push(port);

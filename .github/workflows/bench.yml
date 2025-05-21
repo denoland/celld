@@ -76,6 +76,7 @@ jobs:
           127.0.0.1 hello.localhost
           127.0.0.1 llm-chat.localhost
           127.0.0.1 ws-echo.localhost
+          127.0.0.1 alarm.localhost
           EOF'
 
       - name: Build
