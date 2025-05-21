@@ -119,11 +119,11 @@ impl ProxyHttp for InternalAPI {
         .insert_header(http::header::CONTENT_TYPE, "application/json")
         .unwrap();
 
+      session.set_keepalive(None);
       session.write_response_header(Box::new(resp), false).await?;
       session
         .write_response_body(Some(response.into()), true)
         .await?;
-      session.set_keepalive(None);
       return Ok(true);
     }
 
@@ -138,11 +138,11 @@ impl ProxyHttp for InternalAPI {
           pingora::http::ResponseHeader::build(StatusCode::BAD_REQUEST, None)
             .unwrap();
 
+        session.set_keepalive(None);
         session.write_response_header(Box::new(resp), false).await?;
         session
           .write_response_body(Some("Bad Request".into()), true)
           .await?;
-        session.set_keepalive(None);
         return Ok(true);
       }
 
@@ -159,11 +159,11 @@ impl ProxyHttp for InternalAPI {
           pingora::http::ResponseHeader::build(StatusCode::BAD_REQUEST, None)
             .unwrap();
 
+        session.set_keepalive(None);
         session.write_response_header(Box::new(resp), false).await?;
         session
           .write_response_body(Some("Bad Request".into()), true)
           .await?;
-        session.set_keepalive(None);
         return Ok(true);
       }
 
@@ -246,9 +246,9 @@ impl ProxyHttp for InternalAPI {
           session
             .write_response_header(Box::new(parts.into()), false)
             .await?;
+          session.set_keepalive(None);
           let body = body.collect().await.unwrap().to_bytes();
           session.write_response_body(Some(body), true).await?;
-          session.set_keepalive(None);
           return Ok(true);
         }
         Err(e) => {
@@ -258,8 +258,8 @@ impl ProxyHttp for InternalAPI {
             Some(0),
           )
           .unwrap();
-          session.write_response_header(Box::new(resp), true).await?;
           session.set_keepalive(None);
+          session.write_response_header(Box::new(resp), true).await?;
           return Ok(true);
         }
       }
@@ -276,8 +276,8 @@ impl ProxyHttp for InternalAPI {
           Some(0),
         )
         .unwrap();
-        session.write_response_header(Box::new(resp), true).await?;
         session.set_keepalive(None);
+        session.write_response_header(Box::new(resp), true).await?;
         return Ok(true);
       };
       let dispatched_alarm: Alarm = match serde_json::from_slice(&req_body) {
@@ -289,8 +289,8 @@ impl ProxyHttp for InternalAPI {
             Some(0),
           )
           .unwrap();
-          session.write_response_header(Box::new(resp), true).await?;
           session.set_keepalive(None);
+          session.write_response_header(Box::new(resp), true).await?;
           return Ok(true);
         }
       };
@@ -305,8 +305,8 @@ impl ProxyHttp for InternalAPI {
           }
         };
       let resp = pingora::http::ResponseHeader::build(status, Some(0)).unwrap();
-      session.write_response_header(Box::new(resp), true).await?;
       session.set_keepalive(None);
+      session.write_response_header(Box::new(resp), true).await?;
       return Ok(true);
     }
 
@@ -323,11 +323,11 @@ impl ProxyHttp for InternalAPI {
       .insert_header(http::header::CONTENT_TYPE, "text/plain")
       .unwrap();
 
+    session.set_keepalive(None);
     session.write_response_header(Box::new(resp), false).await?;
     session
       .write_response_body(Some(response.into()), true)
       .await?;
-    session.set_keepalive(None);
 
     Ok(true)
   }
@@ -425,10 +425,10 @@ impl ProxyHttp for Proxy {
         .unwrap();
 
       session.write_response_header(Box::new(resp), false).await?;
+      session.set_keepalive(None);
       session
         .write_response_body(Some(response.into()), true)
         .await?;
-      session.set_keepalive(None);
       return Ok(true);
     }
 
@@ -446,11 +446,11 @@ impl ProxyHttp for Proxy {
         .insert_header(http::header::CONTENT_TYPE, "text/plain")
         .unwrap();
 
+      session.set_keepalive(None);
       session.write_response_header(Box::new(resp), false).await?;
       session
         .write_response_body(Some(response.into()), true)
         .await?;
-      session.set_keepalive(None);
       return Ok(true);
     }
 
@@ -533,6 +533,7 @@ impl ProxyHttp for Proxy {
       .unwrap();
 
     let end_of_stream = req_header.method == http::Method::HEAD;
+    session.set_keepalive(None);
     session
       .write_response_header(Box::new(resp), end_of_stream)
       .await?;
@@ -541,7 +542,6 @@ impl ProxyHttp for Proxy {
       session.write_response_body(Some(file.into()), true).await?;
     }
 
-    session.set_keepalive(None);
     Ok(true)
   }
 
