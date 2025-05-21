@@ -133,6 +133,8 @@ impl TestEnv {
         .env("RUST_LOG", "info")
         .env("ADVERTISE_ADDR", &advertise_addr)
         .env("INTERNAL_LISTEN_ADDR", &internal_addr)
+        // TODO: Each TestEnv instance should have its own data directory to
+        // avoid conflicts between test cases running in parallel
         .env("DATA", "./data")
         .env("CELL_HEARTBEAT_INTERVAL", "2")
         .env("CELL_GRACE_PERIOD_SECONDS", "5")
