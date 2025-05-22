@@ -99,10 +99,8 @@ impl ProcessManager {
         process.request_lock_ttl_renewal(new_ttl);
       } else {
         debug!(
-          lock_key = %process.lock_guard.lock_key(),
-          node_id = ?process.lock_guard.node_id(),
-          pid = process.pid,
-          "Skip renewing lock - locally expired"
+          "Skip renewing lock {} for pid {}: locally expired",
+          process.lock_guard.lock_key, process.pid
         );
       }
     }

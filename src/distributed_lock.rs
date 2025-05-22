@@ -115,8 +115,8 @@ pub struct LockHandle {
 
 // Should not be Clone
 pub struct LockGuard {
-  lock_key: String,
-  node_id: NodeId,
+  pub lock_key: String,
+  pub node_id: NodeId,
   /// Reference back to the manager to call release
   /// Use Arc if the manager itself is shared via Arc
   lock_manager: Arc<dyn DistributedLock>,
@@ -160,17 +160,13 @@ impl LockGuard {
       async move {
         while let Some(new_ttl) = ttl_renewal_request_rx.recv().await {
           // Check if the lock is locally expired before attempting renewal
-          let now = Utc::now();
-          let expiry_time = task_local_acquired_at
-            + chrono::Duration::from_std(task_local_ttl)
-              .unwrap_or_else(|_| chrono::Duration::seconds(0));
-
-          if now > expiry_time {
+          if Utc::now()
+            > task_local_acquired_at
+              + chrono::Duration::from_std(task_local_ttl)
+                .unwrap_or_else(|_| chrono::Duration::seconds(0))
+          {
             debug!(
               lock_key = handle.lock_key,
-              local_acquired_at = ?task_local_acquired_at,
-              local_ttl_secs = task_local_ttl.as_secs(),
-              now = ?now,
               "Skipping renewal - lock locally expired"
             );
             // Lock is locally expired, terminate the renewal task
@@ -220,21 +216,10 @@ impl LockGuard {
 
   /// Check if the lock is still valid based on local TTL tracking
   pub fn is_still_valid(&self) -> bool {
-    let now = Utc::now();
-    let expiry_time = self.acquired_at
-      + chrono::Duration::from_std(self.ttl)
-        .unwrap_or_else(|_| chrono::Duration::seconds(0));
-    now <= expiry_time
-  }
-
-  /// Get the lock key
-  pub fn lock_key(&self) -> &str {
-    &self.lock_key
-  }
-
-  /// Get the node ID
-  pub fn node_id(&self) -> &NodeId {
-    &self.node_id
+    Utc::now()
+      <= self.acquired_at
+        + chrono::Duration::from_std(self.ttl)
+          .unwrap_or_else(|_| chrono::Duration::seconds(0))
   }
 
   /// Request a ttl renewal for the lock. If there is already a renewal request enqueued, no action is taken.
@@ -242,13 +227,7 @@ impl LockGuard {
   pub fn request_ttl_renewal(&self, new_ttl: Duration) {
     // First check if the lock is still valid locally
     if !self.is_still_valid() {
-      debug!(
-        lock_key = %self.lock_key,
-        node_id = ?self.node_id,
-        acquired_at = ?self.acquired_at,
-        ttl_secs = self.ttl.as_secs(),
-        "Lock expired locally, skipping renewal request"
-      );
+      debug!("Lock expired locally, skipping renewal request");
       return;
     }
 
@@ -277,12 +256,11 @@ impl fmt::Debug for LockGuard {
     f.debug_struct("LockGuard")
       .field("lock_key", &self.lock_key)
       .field("node_id", &self.node_id)
-      // Since Arc<dyn DistributedLock> isn't Debug, provide a placeholder
-      .field("lock_manager", &"<DistributedLock Manager>")
+      .field("lock_manager", &"<DistributedLock Manager>") // Arc<dyn DistributedLock> isn't Debug
       .field("acquired_at", &self.acquired_at)
       .field("ttl_secs", &self.ttl.as_secs())
       .field("valid", &self.is_still_valid())
-      .finish() // Complete the struct formatting
+      .finish()
   }
 }
 
@@ -820,7 +798,6 @@ impl DistributedLock for StandaloneDistributedLock {
     handle: LockHandle,
     new_ttl: Duration,
   ) -> Result<LockInfo, LockAcquireError> {
-    // Return a new LockInfo with current timestamp and the requested TTL
     Ok(LockInfo {
       node_id: handle.node_id,
       timestamp: Utc::now(),
@@ -1300,11 +1277,11 @@ mod tests {
       .unwrap();
 
     sleep(Duration::from_millis(150)).await; // Wait well past the 50ms local TTL
-    
+
     assert!(!guard.is_still_valid(),
         "LockGuard should report itself as invalid via is_still_valid() after its local TTL has passed."
     );
-    
+
     guard.request_ttl_renewal(Duration::from_secs(30)); // Attempt renewal
     sleep(Duration::from_millis(50)).await; // Give task time to (not) act
 
