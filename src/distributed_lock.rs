@@ -1300,6 +1300,11 @@ mod tests {
       .unwrap();
 
     sleep(Duration::from_millis(150)).await; // Wait well past the 50ms local TTL
+    
+    assert!(!guard.is_still_valid(),
+        "LockGuard should report itself as invalid via is_still_valid() after its local TTL has passed."
+    );
+    
     guard.request_ttl_renewal(Duration::from_secs(30)); // Attempt renewal
     sleep(Duration::from_millis(50)).await; // Give task time to (not) act
 
