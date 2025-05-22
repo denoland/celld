@@ -85,9 +85,12 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use crate::cluster_membership::NodeId;
+use crate::process_manager::ProcessEntry;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LockInfo {
@@ -108,144 +111,196 @@ pub enum LockAcquireError {
 }
 
 #[derive(Debug, Clone)]
-pub struct LockHandle {
+pub struct LockDescriptor {
   pub lock_key: String,
   node_id: NodeId,
 }
 
-// Should not be Clone
-pub struct LockGuard {
-  lock_key: String,
-  node_id: NodeId,
-  /// Reference back to the manager to call release
-  /// Use Arc if the manager itself is shared via Arc
-  lock_manager: Arc<dyn DistributedLock>,
-  /// If present, this guard will notify the given channel when the lock is released.
-  release_notifier:
-    Option<tokio::sync::oneshot::Sender<Result<(), anyhow::Error>>>,
-  /// A channel to request a ttl renewal for the lock
-  ttl_renewal_request_chan: tokio::sync::mpsc::Sender<Duration>,
-  /// A tokio task that waits for ttl renewal requests and performs the renewal
-  ttl_update_task: tokio::task::JoinHandle<()>,
+#[derive(Debug)]
+pub enum LockReleaseReason {
+  /// The lock was released because the lock was explicitly released
+  ExplicitRelease,
+  /// The lock was released because the ttl expired
+  TTLExpired,
+  /// The lock was released because the ttl renewal failed
+  TTLRenewalFailed,
 }
 
-impl LockGuard {
+#[derive(Clone)]
+pub struct LockHandle {
+  guard: Arc<Mutex<LockGuard>>,
+}
+
+// Should not be Clone
+//
+// TODO: Ideally this should be a generic over the protected resource type `T`.
+// But doing this would make `DistributedLock` not dyn-compatible, so here we
+// hardcode the resource type as `ProcessEntry` for now.
+enum LockGuard {
+  /// Lock is acquired, but the resource is not yet populated
+  Init {
+    descriptor: LockDescriptor,
+    lock_manager: Arc<dyn DistributedLock>,
+    ttl_renewal_task: JoinHandle<()>,
+  },
+  /// Lock is acquired, and the resource is populated
+  Active {
+    descriptor: LockDescriptor,
+    /// Reference back to the manager to call release
+    /// Use Arc if the manager itself is shared via Arc
+    lock_manager: Arc<dyn DistributedLock>,
+    protected_resource: ProcessEntry,
+    ttl_renewal_task: JoinHandle<()>,
+  },
+  /// Lock has been released
+  Released {
+    descriptor: LockDescriptor,
+    reason: LockReleaseReason,
+  },
+}
+
+impl LockHandle {
   fn new(
-    lock_key: String,
-    node_id: NodeId,
+    lock_descriptor: LockDescriptor,
+    ttl: Duration,
     lock_manager: Arc<dyn DistributedLock>,
   ) -> Self {
-    let (ttl_renewal_request_tx, mut ttl_renewal_request_rx) =
-      tokio::sync::mpsc::channel(1);
-
-    let ttl_update_task = tokio::spawn({
+    let ttl_renewal_task = tokio::spawn({
+      let lock_descriptor = lock_descriptor.clone();
       let lock_manager = lock_manager.clone();
-      let handle = LockHandle {
-        lock_key: lock_key.clone(),
-        node_id: node_id.clone(),
-      };
-
       async move {
-        while let Some(new_ttl) = ttl_renewal_request_rx.recv().await {
-          // Call the underlying lock manager's renew function
-          match lock_manager.renew(handle.clone(), new_ttl).await {
-            Ok(_) => {
-              // Successfully renewed. The LockGuard remains valid.
-              // The timestamp/TTL was updated in S3 by the lock manager.
-              debug!(
-                lock_key = handle.lock_key,
-                "Successfully renewed lock key"
-              );
-            }
-            Err(lock_err) => {
-              // Renewal failed. The lock might be lost.
-              error!(
-                error = ?lock_err,
-                lock_key = handle.lock_key,
-                "Failed to renew lock key"
-              );
-              // TODO: Maybe we should report the error to the renewal requester in some way
-              return;
-            }
+        let mut interval = tokio::time::interval(ttl / 3);
+        loop {
+          interval.tick().await;
+          if let Err(e) = lock_manager.renew(&lock_descriptor, ttl).await {
+            warn!(error = ?e, ?lock_descriptor, "Failed to renew lock, stopping TTL renewal task");
           }
         }
       }
     });
 
-    Self {
-      lock_key,
-      node_id,
+    let guard = Arc::new(Mutex::new(LockGuard::Init {
+      descriptor: lock_descriptor,
       lock_manager,
-      release_notifier: None,
-      ttl_renewal_request_chan: ttl_renewal_request_tx,
-      ttl_update_task,
+      ttl_renewal_task,
+    }));
+
+    Self { guard }
+  }
+}
+
+impl LockGuard {
+  fn descriptor(&self) -> &LockDescriptor {
+    match self {
+      LockGuard::Init { descriptor, .. } => descriptor,
+      LockGuard::Active { descriptor, .. } => descriptor,
+      LockGuard::Released { descriptor, .. } => descriptor,
     }
   }
 
-  /// Request a ttl renewal for the lock. If there is already a renewal request enqueued, no action is taken.
-  pub fn request_ttl_renewal(&self, new_ttl: Duration) {
-    if let Err(e) = self.ttl_renewal_request_chan.try_send(new_ttl) {
-      warn!(
-        lock_key = %self.lock_key,
-        node_id = ?self.node_id,
-        error = ?e,
-        "Failed to request lock ttl renewal"
-      );
+  async fn renew_ttl(&self, new_ttl: Duration) -> Result<(), LockAcquireError> {
+    match self {
+      LockGuard::Init {
+        descriptor,
+        lock_manager,
+        ..
+      } => {
+        let descriptor = descriptor.clone();
+        let lock_manager = lock_manager.clone();
+        lock_manager.renew(&descriptor, new_ttl).await?;
+        Ok(())
+      }
+      LockGuard::Active {
+        descriptor,
+        lock_manager,
+        ..
+      } => {
+        let descriptor = descriptor.clone();
+        let lock_manager = lock_manager.clone();
+        lock_manager.renew(&descriptor, new_ttl).await?;
+        Ok(())
+      }
+      LockGuard::Released { .. } => {
+        // Lock was already released, do nothing
+        Ok(())
+      }
     }
   }
 
-  /// Set a notifier that will be notified when the lock is released.
-  pub fn set_release_notifier(
-    &mut self,
-    notifier: tokio::sync::oneshot::Sender<Result<(), anyhow::Error>>,
-  ) {
-    self.release_notifier = Some(notifier);
+  async fn release(&mut self) -> anyhow::Result<()> {
+    match self {
+      LockGuard::Init {
+        descriptor,
+        lock_manager,
+        ttl_renewal_task,
+      } => {
+        // Stop the TTL renewal task
+        ttl_renewal_task.abort();
+
+        // Release the lock
+        lock_manager.release(&descriptor).await?;
+        tracing::debug!(?descriptor, "LockGuard dropped, lock released");
+
+        *self = LockGuard::Released {
+          descriptor: descriptor.clone(),
+          reason: LockReleaseReason::ExplicitRelease,
+        };
+      }
+      LockGuard::Active {
+        descriptor,
+        lock_manager,
+        protected_resource,
+        ttl_renewal_task,
+      } => {
+        // Stop the TTL renewal task
+        ttl_renewal_task.abort();
+
+        // Release the lock
+        lock_manager.release(&descriptor).await?;
+        tracing::debug!(?descriptor, "LockGuard dropped, lock released");
+
+        *self = LockGuard::Released {
+          descriptor: descriptor.clone(),
+          reason: LockReleaseReason::ExplicitRelease,
+        };
+
+        todo!("properly shutdown the protected resource");
+      }
+      LockGuard::Released { reason, descriptor } => {
+        tracing::debug!(?reason, ?descriptor, "Lock was already released");
+      }
+    }
+
+    Ok(())
   }
 }
 
 impl fmt::Debug for LockGuard {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    f.debug_struct("LockGuard")
-      .field("lock_key", &self.lock_key)
-      .field("node_id", &self.node_id)
-      // Since Arc<dyn DistributedLock> isn't Debug, provide a placeholder
-      .field("lock_manager", &"<DistributedLock Manager>")
-      .finish() // Complete the struct formatting
+    match &self {
+      LockGuard::Init { descriptor, .. } => f
+        .debug_struct("LockGuard::Init")
+        .field("descriptor", descriptor)
+        .finish(),
+      LockGuard::Active { descriptor, .. } => f
+        .debug_struct("LockGuard::Active")
+        .field("descriptor", descriptor)
+        .finish(),
+      LockGuard::Released { descriptor, reason } => f
+        .debug_struct("LockGuard::Released")
+        .field("descriptor", descriptor)
+        .field("reason", reason)
+        .finish(),
+    }
   }
 }
 
-/// Release the lock in the background task on drop.
+/// LockGuard should be dropped only after the lock has been properly released.
 impl Drop for LockGuard {
   fn drop(&mut self) {
-    self.ttl_update_task.abort();
-
-    let handle = LockHandle {
-      lock_key: self.lock_key.clone(),
-      node_id: self.node_id.clone(),
-    };
-    let lock_manager = self.lock_manager.clone();
-    let release_notifier = self.release_notifier.take();
-
-    tracing::debug!(
-      lock_key = %self.lock_key,
-      node_id = ?self.node_id,
-      "Dropping LockGuard, releasing lock"
-    );
-
-    // It's okay not even to catch any errors with the release here since the
-    // lock will time out by itself eventually after the TTL expires.
-    tokio::spawn(async move {
-      let release_result = lock_manager.release(handle).await;
-      if let Some(notifier) = release_notifier {
-        if let Err(e) = notifier.send(release_result) {
-          tracing::error!(
-            error = ?e,
-            "Error sending release notification",
-          );
-        }
-      }
-      tracing::debug!("LockGuard dropped, lock released");
-    });
+    if !matches!(self, LockGuard::Released { .. }) {
+      error!(lock_descriptor = ?self.descriptor(), "LockGuard dropped without releasing lock. ");
+    }
   }
 }
 
@@ -257,10 +312,13 @@ pub trait DistributedLock: Send + Sync {
     lock_name: &str,
     node_id: &NodeId,
     ttl: Duration,
-  ) -> Result<LockGuard, LockAcquireError>;
+  ) -> Result<LockHandle, LockAcquireError>;
 
   /// Releases a previously acquired distributed lock.
-  async fn release(&self, handle: LockHandle) -> Result<(), AnyhowError>;
+  async fn release(
+    &self,
+    lock_descriptor: &LockDescriptor,
+  ) -> Result<(), AnyhowError>;
 
   /// Renews an existing lock by updating its timestamp and TTL.
   /// This extends the lock's expiration time without releasing and re-acquiring it.
@@ -270,9 +328,9 @@ pub trait DistributedLock: Send + Sync {
   #[allow(dead_code)]
   async fn renew(
     &self,
-    handle: LockHandle,
+    lock_descriptor: &LockDescriptor,
     new_ttl: Duration,
-  ) -> Result<LockHandle, LockAcquireError>;
+  ) -> Result<LockDescriptor, LockAcquireError>;
 }
 
 pub struct S3DistributedLock {
@@ -309,7 +367,7 @@ impl DistributedLock for S3DistributedLock {
     lock_name: &str,
     node_id: &NodeId,
     ttl: Duration,
-  ) -> Result<LockGuard, LockAcquireError> {
+  ) -> Result<LockHandle, LockAcquireError> {
     let lock_key = self.get_lock_key(lock_name);
     debug!(lock_key, ?node_id, ?ttl, "Attempting to acquire S3 lock");
 
@@ -340,7 +398,14 @@ impl DistributedLock for S3DistributedLock {
     match put_result {
       Ok(_) => {
         info!(lock_key, ?node_id, "Successfully acquired S3 lock");
-        Ok(LockGuard::new(lock_key, node_id.clone(), self))
+        Ok(LockHandle::new(
+          LockDescriptor {
+            lock_key,
+            node_id: node_id.clone(),
+          },
+          ttl,
+          self,
+        ))
       }
       Err(SdkError::ServiceError(service_err)) => {
         let raw_err = service_err.into_err();
@@ -429,7 +494,14 @@ impl DistributedLock for S3DistributedLock {
                       ?node_id,
                       "Successfully acquired S3 lock on retry"
                     );
-                    Ok(LockGuard::new(lock_key, node_id.clone(), self))
+                    Ok(LockHandle::new(
+                      LockDescriptor {
+                        lock_key,
+                        node_id: node_id.clone(),
+                      },
+                      ttl,
+                      self,
+                    ))
                   }
                   Err(SdkError::ServiceError(retry_service_err)) => {
                     let retry_put_err = retry_service_err.into_err();
@@ -480,7 +552,14 @@ impl DistributedLock for S3DistributedLock {
                       ?node_id,
                       "Successfully acquired S3 lock on retry (after NoSuchKey)"
                     );
-                    Ok(LockGuard::new(lock_key, node_id.clone(), self))
+                    Ok(LockHandle::new(
+                      LockDescriptor {
+                        lock_key,
+                        node_id: node_id.clone(),
+                      },
+                      ttl,
+                      self,
+                    ))
                   }
                   Err(SdkError::ServiceError(retry_service_err)) => {
                     let retry_put_err = retry_service_err.into_err();
@@ -535,46 +614,53 @@ impl DistributedLock for S3DistributedLock {
     }
   }
 
-  async fn release(&self, handle: LockHandle) -> Result<(), AnyhowError> {
-    debug!(lock_key = %handle.lock_key, node_id = ?handle.node_id, "Releasing S3 lock");
+  async fn release(
+    &self,
+    lock_descriptor: &LockDescriptor,
+  ) -> Result<(), AnyhowError> {
+    debug!(lock_key = %lock_descriptor.lock_key, node_id = ?lock_descriptor.node_id, "Releasing S3 lock");
     match self
       .s3_client
       .delete_object()
       .bucket(&self.bucket)
-      .key(&handle.lock_key)
+      .key(&lock_descriptor.lock_key)
       .send()
       .await
     {
       Ok(_) => {
-        info!(lock_key = %handle.lock_key, node_id = ?handle.node_id, "Successfully released S3 lock");
+        info!(lock_key = %lock_descriptor.lock_key, node_id = ?lock_descriptor.node_id, "Successfully released S3 lock");
         Ok(())
       }
       Err(SdkError::ServiceError(service_err)) => {
         let del_err = service_err.into_err();
         if del_err.code() == Some("NoSuchKey") {
-          warn!(lock_key = %handle.lock_key, node_id = ?handle.node_id, "Attempted to release a lock that does not exist (or was already released)");
+          warn!(lock_key = %lock_descriptor.lock_key, node_id = ?lock_descriptor.node_id, "Attempted to release a lock that does not exist (or was already released)");
           Ok(())
         } else {
-          warn!(error = ?del_err, lock_key = %handle.lock_key, node_id = ?handle.node_id, "Failed to release S3 lock (Service Error)");
-          Err(AnyhowError::new(del_err))
-            .context(format!("Failed to release S3 lock: {}", handle.lock_key))
+          warn!(error = ?del_err, lock_key = %lock_descriptor.lock_key, node_id = ?lock_descriptor.node_id, "Failed to release S3 lock (Service Error)");
+          Err(AnyhowError::new(del_err)).context(format!(
+            "Failed to release S3 lock: {}",
+            lock_descriptor.lock_key
+          ))
         }
       }
       Err(e) => {
-        warn!(error = ?e, lock_key = %handle.lock_key, node_id = ?handle.node_id, "Failed to release S3 lock (SDK Error)");
-        Err(AnyhowError::new(e))
-          .context(format!("SDK Error releasing S3 lock: {}", handle.lock_key))
+        warn!(error = ?e, lock_key = %lock_descriptor.lock_key, node_id = ?lock_descriptor.node_id, "Failed to release S3 lock (SDK Error)");
+        Err(AnyhowError::new(e)).context(format!(
+          "SDK Error releasing S3 lock: {}",
+          lock_descriptor.lock_key
+        ))
       }
     }
   }
 
   async fn renew(
     &self,
-    handle: LockHandle,
+    lock_descriptor: &LockDescriptor,
     new_ttl: Duration,
-  ) -> Result<LockHandle, LockAcquireError> {
-    let lock_key = &handle.lock_key;
-    let node_id = &handle.node_id;
+  ) -> Result<LockDescriptor, LockAcquireError> {
+    let lock_key = &lock_descriptor.lock_key;
+    let node_id = &lock_descriptor.node_id;
 
     debug!(lock_key, ?node_id, ?new_ttl, "Attempting to renew S3 lock");
 
@@ -657,7 +743,7 @@ impl DistributedLock for S3DistributedLock {
         match put_request.send().await {
           Ok(_) => {
             info!(lock_key, ?node_id, ?new_ttl, "Successfully renewed S3 lock");
-            Ok(LockHandle {
+            Ok(LockDescriptor {
               lock_key: lock_key.clone(),
               node_id: node_id.clone(),
             })
@@ -727,21 +813,31 @@ impl DistributedLock for StandaloneDistributedLock {
     self: Arc<Self>,
     lock_name: &str,
     node_id: &NodeId,
-    _ttl: Duration,
-  ) -> Result<LockGuard, LockAcquireError> {
-    Ok(LockGuard::new(lock_name.to_string(), node_id.clone(), self))
+    ttl: Duration,
+  ) -> Result<LockHandle, LockAcquireError> {
+    Ok(LockHandle::new(
+      LockDescriptor {
+        lock_key: lock_name.to_string(),
+        node_id: node_id.clone(),
+      },
+      ttl,
+      self,
+    ))
   }
 
-  async fn release(&self, _handle: LockHandle) -> Result<(), AnyhowError> {
+  async fn release(
+    &self,
+    _descriptor: &LockDescriptor,
+  ) -> Result<(), AnyhowError> {
     Ok(())
   }
 
   async fn renew(
     &self,
-    handle: LockHandle,
+    handle: &LockDescriptor,
     _new_ttl: Duration,
-  ) -> Result<LockHandle, LockAcquireError> {
-    Ok(handle)
+  ) -> Result<LockDescriptor, LockAcquireError> {
+    Ok(handle.clone())
   }
 }
 
@@ -951,7 +1047,7 @@ mod tests {
     let lock_name = "test_lock_non_existent";
     let node_id = NodeId::new("node_a");
 
-    let fake_handle = LockHandle {
+    let fake_handle = LockDescriptor {
       lock_key: lock_manager.get_lock_key(lock_name),
       node_id,
     };
@@ -991,7 +1087,7 @@ mod tests {
 
     let mut success_count = 0;
     let mut held_count = 0;
-    let mut acquired_guard: Option<LockGuard> = None;
+    let mut acquired_guard: Option<LockDescriptor> = None;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let mut tx = Some(tx);
 
@@ -1108,7 +1204,7 @@ mod tests {
 
     // Test that another node can't renew our lock
     let different_node_id = NodeId::new("node_b");
-    let invalid_handle = LockHandle {
+    let invalid_handle = LockDescriptor {
       lock_key: guard.lock_key.clone(),
       node_id: different_node_id,
     };
