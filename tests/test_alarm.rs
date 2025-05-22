@@ -1,10 +1,8 @@
 mod common;
 
 use common::TestEnv;
-use serial_test::serial;
 
 #[tokio::test]
-#[serial]
 async fn test_alarm_crud_in_single_node_cluster() {
   let test_env = TestEnv::new(1);
   let port = test_env.public_ports[0];
@@ -97,7 +95,6 @@ async fn test_alarm_crud_in_single_node_cluster() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_alarm_dispatch_in_single_node_cluster() {
   let test_env = TestEnv::new(1);
   let port = test_env.public_ports[0];
@@ -152,7 +149,6 @@ async fn test_alarm_dispatch_in_single_node_cluster() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_multiple_cells_alarm_dispatch_in_single_node_cluster() {
   let test_env = TestEnv::new(1);
   let port = test_env.public_ports[0];
@@ -283,7 +279,6 @@ async fn test_multiple_cells_alarm_dispatch_in_single_node_cluster() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_system_cell_takeover() {
   let client = reqwest::Client::new();
 
@@ -384,7 +379,6 @@ async fn test_system_cell_takeover() {
 }
 
 #[tokio::test]
-#[serial]
 async fn alarm_crud_operations_forwarded_to_system_cell_node() {
   let client = reqwest::Client::new();
 
@@ -547,7 +541,6 @@ async fn alarm_crud_operations_forwarded_to_system_cell_node() {
 // 2. A secondary node (where "alarm.localhost/<some-cell-id>" is running)
 // This test verifies that the primary node will dispatch an alarm to the secondary node and then alarm.localhost's alarm handler will be triggered.
 #[tokio::test]
-#[serial]
 async fn test_alarm_dispatch_to_remote_cell_owner() {
   let client = reqwest::Client::new();
 

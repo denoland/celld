@@ -6,9 +6,13 @@ use captured_subprocess::CapturedSubprocess;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::collections::HashSet;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::Duration;
+use tempfile::TempDir;
 use test_utils::MinioTestServer;
 use uuid::Uuid;
 
@@ -22,13 +26,15 @@ pub struct TestEnv {
   /// Celld server ports (external ports)
   ports: Vec<u16>,
   pub minio_server: MinioTestServer,
-  test_id: String,
-  bucket_name: String,
+  pub test_id: String,
+  pub bucket_name: String,
   /// Make public_ports public for tests that need to access them
   /// TODO(magurotuna): this is identical to `ports` . Maybe remove one of them?
   pub public_ports: Vec<u16>,
   /// Celld server ports (internal ports)
   pub internal_ports: Vec<u16>,
+  /// Temporary directories for each server instance's data
+  pub server_dirs: Vec<TempDir>,
 }
 
 impl TestEnv {
@@ -80,6 +86,7 @@ impl TestEnv {
 
     let servers = Vec::new();
     let test_id = Uuid::new_v4().simple().to_string();
+
     let mut test_env = TestEnv {
       servers,
       ports: ports.to_vec(),
@@ -88,6 +95,7 @@ impl TestEnv {
       test_id: test_id.to_string(),
       public_ports: public_ports.clone(),
       internal_ports: internal_ports.clone(),
+      server_dirs: Vec::new(),
     };
 
     for &port in ports.iter() {
@@ -107,9 +115,19 @@ impl TestEnv {
     test_env
   }
 
+  /// Kill a server instance by index, shifting the remaining instances to the
+  /// left.
+  ///
+  /// For example, if we have servers [A, B, C] and call this function
+  /// with index 1, the servers will become [A, C]. Note that C's index has
+  /// changed.
+  // TODO: Can we do this without shifting the remaining instances? Maybe by not
+  // relying on the index but on the server name or something?
   pub fn kill_cell_instance(&mut self, index: usize) {
     let mut server = self.servers.remove(index);
     let _ = self.ports.remove(index);
+    let _tmp_dir = self.server_dirs.remove(index); // Remove and drop TempDir
+
     let pid = Pid::from_raw(server.child().id() as i32);
     // Use SIGKILL to avoid long graceful shutdown times
     kill(pid, Signal::SIGKILL).unwrap();
@@ -119,6 +137,8 @@ impl TestEnv {
   pub fn graceful_shutdown_cell_instance(&mut self, index: usize) {
     let mut server = self.servers.remove(index);
     let _ = self.ports.remove(index);
+    let _tmp_dir = self.server_dirs.remove(index); // Remove and drop TempDir
+
     let pid = Pid::from_raw(server.child().id() as i32);
     kill(pid, Signal::SIGTERM).unwrap();
     server.child_mut().wait().unwrap();
@@ -127,15 +147,20 @@ impl TestEnv {
   pub fn spawn_cell_instance(&mut self, port: u16) {
     let advertise_addr = format!("127.0.0.1:{}", port);
     let internal_addr = format!("127.0.0.1:{}", port + 1);
+
+    // Prepare a properly structured temporary directory
+    // This creates a temp dir with both jsr-cells/ and data/ to maintain relative imports
+    let (temp_dir, data_dir_path) = prepare_test_directory()
+      .expect("Failed to prepare temp directory with proper structure");
+
     let server_cmd = Command::new(env!("CARGO_BIN_EXE_celld"));
     let server_cmd_setup = |cmd: &mut Command| {
       cmd
         .env("RUST_LOG", "info")
         .env("ADVERTISE_ADDR", &advertise_addr)
         .env("INTERNAL_LISTEN_ADDR", &internal_addr)
-        // TODO: Each TestEnv instance should have its own data directory to
-        // avoid conflicts between test cases running in parallel
-        .env("DATA", "./data")
+        .current_dir(temp_dir.path())
+        .env("DATA", &data_dir_path)
         .env("CELL_HEARTBEAT_INTERVAL", "2")
         .env("CELL_GRACE_PERIOD_SECONDS", "5")
         // Use a shorter staleness threshold for tests to detect failures faster
@@ -165,9 +190,11 @@ impl TestEnv {
 
     self.servers.push(server);
     self.ports.push(port);
+    self.server_dirs.push(temp_dir); // Store the TempDir
+
     println!(
-      "Started server on port {} with ADVERTISE_ADDR={} and S3 mesh",
-      port, advertise_addr
+      "Started server on port {} with ADVERTISE_ADDR={}, S3 mesh, DATA_DIR={:?}",
+      port, advertise_addr, data_dir_path
     );
   }
 
@@ -216,6 +243,85 @@ impl Drop for TestEnv {
       lock.remove(&(port + 1));
     }
   }
+}
+
+/// Prepares a temporary directory with the correct project structure
+/// to ensure relative imports like "../../../jsr-cells/mod.ts" work correctly
+///
+/// The structure created is:
+/// temp_dir/
+/// ├── jsr-cells/  (copied from CARGO_MANIFEST_DIR/jsr-cells)
+/// └── data/       (copied from CARGO_MANIFEST_DIR/data, skipping sqlite directories)
+///
+/// Returns the temp directory and the path to the data directory within it
+fn prepare_test_directory() -> io::Result<(TempDir, PathBuf)> {
+  // Create a new temporary directory
+  let temp_dir =
+    TempDir::new().expect("Failed to create temp dir for test environment");
+
+  let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    .canonicalize()
+    .expect("Failed to find project root directory");
+
+  // Create paths for source and destination directories
+  let src_data_path = project_root.join("data");
+  let src_jsr_cells_path = project_root.join("jsr-cells");
+
+  let dst_data_path = temp_dir.path().join("data");
+  let dst_jsr_cells_path = temp_dir.path().join("jsr-cells");
+
+  // Verify source directories exist
+  if !src_data_path.exists() {
+    panic!("Source data directory not found at {:?}", src_data_path);
+  }
+
+  if !src_jsr_cells_path.exists() {
+    panic!(
+      "Source jsr-cells directory not found at {:?}",
+      src_jsr_cells_path
+    );
+  }
+
+  // Create data directory in temp dir
+  fs::create_dir_all(&dst_data_path)?;
+
+  // Copy jsr-cells directory (needed for relative imports)
+  // Note jsr-cells does not contain sqlite directories, but we can reuse the
+  // same function.
+  copy_directory_without_sqlite(&src_jsr_cells_path, &dst_jsr_cells_path)?;
+
+  // Copy data directory, skipping sqlite directories
+  copy_directory_without_sqlite(&src_data_path, &dst_data_path)?;
+
+  Ok((temp_dir, dst_data_path))
+}
+
+/// Recursively copies a directory and all its contents, skipping sqlite directories
+fn copy_directory_without_sqlite(
+  src: impl AsRef<Path>,
+  dst: impl AsRef<Path>,
+) -> io::Result<()> {
+  fs::create_dir_all(&dst)?;
+
+  for entry in fs::read_dir(src)? {
+    let entry = entry?;
+    let file_name = entry.file_name();
+    let path = entry.path();
+
+    // Skip sqlite directories
+    if path.ends_with("sqlite") || path.to_string_lossy().contains("/sqlite/") {
+      continue;
+    }
+
+    let ty = entry.file_type()?;
+    if ty.is_dir() {
+      copy_directory_without_sqlite(&path, dst.as_ref().join(&file_name))?;
+    } else {
+      fs::copy(&path, dst.as_ref().join(&file_name))?;
+    }
+  }
+
+  Ok(())
 }
 
 /// Example of using the port allocation mechanism to get non-conflicting ports
