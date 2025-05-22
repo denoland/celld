@@ -128,17 +128,20 @@ pub enum LockReleaseReason {
   TTLRenewalFailed,
 }
 
+/// TODO: Ideally this should be a generic over the protected resource type `T`.
+/// But doing this would make `DistributedLock` not dyn-compatible, so here we
+/// hardcode the resource type as `ProcessEntry` for now.
 #[derive(Debug, Clone)]
 pub struct LockHandle {
   descriptor: LockDescriptor,
   guard: Arc<Mutex<LockGuard>>,
 }
 
-// Should not be Clone
-//
-// TODO: Ideally this should be a generic over the protected resource type `T`.
-// But doing this would make `DistributedLock` not dyn-compatible, so here we
-// hardcode the resource type as `ProcessEntry` for now.
+/// Should not be Clone
+///
+/// TODO: Ideally this should be a generic over the protected resource type `T`.
+/// But doing this would make `DistributedLock` not dyn-compatible, so here we
+/// hardcode the resource type as `ProcessEntry` for now.
 enum LockGuard {
   /// Lock is acquired, but the resource is not yet populated
   Init {
