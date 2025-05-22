@@ -1,5 +1,6 @@
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::waitpid;
+use nix::unistd::write;
 use nix::unistd::Pid;
 use std::io;
 use std::os::fd::OwnedFd;
@@ -73,18 +74,8 @@ impl ChildOnParentExit {
 
           // Determine which signal to send
           let signal = match result {
-            Ok(0) => {
-              // EOF - parent exited without sending a signal
-              Signal::SIGTERM
-            }
-            Ok(1) => {
-              // Parent sent a signal value
-              Signal::try_from(buf[0] as i32).unwrap_or(Signal::SIGTERM)
-            }
-            _ => {
-              // Error or partial read, use default
-              Signal::SIGTERM
-            }
+            Ok(1) => Signal::try_from(buf[0] as i32).unwrap_or(Signal::SIGTERM),
+            _ => Signal::SIGTERM,
           };
 
           // Kill the child with the appropriate signal
@@ -100,9 +91,9 @@ impl ChildOnParentExit {
   pub fn kill(&self, sig: Signal) {
     if let Some(ref w) = self.death_pipe_w {
       // Write signal as a single byte to the pipe
-      use nix::unistd::write;
       let sig_val = sig as u8;
-      let _ = write(w, &[sig_val]);
+      let r = write(w, &[sig_val]).unwrap();
+      assert_eq!(r, 1, "Failed to write signal to pipe");
     } else {
       // On Linux, death_pipe_w is None, so directly kill the process
       let _ = kill(self.watcher_pid, sig);
