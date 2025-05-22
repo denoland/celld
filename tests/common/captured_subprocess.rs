@@ -83,11 +83,27 @@ impl Drop for CapturedSubprocess {
     }
 
     if let Some(stdout_relay_handle) = self.stdout_relay_handle.take() {
-      stdout_relay_handle.join().unwrap();
+      // Wait for the stdout relay thread to finish with 2s timeout
+      // Without timeout, some tests would hang on macOS
+      for _ in 0..20 {
+        if stdout_relay_handle.is_finished() {
+          stdout_relay_handle.join().unwrap();
+          break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+      }
     }
 
     if let Some(stderr_relay_handle) = self.stderr_relay_handle.take() {
-      stderr_relay_handle.join().unwrap();
+      // Wait for the stderr relay thread to finish with 2s timeout
+      // Without timeout, some tests would hang on macOS
+      for _ in 0..20 {
+        if stderr_relay_handle.is_finished() {
+          stderr_relay_handle.join().unwrap();
+          break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+      }
     }
 
     if std::thread::panicking() {
