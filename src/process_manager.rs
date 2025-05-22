@@ -51,7 +51,7 @@ impl ProcessEntry {
     self.lock_guard.request_ttl_renewal(new_ttl)
   }
 
-  pub fn terminate(mut self) {
+  pub fn terminate(self) {
     self.parent_exit_guard.kill(Signal::SIGTERM);
   }
 
