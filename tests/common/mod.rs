@@ -115,6 +115,14 @@ impl TestEnv {
     test_env
   }
 
+  /// Kill a server instance by index, shifting the remaining instances to the
+  /// left.
+  ///
+  /// For example, if we have servers [A, B, C] and call this function
+  /// with index 1, the servers will become [A, C]. Note that C's index has
+  /// changed.
+  // TODO: Can we do this without shifting the remaining instances? Maybe by not
+  // relying on the index but on the server name or something?
   pub fn kill_cell_instance(&mut self, index: usize) {
     let mut server = self.servers.remove(index);
     let _ = self.ports.remove(index);
