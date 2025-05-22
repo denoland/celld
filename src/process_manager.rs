@@ -94,7 +94,17 @@ impl ProcessManager {
   pub fn request_all_lock_ttls_renewal(&self, new_ttl: Duration) {
     let processes = self.processes.lock().unwrap();
     for process in processes.values() {
-      process.request_lock_ttl_renewal(new_ttl);
+      // Only renew if the lock is still locally valid
+      if process.lock_guard.is_still_valid() {
+        process.request_lock_ttl_renewal(new_ttl);
+      } else {
+        debug!(
+          lock_key = %process.lock_guard.lock_key(),
+          node_id = ?process.lock_guard.node_id(),
+          pid = process.pid,
+          "Skip renewing lock - locally expired"
+        );
+      }
     }
   }
 

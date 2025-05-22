@@ -142,7 +142,7 @@ impl LockGuard {
   ) -> Self {
     let (ttl_renewal_request_tx, mut ttl_renewal_request_rx) =
       tokio::sync::mpsc::channel(1);
-    
+
     // Initialize acquired_at to now
     let acquired_at = Utc::now();
 
@@ -152,7 +152,7 @@ impl LockGuard {
         lock_key: lock_key.clone(),
         node_id: node_id.clone(),
       };
-      
+
       // Local copies for the task
       let mut task_local_acquired_at = acquired_at;
       let mut task_local_ttl = ttl;
@@ -161,8 +161,10 @@ impl LockGuard {
         while let Some(new_ttl) = ttl_renewal_request_rx.recv().await {
           // Check if the lock is locally expired before attempting renewal
           let now = Utc::now();
-          let expiry_time = task_local_acquired_at + chrono::Duration::from_std(task_local_ttl).unwrap_or_else(|_| chrono::Duration::seconds(0));
-          
+          let expiry_time = task_local_acquired_at
+            + chrono::Duration::from_std(task_local_ttl)
+              .unwrap_or_else(|_| chrono::Duration::seconds(0));
+
           if now > expiry_time {
             debug!(
               lock_key = handle.lock_key,
@@ -174,14 +176,14 @@ impl LockGuard {
             // Lock is locally expired, terminate the renewal task
             break;
           }
-          
+
           // Call the underlying lock manager's renew function
           match lock_manager.renew(handle.clone(), new_ttl).await {
             Ok(lock_info) => {
               // Successfully renewed. Update local tracking of TTL and timestamp.
               task_local_acquired_at = lock_info.timestamp;
               task_local_ttl = Duration::from_secs(lock_info.ttl_secs);
-              
+
               debug!(
                 lock_key = handle.lock_key,
                 renewed_at = ?task_local_acquired_at,
@@ -215,12 +217,24 @@ impl LockGuard {
       ttl,
     }
   }
-  
+
   /// Check if the lock is still valid based on local TTL tracking
   pub fn is_still_valid(&self) -> bool {
     let now = Utc::now();
-    let expiry_time = self.acquired_at + chrono::Duration::from_std(self.ttl).unwrap_or_else(|_| chrono::Duration::seconds(0));
+    let expiry_time = self.acquired_at
+      + chrono::Duration::from_std(self.ttl)
+        .unwrap_or_else(|_| chrono::Duration::seconds(0));
     now <= expiry_time
+  }
+
+  /// Get the lock key
+  pub fn lock_key(&self) -> &str {
+    &self.lock_key
+  }
+
+  /// Get the node ID
+  pub fn node_id(&self) -> &NodeId {
+    &self.node_id
   }
 
   /// Request a ttl renewal for the lock. If there is already a renewal request enqueued, no action is taken.
@@ -229,7 +243,7 @@ impl LockGuard {
     // First check if the lock is still valid locally
     if !self.is_still_valid() {
       debug!(
-        lock_key = %self.lock_key, 
+        lock_key = %self.lock_key,
         node_id = ?self.node_id,
         acquired_at = ?self.acquired_at,
         ttl_secs = self.ttl.as_secs(),
@@ -237,7 +251,7 @@ impl LockGuard {
       );
       return;
     }
-    
+
     // Lock is still valid, try to send the renewal request
     if let Err(e) = self.ttl_renewal_request_chan.try_send(new_ttl) {
       warn!(
@@ -327,7 +341,7 @@ pub trait DistributedLock: Send + Sync {
   /// - node_id: The owning node ID (should match the handle)
   /// - timestamp: The new timestamp of the lock renewal
   /// - ttl_secs: The new TTL in seconds
-  /// 
+  ///
   /// Fails if the lock doesn't exist or is held by a different node.
   #[allow(dead_code)]
   async fn renew(
@@ -789,7 +803,12 @@ impl DistributedLock for StandaloneDistributedLock {
     node_id: &NodeId,
     ttl: Duration,
   ) -> Result<LockGuard, LockAcquireError> {
-    Ok(LockGuard::new(lock_name.to_string(), node_id.clone(), self, ttl))
+    Ok(LockGuard::new(
+      lock_name.to_string(),
+      node_id.clone(),
+      self,
+      ttl,
+    ))
   }
 
   async fn release(&self, _handle: LockHandle) -> Result<(), AnyhowError> {
@@ -819,11 +838,11 @@ mod tests {
   use aws_sdk_s3::config::{Credentials, Region};
   use aws_sdk_s3::Client;
 
-  use std::sync::Arc;
+  use chrono::Utc;
   use std::sync::atomic::{AtomicBool, Ordering};
+  use std::sync::Arc;
   use std::time::Duration;
   use tokio::time::sleep;
-  use chrono::Utc;
 
   async fn setup_test_env() -> (Arc<S3DistributedLock>, String, MinioTestServer)
   {
@@ -1223,7 +1242,9 @@ mod tests {
 
   impl MockLockManager {
     fn new() -> Arc<Self> {
-      Arc::new(Self { renew_was_called: Arc::new(AtomicBool::new(false)) })
+      Arc::new(Self {
+        renew_was_called: Arc::new(AtomicBool::new(false)),
+      })
     }
   }
 
@@ -1237,23 +1258,28 @@ mod tests {
     ) -> Result<LockGuard, LockAcquireError> {
       // For this test, LockGuard::new must be callable and accept `ttl`.
       // This might require LockGuard::new to be `pub(crate)`.
-      Ok(LockGuard::new(name.to_string(), id.clone(), self.clone(), ttl))
+      Ok(LockGuard::new(
+        name.to_string(),
+        id.clone(),
+        self.clone(),
+        ttl,
+      ))
     }
-    
+
     async fn release(&self, _h: LockHandle) -> Result<(), AnyhowError> {
       Ok(())
     }
-    
+
     async fn renew(
       &self,
       h: LockHandle,
       ttl: Duration,
     ) -> Result<LockInfo, LockAcquireError> {
       self.renew_was_called.store(true, Ordering::SeqCst);
-      Ok(LockInfo { 
-        node_id: h.node_id, 
-        timestamp: Utc::now(), 
-        ttl_secs: ttl.as_secs() 
+      Ok(LockInfo {
+        node_id: h.node_id,
+        timestamp: Utc::now(),
+        ttl_secs: ttl.as_secs(),
       })
     }
   }
@@ -1262,9 +1288,14 @@ mod tests {
   async fn test_guard_task_stops_for_local_expiry() {
     let mock_manager = MockLockManager::new();
     let renew_was_called = mock_manager.renew_was_called.clone();
-    
-    let guard = mock_manager.clone()
-      .try_acquire("short_lock", &NodeId::new("test"), Duration::from_millis(50))
+
+    let guard = mock_manager
+      .clone()
+      .try_acquire(
+        "short_lock",
+        &NodeId::new("test"),
+        Duration::from_millis(50),
+      )
       .await
       .unwrap();
 
