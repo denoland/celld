@@ -17,7 +17,7 @@ use crate::active_connections;
 use crate::child_on_parent_exit::ChildOnParentExit;
 use crate::control_socket_listener::ControlSocket;
 use crate::distributed_lock::LockAcquireError;
-use crate::distributed_lock::LockGuard;
+use crate::distributed_lock::LockHandle;
 use crate::router::ProxyError;
 use crate::sqlite_replica::{create_empty_database, SqliteReplica};
 use crate::NodeState;
@@ -35,9 +35,6 @@ pub struct ProcessEntry {
   /// Guard for automatic termination on parent exit
   parent_exit_guard: ChildOnParentExit,
 
-  /// Guard for ensuring the uniqueness of the tenant/cellId in the cluster
-  lock_guard: LockGuard,
-
   /// Keep tempdir alive as long as process exists
   _socket_tempdir: TempDir,
 
@@ -47,10 +44,6 @@ pub struct ProcessEntry {
 }
 
 impl ProcessEntry {
-  fn request_lock_ttl_renewal(&self, new_ttl: Duration) {
-    self.lock_guard.request_ttl_renewal(new_ttl)
-  }
-
   pub fn terminate(self) {
     self.parent_exit_guard.kill(Signal::SIGTERM);
   }
@@ -71,7 +64,7 @@ impl ProcessKey {
 
 pub struct ProcessManager {
   pub data_dir: PathBuf,
-  pub processes: Mutex<HashMap<ProcessKey, ProcessEntry>>,
+  pub processes: HashMap<ProcessKey, LockHandle>,
   control_socket_path: PathBuf,
 }
 
@@ -86,35 +79,20 @@ impl ProcessManager {
     // 3. Only removing databases that are successfully backed up to S3/MinIO
     ProcessManager {
       data_dir: std::fs::canonicalize(data_dir.clone()).unwrap(),
-      processes: Mutex::new(HashMap::new()),
+      processes: HashMap::new(),
       control_socket_path: control_socket.socket_path.clone(),
     }
   }
 
-  pub fn request_all_lock_ttls_renewal(&self, new_ttl: Duration) {
-    let processes = self.processes.lock().unwrap();
-    for process in processes.values() {
-      process.request_lock_ttl_renewal(new_ttl);
-    }
-  }
-
   pub async fn wait_until_process_cleanup_complete(&self) {
-    let processes = {
-      let mut lock = self.processes.lock().unwrap();
-      std::mem::take(&mut *lock)
-    };
-
     // Ensure all locks are released
-    // NOTE: Awaiting all notifiers at once with futures::future::join_all
-    // somehow causes hangs. So we process each one sequentially.
-    for (_, mut process) in processes {
-      let (tx, rx) = tokio::sync::oneshot::channel();
-      process.lock_guard.set_release_notifier(tx);
-      // `drop(process)` would not invoke the Drop impl of LockGuard immediately
-      // for unknown reasons. Specifying `.lock_guard` directly is needed.
-      drop(process.lock_guard);
-      if let Err(e) = rx.await {
-        tracing::error!(error = ?e, "Error waiting for process cleanup to complete");
+    for (_, process) in &self.processes {
+      if let Err(e) = process.release().await {
+        tracing::error!(
+          error = ?e,
+          descriptor = ?process.descriptor(),
+          "Error waiting for the process cleanup to complete"
+        );
       }
     }
   }
@@ -124,14 +102,16 @@ impl ProcessManager {
     &self,
     process_key: &ProcessKey,
   ) -> bool {
-    let mut processes = self.processes.lock().unwrap();
-
-    let Some(entry) = processes.get_mut(process_key) else {
+    let Some(entry) = self.processes.get(process_key) else {
       return false;
     };
 
-    entry.incoming_connections += 1;
-    entry.last_used = Instant::now();
+    entry
+      .update_inner(|process_entry| {
+        process_entry.incoming_connections += 1;
+        process_entry.last_used = Instant::now();
+      })
+      .await;
 
     true
   }
@@ -141,15 +121,17 @@ impl ProcessManager {
     &self,
     process_key: &ProcessKey,
   ) -> bool {
-    let mut processes = self.processes.lock().unwrap();
-
-    let Some(entry) = processes.get_mut(process_key) else {
+    let Some(entry) = self.processes.get(process_key) else {
       return false;
     };
 
-    assert!(entry.incoming_connections > 0);
-    entry.incoming_connections -= 1;
-    entry.last_used = Instant::now();
+    entry
+      .update_inner(|process_entry| {
+        assert!(process_entry.incoming_connections > 0);
+        process_entry.incoming_connections -= 1;
+        process_entry.last_used = Instant::now();
+      })
+      .await;
 
     true
   }

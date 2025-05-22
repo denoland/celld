@@ -320,7 +320,7 @@ impl SqliteReplica {
   #[instrument(skip(self, _lock_guard))]
   pub async fn ensure_restored(
     &self,
-    _lock_guard: &distributed_lock::LockGuard,
+    _lock_guard: &distributed_lock::LockDescriptor,
   ) {
     // Check if database already exists locally
     if self.db_path.exists() {

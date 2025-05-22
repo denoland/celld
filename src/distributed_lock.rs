@@ -82,6 +82,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::error::Error as StdError;
 use std::fmt;
+use std::ops::DerefMut as _;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -197,7 +198,26 @@ impl LockHandle {
     }
   }
 
-  async fn release(&self) -> anyhow::Result<()> {
+  pub fn descriptor(&self) -> &LockDescriptor {
+    &self.descriptor
+  }
+
+  pub async fn update_inner(
+    &self,
+    update_inner: impl FnOnce(&mut ProcessEntry),
+  ) {
+    match self.guard.lock().await.deref_mut() {
+      LockGuard::Init { .. } => {}
+      LockGuard::Active {
+        protected_resource, ..
+      } => {
+        update_inner(protected_resource);
+      }
+      LockGuard::Released { .. } => {}
+    }
+  }
+
+  pub async fn release(&self) -> anyhow::Result<()> {
     self.guard.lock().await.release().await
   }
 }

@@ -4,7 +4,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
   alarm_processor::AlarmProcessor,
-  distributed_lock::LockGuard,
+  distributed_lock::LockDescriptor,
   node_state::NodeState,
   sqlite_replica::{create_empty_database, SqliteReplica},
 };
@@ -17,7 +17,7 @@ pub struct SystemCell {
   node_state: Arc<NodeState>,
 
   /// Guard for ensuring the uniqueness of the system cell in the cluster
-  _lock_guard: LockGuard,
+  _lock_guard: LockDescriptor,
 
   /// SQLite replication to S3/MinIO
   /// `None` if S3/MinIO is not configured (i.e. standalone mode)
@@ -35,7 +35,7 @@ pub struct SystemCell {
 impl SystemCell {
   pub async fn new(
     node_state: Arc<NodeState>,
-    lock_guard: LockGuard,
+    lock_guard: LockDescriptor,
   ) -> Result<Self, anyhow::Error> {
     let db_path = node_state
       .config
@@ -62,7 +62,7 @@ impl SystemCell {
 
 async fn setup_sqlite_replica(
   node_state: Arc<NodeState>,
-  lock_guard: &LockGuard,
+  lock_guard: &LockDescriptor,
   db_path: &Path,
 ) -> Result<Option<SqliteReplica>, anyhow::Error> {
   let maybe_replica = match SqliteReplica::initialize(

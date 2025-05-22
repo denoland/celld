@@ -4,13 +4,13 @@ use pingora::services::background::BackgroundService;
 use tracing::{debug, error, info};
 
 use crate::cluster_membership::NodeId;
-use crate::distributed_lock::{DistributedLock, LockGuard};
+use crate::distributed_lock::{DistributedLock, LockDescriptor};
 use crate::system_cell::{SystemCell, SYSTEM_CELL_ID, SYSTEM_TENANT};
 use std::sync::Arc;
 use std::time::Duration;
 
 type SystemCellFactory = Box<
-  dyn Fn(LockGuard) -> BoxFuture<'static, Result<Arc<SystemCell>, anyhow::Error>>
+  dyn Fn(LockDescriptor) -> BoxFuture<'static, Result<Arc<SystemCell>, anyhow::Error>>
     + Send
     + Sync,
 >;
