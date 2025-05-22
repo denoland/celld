@@ -104,6 +104,8 @@ pub struct LockInfo {
 pub enum LockAcquireError {
   #[error("Lock already held: {0:?}")]
   LockHeld(Option<LockInfo>),
+  #[error("Unable to renew expired lock: {0:?}")]
+  UnableToRenewExpiredLock(Option<LockInfo>),
   #[error("S3 operation failed: {0}")]
   S3Error(String),
   #[error("Failed to serialize or deserialize lock data: {0}")]
@@ -126,8 +128,9 @@ pub enum LockReleaseReason {
   TTLRenewalFailed,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct LockHandle {
+  descriptor: LockDescriptor,
   guard: Arc<Mutex<LockGuard>>,
 }
 
@@ -180,12 +183,19 @@ impl LockHandle {
     });
 
     let guard = Arc::new(Mutex::new(LockGuard::Init {
-      descriptor: lock_descriptor,
+      descriptor: lock_descriptor.clone(),
       lock_manager,
       ttl_renewal_task,
     }));
 
-    Self { guard }
+    Self {
+      descriptor: lock_descriptor,
+      guard,
+    }
+  }
+
+  async fn release(&self) -> anyhow::Result<()> {
+    self.guard.lock().await.release().await
   }
 }
 
@@ -708,6 +718,17 @@ impl DistributedLock for S3DistributedLock {
           return Err(LockAcquireError::LockHeld(Some(existing_lock_info)));
         }
 
+        // Verify the lock has not expired
+        if existing_lock_info.timestamp
+          + Duration::from_secs(existing_lock_info.ttl_secs)
+          < Utc::now()
+        {
+          warn!(lock_key, "Cannot renew lock: lock has expired");
+          return Err(LockAcquireError::UnableToRenewExpiredLock(Some(
+            existing_lock_info,
+          )));
+        }
+
         // Create updated lock info with new timestamp and TTL
         let updated_lock_info = LockInfo {
           node_id: node_id.clone(),
@@ -914,24 +935,23 @@ mod tests {
     let node_id = NodeId::new("node_a");
     let ttl = Duration::from_secs(60);
 
-    let mut guard = lock_manager
+    let handle = lock_manager
       .clone()
       .try_acquire(lock_name, &node_id, ttl)
       .await
       .expect("Failed to acquire lock");
 
     assert!(
-      s3_object_exists(&lock_manager.s3_client, &bucket, &guard.lock_key).await,
+      s3_object_exists(
+        &lock_manager.s3_client,
+        &bucket,
+        &handle.descriptor.lock_key
+      )
+      .await,
       "Lock object should exist after acquire"
     );
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    guard.set_release_notifier(tx);
-
-    drop(guard);
-
-    // Wait until the release is complete
-    rx.await.unwrap().unwrap();
+    handle.release().await.unwrap();
 
     let lock_key_after_release = lock_manager.get_lock_key(lock_name);
     assert!(
@@ -954,45 +974,36 @@ mod tests {
     let node_b = NodeId::new("node_b");
     let ttl = Duration::from_secs(60);
 
-    let mut guard_a = lock_manager
+    let handle_a = lock_manager
       .clone()
       .try_acquire(lock_name, &node_a, ttl)
       .await
       .expect("Node A failed to acquire lock");
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    guard_a.set_release_notifier(tx);
-
-    let guard_b = lock_manager
+    let handle_b = lock_manager
       .clone()
       .try_acquire(lock_name, &node_b, ttl)
       .await;
 
-    match guard_b {
+    match handle_b {
       Err(LockAcquireError::LockHeld(Some(info))) => {
         assert_eq!(info.node_id, node_a);
       }
-      _ => panic!("Node B should have failed with LockHeld, got {:?}", guard_b),
+      _ => panic!(
+        "Node B should have failed with LockHeld, got {:?}",
+        handle_b
+      ),
     }
 
-    drop(guard_a);
-
-    // Wait until the release is complete
-    rx.await.unwrap().unwrap();
+    handle_a.release().await.unwrap();
 
     // Now node B should be able to acquire the lock
-    let mut guard_b = lock_manager
+    let handle_b = lock_manager
       .try_acquire(lock_name, &node_b, ttl)
       .await
       .expect("Node B failed to acquire lock after release");
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    guard_b.set_release_notifier(tx);
-
-    drop(guard_b);
-
-    // Wait until the release is complete and ensure it succeeded
-    rx.await.unwrap().unwrap();
+    handle_b.release().await.unwrap();
   }
 
   #[test_log::test(tokio::test)]
@@ -1005,39 +1016,28 @@ mod tests {
     let short_ttl = Duration::from_secs(2);
     let long_ttl = Duration::from_secs(60);
 
-    let mut guard_a = lock_manager
+    let handle_a = lock_manager
       .clone()
       .try_acquire(lock_name, &node_a, short_ttl)
       .await
       .expect("Node A failed to acquire lock with short TTL");
 
-    let (tx_guard_a, rx_guard_a) = tokio::sync::oneshot::channel();
-    guard_a.set_release_notifier(tx_guard_a);
-
+    // Wait until the lock expires
     sleep(short_ttl + Duration::from_secs(1)).await;
 
-    let mut guard_b = lock_manager
+    let handle_b = lock_manager
       .try_acquire(lock_name, &node_b, long_ttl)
       .await
       .expect("Node B failed to acquire expired lock");
 
-    let (tx_guard_b, rx_guard_b) = tokio::sync::oneshot::channel();
-    guard_b.set_release_notifier(tx_guard_b);
+    assert_eq!(handle_b.descriptor.node_id, node_b);
 
-    assert_eq!(guard_b.node_id, node_b);
+    handle_a
+      .release()
+      .await
+      .expect("Attempt to release the expired lock should be okay");
 
-    drop(guard_a);
-    // Wait until the release of guard_a is complete
-    let release_a_result = rx_guard_a.await.unwrap();
-
-    assert!(
-      release_a_result.is_ok(),
-      "Releasing stale handle should be okay (lock already gone or owned by B)"
-    );
-
-    drop(guard_b);
-    // Wait until the release of guard_b is complete and ensure it succeeded
-    rx_guard_b.await.unwrap().unwrap();
+    handle_b.release().await.unwrap();
   }
 
   #[test_log::test(tokio::test)]
@@ -1052,7 +1052,7 @@ mod tests {
       node_id,
     };
 
-    let result = lock_manager.release(fake_handle).await;
+    let result = lock_manager.release(&fake_handle).await;
 
     assert!(
       result.is_ok(),
@@ -1087,18 +1087,13 @@ mod tests {
 
     let mut success_count = 0;
     let mut held_count = 0;
-    let mut acquired_guard: Option<LockDescriptor> = None;
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let mut tx = Some(tx);
+    let mut acquired_handle: Option<LockHandle> = None;
 
     for result in results {
       match result {
-        Ok(Ok(mut guard)) => {
+        Ok(Ok(mut handle)) => {
           success_count += 1;
-          if let Some(tx) = tx.take() {
-            guard.set_release_notifier(tx);
-          }
-          acquired_guard = Some(guard);
+          acquired_handle = Some(handle);
         }
         Ok(Err(LockAcquireError::LockHeld(_))) => {
           held_count += 1;
@@ -1119,10 +1114,8 @@ mod tests {
       "All other nodes should fail with LockHeld"
     );
 
-    if let Some(guard) = acquired_guard {
-      drop(guard);
-      // Wait until the release is complete and ensure it succeeded
-      rx.await.unwrap().unwrap();
+    if let Some(handle) = acquired_handle {
+      handle.release().await.unwrap();
     }
   }
 
@@ -1132,68 +1125,69 @@ mod tests {
 
     let lock_name = "test_lock_renewal";
     let node_id = NodeId::new("node_a");
-    let initial_ttl = Duration::from_secs(10);
-    let new_ttl = Duration::from_secs(60);
+    // Lock renewal happens every one third of the TTL i.e. 2 seconds.
+    let ttl = Duration::from_secs(6);
 
     // First acquire the lock
-    let mut guard = lock_manager
+    let handle = lock_manager
       .clone()
-      .try_acquire(lock_name, &node_id, initial_ttl)
+      .try_acquire(lock_name, &node_id, ttl)
       .await
       .expect("Failed to acquire lock initially");
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    guard.set_release_notifier(tx);
-
     // Check lock exists
     assert!(
-      s3_object_exists(&lock_manager.s3_client, &bucket, &guard.lock_key).await,
+      s3_object_exists(
+        &lock_manager.s3_client,
+        &bucket,
+        &handle.descriptor.lock_key
+      )
+      .await,
       "Lock object should exist after acquire"
     );
 
     // Get the initial lock info to verify timestamps later
-    let initial_lock_info =
-      get_lock_info(&lock_manager.s3_client, &bucket, &guard.lock_key)
-        .await
-        .expect("Failed to get initial lock info");
+    let initial_lock_info = get_lock_info(
+      &lock_manager.s3_client,
+      &bucket,
+      &handle.descriptor.lock_key,
+    )
+    .await
+    .expect("Failed to get initial lock info");
 
-    // Sleep a bit to ensure timestamp will be different
-    sleep(Duration::from_secs(1)).await; // Increased sleep time to ensure timestamp difference
-
-    // Renew the lock with a longer TTL
-    guard.request_ttl_renewal(new_ttl);
-
-    // Wait for the renewal to complete
-    // TODO(magurotuna): introduce more reliable, less flaky way to wait for the renewal to complete
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Sleep for 5 seconds to ensure the lock will have been renewed
+    sleep(Duration::from_secs(5)).await;
 
     // Lock should still exist
     assert!(
-      s3_object_exists(&lock_manager.s3_client, &bucket, &guard.lock_key).await,
+      s3_object_exists(
+        &lock_manager.s3_client,
+        &bucket,
+        &handle.descriptor.lock_key
+      )
+      .await,
       "Lock object should still exist after renewal"
     );
 
     // Get the updated lock info
-    let renewed_lock_info =
-      get_lock_info(&lock_manager.s3_client, &bucket, &guard.lock_key)
-        .await
-        .expect("Failed to get renewed lock info");
+    let renewed_lock_info = get_lock_info(
+      &lock_manager.s3_client,
+      &bucket,
+      &handle.descriptor.lock_key,
+    )
+    .await
+    .expect("Failed to get renewed lock info");
 
     // Print timestamps for debugging
     println!("Initial timestamp: {:?}", initial_lock_info.timestamp);
     println!("Renewed timestamp: {:?}", renewed_lock_info.timestamp);
 
-    // Verify the TTL was updated
-    assert_eq!(
-      renewed_lock_info.ttl_secs,
-      new_ttl.as_secs(),
-      "TTL should be updated to the new value"
-    );
-
     // Verify the timestamp was updated (renewed)
     assert!(
       renewed_lock_info.timestamp > initial_lock_info.timestamp,
-      "Lock timestamp should be updated during renewal"
+      "Lock timestamp should be updated during renewal, but got renewed timestamp {:?} and initial timestamp {:?}",
+      renewed_lock_info.timestamp,
+      initial_lock_info.timestamp
     );
 
     // Verify the owner stayed the same
@@ -1204,12 +1198,12 @@ mod tests {
 
     // Test that another node can't renew our lock
     let different_node_id = NodeId::new("node_b");
-    let invalid_handle = LockDescriptor {
-      lock_key: guard.lock_key.clone(),
+    let invalid_descriptor = LockDescriptor {
+      lock_key: handle.descriptor.lock_key.clone(),
       node_id: different_node_id,
     };
 
-    match lock_manager.renew(invalid_handle, new_ttl).await {
+    match lock_manager.renew(&invalid_descriptor, ttl).await {
       Err(LockAcquireError::LockHeld(Some(info))) => {
         assert_eq!(
           info.node_id, node_id,
@@ -1219,9 +1213,7 @@ mod tests {
       other => panic!("Expected LockHeld error, got {:?}", other),
     }
 
-    // Wait until the release is complete and ensure it succeeded
-    drop(guard);
-    rx.await.unwrap().unwrap();
+    handle.release().await.unwrap();
   }
 
   // Helper function to get lock info from S3
