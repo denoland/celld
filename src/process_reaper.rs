@@ -132,7 +132,9 @@ impl BackgroundService for ProcessReaper {
     loop {
       tokio::select! {
           _ = shutdown.changed() => {
-              info!("Process reaper received shutdown signal");
+              info!("Process reaper received shutdown signal - terminating all processes");
+              // Terminate all processes when shutdown signal is received
+              self.node_state.process_manager.terminate_all().await;
               break;
           }
           _ = interval.tick() => {

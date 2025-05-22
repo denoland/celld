@@ -1,5 +1,6 @@
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::waitpid;
+use nix::unistd::write;
 use nix::unistd::Pid;
 use std::io;
 use std::os::fd::OwnedFd;
@@ -67,12 +68,18 @@ impl ChildOnParentExit {
           drop(w); // Close write end
           let mut real_child = cmd.spawn()?;
 
-          // block until parent exits
-          let mut buf = [0u8; 1];
-          let _ = read(&r, &mut buf);
+          // block until parent exits or sends a signal
+          let mut buf = [0u8; 1]; // One byte for signal
+          let result = read(&r, &mut buf);
 
-          // parent gone → kill real child
-          let _ = kill(Pid::from_raw(real_child.id() as i32), Signal::SIGINT);
+          // Determine which signal to send
+          let signal = match result {
+            Ok(1) => Signal::try_from(buf[0] as i32).unwrap_or(Signal::SIGTERM),
+            _ => Signal::SIGTERM,
+          };
+
+          // Kill the child with the appropriate signal
+          let _ = kill(Pid::from_raw(real_child.id() as i32), signal);
           let _ = real_child.wait();
           std::process::exit(0);
         }
@@ -80,9 +87,17 @@ impl ChildOnParentExit {
     }
   }
 
-  /// Send SIGTERM to the watcher (and thus the real child on macOS).
+  /// Send signal to the child process by writing it to the death pipe.
   pub fn kill(&self, sig: Signal) {
-    let _ = kill(self.watcher_pid, sig);
+    if let Some(ref w) = self.death_pipe_w {
+      // Write signal as a single byte to the pipe
+      let sig_val = sig as u8;
+      let r = write(w, &[sig_val]).unwrap();
+      assert_eq!(r, 1, "Failed to write signal to pipe");
+    } else {
+      // On Linux, death_pipe_w is None, so directly kill the process
+      let _ = kill(self.watcher_pid, sig);
+    }
   }
 
   /// Get the PID of the child process
