@@ -7,6 +7,7 @@ mod cluster_membership;
 mod config;
 mod control_socket_listener;
 mod distributed_lock;
+mod extendable_timer;
 mod heartbeat_service;
 mod lock_guard_ttl_updater;
 mod node_state;
