@@ -82,11 +82,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::error::Error as StdError;
 use std::fmt;
+use std::ops::Deref as _;
 use std::ops::DerefMut as _;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::Mutex;
+use tokio::task::AbortHandle;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -155,7 +157,7 @@ enum LockGuard {
   TtlRenewalTaskStarted {
     descriptor: LockDescriptor,
     lock_manager: Arc<dyn DistributedLock>,
-    ttl_renewal_task: JoinHandle<()>,
+    ttl_renewal_task_abort_handle: AbortHandle,
   },
   /// Lock is acquired, and the resource is populated
   Active {
@@ -163,7 +165,7 @@ enum LockGuard {
     /// Reference back to the manager to call release
     /// Use Arc if the manager itself is shared via Arc
     lock_manager: Arc<dyn DistributedLock>,
-    ttl_renewal_task: JoinHandle<()>,
+    ttl_renewal_task_abort_handle: AbortHandle,
     protected_resource: ProcessEntry,
   },
   /// Lock has been released
@@ -240,8 +242,27 @@ impl LockHandle {
     &self.descriptor
   }
 
-  /// Perform the given operation on the protected resource.
-  pub async fn update_inner(
+  pub async fn transition_to_active(&self, resource: ProcessEntry) {
+    self.guard.lock().await.transition_to_active(resource);
+  }
+
+  pub async fn access_resource<T>(
+    &self,
+    accessor: impl FnOnce(&ProcessEntry) -> T,
+  ) -> Option<T> {
+    match self.guard.lock().await.deref() {
+      LockGuard::Init { .. } => None,
+      LockGuard::TtlRenewalTaskStarted { .. } => None,
+      LockGuard::Active {
+        ref protected_resource,
+        ..
+      } => Some(accessor(protected_resource)),
+      LockGuard::Released { .. } => None,
+    }
+  }
+
+  /// Perform the given operation on the protected resource to mutate it.
+  pub async fn mutate_resource(
     &self,
     update_inner: impl FnOnce(&mut ProcessEntry),
   ) {
@@ -286,11 +307,33 @@ impl LockGuard {
         *self = LockGuard::TtlRenewalTaskStarted {
           descriptor: descriptor.clone(),
           lock_manager: lock_manager.clone(),
-          ttl_renewal_task,
+          ttl_renewal_task_abort_handle: ttl_renewal_task.abort_handle(),
         };
       }
       _ => {
         unreachable!("LockGuard is not in the Init state");
+      }
+    }
+  }
+
+  fn transition_to_active(&mut self, resource: ProcessEntry) {
+    assert!(matches!(self, LockGuard::TtlRenewalTaskStarted { .. }));
+
+    match self {
+      LockGuard::TtlRenewalTaskStarted {
+        descriptor,
+        lock_manager,
+        ttl_renewal_task_abort_handle,
+      } => {
+        *self = LockGuard::Active {
+          descriptor: descriptor.clone(),
+          lock_manager: lock_manager.clone(),
+          ttl_renewal_task_abort_handle: ttl_renewal_task_abort_handle.clone(),
+          protected_resource: resource,
+        }
+      }
+      _ => {
+        unreachable!("LockGuard is not in the TtlRenewalTaskStarted state");
       }
     }
   }
@@ -319,10 +362,10 @@ impl LockGuard {
       LockGuard::TtlRenewalTaskStarted {
         descriptor,
         lock_manager,
-        ttl_renewal_task,
+        ttl_renewal_task_abort_handle,
       } => {
         // Stop the TTL renewal task
-        ttl_renewal_task.abort();
+        ttl_renewal_task_abort_handle.abort();
 
         // Release the lock
         lock_manager.release(&descriptor).await?;
@@ -338,10 +381,13 @@ impl LockGuard {
         descriptor,
         lock_manager,
         protected_resource,
-        ttl_renewal_task,
+        ttl_renewal_task_abort_handle,
       } => {
+        // Terminate the protected resource
+        protected_resource.terminate();
+
         // Stop the TTL renewal task
-        ttl_renewal_task.abort();
+        ttl_renewal_task_abort_handle.abort();
 
         // Release the lock
         lock_manager.release(&descriptor).await?;
