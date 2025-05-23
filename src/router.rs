@@ -3,6 +3,7 @@ use http_body_util::BodyExt;
 use pingora::http::StatusCode;
 use pingora::prelude::*;
 use pingora::upstreams::peer::HttpPeer;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, error, info};
@@ -388,23 +389,30 @@ impl ProxyHttp for Proxy {
         "default"
       };
 
-    // Extract hostname without port
-    let hostname = host.split(':').next().unwrap_or(host);
-    let mut tenant = hostname.to_string();
+    // In single-tenant mode, always use "default" tenant
+    let tenant = if self.node_state.config.single_tenant.is_some() {
+      "default".to_string()
+    } else {
+      // Extract hostname without port
+      let hostname = host.split(':').next().unwrap_or(host);
+      let mut tenant = hostname.to_string();
 
-    // Validate host format briefly (prevent directory traversal)
-    if tenant.contains('/') || tenant.contains("..") {
-      return Err(pingora::Error::explain(
-        ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
-        "Invalid Host header",
-      ));
-    }
+      // Validate host format briefly (prevent directory traversal)
+      if tenant.contains('/') || tenant.contains("..") {
+        return Err(pingora::Error::explain(
+          ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
+          "Invalid Host header",
+        ));
+      }
 
-    // Check if tenant directory exists, fall back to "default" if not
-    let tenant_dir = self.node_state.process_manager.data_dir.join(&tenant);
-    if !tenant_dir.exists() {
-      tenant = "default".to_string();
-    }
+      // Check if tenant directory exists, fall back to "default" if not
+      let tenant_dir = self.node_state.process_manager.data_dir.join(&tenant);
+      if !tenant_dir.exists() {
+        tenant = "default".to_string();
+      }
+
+      tenant
+    };
 
     ctx.tenant = tenant;
 
@@ -475,8 +483,18 @@ impl ProxyHttp for Proxy {
     };
 
     // Construct the file path
-    let tenant_dir = self.node_state.process_manager.data_dir.join(&ctx.tenant);
-    let static_dir = tenant_dir.join("static");
+    let static_dir =
+      if let Some(ref single_tenant) = self.node_state.config.single_tenant {
+        // In single-tenant mode, use the specified static directory or fall back to current dir
+        single_tenant.static_dir.clone().unwrap_or_else(|| {
+          std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        })
+      } else {
+        // In multi-tenant mode, use the standard path structure
+        let tenant_dir =
+          self.node_state.process_manager.data_dir.join(&ctx.tenant);
+        tenant_dir.join("static")
+      };
     let file_path = static_dir.join(&rel_path_);
 
     // Try to read the file

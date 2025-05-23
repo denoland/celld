@@ -195,9 +195,21 @@ impl ProcessManager {
 
     // checked higher up, but done again here for safety
     assert!(!host.contains('/') && !host.contains(".."));
+
+    // Always compute tenant_dir for SQLite and process spawning
     let tenant_dir = self.data_dir.join(host);
-    let app_code_dir = tenant_dir.join("src");
-    let main_script = app_code_dir.join("main.ts"); // TODO support main.js
+
+    // Determine the source file path
+    let main_script =
+      if let Some(ref single_tenant) = node_state.config.single_tenant {
+        // In single-tenant mode, use the specified source file
+        single_tenant.src_file.clone()
+      } else {
+        // In multi-tenant mode, use the standard path structure
+        let app_code_dir = tenant_dir.join("src");
+        app_code_dir.join("main.ts") // TODO support main.js
+      };
+
     if !main_script.exists() {
       error!("Application code not found at {}", main_script.display());
       return Err(ProcessManagerError::Internal(
