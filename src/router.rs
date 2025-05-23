@@ -374,7 +374,7 @@ impl ProxyHttp for Proxy {
   ) -> Result<bool> {
     let req_header = session.req_header();
 
-    // Extract and validate host header
+    // Extract host header, fall back to "default" if missing
     let host =
       if let Some(header_value) = req_header.headers.get(http::header::HOST) {
         header_value.to_str().map_err(|_| {
@@ -385,24 +385,28 @@ impl ProxyHttp for Proxy {
           )
         })?
       } else {
-        error!("Missing host header");
-        return Err(pingora::Error::explain(
-          ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
-          "Missing Host header",
-        ));
+        "default"
       };
 
     // Extract hostname without port
     let hostname = host.split(':').next().unwrap_or(host);
-    ctx.tenant = hostname.to_string();
+    let mut tenant = hostname.to_string();
 
     // Validate host format briefly (prevent directory traversal)
-    if ctx.tenant.contains('/') || ctx.tenant.contains("..") {
+    if tenant.contains('/') || tenant.contains("..") {
       return Err(pingora::Error::explain(
         ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
         "Invalid Host header",
       ));
     }
+
+    // Check if tenant directory exists, fall back to "default" if not
+    let tenant_dir = self.node_state.process_manager.data_dir.join(&tenant);
+    if !tenant_dir.exists() {
+      tenant = "default".to_string();
+    }
+
+    ctx.tenant = tenant;
 
     // Get the path
     let path = req_header.uri.path();

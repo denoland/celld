@@ -9,9 +9,11 @@ Deno for isolated compute, SQLite for local state, and S3 as the primary cloud
 backing service.
 
 **Multi-Tenancy**: The runtime handles multiple tenants, where each tenant is
-typically delineated by the `Host` header of incoming HTTP requests. Each tenant
-has its own dedicated data directory structure for application code, static
-assets, and persisted state.
+typically delineated by the `Host` header of incoming HTTP requests. If no Host
+header is present or the hostname doesn't match any existing tenant directory,
+the system falls back to a "default" tenant. Each tenant has its own dedicated
+data directory structure for application code, static assets, and persisted
+state.
 
 **Request Handling**:
 
@@ -67,7 +69,8 @@ The Deno Cells runtime is composed of several key components working in concert:
   HTTP/1.x and WebSocket proxying.
 - **Responsibilities**:
   - **Tenant Extraction**: Parses the `Host:` header to determine the tenant
-    context.
+    context. Falls back to "default" tenant if no Host header is present or if
+    the hostname doesn't match any existing tenant directory.
   - **Static File Serving**: Serves static assets directly from the tenant's
     `$DATA_DIR/<tenant>/static/` directory.
   - **Cell Request Proxying**: Intercepts requests for `/cell/{cellId}`.
@@ -200,15 +203,20 @@ The Deno Cells runtime is composed of several key components working in concert:
 
 ```
 <data-dir>/
-└── <tenant-hostname>/  # e.g., myapp.localhost
-├── static/             # Served at / for the tenant
-│   └── index.html
-├── src/
-│   └── main.ts         # Cell logic for this tenant
-├── sqlite/             # Per-cell SQLite DBs and Litestream configs
-│   ├── <cell-id>.db
-│   └── <cell-id>.yml   # Litestream config for <cell-id>.db
-└── prod.env            # Optional environment variables for cells of tenant
+├── <tenant-hostname>/  # e.g., myapp.localhost
+│   ├── static/         # Served at / for the tenant
+│   │   └── index.html
+│   ├── src/
+│   │   └── main.ts     # Cell logic for this tenant
+│   ├── sqlite/         # Per-cell SQLite DBs and Litestream configs
+│   │   ├── <cell-id>.db
+│   │   └── <cell-id>.yml   # Litestream config for <cell-id>.db
+│   └── prod.env        # Optional environment variables for cells of tenant
+└── default/            # Default tenant (used when no Host header)
+    ├── static/
+    ├── src/
+    │   └── main.ts
+    └── sqlite/
 ```
 
 - **Unix Domain Sockets**: These are created in a system-wide temporary
