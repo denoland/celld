@@ -541,4 +541,20 @@ mod tests {
     assert_eq!(env_obj["X-Cell-Id"], "test-cell");
     assert_eq!(env_obj.len(), 3, "Expected exactly 4 environment variables");
   }
+
+  #[tokio::test]
+  async fn test_default_tenant() {
+    init();
+
+    // Test without Host header - should use default tenant
+    let response = reqwest::Client::new()
+      .get("http://127.0.0.1:6146/cell/test")
+      .send()
+      .await
+      .unwrap()
+      .text()
+      .await
+      .unwrap();
+    assert!(response.contains("default tenant"));
+  }
 }
