@@ -20,10 +20,12 @@ mod system_cell_takeover;
 #[cfg(test)]
 pub mod test_utils;
 
+use clap::{Arg, Command};
 use futures::FutureExt as _;
 use pingora::prelude::*;
 use pingora::server::configuration::ServerConf;
 use pingora::services::background::background_service;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info};
@@ -35,6 +37,100 @@ use router::{InternalAPI, Proxy};
 // Default values, can be overridden when creating ProcessManager
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_REAPER_INTERVAL: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone)]
+struct Args {
+  src_file: Option<PathBuf>,
+  static_dir: Option<PathBuf>,
+}
+
+fn create_command() -> Command {
+  Command::new("celld")
+    .version("0.1.0")
+    .about("Deno Cells - Simple, Stateful, Scalable Compute Units")
+    .long_about("
+celld runs \"Cells\": Deno isolates for your JS/TS code, each with a private,
+synchronous SQLite database. S3 is its sole dependency, used for durable
+state persistence (via Litestream replication), service discovery, and locking,
+enabling a resilient cluster of celld nodes.
+
+OPERATION:
+  Each unique '/cell/<cell_id>' gets a dedicated Deno isolate. Clustered
+  celld nodes use consistent hashing to distribute Cells. Cells with active
+  WebSocket connections or outbound TCP connections remain alive, and
+  automatically terminate after becoming idle.
+
+ROUTING:
+  http://<tenant_host>/cell/<cell_id>  ->  Activates Cell
+  ws://<tenant_host>/cell/<cell_id>    ->  Activates Cell
+  http://<tenant_host>/<path>          ->  Serves static file
+
+  Example: http://myapp.localhost:8000/cell/chat1
+           └──────────┬────────┘ └───┬────┘
+            tenant domain      cell ID
+
+DATA LAYOUT:
+  <data-dir>/
+  └── myapp.localhost/
+      ├── static/          # Served at /
+      │   └── index.html, client.js, etc.
+      ├── src/
+      │   └── main.ts      # Cell logic for this tenant
+      ├── sqlite/          # SQLite per cell
+      │   └── A.db, B.db
+
+CELL API (starting at main.ts):
+  import { cell } from \"jsr:@ry/cells\";
+
+  cell.id                           // Current Cell's unique ID
+  cell.db.exec(sql)                 // Executes SQL
+  cell.db.prepare(sql)              // Returns Statement; run(), get(), all()
+  cell.request((req) => Response)   // Handles HTTP requests
+  cell.connect((socket, id) => {})  // Handles new WebSocket connections
+  cell.message((event, socket, id) => {}) // Handles WebSocket messages
+  cell.broadcast(data, opts)        // Sends to all WebSockets in this Cell
+
+EXAMPLE: Incrementing Counter (main.ts):
+  import { cell } from \"jsr:@ry/cells\";
+  cell.db.exec(`CREATE TABLE IF NOT EXISTS c (id TEXT PRIMARY KEY, v INTEGER)`);
+  cell.db.exec(`INSERT OR IGNORE INTO c (id, v) VALUES ('hits', 0)`);
+  cell.request((req) => {
+    cell.db.prepare(`UPDATE c SET v = v + 1 WHERE id = 'hits'`).run();
+    const r = cell.db.prepare(`SELECT v FROM c WHERE id = 'hits'`).get();
+    return new Response(`${r.v} (${cell.id})\\n`);
+  });
+
+CONFIGURATION (Environment Variables):
+  CELL_S3_ENDPOINT, CELL_S3_BUCKET, CELL_S3_ACCESS_KEY_ID,
+  CELL_S3_SECRET_ACCESS_KEY, CELL_S3_REGION, CELL_S3_PREFIX
+  ADVERTISE_ADDR
+
+LIMITATIONS:
+  - Durability: SQLite writes are sync locally. S3 replication is async;
+    very recent writes (secs) may be lost on catastrophic node failure.
+  - Consistency: Strong for active Cell operations (single owner). S3 state
+    is eventually consistent with the last successful replication.
+  - Cell DB Size: Best for small DBs (<500MB) for fast S3 hydration.
+  - Scaling: Individual Cells are single Deno isolates (no auto-scale).
+    System scales by adding celld nodes.
+
+USAGE EXAMPLES:
+  celld                              # Multi-tenant mode (serve from data/ directory)
+  celld src/main.ts                  # Single-tenant mode (default tenant only)
+  celld src/main.ts static/          # Single-tenant with static files")
+    .arg(
+      Arg::new("src_file")
+        .help("source file for default tenant (enables single-tenant mode)")
+        .value_name("SRC_FILE")
+        .index(1)
+    )
+    .arg(
+      Arg::new("static_dir")
+        .help("static files directory for default tenant")
+        .value_name("STATIC_DIR")
+        .index(2)
+    )
+}
 
 /// Starts the server with the given configuration
 /// Returns the server instance
@@ -192,8 +288,24 @@ fn main() {
     return;
   }
 
+  // Parse CLI arguments
+  let matches = create_command().get_matches();
+
+  let args = Args {
+    src_file: matches.get_one::<String>("src_file").map(|s| {
+      let path = PathBuf::from(s);
+      // Convert to absolute path to avoid issues with working directory
+      std::fs::canonicalize(&path).unwrap_or(path)
+    }),
+    static_dir: matches.get_one::<String>("static_dir").map(|s| {
+      let path = PathBuf::from(s);
+      // Convert to absolute path to avoid issues with working directory
+      std::fs::canonicalize(&path).unwrap_or(path)
+    }),
+  };
+
   // Parse configuration from environment variables
-  let config = match config::Config::from_env() {
+  let mut config = match config::Config::from_env() {
     Ok(config) => config,
     Err(err) => {
       error!("{}", err);
@@ -201,7 +313,30 @@ fn main() {
     }
   };
 
-  info!("Starting server with dynamic cluster membership");
+  // Configure single-tenant mode if CLI arguments are provided
+  if let Some(src_file) = args.src_file {
+    if !src_file.exists() {
+      error!("Source file does not exist: {}", src_file.display());
+      std::process::exit(1);
+    }
+
+    // Validate static directory if provided
+    if let Some(ref static_dir) = args.static_dir {
+      if !static_dir.is_dir() {
+        error!("Static directory does not exist: {}", static_dir.display());
+        std::process::exit(1);
+      }
+    }
+
+    config.single_tenant = Some(config::SingleTenantConfig {
+      src_file,
+      static_dir: args.static_dir,
+    });
+
+    info!("Starting server in single-tenant mode");
+  } else {
+    info!("Starting server with dynamic cluster membership");
+  }
 
   // Start the server with configuration
   let server = start_server(config);

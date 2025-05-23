@@ -28,6 +28,7 @@ pub async fn run(iterations: usize) -> Result<()> {
         lock_guard_ttl: Duration::from_secs(30),
         system_cell_takeover_interval: Duration::from_secs(10),
         alarm_scheduler_interval: Duration::from_secs(5),
+        single_tenant: None,
       }
     }
   };
