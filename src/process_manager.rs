@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use if_chain::if_chain;
 use nix::sys::signal::Signal;
 use std::collections::HashMap;
 use std::fs;
@@ -44,8 +45,12 @@ pub struct ProcessEntry {
 }
 
 impl ProcessEntry {
-  pub fn terminate(self) {
+  pub fn terminate(&self) {
     self.parent_exit_guard.kill(Signal::SIGTERM);
+
+    // TODO: do we want to explicitly wait for the process to exit?
+
+    // TODO: Terminate Litestream replication process gracefully
   }
 
   pub fn has_active_connections(&self) -> bool {
@@ -64,7 +69,7 @@ impl ProcessKey {
 
 pub struct ProcessManager {
   pub data_dir: PathBuf,
-  pub processes: HashMap<ProcessKey, LockHandle>,
+  pub processes: Mutex<HashMap<ProcessKey, LockHandle>>,
   control_socket_path: PathBuf,
 }
 
@@ -79,14 +84,19 @@ impl ProcessManager {
     // 3. Only removing databases that are successfully backed up to S3/MinIO
     ProcessManager {
       data_dir: std::fs::canonicalize(data_dir.clone()).unwrap(),
-      processes: HashMap::new(),
+      processes: Mutex::new(HashMap::new()),
       control_socket_path: control_socket.socket_path.clone(),
     }
   }
 
   pub async fn wait_until_process_cleanup_complete(&self) {
+    let processes: Vec<_> = {
+      let mut processes = self.processes.lock().unwrap();
+      processes.drain().collect()
+    };
+
     // Ensure all locks are released
-    for (_, process) in &self.processes {
+    for (_, process) in processes {
       if let Err(e) = process.release().await {
         tracing::error!(
           error = ?e,
@@ -107,7 +117,7 @@ impl ProcessManager {
     };
 
     entry
-      .update_inner(|process_entry| {
+      .mutate_resource(|process_entry| {
         process_entry.incoming_connections += 1;
         process_entry.last_used = Instant::now();
       })
@@ -126,7 +136,7 @@ impl ProcessManager {
     };
 
     entry
-      .update_inner(|process_entry| {
+      .mutate_resource(|process_entry| {
         assert!(process_entry.incoming_connections > 0);
         process_entry.incoming_connections -= 1;
         process_entry.last_used = Instant::now();
@@ -146,34 +156,21 @@ impl ProcessManager {
     // Create a combined key for host and cell to ensure one isolate per cell
     let process_key = ProcessKey::new(host, cell_id);
 
-    // First, try to find and connect to an existing process, keeping the lock time minimal
-    let socket_path_opt = {
-      let processes = self.processes.lock().unwrap();
-      processes
-        .get(&process_key)
-        .map(|entry| entry.socket_path.to_path_buf())
-    };
-
-    // If we found a socket path, try to connect without holding the lock
-    if let Some(socket_path) = socket_path_opt {
-      match UnixStream::connect(&socket_path).await {
-        Ok(stream) => {
-          debug!(
-            socket = %socket_path.display(),
-            "Connected to existing process socket"
-          );
-          return Ok((socket_path, stream, process_key));
-        }
-        Err(e) => {
-          error!(
-            socket = %socket_path.display(),
-            error = %e,
-            "Failed to connect to existing process socket, spawn new one"
-          );
-          // Fall through to spawn a new process
-        }
+    // First, try to find and connect to an existing process
+    if_chain! {
+      if let Some(handle) = self.processes.get(&process_key);
+      if let Some(socket_path) = handle.access_resource(|r| r.socket_path.to_path_buf()).await;
+      if let Ok(stream) = UnixStream::connect(&socket_path).await;
+      then {
+        debug!(
+          socket = %socket_path.display(),
+          "Connected to existing process socket"
+        );
+        return Ok((socket_path, stream, process_key));
       }
     }
+
+    // Fall through to spawn a new process
 
     // checked higher up, but done again here for safety
     assert!(!host.contains('/') && !host.contains(".."));
@@ -188,11 +185,10 @@ impl ProcessManager {
     }
 
     // Acquire a lock on the cell to declare ownership of the combination of
-    // tenant and cellId. This lock's lifetime should match that of the Deno
-    // process we will create later.
+    // tenant and cellId.
     let lock_name = format!("{}/{}", host, cell_id);
     let node_id = node_state.peer_manager.get_local_node_id();
-    let lock_guard = node_state
+    let lock_handle = node_state
       .distributed_lock
       .clone()
       .try_acquire(&lock_name, node_id, node_state.config.lock_guard_ttl)
@@ -214,6 +210,10 @@ impl ProcessManager {
               }
               _ => ProcessManagerError::LockContention,
             }
+          }
+          LockAcquireError::UnableToRenewExpiredLock(_) => {
+            // This error should never happen here
+            ProcessManagerError::Internal(e.into())
           }
           LockAcquireError::S3Error(e) => {
             ProcessManagerError::S3(e.to_string())
@@ -282,7 +282,7 @@ impl ProcessManager {
       );
 
       // Call ensure_restored to perform the restore with distributed locking
-      replica.ensure_restored(&lock_guard).await;
+      replica.ensure_restored(&lock_handle).await;
       replica.start_replication().await?;
     } else if !db_path.exists() {
       // No replica, but we still need a database - create an empty one
@@ -342,10 +342,13 @@ impl ProcessManager {
       last_used: Instant::now(),
       incoming_connections: 0,
       parent_exit_guard: child_guard,
-      lock_guard,
       _socket_tempdir: socket_tempdir,
       replica: replica.clone(),
     };
+
+    lock_handle.transition_to_active(entry).await;
+    
+    self.processes.in
 
     // Insert the entry into the processes map using a short-lived lock
     {

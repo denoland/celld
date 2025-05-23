@@ -32,6 +32,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 futures = "0.3"
 rusqlite = "0.35.0"
 serde_qs = "0.15.0"
+if_chain = "1.0.2"
 
 [dev-dependencies]
 lazy_static = "1.4"

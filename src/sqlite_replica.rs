@@ -316,11 +316,11 @@ impl SqliteReplica {
   }
 
   /// Ensure the database is restored, coordinating with other nodes using distributed lock.
-  /// This takes reference to a lock guard to make sure that the caller did acquire a lock.
-  #[instrument(skip(self, _lock_guard))]
+  /// This takes reference to a lock handle to make sure that the caller did acquire a lock.
+  #[instrument(skip(self, _lock_handle))]
   pub async fn ensure_restored(
     &self,
-    _lock_guard: &distributed_lock::LockDescriptor,
+    _lock_handle: &distributed_lock::LockHandle,
   ) {
     // Check if database already exists locally
     if self.db_path.exists() {
