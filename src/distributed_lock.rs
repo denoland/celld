@@ -1,77 +1,9 @@
-//! Provides a distributed locking mechanism using S3 objects.
-//!
-//! ## Purpose
-//!
-//! In a distributed system like `celld` where multiple nodes might operate on
-//! shared resources or need to coordinate actions, a distributed lock is
-//! crucial to prevent race conditions and ensure data consistency. This module
-//! implements such a lock, specifically tailored for controlling access during
-//! critical, potentially long-running operations like restoring SQLite
-//! databases from backups.
-//!
-//! ## Mechanism: S3-based Locking
-//!
-//! This implementation leverages Amazon S3 (or compatible services like MinIO)
-//! as a coordination point. It uses S3 objects as "lock files":
-//!
-//! 1.  **Atomic Acquisition:** A lock is acquired by attempting to create a
-//!     specific S3 object using a conditional `PutObject` request
-//!     (`If-None-Match: *`). This ensures that only the first node to
-//!     successfully create the object acquires the lock.
-//! 2.  **Lock Information:** The content of the lock object (`LockInfo`) stores
-//!     metadata about the lock holder, including the holding `node_id`, a
-//!     `timestamp` of acquisition, and a Time-To-Live (`ttl_secs`).
-//! 3.  **Lease/Expiry:** Locks have a TTL. If a node attempts to acquire a lock
-//!     that already exists, it checks the lock object's timestamp and TTL. If
-//!     the lock has expired (presumably because the previous holder crashed or
-//!     failed), the attempting node can try to delete the stale lock and
-//!     acquire it.
-//! 4.  **Release:** The lock is explicitly released by deleting the
-//!     corresponding S3 object.
-//!
-//! ## Context in `celld`: Coordinating SQLite Restores
-//!
-//! The primary use case within `celld` is to coordinate the `litestream
-//! restore` process for SQLite databases associated with specific cells
-//! (`tenant`/`cell_id`). When a `celld` node needs to potentially restore a
-//! database (e.g., on cold start or node takeover), it must first acquire the
-//! distributed lock for that specific database.
-//!
-//! - **Prevents Conflicts:** This ensures that only one node actively restores
-//!   a given database at any time, preventing multiple nodes from writing to the
-//!   same local database file simultaneously or performing redundant restore
-//!   operations.
-//! - **Failure Handling:** The lock TTL helps recover from scenarios where a
-//!   node acquires a lock but crashes before releasing it.
-//!
-//! ### Example S3 Lock Path
-//!
-//! The specific S3 key for a lock is determined by a configured prefix and a
-//! hash of the unique resource being locked (typically the tenant and cell ID
-//! combined).
-//!
-//! For example, if the S3 bucket is `my-celld-state` and the lock prefix is
-//! configured as `cluster_state/locks/restore/`, acquiring a lock for the
-//! database corresponding to tenant `my-app.localhost` and cell
-//! `user-session-abc` might result in an attempt to atomically create an S3
-//! object like:
-//!
-//! ```text
-//! s3://my-celld-state/cluster_state/locks/restore/f8a3b1e4c9d0...{hash_of_"my-app.localhost/user-session-abc"}...e5f6a7b8.lock
-//! ```
-//!
-//! The content of this object would be a JSON representation of the `LockInfo`
-//! struct.
-//!
-//! ## Usage
-//!
-//! This module defines the `DistributedLock` trait and provides the
-//! `S3DistributedLock` implementation. Components like `SqliteReplica` or
-//! `ProcessManager` use an instance conforming to this trait (typically
-//! injected via `NodeState`) to acquire and release locks before performing
-//! operations like `litestream restore`.
+use std::error::Error as _;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::{Context, Error as AnyhowError};
+use anyhow::Context as _;
 use async_trait::async_trait;
 use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::error::SdkError;
@@ -80,22 +12,16 @@ use aws_sdk_s3::Client as S3Client;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::error::Error as StdError;
-use std::fmt;
-use std::ops::Deref as _;
-use std::ops::DerefMut as _;
-use std::sync::Arc;
-use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::Mutex;
-use tokio::task::AbortHandle;
-use tokio::task::JoinHandle;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio::time::{interval, sleep_until, Instant, Sleep};
 use tracing::{debug, error, info, warn};
 
 use crate::cluster_membership::NodeId;
-use crate::extendable_timer::spawn_extendable_timer;
 use crate::process_manager::ProcessEntry;
 
+/// Serialization format of the lock saved in the backing storage for sync
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LockInfo {
   pub node_id: NodeId,
@@ -119,328 +45,7 @@ pub enum LockAcquireError {
 #[derive(Debug, Clone)]
 pub struct LockDescriptor {
   pub lock_key: String,
-  node_id: NodeId,
-}
-
-#[derive(Debug)]
-pub enum LockReleaseReason {
-  /// The lock was released because the lock was explicitly released
-  ExplicitRelease,
-  /// The lock was released because the ttl expired
-  TTLExpired,
-  /// The lock was released because the ttl renewal failed
-  TTLRenewalFailed,
-}
-
-/// TODO: Ideally this should be a generic over the protected resource type `T`.
-/// But doing this would make `DistributedLock` not dyn-compatible, so here we
-/// hardcode the resource type as `ProcessEntry` for now.
-#[derive(Debug, Clone)]
-pub struct LockHandle {
-  descriptor: LockDescriptor,
-  guard: Arc<Mutex<LockGuard>>,
-}
-
-/// Should not be Clone
-///
-/// TODO: Ideally this should be a generic over the protected resource type `T`.
-/// But doing this would make `DistributedLock` not dyn-compatible, so here we
-/// hardcode the resource type as `ProcessEntry` for now.
-enum LockGuard {
-  /// Lock is acquired, but the TTL renewal task has not started and resource is
-  /// not yet populated
-  Init {
-    descriptor: LockDescriptor,
-    lock_manager: Arc<dyn DistributedLock>,
-  },
-  /// Lock is acquired, but the resource is not yet populated
-  TtlRenewalTaskStarted {
-    descriptor: LockDescriptor,
-    lock_manager: Arc<dyn DistributedLock>,
-    ttl_renewal_task_abort_handle: AbortHandle,
-  },
-  /// Lock is acquired, and the resource is populated
-  Active {
-    descriptor: LockDescriptor,
-    /// Reference back to the manager to call release
-    /// Use Arc if the manager itself is shared via Arc
-    lock_manager: Arc<dyn DistributedLock>,
-    ttl_renewal_task_abort_handle: AbortHandle,
-    protected_resource: ProcessEntry,
-  },
-  /// Lock has been released
-  Released {
-    descriptor: LockDescriptor,
-    reason: LockReleaseReason,
-  },
-}
-
-impl LockHandle {
-  async fn new(
-    lock_descriptor: LockDescriptor,
-    ttl: Duration,
-    lock_manager: Arc<dyn DistributedLock>,
-  ) -> Self {
-    let guard = Arc::new(Mutex::new(LockGuard::Init {
-      descriptor: lock_descriptor.clone(),
-      lock_manager: lock_manager.clone(),
-    }));
-
-    // Spawn a task that will forcibly release the lock once the TTL expires.
-    // TTL is updated whenever the new TTL value is successfully synced to the
-    // shared storage (i.e. S3).
-    let ttl_expiry_checker_handle = spawn_extendable_timer(
-      tokio::time::Instant::now() + ttl,
-      {
-        let guard = guard.clone();
-        async move {
-          let mut guard = guard.lock().await;
-          info!(descriptor = ?guard.descriptor(), "TTL expired, forcibly releasing lock");
-          if let Err(e) = guard.release().await {
-            warn!(error = ?e, descriptor = ?guard.descriptor(), "Failed to release lock");
-          }
-        }
-      },
-    );
-
-    let ttl_renewal_task = tokio::spawn({
-      let lock_descriptor = lock_descriptor.clone();
-      let lock_manager = lock_manager.clone();
-      async move {
-        let mut interval = tokio::time::interval(ttl / 3);
-        loop {
-          interval.tick().await;
-
-          let new_deadline = tokio::time::Instant::now() + ttl;
-
-          // Renew the lock TTL, and on success, reset the deadline of the local
-          // TTL expiry checker
-          match lock_manager.renew(&lock_descriptor, ttl).await {
-            Ok(_) => {
-              ttl_expiry_checker_handle.extend(new_deadline);
-            }
-            Err(e) => {
-              warn!(error = ?e, ?lock_descriptor, "Failed to renew lock, stopping TTL renewal task");
-            }
-          }
-        }
-      }
-    });
-
-    guard
-      .lock()
-      .await
-      .transition_to_ttl_renewal_task_started(ttl_renewal_task);
-
-    Self {
-      descriptor: lock_descriptor,
-      guard,
-    }
-  }
-
-  pub fn descriptor(&self) -> &LockDescriptor {
-    &self.descriptor
-  }
-
-  pub async fn transition_to_active(&self, resource: ProcessEntry) {
-    self.guard.lock().await.transition_to_active(resource);
-  }
-
-  pub async fn access_resource<T>(
-    &self,
-    accessor: impl FnOnce(&ProcessEntry) -> T,
-  ) -> Option<T> {
-    match self.guard.lock().await.deref() {
-      LockGuard::Init { .. } => None,
-      LockGuard::TtlRenewalTaskStarted { .. } => None,
-      LockGuard::Active {
-        ref protected_resource,
-        ..
-      } => Some(accessor(protected_resource)),
-      LockGuard::Released { .. } => None,
-    }
-  }
-
-  /// Perform the given operation on the protected resource to mutate it.
-  pub async fn mutate_resource(
-    &self,
-    update_inner: impl FnOnce(&mut ProcessEntry),
-  ) {
-    match self.guard.lock().await.deref_mut() {
-      LockGuard::Init { .. } => {}
-      LockGuard::TtlRenewalTaskStarted { .. } => {}
-      LockGuard::Active {
-        protected_resource, ..
-      } => {
-        update_inner(protected_resource);
-      }
-      LockGuard::Released { .. } => {}
-    }
-  }
-
-  pub async fn release(&self) -> anyhow::Result<()> {
-    self.guard.lock().await.release().await
-  }
-}
-
-impl LockGuard {
-  fn descriptor(&self) -> &LockDescriptor {
-    match self {
-      LockGuard::Init { descriptor, .. } => descriptor,
-      LockGuard::TtlRenewalTaskStarted { descriptor, .. } => descriptor,
-      LockGuard::Active { descriptor, .. } => descriptor,
-      LockGuard::Released { descriptor, .. } => descriptor,
-    }
-  }
-
-  fn transition_to_ttl_renewal_task_started(
-    &mut self,
-    ttl_renewal_task: JoinHandle<()>,
-  ) {
-    assert!(matches!(self, LockGuard::Init { .. }));
-
-    match self {
-      LockGuard::Init {
-        descriptor,
-        lock_manager,
-      } => {
-        *self = LockGuard::TtlRenewalTaskStarted {
-          descriptor: descriptor.clone(),
-          lock_manager: lock_manager.clone(),
-          ttl_renewal_task_abort_handle: ttl_renewal_task.abort_handle(),
-        };
-      }
-      _ => {
-        unreachable!("LockGuard is not in the Init state");
-      }
-    }
-  }
-
-  fn transition_to_active(&mut self, resource: ProcessEntry) {
-    assert!(matches!(self, LockGuard::TtlRenewalTaskStarted { .. }));
-
-    match self {
-      LockGuard::TtlRenewalTaskStarted {
-        descriptor,
-        lock_manager,
-        ttl_renewal_task_abort_handle,
-      } => {
-        *self = LockGuard::Active {
-          descriptor: descriptor.clone(),
-          lock_manager: lock_manager.clone(),
-          ttl_renewal_task_abort_handle: ttl_renewal_task_abort_handle.clone(),
-          protected_resource: resource,
-        }
-      }
-      _ => {
-        unreachable!("LockGuard is not in the TtlRenewalTaskStarted state");
-      }
-    }
-  }
-
-  /// Release the lock and perform the necessary cleanup.
-  ///
-  /// Since this method requires &mut, we don't need to worry about some other
-  /// execution path trying to use the protected resource while the release is
-  /// running.
-  async fn release(&mut self) -> anyhow::Result<()> {
-    match self {
-      LockGuard::Init {
-        descriptor,
-        lock_manager,
-      } => {
-        // Release the lock
-        lock_manager.release(&descriptor).await?;
-        tracing::debug!(?descriptor, "LockGuard dropped, lock released");
-
-        // Transition to the Released state
-        *self = LockGuard::Released {
-          descriptor: descriptor.clone(),
-          reason: LockReleaseReason::ExplicitRelease,
-        };
-      }
-      LockGuard::TtlRenewalTaskStarted {
-        descriptor,
-        lock_manager,
-        ttl_renewal_task_abort_handle,
-      } => {
-        // Stop the TTL renewal task
-        ttl_renewal_task_abort_handle.abort();
-
-        // Release the lock
-        lock_manager.release(&descriptor).await?;
-        tracing::debug!(?descriptor, "LockGuard dropped, lock released");
-
-        // Transition to the Released state
-        *self = LockGuard::Released {
-          descriptor: descriptor.clone(),
-          reason: LockReleaseReason::ExplicitRelease,
-        };
-      }
-      LockGuard::Active {
-        descriptor,
-        lock_manager,
-        protected_resource,
-        ttl_renewal_task_abort_handle,
-      } => {
-        // Terminate the protected resource
-        protected_resource.terminate();
-
-        // Stop the TTL renewal task
-        ttl_renewal_task_abort_handle.abort();
-
-        // Release the lock
-        lock_manager.release(&descriptor).await?;
-        tracing::debug!(?descriptor, "LockGuard dropped, lock released");
-
-        // Transition to the Released state
-        *self = LockGuard::Released {
-          descriptor: descriptor.clone(),
-          reason: LockReleaseReason::ExplicitRelease,
-        };
-
-        todo!("properly shutdown the protected resource");
-      }
-      LockGuard::Released { reason, descriptor } => {
-        tracing::debug!(?reason, ?descriptor, "Lock was already released");
-      }
-    }
-
-    Ok(())
-  }
-}
-
-impl fmt::Debug for LockGuard {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match &self {
-      LockGuard::Init { descriptor, .. } => f
-        .debug_struct("LockGuard::Init")
-        .field("descriptor", descriptor)
-        .finish(),
-      LockGuard::TtlRenewalTaskStarted { descriptor, .. } => f
-        .debug_struct("LockGuard::TtlRenewalTaskStarted")
-        .field("descriptor", descriptor)
-        .finish(),
-      LockGuard::Active { descriptor, .. } => f
-        .debug_struct("LockGuard::Active")
-        .field("descriptor", descriptor)
-        .finish(),
-      LockGuard::Released { descriptor, reason } => f
-        .debug_struct("LockGuard::Released")
-        .field("descriptor", descriptor)
-        .field("reason", reason)
-        .finish(),
-    }
-  }
-}
-
-/// LockGuard should be dropped only after the lock has been properly released.
-impl Drop for LockGuard {
-  fn drop(&mut self) {
-    if !matches!(self, LockGuard::Released { .. }) {
-      error!(lock_descriptor = ?self.descriptor(), "LockGuard dropped without releasing lock. ");
-    }
-  }
+  pub node_id: NodeId,
 }
 
 #[async_trait]
@@ -457,19 +62,304 @@ pub trait DistributedLock: Send + Sync {
   async fn release(
     &self,
     lock_descriptor: &LockDescriptor,
-  ) -> Result<(), AnyhowError>;
+  ) -> anyhow::Result<()>;
 
   /// Renews an existing lock by updating its timestamp and TTL.
   /// This extends the lock's expiration time without releasing and re-acquiring it.
   ///
   /// Returns a new LockHandle with the updated information on success.
   /// Fails if the lock doesn't exist or is held by a different node.
-  #[allow(dead_code)]
   async fn renew(
     &self,
     lock_descriptor: &LockDescriptor,
     new_ttl: Duration,
   ) -> Result<LockDescriptor, LockAcquireError>;
+}
+
+#[derive(Debug)]
+enum LockReleaseReason {
+  /// The lock was released because the lock was explicitly released
+  ExplicitRelease,
+  /// The lock was released because the ttl expired
+  TTLExpired,
+}
+
+enum LockState {
+  Init {
+    descriptor: LockDescriptor,
+    lock_manager: Arc<dyn DistributedLock>,
+  },
+  Active {
+    descriptor: LockDescriptor,
+    lock_manager: Arc<dyn DistributedLock>,
+    protected_resource: ProcessEntry,
+  },
+  Released {
+    descriptor: LockDescriptor,
+    reason: LockReleaseReason,
+  },
+}
+
+impl LockState {
+  fn descriptor(&self) -> &LockDescriptor {
+    match self {
+      LockState::Init { descriptor, .. } => descriptor,
+      LockState::Active { descriptor, .. } => descriptor,
+      LockState::Released { descriptor, .. } => descriptor,
+    }
+  }
+
+  async fn renew_ttl(
+    &self,
+    ttl: Duration,
+    ttl_expiry_timer: &mut Pin<&mut Sleep>,
+  ) -> anyhow::Result<()> {
+    match self {
+      LockState::Init {
+        descriptor,
+        lock_manager,
+      } => {
+        let now = Instant::now();
+        lock_manager.renew(descriptor, ttl).await?;
+        ttl_expiry_timer.as_mut().reset(now + ttl);
+      }
+      LockState::Active {
+        lock_manager,
+        descriptor,
+        ..
+      } => {
+        let now = Instant::now();
+        lock_manager.renew(descriptor, ttl).await?;
+        ttl_expiry_timer.as_mut().reset(now + ttl);
+      }
+      LockState::Released { .. } => {
+        // Do nothing
+      }
+    }
+
+    Ok(())
+  }
+
+  async fn release_lock(
+    &mut self,
+    reason: LockReleaseReason,
+    ttl_expiry_timer: Option<&mut Pin<&mut Sleep>>,
+  ) -> anyhow::Result<()> {
+    match self {
+      LockState::Init {
+        descriptor,
+        lock_manager,
+      } => {
+        // Release the lock
+        lock_manager.release(descriptor).await?;
+        debug!(?descriptor, "Lock released");
+
+        *self = LockState::Released {
+          descriptor: descriptor.clone(),
+          reason,
+        };
+      }
+      LockState::Active {
+        descriptor,
+        lock_manager,
+        protected_resource,
+      } => {
+        // Releasing the resource gracefully may be taking some time.
+        // To ensure that no other node will detect the lock as expired during the
+        // release process, if the deadline is close, we first extend it before
+        // releasing the lock.
+        if let Some(timer) = ttl_expiry_timer {
+          let now = Instant::now();
+          let deadline = timer.deadline();
+          if deadline < now + Duration::from_secs(10) {
+            // The current deadline is too close. Reset it to 30 seconds from now.
+            let new_ttl = Duration::from_secs(30);
+            lock_manager.renew(&descriptor, new_ttl).await?;
+            timer.as_mut().reset(now + new_ttl);
+          }
+        }
+
+        // The release order matters. Deno process and Litestream replication must
+        // be stopped *before* other nodes detect the lock as released.
+
+        // Shutdown the protected resource gracefully
+        // TODO: Add a timeout to this operation (maybe 5s or so?)
+        protected_resource.terminate();
+
+        // Release the lock
+        lock_manager.release(descriptor).await?;
+        debug!(?descriptor, "Lock released");
+
+        *self = LockState::Released {
+          descriptor: descriptor.clone(),
+          reason,
+        };
+      }
+      LockState::Released { .. } => {
+        // Lock was already released. Do nothing.
+      }
+    }
+
+    Ok(())
+  }
+}
+
+enum LockStateRequest {
+  SetResource(SetResourceRequest),
+  Release(ReleaseRequest),
+}
+
+struct SetResourceRequest {
+  resource: ProcessEntry,
+  res_chan: oneshot::Sender<()>,
+}
+
+struct ReleaseRequest {
+  res_chan: oneshot::Sender<anyhow::Result<()>>,
+}
+
+#[derive(Debug)]
+pub struct LockHandle {
+  descriptor: LockDescriptor,
+  tx: mpsc::UnboundedSender<LockStateRequest>,
+}
+
+impl Drop for LockHandle {
+  fn drop(&mut self) {
+    let (tx, _rx) = oneshot::channel();
+    let req = LockStateRequest::Release(ReleaseRequest { res_chan: tx });
+
+    if let Err(_) = self.tx.send(req) {
+      warn!("Failed to send release request to lock state loop (loop already exited");
+    }
+  }
+}
+
+impl LockHandle {
+  pub fn new(
+    lock_descriptor: LockDescriptor,
+    lock_manager: Arc<dyn DistributedLock>,
+    ttl: Duration,
+  ) -> Self {
+    let (tx, rx) = mpsc::unbounded_channel();
+
+    tokio::spawn({
+      let descriptor = lock_descriptor.clone();
+      let lock_manager = lock_manager.clone();
+
+      lock_state_loop(descriptor, lock_manager, ttl, rx)
+    });
+
+    Self {
+      tx,
+      descriptor: lock_descriptor,
+    }
+  }
+
+  pub async fn release(&self) -> anyhow::Result<()> {
+    let (tx, rx) = oneshot::channel();
+    self
+      .tx
+      .send(LockStateRequest::Release(ReleaseRequest { res_chan: tx }))?;
+    rx.await?
+  }
+}
+
+async fn lock_state_loop(
+  descriptor: LockDescriptor,
+  lock_manager: Arc<dyn DistributedLock>,
+  ttl: Duration,
+  mut request_rx: mpsc::UnboundedReceiver<LockStateRequest>,
+) {
+  let mut state = LockState::Init {
+    descriptor,
+    lock_manager,
+  };
+
+  let mut ttl_renewal_interval = interval(ttl / 3);
+  // TODO: maybe subtract some second from this to account for the clock skew or network latency
+  let mut ttl_expiry_timer = std::pin::pin!(sleep_until(Instant::now() + ttl));
+
+  loop {
+    tokio::select! {
+      biased;
+
+      _ = &mut ttl_expiry_timer => {
+        info!(descriptor = ?state.descriptor(), "TTL expired; forcibly releasing lock");
+        // TTL expired; forcibly release the lock and exit the loop
+
+        // TODO(magurotuna): actually, it is too late to terminate the process
+        // here because at this point another node may acquire the lock i.e.
+        // there are two nodes running the same cell and its associated SQLite
+        // replication. Probably we should do two phase expiry management, where
+        // shorter deadline is used to start the release process and longer one
+        // represents the actual expiry visible to other nodes in the cluster.
+
+        if let Err(e) = state.release_lock(LockReleaseReason::TTLExpired, None).await {
+          error!(error = ?e, descriptor = ?state.descriptor(), "Failed to release lock");
+        }
+
+        return;
+      }
+
+      _ = ttl_renewal_interval.tick() => {
+        // Renew the TTL using the lock manager
+        if let Err(e) = state.renew_ttl(ttl, &mut ttl_expiry_timer).await {
+          error!(error = ?e, descriptor = ?state.descriptor(), "Failed to renew TTL");
+        }
+      }
+
+      req = request_rx.recv() => {
+        match req {
+          Some(LockStateRequest::SetResource(req)) => {
+            handle_set_resource(req, &mut state);
+          }
+          Some(LockStateRequest::Release(req)) => {
+            handle_release(req, &mut state, &mut ttl_expiry_timer);
+          }
+          None => {
+            // LockHandle was dropped; at this point, the state must be `Released`
+            if !matches!(state, LockState::Released { .. }) {
+              error!("LockHandle was dropped while in unexpected state");
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/// Set the provided resource in the lock state, transitioning the state to `Active`.
+/// This must be called when the state is `Init`.
+fn handle_set_resource(req: SetResourceRequest, state: &mut LockState) {
+  assert!(matches!(state, LockState::Init { .. }));
+
+  match state {
+    LockState::Init {
+      descriptor,
+      lock_manager,
+    } => {
+      *state = LockState::Active {
+        descriptor: descriptor.clone(),
+        lock_manager: lock_manager.clone(),
+        protected_resource: req.resource,
+      };
+
+      let _ = req.res_chan.send(());
+    }
+    _ => unreachable!(),
+  }
+}
+
+async fn handle_release(
+  req: ReleaseRequest,
+  state: &mut LockState,
+  ttl_expiry_timer: &mut Pin<&mut Sleep>,
+) {
+  let res = state
+    .release_lock(LockReleaseReason::ExplicitRelease, Some(ttl_expiry_timer))
+    .await;
+  let _ = req.res_chan.send(res);
 }
 
 pub struct S3DistributedLock {
@@ -537,17 +427,14 @@ impl DistributedLock for S3DistributedLock {
     match put_result {
       Ok(_) => {
         info!(lock_key, ?node_id, "Successfully acquired S3 lock");
-        Ok(
-          LockHandle::new(
-            LockDescriptor {
-              lock_key,
-              node_id: node_id.clone(),
-            },
-            ttl,
-            self,
-          )
-          .await,
-        )
+        Ok(LockHandle::new(
+          LockDescriptor {
+            lock_key,
+            node_id: node_id.clone(),
+          },
+          self,
+          ttl,
+        ))
       }
       Err(SdkError::ServiceError(service_err)) => {
         let raw_err = service_err.into_err();
@@ -636,17 +523,14 @@ impl DistributedLock for S3DistributedLock {
                       ?node_id,
                       "Successfully acquired S3 lock on retry"
                     );
-                    Ok(
-                      LockHandle::new(
-                        LockDescriptor {
-                          lock_key,
-                          node_id: node_id.clone(),
-                        },
-                        ttl,
-                        self,
-                      )
-                      .await,
-                    )
+                    Ok(LockHandle::new(
+                      LockDescriptor {
+                        lock_key,
+                        node_id: node_id.clone(),
+                      },
+                      self,
+                      ttl,
+                    ))
                   }
                   Err(SdkError::ServiceError(retry_service_err)) => {
                     let retry_put_err = retry_service_err.into_err();
@@ -702,9 +586,9 @@ impl DistributedLock for S3DistributedLock {
                         lock_key,
                         node_id: node_id.clone(),
                       },
-                      ttl,
                       self,
-                    ).await)
+                      ttl,
+                    ))
                   }
                   Err(SdkError::ServiceError(retry_service_err)) => {
                     let retry_put_err = retry_service_err.into_err();
@@ -762,7 +646,7 @@ impl DistributedLock for S3DistributedLock {
   async fn release(
     &self,
     lock_descriptor: &LockDescriptor,
-  ) -> Result<(), AnyhowError> {
+  ) -> anyhow::Result<()> {
     debug!(lock_key = %lock_descriptor.lock_key, node_id = ?lock_descriptor.node_id, "Releasing S3 lock");
     match self
       .s3_client
@@ -783,18 +667,16 @@ impl DistributedLock for S3DistributedLock {
           Ok(())
         } else {
           warn!(error = ?del_err, lock_key = %lock_descriptor.lock_key, node_id = ?lock_descriptor.node_id, "Failed to release S3 lock (Service Error)");
-          Err(AnyhowError::new(del_err)).context(format!(
-            "Failed to release S3 lock: {}",
-            lock_descriptor.lock_key
-          ))
+          Err(del_err).with_context(|| {
+            format!("Failed to release S3 lock: {}", lock_descriptor.lock_key)
+          })
         }
       }
       Err(e) => {
         warn!(error = ?e, lock_key = %lock_descriptor.lock_key, node_id = ?lock_descriptor.node_id, "Failed to release S3 lock (SDK Error)");
-        Err(AnyhowError::new(e)).context(format!(
-          "SDK Error releasing S3 lock: {}",
-          lock_descriptor.lock_key
-        ))
+        Err(e).with_context(|| {
+          format!("SDK Error releasing S3 lock: {}", lock_descriptor.lock_key)
+        })
       }
     }
   }
@@ -971,23 +853,17 @@ impl DistributedLock for StandaloneDistributedLock {
     node_id: &NodeId,
     ttl: Duration,
   ) -> Result<LockHandle, LockAcquireError> {
-    Ok(
-      LockHandle::new(
-        LockDescriptor {
-          lock_key: lock_name.to_string(),
-          node_id: node_id.clone(),
-        },
-        ttl,
-        self,
-      )
-      .await,
-    )
+    Ok(LockHandle::new(
+      LockDescriptor {
+        lock_key: lock_name.to_string(),
+        node_id: node_id.clone(),
+      },
+      self,
+      ttl,
+    ))
   }
 
-  async fn release(
-    &self,
-    _descriptor: &LockDescriptor,
-  ) -> Result<(), AnyhowError> {
+  async fn release(&self, _descriptor: &LockDescriptor) -> anyhow::Result<()> {
     Ok(())
   }
 
