@@ -145,8 +145,8 @@ impl LockState {
     &mut self,
     reason: LockReleaseReason,
     ttl_expiry_timer: Option<&mut Pin<&mut Sleep>>,
-  ) -> anyhow::Result<()> {
-    match self {
+  ) -> anyhow::Result<bool> {
+    let released = match self {
       LockState::Init {
         descriptor,
         lock_manager,
@@ -159,6 +159,8 @@ impl LockState {
           descriptor: descriptor.clone(),
           reason,
         };
+
+        true
       }
       LockState::Active {
         descriptor,
@@ -195,13 +197,16 @@ impl LockState {
           descriptor: descriptor.clone(),
           reason,
         };
+
+        true
       }
       LockState::Released { .. } => {
         // Lock was already released. Do nothing.
+        false
       }
-    }
+    };
 
-    Ok(())
+    Ok(released)
   }
 }
 
@@ -209,6 +214,7 @@ enum LockStateRequest {
   SetResource(SetResourceRequest),
   GetSocketPath(AccessResourceRequest<PathBuf>),
   MutateResource(MutateResourceRequest),
+  ReleaseIfIdle(ReleaseIfIdleRequest),
   Release(ReleaseRequest),
 }
 
@@ -227,8 +233,13 @@ struct MutateResourceRequest {
   res_chan: oneshot::Sender<()>,
 }
 
+struct ReleaseIfIdleRequest {
+  idle_timeout: Duration,
+  res_chan: oneshot::Sender<anyhow::Result<bool>>,
+}
+
 struct ReleaseRequest {
-  res_chan: oneshot::Sender<anyhow::Result<()>>,
+  res_chan: oneshot::Sender<anyhow::Result<bool>>,
 }
 
 #[derive(Debug)]
@@ -312,7 +323,23 @@ impl LockHandle {
     rx.await.context("Lock state loop exited unexpectedly")
   }
 
-  pub async fn release(&self) -> anyhow::Result<()> {
+  /// Releases the lock if the resource is idle for the given duration. Returns `true` if the resource was released.
+  pub async fn release_if_idle(
+    &self,
+    idle_timeout: Duration,
+  ) -> anyhow::Result<bool> {
+    let (tx, rx) = oneshot::channel();
+    self
+      .tx
+      .send(LockStateRequest::ReleaseIfIdle(ReleaseIfIdleRequest {
+        idle_timeout,
+        res_chan: tx,
+      }))?;
+    rx.await?
+  }
+
+  /// Terminates the resource and releases the lock. Returns `true` if the resource was released.
+  pub async fn release(&self) -> anyhow::Result<bool> {
     let (tx, rx) = oneshot::channel();
     self
       .tx
@@ -375,6 +402,9 @@ async fn lock_state_loop(
           }
           Some(LockStateRequest::MutateResource(req)) => {
             handle_mutate_resource(req, &mut state);
+          }
+          Some(LockStateRequest::ReleaseIfIdle(req)) => {
+            handle_release_if_idle(req, &mut state);
           }
           Some(LockStateRequest::Release(req)) => {
             handle_release(req, &mut state, &mut ttl_expiry_timer);
@@ -451,6 +481,32 @@ fn handle_mutate_resource(req: MutateResourceRequest, state: &mut LockState) {
   }
 
   let _ = req.res_chan.send(());
+}
+
+async fn handle_release_if_idle(
+  req: ReleaseIfIdleRequest,
+  state: &mut LockState,
+) {
+  match state {
+    LockState::Active {
+      protected_resource, ..
+    } => {
+      let now = std::time::Instant::now();
+      if !protected_resource.has_active_connections()
+        && now.duration_since(protected_resource.last_used) > req.idle_timeout
+      {
+        let res = state
+          .release_lock(LockReleaseReason::ExplicitRelease, None)
+          .await;
+        let _ = req.res_chan.send(res);
+      } else {
+        let _ = req.res_chan.send(Ok(false));
+      }
+    }
+    _ => {
+      let _ = req.res_chan.send(Ok(false));
+    }
+  }
 }
 
 async fn handle_release(
