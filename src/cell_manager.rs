@@ -15,6 +15,7 @@ use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::active_connections;
+use crate::alarm_processor::AlarmProcessor;
 use crate::child_on_parent_exit::ChildOnParentExit;
 use crate::control_socket_listener::ControlSocket;
 use crate::distributed_lock::LockAcquireError;
@@ -23,25 +24,16 @@ use crate::router::ProxyError;
 use crate::sqlite_replica::{create_empty_database, SqliteReplica};
 use crate::NodeState;
 
+pub const SYSTEM_TENANT: &str = "_system";
+pub const SYSTEM_CELL_ID: &str = "main";
+
 #[derive(Debug)]
 pub struct CellEntry {
-  pub pid: u32,
-  pub socket_path: PathBuf,
-  pub last_used: Instant,
-
-  /// Number of current websocket connections to this process
-  /// This is used to determine if the process should be kept alive
-  incoming_connections: usize,
-
-  /// Guard for automatic termination on parent exit
-  parent_exit_guard: ChildOnParentExit,
-
-  /// Keep tempdir alive as long as process exists
-  _socket_tempdir: TempDir,
-
   /// SQLite replication to S3/MinIO
   /// `None` if S3/MinIO is not configured
-  pub replica: Option<SqliteReplica>,
+  replica: Option<SqliteReplica>,
+
+  inner: CellEntryInner,
 }
 
 impl CellEntry {
@@ -53,9 +45,62 @@ impl CellEntry {
     // TODO: Terminate Litestream replication process gracefully
   }
 
-  pub fn has_active_connections(&self) -> bool {
-    self.incoming_connections > 0 || active_connections::count(self.pid) > 0
+  pub fn get_socket_path(&self) -> Option<&Path> {
+    match &self.inner {
+      CellEntryInner::Normal { socket_path, .. } => Some(socket_path.as_path()),
+      CellEntryInner::System { .. } => None,
+    }
   }
+
+  /// Get the alarm processor if this is the system cell.
+  pub fn alarm_processor(&self) -> Option<&AlarmProcessor> {
+    match &self.inner {
+      CellEntryInner::System { alarm_processor } => Some(alarm_processor),
+      CellEntryInner::Normal { .. } => None,
+    }
+  }
+
+  /// Returns true if the cell is considered idle.
+  /// Note that the system cell is never considered idle. The only case where it
+  /// is evicted is when the system cell needs to be relocated to another node
+  /// in the cluster.
+  pub fn is_idle(&self, idle_timeout: Duration) -> bool {
+    match &self.inner {
+      CellEntryInner::System { .. } => false,
+      CellEntryInner::Normal {
+        incoming_connections,
+        pid,
+        last_used,
+        ..
+      } => {
+        let now = std::time::Instant::now();
+        if now.duration_since(*last_used) < idle_timeout {
+          return false;
+        }
+
+        *incoming_connections == 0 || active_connections::count(*pid) == 0
+      }
+    }
+  }
+}
+
+#[derive(Debug)]
+enum CellEntryInner {
+  System {
+    alarm_processor: AlarmProcessor,
+  },
+  Normal {
+    pid: u32,
+    socket_path: PathBuf,
+    last_used: Instant,
+    /// Number of current websocket connections to this process
+    /// This is used to determine if the process should be kept alive
+    incoming_connections: usize,
+    /// Guard for automatic termination on parent exit
+    parent_exit_guard: ChildOnParentExit,
+    /// Keep tempdir alive as long as process exists
+    _socket_tempdir: TempDir,
+  },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -89,6 +134,14 @@ impl CellManager {
     }
   }
 
+  /// Get the handle to the system cell if exists.
+  pub fn get_system_cell(&self) -> Option<LockHandle> {
+    self
+      .cells
+      .get(&CellKey::new(SYSTEM_TENANT, SYSTEM_CELL_ID))
+      .map(|a| a.value().clone())
+  }
+
   pub async fn wait_until_cell_cleanup_complete(&self) {
     // Ensure all locks are released
     for entry in &self.cells {
@@ -103,16 +156,23 @@ impl CellManager {
     }
   }
 
-  /// Track a new connection to the prosess
+  /// Track a new connection to the process
   pub async fn increment_connection_count(&self, cell_key: &CellKey) -> bool {
     let Some(entry) = self.cells.get(cell_key) else {
       return false;
     };
 
     match entry
-      .mutate_resource(Box::new(|cell_entry| {
-        cell_entry.incoming_connections += 1;
-        cell_entry.last_used = Instant::now();
+      .mutate_resource(Box::new(|cell_entry| match cell_entry.inner {
+        CellEntryInner::Normal {
+          ref mut incoming_connections,
+          ref mut last_used,
+          ..
+        } => {
+          *incoming_connections += 1;
+          *last_used = Instant::now();
+        }
+        CellEntryInner::System { .. } => {}
       }))
       .await
     {
@@ -134,10 +194,17 @@ impl CellManager {
     };
 
     match entry
-      .mutate_resource(Box::new(|cell_entry| {
-        assert!(cell_entry.incoming_connections > 0);
-        cell_entry.incoming_connections -= 1;
-        cell_entry.last_used = Instant::now();
+      .mutate_resource(Box::new(|cell_entry| match cell_entry.inner {
+        CellEntryInner::Normal {
+          ref mut incoming_connections,
+          ref mut last_used,
+          ..
+        } => {
+          assert!(*incoming_connections > 0);
+          *incoming_connections -= 1;
+          *last_used = Instant::now();
+        }
+        CellEntryInner::System { .. } => {}
       }))
       .await
     {
@@ -153,7 +220,7 @@ impl CellManager {
   }
 
   #[instrument(skip(self, node_state), fields(host = %host, cell_id = %cell_id))]
-  pub async fn get_or_spawn_cell(
+  pub async fn get_or_spawn_normal_cell(
     &self,
     host: &str,
     cell_id: &str,
@@ -341,12 +408,14 @@ impl CellManager {
 
     // Create a new CellEntry with proper values
     let entry = CellEntry {
-      pid,
-      socket_path: serve_socket_path.clone(),
-      last_used: Instant::now(),
-      incoming_connections: 0,
-      parent_exit_guard: child_guard,
-      _socket_tempdir: socket_tempdir,
+      inner: CellEntryInner::Normal {
+        pid,
+        socket_path: serve_socket_path.clone(),
+        last_used: Instant::now(),
+        incoming_connections: 0,
+        parent_exit_guard: child_guard,
+        _socket_tempdir: socket_tempdir,
+      },
       replica: replica.clone(),
     };
 

@@ -21,6 +21,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::cell_manager::CellEntry;
 use crate::cluster_membership::NodeId;
+use crate::node_state::NodeState;
 
 /// Serialization format of the lock saved in the backing storage for sync
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -212,8 +213,9 @@ impl LockState {
 
 enum LockStateRequest {
   SetResource(SetResourceRequest),
-  GetSocketPath(AccessResourceRequest<PathBuf>),
+  GetSocketPath(AccessOptionalResourceRequest<PathBuf>),
   MutateResource(MutateResourceRequest),
+  DispatchAlarms(DispatchAlarmsRequest),
   ReleaseIfIdle(ReleaseIfIdleRequest),
   Release(ReleaseRequest),
 }
@@ -223,14 +225,21 @@ struct SetResourceRequest {
   res_chan: oneshot::Sender<()>,
 }
 
-struct AccessResourceRequest<T> {
-  accessor: Box<dyn FnOnce(&CellEntry) -> T + Send + Sync>,
+struct AccessOptionalResourceRequest<T> {
+  accessor: Box<dyn FnOnce(&CellEntry) -> Option<T> + Send + Sync>,
   res_chan: oneshot::Sender<Option<T>>,
 }
 
 struct MutateResourceRequest {
   mutator: Box<dyn FnOnce(&mut CellEntry) + Send + Sync>,
   res_chan: oneshot::Sender<()>,
+}
+
+struct DispatchAlarmsRequest {
+  node_state: Arc<NodeState>,
+  now: DateTime<Utc>,
+  limit: u32,
+  res_chan: oneshot::Sender<anyhow::Result<()>>,
 }
 
 struct ReleaseIfIdleRequest {
@@ -242,7 +251,7 @@ struct ReleaseRequest {
   res_chan: oneshot::Sender<anyhow::Result<bool>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LockHandle {
   descriptor: LockDescriptor,
   tx: mpsc::UnboundedSender<LockStateRequest>,
@@ -297,12 +306,14 @@ impl LockHandle {
 
   pub async fn get_socket_path(&self) -> anyhow::Result<Option<PathBuf>> {
     let (tx, rx) = oneshot::channel();
-    self
-      .tx
-      .send(LockStateRequest::GetSocketPath(AccessResourceRequest {
-        accessor: Box::new(|process_entry| process_entry.socket_path.clone()),
+    self.tx.send(LockStateRequest::GetSocketPath(
+      AccessOptionalResourceRequest {
+        accessor: Box::new(|process_entry| {
+          process_entry.get_socket_path().map(|p| p.to_path_buf())
+        }),
         res_chan: tx,
-      }))?;
+      },
+    ))?;
     rx.await.context("Lock state loop exited unexpectedly")
   }
 
@@ -318,6 +329,24 @@ impl LockHandle {
         res_chan: tx,
       }))?;
     rx.await.context("Lock state loop exited unexpectedly")
+  }
+
+  pub async fn dispatch_alarms(
+    &self,
+    node_state: Arc<NodeState>,
+    now: DateTime<Utc>,
+    limit: u32,
+  ) -> anyhow::Result<()> {
+    let (tx, rx) = oneshot::channel();
+    self
+      .tx
+      .send(LockStateRequest::DispatchAlarms(DispatchAlarmsRequest {
+        node_state,
+        now,
+        limit,
+        res_chan: tx,
+      }))?;
+    rx.await?
   }
 
   /// Releases the lock if the resource is idle for the given duration. Returns `true` if the resource was released.
@@ -400,6 +429,9 @@ async fn lock_state_loop(
           Some(LockStateRequest::MutateResource(req)) => {
             handle_mutate_resource(req, &mut state);
           }
+          Some(LockStateRequest::DispatchAlarms(req)) => {
+            handle_dispatch_alarms(req, &mut state);
+          }
           Some(LockStateRequest::ReleaseIfIdle(req)) => {
             handle_release_if_idle(req, &mut state);
           }
@@ -441,7 +473,7 @@ fn handle_set_resource(req: SetResourceRequest, state: &mut LockState) {
 }
 
 fn handle_get_socket_path(
-  req: AccessResourceRequest<PathBuf>,
+  req: AccessOptionalResourceRequest<PathBuf>,
   state: &mut LockState,
 ) {
   match state {
@@ -453,7 +485,7 @@ fn handle_get_socket_path(
       protected_resource, ..
     } => {
       let socket_path = (req.accessor)(protected_resource);
-      let _ = req.res_chan.send(Some(socket_path));
+      let _ = req.res_chan.send(socket_path);
     }
     LockState::Released { .. } => {
       // Do nothing
@@ -480,6 +512,46 @@ fn handle_mutate_resource(req: MutateResourceRequest, state: &mut LockState) {
   let _ = req.res_chan.send(());
 }
 
+async fn handle_dispatch_alarms(
+  req: DispatchAlarmsRequest,
+  state: &mut LockState,
+) {
+  match state {
+    LockState::Init { .. } => {
+      let _ = req
+        .res_chan
+        .send(Err(anyhow::anyhow!("Cell is not initialized yet")));
+    }
+    LockState::Active {
+      protected_resource, ..
+    } => {
+      let Some(alarm_processor) = protected_resource.alarm_processor() else {
+        let _ = req
+          .res_chan
+          .send(Err(anyhow::anyhow!("Cell is not the system cell")));
+        return;
+      };
+
+      match alarm_processor
+        .dispatch(req.node_state, req.now, req.limit)
+        .await
+      {
+        Ok(_) => {
+          let _ = req.res_chan.send(Ok(()));
+        }
+        Err(e) => {
+          let _ = req.res_chan.send(Err(e.into()));
+        }
+      }
+    }
+    LockState::Released { .. } => {
+      let _ = req
+        .res_chan
+        .send(Err(anyhow::anyhow!("Cell is already released")));
+    }
+  }
+}
+
 async fn handle_release_if_idle(
   req: ReleaseIfIdleRequest,
   state: &mut LockState,
@@ -488,10 +560,7 @@ async fn handle_release_if_idle(
     LockState::Active {
       protected_resource, ..
     } => {
-      let now = std::time::Instant::now();
-      if !protected_resource.has_active_connections()
-        && now.duration_since(protected_resource.last_used) > req.idle_timeout
-      {
+      if protected_resource.is_idle(req.idle_timeout) {
         let res = state
           .release_lock(LockReleaseReason::ExplicitRelease, None)
           .await;

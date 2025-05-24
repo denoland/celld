@@ -56,7 +56,7 @@ pub async fn run(iterations: usize) -> Result<()> {
 
     let (_socket_path, _stream, _process_key) = node_state
       .cell_manager
-      .get_or_spawn_cell(host, &cell_id, node_state.clone())
+      .get_or_spawn_normal_cell(host, &cell_id, node_state.clone())
       .await?;
     let elapsed = start.elapsed();
 

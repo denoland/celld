@@ -610,7 +610,7 @@ impl ProxyHttp for Proxy {
       match self
         .node_state
         .cell_manager
-        .get_or_spawn_cell(&ctx.tenant, cell_id, self.node_state.clone())
+        .get_or_spawn_normal_cell(&ctx.tenant, cell_id, self.node_state.clone())
         .await
       {
         Ok((path, _stream, process_key)) => {

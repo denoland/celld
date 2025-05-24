@@ -52,6 +52,7 @@ pub enum AlarmProcessRequest {
   },
 }
 
+#[derive(Debug)]
 pub struct AlarmProcessor {
   _handle: std::thread::JoinHandle<()>,
   request_tx: tokio::sync::mpsc::Sender<AlarmProcessRequest>,
@@ -287,7 +288,7 @@ pub async fn dispatch_alarm_locally(
 ) -> anyhow::Result<Alarm> {
   let (_sock_path, stream, _process_key) = node_state
     .cell_manager
-    .get_or_spawn_cell(&alarm.tenant, &alarm.cell_id, node_state.clone())
+    .get_or_spawn_normal_cell(&alarm.tenant, &alarm.cell_id, node_state.clone())
     .await?;
 
   let io = hyper_util::rt::TokioIo::new(stream);

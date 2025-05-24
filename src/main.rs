@@ -15,7 +15,6 @@ mod peer_manager;
 mod process_reaper;
 mod router;
 mod sqlite_replica;
-mod system_cell;
 mod system_cell_takeover;
 #[cfg(test)]
 pub mod test_utils;
@@ -137,7 +136,7 @@ fn start_server(config: config::Config) -> Server {
     "alarm_scheduler",
     alarm_scheduler::AlarmScheduler {
       node_state: node_state.clone(),
-      system_cell_rx: system_cell_rx.clone(),
+      system_cell_handle_rx: system_cell_rx.clone(),
       interval: node_state.config.alarm_scheduler_interval,
     },
   ));
