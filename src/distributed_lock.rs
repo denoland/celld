@@ -206,11 +206,17 @@ impl LockState {
 
 enum LockStateRequest {
   SetResource(SetResourceRequest),
+  MutateResource(MutateResourceRequest),
   Release(ReleaseRequest),
 }
 
 struct SetResourceRequest {
   resource: ProcessEntry,
+  res_chan: oneshot::Sender<()>,
+}
+
+struct MutateResourceRequest {
+  mutator: Box<dyn FnOnce(&mut ProcessEntry) + Send + Sync>,
   res_chan: oneshot::Sender<()>,
 }
 
@@ -254,6 +260,24 @@ impl LockHandle {
       tx,
       descriptor: lock_descriptor,
     }
+  }
+
+  pub fn descriptor(&self) -> &LockDescriptor {
+    &self.descriptor
+  }
+
+  pub async fn mutate_resource(
+    &self,
+    mutator: Box<dyn FnOnce(&mut ProcessEntry) + Send + Sync>,
+  ) -> anyhow::Result<()> {
+    let (tx, rx) = oneshot::channel();
+    self
+      .tx
+      .send(LockStateRequest::MutateResource(MutateResourceRequest {
+        mutator,
+        res_chan: tx,
+      }))?;
+    rx.await.context("Lock state loop exited unexpectedly")
   }
 
   pub async fn release(&self) -> anyhow::Result<()> {
@@ -314,6 +338,9 @@ async fn lock_state_loop(
           Some(LockStateRequest::SetResource(req)) => {
             handle_set_resource(req, &mut state);
           }
+          Some(LockStateRequest::MutateResource(req)) => {
+            handle_mutate_resource(req, &mut state);
+          }
           Some(LockStateRequest::Release(req)) => {
             handle_release(req, &mut state, &mut ttl_expiry_timer);
           }
@@ -349,6 +376,24 @@ fn handle_set_resource(req: SetResourceRequest, state: &mut LockState) {
     }
     _ => unreachable!(),
   }
+}
+
+fn handle_mutate_resource(req: MutateResourceRequest, state: &mut LockState) {
+  match state {
+    LockState::Init { .. } => {
+      // Do nothing
+    }
+    LockState::Active {
+      protected_resource, ..
+    } => {
+      (req.mutator)(protected_resource);
+    }
+    LockState::Released { .. } => {
+      // Do nothing
+    }
+  }
+
+  let _ = req.res_chan.send(());
 }
 
 async fn handle_release(
