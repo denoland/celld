@@ -1,4 +1,5 @@
 use std::error::Error as _;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -206,6 +207,7 @@ impl LockState {
 
 enum LockStateRequest {
   SetResource(SetResourceRequest),
+  GetSocketPath(AccessResourceRequest<PathBuf>),
   MutateResource(MutateResourceRequest),
   Release(ReleaseRequest),
 }
@@ -213,6 +215,11 @@ enum LockStateRequest {
 struct SetResourceRequest {
   resource: ProcessEntry,
   res_chan: oneshot::Sender<()>,
+}
+
+struct AccessResourceRequest<T> {
+  accessor: Box<dyn FnOnce(&ProcessEntry) -> T + Send + Sync>,
+  res_chan: oneshot::Sender<Option<T>>,
 }
 
 struct MutateResourceRequest {
@@ -264,6 +271,31 @@ impl LockHandle {
 
   pub fn descriptor(&self) -> &LockDescriptor {
     &self.descriptor
+  }
+
+  pub async fn set_resource(
+    &self,
+    resource: ProcessEntry,
+  ) -> anyhow::Result<()> {
+    let (tx, rx) = oneshot::channel();
+    self
+      .tx
+      .send(LockStateRequest::SetResource(SetResourceRequest {
+        resource,
+        res_chan: tx,
+      }))?;
+    rx.await.context("Lock state loop exited unexpectedly")
+  }
+
+  pub async fn get_socket_path(&self) -> anyhow::Result<Option<PathBuf>> {
+    let (tx, rx) = oneshot::channel();
+    self
+      .tx
+      .send(LockStateRequest::GetSocketPath(AccessResourceRequest {
+        accessor: Box::new(|process_entry| process_entry.socket_path.clone()),
+        res_chan: tx,
+      }))?;
+    rx.await.context("Lock state loop exited unexpectedly")
   }
 
   pub async fn mutate_resource(
@@ -338,6 +370,9 @@ async fn lock_state_loop(
           Some(LockStateRequest::SetResource(req)) => {
             handle_set_resource(req, &mut state);
           }
+          Some(LockStateRequest::GetSocketPath(req)) => {
+            handle_get_socket_path(req, &mut state);
+          }
           Some(LockStateRequest::MutateResource(req)) => {
             handle_mutate_resource(req, &mut state);
           }
@@ -375,6 +410,28 @@ fn handle_set_resource(req: SetResourceRequest, state: &mut LockState) {
       let _ = req.res_chan.send(());
     }
     _ => unreachable!(),
+  }
+}
+
+fn handle_get_socket_path(
+  req: AccessResourceRequest<PathBuf>,
+  state: &mut LockState,
+) {
+  match state {
+    LockState::Init { .. } => {
+      // Do nothing
+      let _ = req.res_chan.send(None);
+    }
+    LockState::Active {
+      protected_resource, ..
+    } => {
+      let socket_path = (req.accessor)(protected_resource);
+      let _ = req.res_chan.send(Some(socket_path));
+    }
+    LockState::Released { .. } => {
+      // Do nothing
+      let _ = req.res_chan.send(None);
+    }
   }
 }
 

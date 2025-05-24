@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use dashmap::DashMap;
 use if_chain::if_chain;
 use nix::sys::signal::Signal;
 use std::collections::HashMap;
@@ -6,7 +7,6 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
@@ -69,7 +69,7 @@ impl ProcessKey {
 
 pub struct ProcessManager {
   pub data_dir: PathBuf,
-  pub processes: Mutex<HashMap<ProcessKey, LockHandle>>,
+  pub processes: DashMap<ProcessKey, LockHandle>,
   control_socket_path: PathBuf,
 }
 
@@ -84,19 +84,15 @@ impl ProcessManager {
     // 3. Only removing databases that are successfully backed up to S3/MinIO
     ProcessManager {
       data_dir: std::fs::canonicalize(data_dir.clone()).unwrap(),
-      processes: Mutex::new(HashMap::new()),
+      processes: DashMap::new(),
       control_socket_path: control_socket.socket_path.clone(),
     }
   }
 
   pub async fn wait_until_process_cleanup_complete(&self) {
-    let processes: Vec<_> = {
-      let mut processes = self.processes.lock().unwrap();
-      processes.drain().collect()
-    };
-
     // Ensure all locks are released
-    for (_, process) in processes {
+    for entry in &self.processes {
+      let process = entry.value();
       if let Err(e) = process.release().await {
         tracing::error!(
           error = ?e,
@@ -116,14 +112,22 @@ impl ProcessManager {
       return false;
     };
 
-    entry
-      .mutate_resource(|process_entry| {
+    match entry
+      .mutate_resource(Box::new(|process_entry| {
         process_entry.incoming_connections += 1;
         process_entry.last_used = Instant::now();
-      })
-      .await;
-
-    true
+      }))
+      .await
+    {
+      Ok(()) => true,
+      Err(e) => {
+        error!(
+          error = ?e,
+          "Error incrementing connection count"
+        );
+        false
+      }
+    }
   }
 
   /// Track a closed connection to the process
@@ -135,15 +139,23 @@ impl ProcessManager {
       return false;
     };
 
-    entry
-      .mutate_resource(|process_entry| {
+    match entry
+      .mutate_resource(Box::new(|process_entry| {
         assert!(process_entry.incoming_connections > 0);
         process_entry.incoming_connections -= 1;
         process_entry.last_used = Instant::now();
-      })
-      .await;
-
-    true
+      }))
+      .await
+    {
+      Ok(()) => true,
+      Err(e) => {
+        error!(
+          error = ?e,
+          "Error decrementing connection count"
+        );
+        false
+      }
+    }
   }
 
   #[instrument(skip(self, node_state), fields(host = %host, cell_id = %cell_id))]
@@ -159,7 +171,7 @@ impl ProcessManager {
     // First, try to find and connect to an existing process
     if_chain! {
       if let Some(handle) = self.processes.get(&process_key);
-      if let Some(socket_path) = handle.access_resource(|r| r.socket_path.to_path_buf()).await;
+      if let Ok(Some(socket_path)) = handle.get_socket_path().await;
       if let Ok(stream) = UnixStream::connect(&socket_path).await;
       then {
         debug!(
@@ -346,15 +358,9 @@ impl ProcessManager {
       replica: replica.clone(),
     };
 
-    lock_handle.transition_to_active(entry).await;
-    
-    self.processes.in
+    lock_handle.set_resource(entry).await?;
 
-    // Insert the entry into the processes map using a short-lived lock
-    {
-      let mut processes = self.processes.lock().unwrap();
-      processes.insert(process_key.clone(), entry);
-    }
+    self.processes.insert(process_key.clone(), lock_handle);
 
     // --- Wait for the socket to become available (crucial for cold start) ---
     let socket_ = serve_socket_path.clone();
@@ -377,10 +383,10 @@ impl ProcessManager {
         );
 
         // Remove the entry from the map to avoid stale entries
-        let mut processes = self.processes.lock().unwrap();
-        if let Some(entry) = processes.remove(&process_key) {
-          // Terminate the process to avoid zombies
-          entry.terminate();
+        if let Some((_, handle)) = self.processes.remove(&process_key) {
+          handle.release().await?;
+        } else {
+          warn!("Process entry not found in map");
         }
 
         // The tempdir will be dropped at the end of this scope, cleaning up the socket file
@@ -439,10 +445,8 @@ impl ProcessManager {
           );
 
           // Remove the entry from the map to avoid stale entries
-          let mut processes = self.processes.lock().unwrap();
-          if let Some(entry) = processes.remove(&process_key) {
-            // Terminate the process to avoid zombies
-            entry.terminate();
+          if let Some((_, handle)) = self.processes.remove(&process_key) {
+            handle.release().await?;
           }
 
           // The tempdir will be dropped at the end of this scope, cleaning up the socket file
@@ -457,15 +461,16 @@ impl ProcessManager {
   }
 
   pub async fn terminate_all(&self) {
-    // Move all entries into a local collection to minimize lock duration
-    let entries: Vec<_> = {
-      let mut processes = self.processes.lock().unwrap();
-      processes.drain().collect()
-    };
-
-    // Terminate all processes without holding the lock
-    for (_, entry) in entries {
-      entry.terminate();
+    for entry in &self.processes {
+      let handle = entry.value();
+      // TODO(magurotuna): Can we do this concurrently?
+      if let Err(e) = handle.release().await {
+        error!(
+          error = ?e,
+          descriptor = ?handle.descriptor(),
+          "Error releasing lock for process"
+        );
+      }
     }
   }
 }
