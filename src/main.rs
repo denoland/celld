@@ -15,7 +15,6 @@ mod peer_manager;
 mod process_manager;
 mod process_reaper;
 mod router;
-mod s3_distributed_lock;
 mod sqlite_replica;
 mod system_cell;
 mod system_cell_takeover;
