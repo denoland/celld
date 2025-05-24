@@ -2,6 +2,7 @@ mod active_connections;
 mod alarm_processor;
 mod alarm_scheduler;
 mod benchmark_deno_startup;
+mod cell_manager;
 mod child_on_parent_exit;
 mod cluster_membership;
 mod config;
@@ -9,10 +10,8 @@ mod control_socket_listener;
 mod distributed_lock;
 mod extendable_timer;
 mod heartbeat_service;
-mod lock_guard_ttl_updater;
 mod node_state;
 mod peer_manager;
-mod process_manager;
 mod process_reaper;
 mod router;
 mod sqlite_replica;
@@ -97,15 +96,6 @@ fn start_server(config: config::Config) -> Server {
       DEFAULT_IDLE_TIMEOUT,
       DEFAULT_REAPER_INTERVAL,
     ),
-  ));
-
-  server.add_service(background_service(
-    "process_guard_lock_ttl_updater",
-    lock_guard_ttl_updater::LockGuardTTLUpdater {
-      interval: node_state.config.lock_guard_ttl / 3,
-      process_manager: node_state.process_manager.clone(),
-      ttl: node_state.config.lock_guard_ttl,
-    },
   ));
 
   // Add a background service for S3 heartbeat and peer discovery

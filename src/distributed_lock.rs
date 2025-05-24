@@ -19,8 +19,8 @@ use tokio::sync::oneshot;
 use tokio::time::{interval, sleep_until, Instant, Sleep};
 use tracing::{debug, error, info, warn};
 
+use crate::cell_manager::CellEntry;
 use crate::cluster_membership::NodeId;
-use crate::process_manager::ProcessEntry;
 
 /// Serialization format of the lock saved in the backing storage for sync
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -93,7 +93,7 @@ enum LockState {
   Active {
     descriptor: LockDescriptor,
     lock_manager: Arc<dyn DistributedLock>,
-    protected_resource: ProcessEntry,
+    protected_resource: CellEntry,
   },
   Released {
     descriptor: LockDescriptor,
@@ -219,17 +219,17 @@ enum LockStateRequest {
 }
 
 struct SetResourceRequest {
-  resource: ProcessEntry,
+  resource: CellEntry,
   res_chan: oneshot::Sender<()>,
 }
 
 struct AccessResourceRequest<T> {
-  accessor: Box<dyn FnOnce(&ProcessEntry) -> T + Send + Sync>,
+  accessor: Box<dyn FnOnce(&CellEntry) -> T + Send + Sync>,
   res_chan: oneshot::Sender<Option<T>>,
 }
 
 struct MutateResourceRequest {
-  mutator: Box<dyn FnOnce(&mut ProcessEntry) + Send + Sync>,
+  mutator: Box<dyn FnOnce(&mut CellEntry) + Send + Sync>,
   res_chan: oneshot::Sender<()>,
 }
 
@@ -284,10 +284,7 @@ impl LockHandle {
     &self.descriptor
   }
 
-  pub async fn set_resource(
-    &self,
-    resource: ProcessEntry,
-  ) -> anyhow::Result<()> {
+  pub async fn set_resource(&self, resource: CellEntry) -> anyhow::Result<()> {
     let (tx, rx) = oneshot::channel();
     self
       .tx
@@ -311,7 +308,7 @@ impl LockHandle {
 
   pub async fn mutate_resource(
     &self,
-    mutator: Box<dyn FnOnce(&mut ProcessEntry) + Send + Sync>,
+    mutator: Box<dyn FnOnce(&mut CellEntry) + Send + Sync>,
   ) -> anyhow::Result<()> {
     let (tx, rx) = oneshot::channel();
     self

@@ -286,8 +286,8 @@ pub async fn dispatch_alarm_locally(
   node_state: Arc<NodeState>,
 ) -> anyhow::Result<Alarm> {
   let (_sock_path, stream, _process_key) = node_state
-    .process_manager
-    .get_or_spawn_process(&alarm.tenant, &alarm.cell_id, node_state.clone())
+    .cell_manager
+    .get_or_spawn_cell(&alarm.tenant, &alarm.cell_id, node_state.clone())
     .await?;
 
   let io = hyper_util::rt::TokioIo::new(stream);

@@ -24,7 +24,7 @@ use crate::sqlite_replica::{create_empty_database, SqliteReplica};
 use crate::NodeState;
 
 #[derive(Debug)]
-pub struct ProcessEntry {
+pub struct CellEntry {
   pub pid: u32,
   pub socket_path: PathBuf,
   pub last_used: Instant,
@@ -44,7 +44,7 @@ pub struct ProcessEntry {
   pub replica: Option<SqliteReplica>,
 }
 
-impl ProcessEntry {
+impl CellEntry {
   pub fn terminate(&self) {
     self.parent_exit_guard.kill(Signal::SIGTERM);
 
@@ -59,21 +59,21 @@ impl ProcessEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ProcessKey(String);
+pub struct CellKey(String);
 
-impl ProcessKey {
+impl CellKey {
   fn new(host: &str, cell_id: &str) -> Self {
-    ProcessKey(format!("{}/{}", host, cell_id))
+    CellKey(format!("{}/{}", host, cell_id))
   }
 }
 
-pub struct ProcessManager {
+pub struct CellManager {
   pub data_dir: PathBuf,
-  pub processes: DashMap<ProcessKey, LockHandle>,
+  pub cells: DashMap<CellKey, LockHandle>,
   control_socket_path: PathBuf,
 }
 
-impl ProcessManager {
+impl CellManager {
   pub fn new(data_dir: PathBuf, control_socket: &ControlSocket) -> Self {
     let data_dir = data_dir.clone();
     // TODO: Implement a cleanup mechanism for old empty database files
@@ -82,40 +82,37 @@ impl ProcessManager {
     // 2. Running a periodic cleanup job that removes databases that haven't been
     //    accessed for a long time (e.g., weeks or months)
     // 3. Only removing databases that are successfully backed up to S3/MinIO
-    ProcessManager {
+    CellManager {
       data_dir: std::fs::canonicalize(data_dir.clone()).unwrap(),
-      processes: DashMap::new(),
+      cells: DashMap::new(),
       control_socket_path: control_socket.socket_path.clone(),
     }
   }
 
-  pub async fn wait_until_process_cleanup_complete(&self) {
+  pub async fn wait_until_cell_cleanup_complete(&self) {
     // Ensure all locks are released
-    for entry in &self.processes {
-      let process = entry.value();
-      if let Err(e) = process.release().await {
+    for entry in &self.cells {
+      let cell = entry.value();
+      if let Err(e) = cell.release().await {
         tracing::error!(
           error = ?e,
-          descriptor = ?process.descriptor(),
-          "Error waiting for the process cleanup to complete"
+          descriptor = ?cell.descriptor(),
+          "Error waiting for the cell cleanup to complete"
         );
       }
     }
   }
 
-  /// Track a new connection to the process
-  pub async fn increment_connection_count(
-    &self,
-    process_key: &ProcessKey,
-  ) -> bool {
-    let Some(entry) = self.processes.get(process_key) else {
+  /// Track a new connection to the prosess
+  pub async fn increment_connection_count(&self, cell_key: &CellKey) -> bool {
+    let Some(entry) = self.cells.get(cell_key) else {
       return false;
     };
 
     match entry
-      .mutate_resource(Box::new(|process_entry| {
-        process_entry.incoming_connections += 1;
-        process_entry.last_used = Instant::now();
+      .mutate_resource(Box::new(|cell_entry| {
+        cell_entry.incoming_connections += 1;
+        cell_entry.last_used = Instant::now();
       }))
       .await
     {
@@ -131,19 +128,16 @@ impl ProcessManager {
   }
 
   /// Track a closed connection to the process
-  pub async fn decrement_connection_count(
-    &self,
-    process_key: &ProcessKey,
-  ) -> bool {
-    let Some(entry) = self.processes.get(process_key) else {
+  pub async fn decrement_connection_count(&self, cell_key: &CellKey) -> bool {
+    let Some(entry) = self.cells.get(cell_key) else {
       return false;
     };
 
     match entry
-      .mutate_resource(Box::new(|process_entry| {
-        assert!(process_entry.incoming_connections > 0);
-        process_entry.incoming_connections -= 1;
-        process_entry.last_used = Instant::now();
+      .mutate_resource(Box::new(|cell_entry| {
+        assert!(cell_entry.incoming_connections > 0);
+        cell_entry.incoming_connections -= 1;
+        cell_entry.last_used = Instant::now();
       }))
       .await
     {
@@ -159,30 +153,30 @@ impl ProcessManager {
   }
 
   #[instrument(skip(self, node_state), fields(host = %host, cell_id = %cell_id))]
-  pub async fn get_or_spawn_process(
+  pub async fn get_or_spawn_cell(
     &self,
     host: &str,
     cell_id: &str,
     node_state: Arc<NodeState>,
-  ) -> Result<(PathBuf, UnixStream, ProcessKey), ProcessManagerError> {
+  ) -> Result<(PathBuf, UnixStream, CellKey), CellManagerError> {
     // Create a combined key for host and cell to ensure one isolate per cell
-    let process_key = ProcessKey::new(host, cell_id);
+    let cell_key = CellKey::new(host, cell_id);
 
-    // First, try to find and connect to an existing process
+    // First, try to find and connect to an existing cell
     if_chain! {
-      if let Some(handle) = self.processes.get(&process_key);
+      if let Some(handle) = self.cells.get(&cell_key);
       if let Ok(Some(socket_path)) = handle.get_socket_path().await;
       if let Ok(stream) = UnixStream::connect(&socket_path).await;
       then {
         debug!(
           socket = %socket_path.display(),
-          "Connected to existing process socket"
+          "Connected to existing cell socket"
         );
-        return Ok((socket_path, stream, process_key));
+        return Ok((socket_path, stream, cell_key));
       }
     }
 
-    // Fall through to spawn a new process
+    // Fall through to spawn a new cell
 
     // checked higher up, but done again here for safety
     assert!(!host.contains('/') && !host.contains(".."));
@@ -191,7 +185,7 @@ impl ProcessManager {
     let main_script = app_code_dir.join("main.ts"); // TODO support main.js
     if !main_script.exists() {
       error!("Application code not found at {}", main_script.display());
-      return Err(ProcessManagerError::Internal(
+      return Err(CellManagerError::Internal(
         ProxyError::AppNotFound(host.to_string()).into(),
       ));
     }
@@ -218,19 +212,17 @@ impl ProcessManager {
           LockAcquireError::LockHeld(maybe_lock_info) => {
             match maybe_lock_info {
               Some(lock_info) if lock_info.node_id == *node_id => {
-                ProcessManagerError::ProcessCreationInProgress
+                CellManagerError::CellCreationInProgress
               }
-              _ => ProcessManagerError::LockContention,
+              _ => CellManagerError::LockContention,
             }
           }
           LockAcquireError::UnableToRenewExpiredLock(_) => {
             // This error should never happen here
-            ProcessManagerError::Internal(e.into())
+            CellManagerError::Internal(e.into())
           }
-          LockAcquireError::S3Error(e) => {
-            ProcessManagerError::S3(e.to_string())
-          }
-          LockAcquireError::SerdeError(e) => ProcessManagerError::Serde(e),
+          LockAcquireError::S3Error(e) => CellManagerError::S3(e.to_string()),
+          LockAcquireError::SerdeError(e) => CellManagerError::Serde(e),
         }
       })?;
 
@@ -347,8 +339,8 @@ impl ProcessManager {
     // Convert to tokio::process::Child using the PID
     let pid = child_guard.pid().unwrap() as u32;
 
-    // Create a new ProcessEntry with proper values
-    let entry = ProcessEntry {
+    // Create a new CellEntry with proper values
+    let entry = CellEntry {
       pid,
       socket_path: serve_socket_path.clone(),
       last_used: Instant::now(),
@@ -360,7 +352,7 @@ impl ProcessManager {
 
     lock_handle.set_resource(entry).await?;
 
-    self.processes.insert(process_key.clone(), lock_handle);
+    self.cells.insert(cell_key.clone(), lock_handle);
 
     // --- Wait for the socket to become available (crucial for cold start) ---
     let socket_ = serve_socket_path.clone();
@@ -383,10 +375,10 @@ impl ProcessManager {
         );
 
         // Remove the entry from the map to avoid stale entries
-        if let Some((_, handle)) = self.processes.remove(&process_key) {
+        if let Some((_, handle)) = self.cells.remove(&cell_key) {
           handle.release().await?;
         } else {
-          warn!("Process entry not found in map");
+          warn!("Cell entry not found in map");
         }
 
         // The tempdir will be dropped at the end of this scope, cleaning up the socket file
@@ -445,7 +437,7 @@ impl ProcessManager {
           );
 
           // Remove the entry from the map to avoid stale entries
-          if let Some((_, handle)) = self.processes.remove(&process_key) {
+          if let Some((_, handle)) = self.cells.remove(&cell_key) {
             handle.release().await?;
           }
 
@@ -457,18 +449,18 @@ impl ProcessManager {
       }
     };
 
-    Ok((serve_socket_path, stream, process_key))
+    Ok((serve_socket_path, stream, cell_key))
   }
 
   pub async fn terminate_all(&self) {
-    for entry in &self.processes {
+    for entry in &self.cells {
       let handle = entry.value();
       // TODO(magurotuna): Can we do this concurrently?
       if let Err(e) = handle.release().await {
         error!(
           error = ?e,
           descriptor = ?handle.descriptor(),
-          "Error releasing lock for process"
+          "Error terminating the cell"
         );
       }
     }
@@ -476,9 +468,9 @@ impl ProcessManager {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ProcessManagerError {
-  #[error("Process creation in progress; retry later")]
-  ProcessCreationInProgress,
+pub enum CellManagerError {
+  #[error("Cell creation in progress; retry later")]
+  CellCreationInProgress,
   #[error("Cell lock held by another node")]
   LockContention,
   #[error("S3 operation failed: {0}")]
@@ -489,15 +481,15 @@ pub enum ProcessManagerError {
   Internal(#[from] anyhow::Error),
 }
 
-impl From<ProcessManagerError> for Box<pingora::Error> {
-  fn from(e: ProcessManagerError) -> Self {
-    use ProcessManagerError::*;
+impl From<CellManagerError> for Box<pingora::Error> {
+  fn from(e: CellManagerError) -> Self {
+    use CellManagerError::*;
     match e {
-      ProcessCreationInProgress => pingora::Error::explain(
+      CellCreationInProgress => pingora::Error::explain(
         pingora::ErrorType::HTTPStatus(
           http::StatusCode::INTERNAL_SERVER_ERROR.into(),
         ),
-        "Failed to get or spawn process",
+        "Failed to get or spawn cell",
       ),
       LockContention => pingora::Error::explain(
         pingora::ErrorType::HTTPStatus(
@@ -521,7 +513,7 @@ impl From<ProcessManagerError> for Box<pingora::Error> {
         pingora::ErrorType::HTTPStatus(
           http::StatusCode::INTERNAL_SERVER_ERROR.into(),
         ),
-        "Internal server error during process lookup",
+        "Internal server error during cell lookup",
       ),
     }
   }

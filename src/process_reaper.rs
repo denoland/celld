@@ -4,7 +4,7 @@ use pingora::services::background::BackgroundService;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, info, trace, warn};
+use tracing::{info, trace};
 
 /// ProcessReaper service cleans up idle processes
 pub struct ProcessReaper {
@@ -30,7 +30,7 @@ impl ProcessReaper {
     trace!("Reaper checking for idle processes...");
     let mut reaped_process_keys = HashSet::new();
 
-    for entry in &self.node_state.process_manager.processes {
+    for entry in &self.node_state.cell_manager.cells {
       let process_key = entry.key();
       let entry = entry.value();
       let reaped = entry
@@ -45,8 +45,8 @@ impl ProcessReaper {
 
     self
       .node_state
-      .process_manager
-      .processes
+      .cell_manager
+      .cells
       .retain(|k, _| !reaped_process_keys.contains(k));
 
     trace!("Reaper check complete.");
@@ -68,7 +68,7 @@ impl BackgroundService for ProcessReaper {
           _ = shutdown.changed() => {
               info!("Process reaper received shutdown signal - terminating all processes");
               // Terminate all processes when shutdown signal is received
-              self.node_state.process_manager.terminate_all().await;
+              self.node_state.cell_manager.terminate_all().await;
               break;
           }
           _ = interval.tick() => {

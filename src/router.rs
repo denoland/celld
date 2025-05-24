@@ -8,9 +8,9 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, error, info};
 
 use crate::alarm_processor::{dispatch_alarm_locally, Alarm};
+use crate::cell_manager::{CellKey, CellManagerError};
 use crate::control_socket_listener::locally_handle_internal_alarms;
 use crate::node_state::NodeState;
-use crate::process_manager::{ProcessKey, ProcessManagerError};
 use crate::system_cell::SystemCell;
 
 #[derive(Debug, thiserror::Error)]
@@ -38,7 +38,7 @@ pub struct InternalAPI {
 pub struct Ctx {
   pub tenant: String,
   pub cell_id: Option<String>,
-  pub process_key: Option<ProcessKey>,
+  pub cell_key: Option<CellKey>,
 }
 
 pub struct InternalCtx {
@@ -358,10 +358,10 @@ impl ProxyHttp for Proxy {
     _e: Option<&pingora::Error>,
     ctx: &mut Self::CTX,
   ) {
-    if let Some(process_key) = &ctx.process_key {
+    if let Some(process_key) = &ctx.cell_key {
       let _ = self
         .node_state
-        .process_manager
+        .cell_manager
         .decrement_connection_count(process_key)
         .await;
     }
@@ -471,7 +471,7 @@ impl ProxyHttp for Proxy {
     };
 
     // Construct the file path
-    let tenant_dir = self.node_state.process_manager.data_dir.join(&ctx.tenant);
+    let tenant_dir = self.node_state.cell_manager.data_dir.join(&ctx.tenant);
     let static_dir = tenant_dir.join("static");
     let file_path = static_dir.join(&rel_path_);
 
@@ -609,8 +609,8 @@ impl ProxyHttp for Proxy {
     for _ in 0..RETRY_COUNT {
       match self
         .node_state
-        .process_manager
-        .get_or_spawn_process(&ctx.tenant, cell_id, self.node_state.clone())
+        .cell_manager
+        .get_or_spawn_cell(&ctx.tenant, cell_id, self.node_state.clone())
         .await
       {
         Ok((path, _stream, process_key)) => {
@@ -618,38 +618,38 @@ impl ProxyHttp for Proxy {
           // Increment active connection count
           self
             .node_state
-            .process_manager
+            .cell_manager
             .increment_connection_count(&process_key)
             .await;
-          ctx.process_key = Some(process_key);
+          ctx.cell_key = Some(process_key);
           socket_path = Some(path);
           break;
         }
-        Err(ProcessManagerError::ProcessCreationInProgress) => {
+        Err(CellManagerError::CellCreationInProgress) => {
           info!(
             node_id = ?self.node_state.node_id,
-            "Lock is held by this node, meaning a deno process creation is already in progress. Retry in {:?}",
+            "Lock is held by this node, meaning a cell creation is already in progress. Retry in {:?}",
             RETRY_INTERVAL
           );
           tokio::time::sleep(RETRY_INTERVAL).await;
           continue;
         }
-        Err(error @ ProcessManagerError::LockContention) => {
+        Err(error @ CellManagerError::LockContention) => {
           debug!(
             "Lock is held by another node that is responsible for this cell"
           );
           // TODO: forward the request to the lock holder?
           return Err(error.into());
         }
-        Err(error @ ProcessManagerError::S3(_)) => {
+        Err(error @ CellManagerError::S3(_)) => {
           debug!(?error, "S3 operation failed");
           return Err(error.into());
         }
-        Err(error @ ProcessManagerError::Serde(_)) => {
+        Err(error @ CellManagerError::Serde(_)) => {
           debug!(?error, "Failed to serialize or deserialize lock data");
           return Err(error.into());
         }
-        Err(error @ ProcessManagerError::Internal(_)) => {
+        Err(error @ CellManagerError::Internal(_)) => {
           error!(?error, "Error getting or spawning process");
           return Err(error.into());
         }

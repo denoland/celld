@@ -55,8 +55,8 @@ pub async fn run(iterations: usize) -> Result<()> {
     let start = Instant::now();
 
     let (_socket_path, _stream, _process_key) = node_state
-      .process_manager
-      .get_or_spawn_process(host, &cell_id, node_state.clone())
+      .cell_manager
+      .get_or_spawn_cell(host, &cell_id, node_state.clone())
       .await?;
     let elapsed = start.elapsed();
 
@@ -97,7 +97,7 @@ pub async fn run(iterations: usize) -> Result<()> {
     println!("p99: {} ms", p99.as_millis());
   }
 
-  node_state.process_manager.terminate_all().await;
+  node_state.cell_manager.terminate_all().await;
 
   Ok(())
 }
