@@ -50,6 +50,9 @@ pub enum AlarmProcessRequest {
     limit: u32,
     response: tokio::sync::oneshot::Sender<Result<(), AlarmError>>,
   },
+  Shutdown {
+    response: tokio::sync::oneshot::Sender<()>,
+  },
 }
 
 #[derive(Debug)]
@@ -136,6 +139,10 @@ impl AlarmProcessor {
               )
               .await;
               let _ = response.send(res);
+            }
+            AlarmProcessRequest::Shutdown { response } => {
+              let _ = response.send(());
+              break;
             }
           }
         }
@@ -225,6 +232,19 @@ impl AlarmProcessor {
       })
       .await?;
     res_rx.await?
+  }
+
+  /// Shutdown the alarm processor.
+  /// This will resolve when the alarm processor has finished processing all
+  /// requests.
+  pub async fn shutdown(self) -> Result<(), AlarmError> {
+    let (res_tx, res_rx) = tokio::sync::oneshot::channel();
+    self
+      .request_tx
+      .send(AlarmProcessRequest::Shutdown { response: res_tx })
+      .await?;
+    res_rx.await?;
+    Ok(())
   }
 }
 

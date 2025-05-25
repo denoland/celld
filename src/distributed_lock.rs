@@ -164,11 +164,22 @@ impl LockState {
 
         true
       }
-      LockState::Active {
-        descriptor,
-        lock_manager,
-        protected_resource,
-      } => {
+      LockState::Active { descriptor, .. } => {
+        let descriptor = descriptor.clone();
+        // Set the state to Released before actually processing the resource
+        // cleanup to get the ownership.
+        let state =
+          std::mem::replace(self, LockState::Released { descriptor, reason });
+
+        let LockState::Active {
+          descriptor,
+          lock_manager,
+          protected_resource,
+        } = state
+        else {
+          unreachable!("We already checked that the state is Active in the match statement");
+        };
+
         // Releasing the resource gracefully may be taking some time.
         // To ensure that no other node will detect the lock as expired during the
         // release process, if the deadline is close, we first extend it before
@@ -187,18 +198,25 @@ impl LockState {
         // The release order matters. Deno process and Litestream replication must
         // be stopped *before* other nodes detect the lock as released.
 
-        // Shutdown the protected resource gracefully
-        // TODO: Add a timeout to this operation (maybe 5s or so?)
-        protected_resource.terminate();
+        // Shutdown the protected resource (i.e. Deno process and then Litestream
+        // replication) gracefully
+        if let Err(_) = tokio::time::timeout(
+          Duration::from_secs(5),
+          protected_resource.terminate(),
+        )
+        .await
+        {
+          // TODO(magurotuna): we should forcibly kill it here to ensure that
+          // the cell stays alive after the lock is released.
+          error!(
+            ?descriptor,
+            "Timed out while terminating protected resource gracefully"
+          );
+        }
 
         // Release the lock
-        lock_manager.release(descriptor).await?;
+        lock_manager.release(&descriptor).await?;
         debug!(?descriptor, "Lock released");
-
-        *self = LockState::Released {
-          descriptor: descriptor.clone(),
-          reason,
-        };
 
         true
       }

@@ -40,12 +40,32 @@ pub struct CellEntry {
 }
 
 impl CellEntry {
-  pub fn terminate(&self) {
-    self.parent_exit_guard.kill(Signal::SIGTERM);
+  pub async fn terminate(self) {
+    match self.inner {
+      CellEntryInner::Normal {
+        parent_exit_guard, ..
+      } => {
+        parent_exit_guard.kill(Signal::SIGTERM);
+        parent_exit_guard.wait();
+      }
+      CellEntryInner::System { alarm_processor } => {
+        if let Err(e) = alarm_processor.shutdown().await {
+          error!(
+            error = ?e,
+            "Error shutting down alarm processor"
+          );
+        }
+      }
+    }
 
-    // TODO: do we want to explicitly wait for the process to exit?
-
-    // TODO: Terminate Litestream replication process gracefully
+    if let Some(replica) = &self.replica {
+      if let Err(e) = replica.shutdown().await {
+        error!(
+          error = ?e,
+          "Error shutting down Litestream replication"
+        );
+      }
+    }
   }
 
   pub fn get_socket_path(&self) -> Option<&Path> {
