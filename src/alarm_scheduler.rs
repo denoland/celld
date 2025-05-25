@@ -29,7 +29,8 @@ impl BackgroundService for AlarmScheduler {
             break;
         }
         _ = interval.tick() => {
-          let Some(system_cell_handle) = self.node_state.cell_manager.get_system_cell() else {
+          let Some(system_cell_handle) = self.node_state.cell_manager.get_system_cell().await else {
+            // System cell not found, indicating that its owner is not self now.
             continue;
           };
 

@@ -3,6 +3,7 @@ use dashmap::DashMap;
 use if_chain::if_chain;
 use nix::sys::signal::Signal;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -20,6 +21,8 @@ use crate::child_on_parent_exit::ChildOnParentExit;
 use crate::control_socket_listener::ControlSocket;
 use crate::distributed_lock::LockAcquireError;
 use crate::distributed_lock::LockHandle;
+use crate::distributed_lock::LockStateKind;
+use crate::peer_manager::PeerManager;
 use crate::router::ProxyError;
 use crate::sqlite_replica::{create_empty_database, SqliteReplica};
 use crate::NodeState;
@@ -104,11 +107,17 @@ enum CellEntryInner {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CellKey(String);
+pub struct CellKey {
+  host: String,
+  cell_id: String,
+}
 
 impl CellKey {
-  fn new(host: &str, cell_id: &str) -> Self {
-    CellKey(format!("{}/{}", host, cell_id))
+  fn new(host: impl ToString, cell_id: impl ToString) -> Self {
+    CellKey {
+      host: host.to_string(),
+      cell_id: cell_id.to_string(),
+    }
   }
 }
 
@@ -135,11 +144,158 @@ impl CellManager {
   }
 
   /// Get the handle to the system cell if exists.
-  pub fn get_system_cell(&self) -> Option<LockHandle> {
-    self
-      .cells
-      .get(&CellKey::new(SYSTEM_TENANT, SYSTEM_CELL_ID))
-      .map(|a| a.value().clone())
+  pub async fn get_system_cell(&self) -> Option<LockHandle> {
+    let Some(entry) =
+      self.cells.get(&CellKey::new(SYSTEM_TENANT, SYSTEM_CELL_ID))
+    else {
+      return None;
+    };
+
+    match entry.value().ping().await {
+      Ok(status) => match status {
+        LockStateKind::Init => {
+          unreachable!("CellEntry should be inserted to self.cells after it transitioned to Active state");
+        }
+        LockStateKind::Active => Some(entry.value().clone()),
+        LockStateKind::Released => {
+          self.cells.remove(entry.key());
+          None
+        }
+      },
+      Err(e) => {
+        error!(
+          error = ?e,
+          key = ?entry.key(),
+          "Error pinging system cell, removing it from cells"
+        );
+        self.cells.remove(entry.key());
+        None
+      }
+    }
+  }
+
+  pub async fn ensure_system_cell_spawned(
+    &self,
+    node_state: Arc<NodeState>,
+  ) -> anyhow::Result<()> {
+    // Retry 10 times with 100ms interval to accout for the delay in the
+    // propagation of cluster membership change.
+    // We may want to adjust this number based on the actual delay and what
+    // value is set as the heartbeat interval.
+    for _ in 0..10 {
+      if self.get_system_cell().await.is_some() {
+        return Ok(());
+      }
+
+      match self.spawn_system_cell(node_state.clone()).await {
+        Ok(()) => {
+          return Ok(());
+        }
+        Err(e) => {
+          error!(
+            error = ?e,
+            "Failed to spawn system cell"
+          );
+          sleep(Duration::from_millis(100)).await;
+        }
+      }
+    }
+
+    Err(anyhow::anyhow!("Failed to spawn system cell"))
+  }
+
+  async fn spawn_system_cell(
+    &self,
+    node_state: Arc<NodeState>,
+  ) -> Result<(), CellManagerError> {
+    let cell_key = CellKey::new(SYSTEM_TENANT, SYSTEM_CELL_ID);
+    let lock_name = format!("{}/{}", SYSTEM_TENANT, SYSTEM_CELL_ID);
+    let node_id = node_state.peer_manager.get_local_node_id();
+    let lock_handle = node_state
+      .distributed_lock
+      .clone()
+      .try_acquire(&lock_name, node_id, node_state.config.lock_guard_ttl)
+      .await
+      .map_err(|e| {
+        tracing::warn!(
+          tenant = SYSTEM_TENANT,
+          cell_id = SYSTEM_CELL_ID,
+          lock_name,
+          ?node_id,
+          error = ?e,
+          "Failed to acquire lock on cell"
+        );
+        match e {
+          LockAcquireError::LockHeld(maybe_lock_info) => {
+            match maybe_lock_info {
+              Some(lock_info) if lock_info.node_id == *node_id => {
+                CellManagerError::CellCreationInProgress
+              }
+              _ => CellManagerError::LockContention,
+            }
+          }
+          LockAcquireError::UnableToRenewExpiredLock(_) => {
+            // This error should never happen here
+            CellManagerError::Internal(e.into())
+          }
+          LockAcquireError::S3Error(e) => CellManagerError::S3(e.to_string()),
+          LockAcquireError::SerdeError(e) => CellManagerError::Serde(e),
+        }
+      })?;
+
+    let tenant_dir = self.data_dir.join(SYSTEM_TENANT);
+
+    let sqlite_dir = tenant_dir.join("sqlite");
+    std::fs::create_dir_all(&sqlite_dir).unwrap_or_else(|e| {
+      warn!("Failed to create sqlite directory: {}", e);
+    });
+
+    let db_path = sqlite_dir.join(format!("{}.db", SYSTEM_CELL_ID));
+
+    let replica = self
+      .setup_sqlite_replica(
+        SYSTEM_TENANT,
+        SYSTEM_CELL_ID,
+        node_state.clone(),
+        &lock_handle,
+        &db_path,
+      )
+      .await?;
+
+    let entry = CellEntry {
+      inner: CellEntryInner::System {
+        alarm_processor: AlarmProcessor::new(&db_path)?,
+      },
+      replica: replica.clone(),
+    };
+
+    lock_handle.set_resource(entry).await?;
+
+    self.cells.insert(cell_key, lock_handle);
+
+    Ok(())
+  }
+
+  /// Terminate cells (including both normal cells and the system cell) that are
+  /// no longer owned by this node according the the peer manager.
+  pub async fn terminate_unowned_cells(&self, peer_manager: &PeerManager) {
+    let mut released_keys = HashSet::new();
+
+    for entry in &self.cells {
+      let key = entry.key();
+      if !peer_manager.is_local_owner(&key.host, &key.cell_id) {
+        if let Err(e) = entry.value().release().await {
+          error!(
+            error = ?e,
+            descriptor = ?entry.value().descriptor(),
+            "Error releasing cell lock"
+          );
+        }
+        released_keys.insert(key.clone());
+      }
+    }
+
+    self.cells.retain(|key, _| !released_keys.contains(key));
   }
 
   pub async fn wait_until_cell_cleanup_complete(&self) {
@@ -229,7 +385,7 @@ impl CellManager {
     // Create a combined key for host and cell to ensure one isolate per cell
     let cell_key = CellKey::new(host, cell_id);
 
-    // First, try to find and connect to an existing cell
+    // First, try to find and connect to an existing ready cell
     if_chain! {
       if let Some(handle) = self.cells.get(&cell_key);
       if let Ok(Some(socket_path)) = handle.get_socket_path().await;
@@ -314,67 +470,15 @@ impl CellManager {
     // Configure SQLite replication if S3 is configured
     let db_path = sqlite_dir.join(format!("{}.db", cell_id));
 
-    // Try to initialize the SqliteReplica with the S3 config
-    let replica = match SqliteReplica::initialize(
-      &self.data_dir,
-      host,
-      cell_id,
-      node_state.config.to_s3_config(),
-    )
-    .await
-    {
-      Ok(replica_opt) => {
-        if replica_opt.is_some() {
-          debug!(
-            tenant = %host,
-            cell_id = %cell_id,
-            "S3 replication initialized successfully"
-          );
-        }
-        replica_opt
-      }
-      Err(e) => {
-        warn!(
-          tenant = %host,
-          cell_id = %cell_id,
-          error = %e,
-          "Fatal error initializing replica"
-        );
-        None
-      }
-    };
-
-    // Handle database restoration if necessary
-    if let Some(ref replica) = replica {
-      info!(
-        tenant = %host,
-        cell_id = %cell_id,
-        "Starting coordinated database restore process"
-      );
-
-      // Call ensure_restored to perform the restore with distributed locking
-      replica.ensure_restored(&lock_handle).await;
-      replica.start_replication().await?;
-    } else if !db_path.exists() {
-      // No replica, but we still need a database - create an empty one
-      debug!(
-        tenant = %host,
-        cell_id = %cell_id,
-        "No S3 replication, creating empty database"
-      );
-
-      if let Err(e) = create_empty_database(&db_path) {
-        warn!("Failed to create empty database file: {}", e);
-      }
-    } else {
-      // No replica and the database already exists
-      debug!(
-        tenant = %host,
-        cell_id = %cell_id,
-        db_path = %db_path.display(),
-        "No replica and database already exists, using existing database"
-      );
-    }
+    let replica = self
+      .setup_sqlite_replica(
+        host,
+        cell_id,
+        node_state.clone(),
+        &lock_handle,
+        &db_path,
+      )
+      .await?;
 
     let spawn_start = Instant::now();
 
@@ -533,6 +637,79 @@ impl CellManager {
         );
       }
     }
+  }
+
+  async fn setup_sqlite_replica(
+    &self,
+    host: &str,
+    cell_id: &str,
+    node_state: Arc<NodeState>,
+    lock_handle: &LockHandle,
+    db_path: &Path,
+  ) -> Result<Option<SqliteReplica>, CellManagerError> {
+    // Try to initialize the SqliteReplica with the S3 config
+    let replica = match SqliteReplica::initialize(
+      &self.data_dir,
+      host,
+      cell_id,
+      node_state.config.to_s3_config(),
+    )
+    .await
+    {
+      Ok(replica_opt) => {
+        if replica_opt.is_some() {
+          debug!(
+            tenant = %host,
+            cell_id = %cell_id,
+            "S3 replication initialized successfully"
+          );
+        }
+        replica_opt
+      }
+      Err(e) => {
+        warn!(
+          tenant = %host,
+          cell_id = %cell_id,
+          error = %e,
+          "Fatal error initializing replica"
+        );
+        None
+      }
+    };
+
+    // Handle database restoration if necessary
+    if let Some(ref replica) = replica {
+      info!(
+        tenant = %host,
+        cell_id = %cell_id,
+        "Starting coordinated database restore process"
+      );
+
+      // Call ensure_restored to perform the restore with distributed locking
+      replica.ensure_restored(&lock_handle).await;
+      replica.start_replication().await?;
+    } else if !db_path.exists() {
+      // No replica, but we still need a database - create an empty one
+      debug!(
+        tenant = %host,
+        cell_id = %cell_id,
+        "No S3 replication, creating empty database"
+      );
+
+      if let Err(e) = create_empty_database(&db_path) {
+        warn!("Failed to create empty database file: {}", e);
+      }
+    } else {
+      // No replica and the database already exists
+      debug!(
+        tenant = %host,
+        cell_id = %cell_id,
+        db_path = %db_path.display(),
+        "No replica and database already exists, using existing database"
+      );
+    }
+
+    Ok(replica)
   }
 }
 

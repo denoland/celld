@@ -1,6 +1,8 @@
 use std::error::Error as _;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,6 +21,7 @@ use tokio::sync::oneshot;
 use tokio::time::{interval, sleep_until, Instant, Sleep};
 use tracing::{debug, error, info, warn};
 
+use crate::alarm_processor::Alarm;
 use crate::cell_manager::CellEntry;
 use crate::cluster_membership::NodeId;
 use crate::node_state::NodeState;
@@ -213,8 +216,12 @@ impl LockState {
 
 enum LockStateRequest {
   SetResource(SetResourceRequest),
+  Ping(PingRequest),
   GetSocketPath(AccessOptionalResourceRequest<PathBuf>),
   MutateResource(MutateResourceRequest),
+  GetAlarm(GetAlarmRequest),
+  DeleteAlarm(DeleteAlarmRequest),
+  SetAlarm(SetAlarmRequest),
   DispatchAlarms(DispatchAlarmsRequest),
   ReleaseIfIdle(ReleaseIfIdleRequest),
   Release(ReleaseRequest),
@@ -225,6 +232,16 @@ struct SetResourceRequest {
   res_chan: oneshot::Sender<()>,
 }
 
+pub enum LockStateKind {
+  Init,
+  Active,
+  Released,
+}
+
+struct PingRequest {
+  res_chan: oneshot::Sender<LockStateKind>,
+}
+
 struct AccessOptionalResourceRequest<T> {
   accessor: Box<dyn FnOnce(&CellEntry) -> Option<T> + Send + Sync>,
   res_chan: oneshot::Sender<Option<T>>,
@@ -233,6 +250,29 @@ struct AccessOptionalResourceRequest<T> {
 struct MutateResourceRequest {
   mutator: Box<dyn FnOnce(&mut CellEntry) + Send + Sync>,
   res_chan: oneshot::Sender<()>,
+}
+
+struct GetAlarmRequest {
+  tenant: String,
+  cell_id: String,
+  res_chan: oneshot::Sender<Option<GetAlarmResponse>>,
+}
+
+struct GetAlarmResponse {
+  scheduled_time_unix_ms: u64,
+}
+
+struct DeleteAlarmRequest {
+  tenant: String,
+  cell_id: String,
+  res_chan: oneshot::Sender<anyhow::Result<()>>,
+}
+
+struct SetAlarmRequest {
+  tenant: String,
+  cell_id: String,
+  scheduled_time_unix_ms: u64,
+  res_chan: oneshot::Sender<anyhow::Result<()>>,
 }
 
 struct DispatchAlarmsRequest {
@@ -263,7 +303,7 @@ impl Drop for LockHandle {
     let req = LockStateRequest::Release(ReleaseRequest { res_chan: tx });
 
     if let Err(_) = self.tx.send(req) {
-      warn!("Failed to send release request to lock state loop (loop already exited");
+      warn!("Failed to send release request to lock state loop (loop already exited)");
     }
   }
 }
@@ -304,6 +344,14 @@ impl LockHandle {
     rx.await.context("Lock state loop exited unexpectedly")
   }
 
+  pub async fn ping(&self) -> anyhow::Result<LockStateKind> {
+    let (tx, rx) = oneshot::channel();
+    self
+      .tx
+      .send(LockStateRequest::Ping(PingRequest { res_chan: tx }))?;
+    rx.await.context("Lock state loop exited unexpectedly")
+  }
+
   pub async fn get_socket_path(&self) -> anyhow::Result<Option<PathBuf>> {
     let (tx, rx) = oneshot::channel();
     self.tx.send(LockStateRequest::GetSocketPath(
@@ -329,6 +377,60 @@ impl LockHandle {
         res_chan: tx,
       }))?;
     rx.await.context("Lock state loop exited unexpectedly")
+  }
+
+  pub async fn get_alarm(
+    &self,
+    tenant: &str,
+    cell_id: &str,
+  ) -> anyhow::Result<Option<Alarm>> {
+    let (tx, rx) = oneshot::channel();
+    self.tx.send(LockStateRequest::GetAlarm(GetAlarmRequest {
+      tenant: tenant.to_string(),
+      cell_id: cell_id.to_string(),
+      res_chan: tx,
+    }))?;
+
+    match rx.await.context("Lock state loop exited unexpectedly")? {
+      Some(alarm) => Ok(Some(Alarm {
+        tenant: tenant.to_string(),
+        cell_id: cell_id.to_string(),
+        scheduled_time_unix_ms: alarm.scheduled_time_unix_ms,
+      })),
+      None => Ok(None),
+    }
+  }
+
+  pub async fn delete_alarm(
+    &self,
+    tenant: &str,
+    cell_id: &str,
+  ) -> anyhow::Result<()> {
+    let (tx, rx) = oneshot::channel();
+    self
+      .tx
+      .send(LockStateRequest::DeleteAlarm(DeleteAlarmRequest {
+        tenant: tenant.to_string(),
+        cell_id: cell_id.to_string(),
+        res_chan: tx,
+      }))?;
+    rx.await?
+  }
+
+  pub async fn set_alarm(
+    &self,
+    tenant: &str,
+    cell_id: &str,
+    scheduled_time_unix_ms: u64,
+  ) -> anyhow::Result<()> {
+    let (tx, rx) = oneshot::channel();
+    self.tx.send(LockStateRequest::SetAlarm(SetAlarmRequest {
+      tenant: tenant.to_string(),
+      cell_id: cell_id.to_string(),
+      scheduled_time_unix_ms,
+      res_chan: tx,
+    }))?;
+    rx.await?
   }
 
   pub async fn dispatch_alarms(
@@ -423,11 +525,23 @@ async fn lock_state_loop(
           Some(LockStateRequest::SetResource(req)) => {
             handle_set_resource(req, &mut state);
           }
+          Some(LockStateRequest::Ping(req)) => {
+            handle_ping(req, &mut state);
+          }
           Some(LockStateRequest::GetSocketPath(req)) => {
             handle_get_socket_path(req, &mut state);
           }
           Some(LockStateRequest::MutateResource(req)) => {
             handle_mutate_resource(req, &mut state);
+          }
+          Some(LockStateRequest::GetAlarm(req)) => {
+            handle_get_alarm(req, &mut state);
+          }
+          Some(LockStateRequest::DeleteAlarm(req)) => {
+            handle_delete_alarm(req, &mut state);
+          }
+          Some(LockStateRequest::SetAlarm(req)) => {
+            handle_set_alarm(req, &mut state);
           }
           Some(LockStateRequest::DispatchAlarms(req)) => {
             handle_dispatch_alarms(req, &mut state);
@@ -472,6 +586,20 @@ fn handle_set_resource(req: SetResourceRequest, state: &mut LockState) {
   }
 }
 
+fn handle_ping(req: PingRequest, state: &mut LockState) {
+  match state {
+    LockState::Init { .. } => {
+      let _ = req.res_chan.send(LockStateKind::Init);
+    }
+    LockState::Active { .. } => {
+      let _ = req.res_chan.send(LockStateKind::Active);
+    }
+    LockState::Released { .. } => {
+      let _ = req.res_chan.send(LockStateKind::Released);
+    }
+  }
+}
+
 fn handle_get_socket_path(
   req: AccessOptionalResourceRequest<PathBuf>,
   state: &mut LockState,
@@ -510,6 +638,95 @@ fn handle_mutate_resource(req: MutateResourceRequest, state: &mut LockState) {
   }
 
   let _ = req.res_chan.send(());
+}
+
+async fn handle_get_alarm(req: GetAlarmRequest, state: &mut LockState) {
+  match state {
+    LockState::Init { .. } => {
+      let _ = req.res_chan.send(None);
+    }
+    LockState::Active {
+      protected_resource, ..
+    } => {
+      let Some(alarm_processor) = protected_resource.alarm_processor() else {
+        let _ = req.res_chan.send(None);
+        return;
+      };
+
+      let maybe_alarm = alarm_processor.get(req.tenant, req.cell_id).await.ok();
+      let _ = req.res_chan.send(maybe_alarm.map(|alarm| GetAlarmResponse {
+        scheduled_time_unix_ms: alarm.scheduled_time_unix_ms,
+      }));
+    }
+    LockState::Released { .. } => {
+      let _ = req.res_chan.send(None);
+    }
+  }
+}
+
+async fn handle_delete_alarm(req: DeleteAlarmRequest, state: &mut LockState) {
+  match state {
+    LockState::Init { .. } => {
+      let _ = req
+        .res_chan
+        .send(Err(anyhow::anyhow!("Cell is not initialized yet")));
+    }
+    LockState::Active {
+      protected_resource, ..
+    } => {
+      let Some(alarm_processor) = protected_resource.alarm_processor() else {
+        let _ = req
+          .res_chan
+          .send(Err(anyhow::anyhow!("Cell is not the system cell")));
+        return;
+      };
+
+      if let Err(e) = alarm_processor.delete(req.tenant, req.cell_id).await {
+        let _ = req.res_chan.send(Err(e.into()));
+      } else {
+        let _ = req.res_chan.send(Ok(()));
+      }
+    }
+    LockState::Released { .. } => {
+      let _ = req
+        .res_chan
+        .send(Err(anyhow::anyhow!("Cell is already released")));
+    }
+  }
+}
+
+async fn handle_set_alarm(req: SetAlarmRequest, state: &mut LockState) {
+  match state {
+    LockState::Init { .. } => {
+      let _ = req
+        .res_chan
+        .send(Err(anyhow::anyhow!("Cell is not initialized yet")));
+    }
+    LockState::Active {
+      protected_resource, ..
+    } => {
+      let Some(alarm_processor) = protected_resource.alarm_processor() else {
+        let _ = req
+          .res_chan
+          .send(Err(anyhow::anyhow!("Cell is not the system cell")));
+        return;
+      };
+
+      if let Err(e) = alarm_processor
+        .set(req.tenant, req.cell_id, req.scheduled_time_unix_ms)
+        .await
+      {
+        let _ = req.res_chan.send(Err(e.into()));
+      } else {
+        let _ = req.res_chan.send(Ok(()));
+      }
+    }
+    LockState::Released { .. } => {
+      let _ = req
+        .res_chan
+        .send(Err(anyhow::anyhow!("Cell is already released")));
+    }
+  }
 }
 
 async fn handle_dispatch_alarms(

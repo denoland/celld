@@ -1,17 +1,14 @@
-use futures::future::{BoxFuture, Shared};
 use http_body_util::BodyExt;
 use pingora::http::StatusCode;
 use pingora::prelude::*;
 use pingora::upstreams::peer::HttpPeer;
 use std::sync::Arc;
-use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, error, info};
 
 use crate::alarm_processor::{dispatch_alarm_locally, Alarm};
 use crate::cell_manager::{CellKey, CellManagerError};
 use crate::control_socket_listener::locally_handle_internal_alarms;
 use crate::node_state::NodeState;
-use crate::system_cell::SystemCell;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
@@ -30,8 +27,6 @@ pub struct Proxy {
 
 pub struct InternalAPI {
   pub node_state: Arc<NodeState>,
-  pub system_cell_rx:
-    Shared<BoxFuture<'static, Result<Arc<SystemCell>, RecvError>>>,
 }
 
 #[derive(Debug, Default)]
@@ -41,10 +36,7 @@ pub struct Ctx {
   pub cell_key: Option<CellKey>,
 }
 
-pub struct InternalCtx {
-  system_cell_rx:
-    Shared<BoxFuture<'static, Result<Arc<SystemCell>, RecvError>>>,
-}
+pub struct InternalCtx {}
 
 impl std::fmt::Debug for InternalCtx {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -59,9 +51,7 @@ impl ProxyHttp for InternalAPI {
   type CTX = InternalCtx;
 
   fn new_ctx(&self) -> Self::CTX {
-    InternalCtx {
-      system_cell_rx: self.system_cell_rx.clone(),
-    }
+    InternalCtx {}
   }
 
   async fn request_filter(
@@ -186,34 +176,18 @@ impl ProxyHttp for InternalAPI {
 
     // Handle the alarms endpoint
     if path.starts_with("/_internal/alarms") {
-      let system_cell = tokio::select! {
-        system_cell_res = ctx.system_cell_rx.clone() => {
-          match system_cell_res {
-            Ok(system_cell) => system_cell,
-            Err(e) => {
-              error!(error = ?e, "Error receiving system cell");
-              let resp = pingora::http::ResponseHeader::build(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Some(0),
-              )
-              .unwrap();
-              session.set_keepalive(None);
-              session.write_response_header(Box::new(resp), true).await?;
-              return Ok(true);
-            }
-          }
-        }
-
-        _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
-          error!("Timeout waiting for system cell; most likely the system cell is running on another node");
-          let resp = pingora::http::ResponseHeader::build(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Some(0),
-          ).unwrap();
-          session.set_keepalive(None);
-          session.write_response_header(Box::new(resp), true).await?;
-          return Ok(true);
-        }
+      let Some(system_cell_handle) =
+        self.node_state.cell_manager.get_system_cell().await
+      else {
+        error!("System cell not found; most likely the system cell is running on another node");
+        let resp = pingora::http::ResponseHeader::build(
+          StatusCode::INTERNAL_SERVER_ERROR,
+          Some(0),
+        )
+        .unwrap();
+        session.set_keepalive(None);
+        session.write_response_header(Box::new(resp), true).await?;
+        return Ok(true);
       };
 
       let parts = session.req_header().as_ref().clone();
@@ -224,7 +198,7 @@ impl ProxyHttp for InternalAPI {
         .unwrap_or_else(|| http_body_util::Empty::new().boxed());
       let req = hyper::Request::from_parts(parts, req_body);
 
-      match locally_handle_internal_alarms(req, system_cell).await {
+      match locally_handle_internal_alarms(req, system_cell_handle).await {
         Ok(res) => {
           let (parts, body) = res.into_parts();
           session
