@@ -493,13 +493,32 @@ impl LockHandle {
     rx.await?
   }
 
-  /// Terminates the resource and releases the lock. Returns `true` if the resource was released.
-  pub async fn release(&self) -> anyhow::Result<bool> {
+  /// Terminates the resource and releases the lock. Returns `true` if the
+  /// resource was released by this call, or already released before this call.
+  pub async fn release(&self) -> bool {
     let (tx, rx) = oneshot::channel();
-    self
+    let send_result = self
       .tx
-      .send(LockStateRequest::Release(ReleaseRequest { res_chan: tx }))?;
-    rx.await?
+      .send(LockStateRequest::Release(ReleaseRequest { res_chan: tx }));
+
+    // send_result == Err means the lock state loop already exited, in which
+    // case the release was already done.
+    if send_result.is_err() {
+      return true;
+    }
+
+    match rx.await {
+      Err(_) => {
+        // In this error case, the sender was dropped and the lock state loop
+        // already exited. So the release was already done.
+        true
+      }
+      Ok(Ok(released)) => released,
+      Ok(Err(e)) => {
+        error!(error = ?e, "Failed to release lock");
+        false
+      }
+    }
   }
 }
 
@@ -1435,7 +1454,7 @@ mod tests {
       "Lock object should exist after acquire"
     );
 
-    handle.release().await.unwrap();
+    assert!(handle.release().await);
 
     let lock_key_after_release = lock_manager.get_lock_key(lock_name);
     assert!(
@@ -1479,7 +1498,7 @@ mod tests {
       ),
     }
 
-    handle_a.release().await.unwrap();
+    assert!(handle_a.release().await);
 
     // Now node B should be able to acquire the lock
     let handle_b = lock_manager
@@ -1487,7 +1506,7 @@ mod tests {
       .await
       .expect("Node B failed to acquire lock after release");
 
-    handle_b.release().await.unwrap();
+    assert!(handle_b.release().await);
   }
 
   #[test_log::test(tokio::test)]
@@ -1553,12 +1572,9 @@ mod tests {
 
     assert_eq!(handle_b.descriptor.node_id, node_b);
 
-    handle_a
-      .release()
-      .await
-      .expect("Attempt to release the expired lock should be okay");
-
-    handle_b.release().await.unwrap();
+    // Call to `release` on the expired lock handle should return true
+    assert!(handle_a.release().await);
+    assert!(handle_b.release().await);
   }
 
   #[test_log::test(tokio::test)]
@@ -1638,7 +1654,7 @@ mod tests {
     );
 
     if let Some(handle) = acquired_handle {
-      handle.release().await.unwrap();
+      assert!(handle.release().await);
     }
   }
 
@@ -1736,7 +1752,7 @@ mod tests {
       other => panic!("Expected LockHeld error, got {:?}", other),
     }
 
-    handle.release().await.unwrap();
+    assert!(handle.release().await);
   }
 
   // Helper function to get lock info from S3

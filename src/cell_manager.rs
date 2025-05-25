@@ -232,7 +232,12 @@ impl CellManager {
     let lock_handle = node_state
       .distributed_lock
       .clone()
-      .try_acquire(&lock_name, node_id, node_state.config.lock_guard_ttl)
+      .try_acquire(
+        &lock_name,
+        node_id,
+        node_state.config.lock_guard_ttl,
+        node_state.distributed_lock.clone(),
+      )
       .await
       .map_err(|e| {
         tracing::warn!(
@@ -302,14 +307,14 @@ impl CellManager {
     for entry in &self.cells {
       let key = entry.key();
       if !peer_manager.is_local_owner(&key.host, &key.cell_id) {
-        if let Err(e) = entry.value().release().await {
+        if entry.value().release().await {
+          released_keys.insert(key.clone());
+        } else {
           error!(
-            error = ?e,
             descriptor = ?entry.value().descriptor(),
             "Error releasing cell lock"
           );
         }
-        released_keys.insert(key.clone());
       }
     }
 
@@ -424,7 +429,12 @@ impl CellManager {
     let lock_handle = node_state
       .distributed_lock
       .clone()
-      .try_acquire(&lock_name, node_id, node_state.config.lock_guard_ttl)
+      .try_acquire(
+        &lock_name,
+        node_id,
+        node_state.config.lock_guard_ttl,
+        node_state.distributed_lock.clone(),
+      )
       .await
       .map_err(|e| {
         tracing::warn!(
@@ -553,9 +563,9 @@ impl CellManager {
 
         // Remove the entry from the map to avoid stale entries
         if let Some((_, handle)) = self.cells.remove(&cell_key) {
-          handle.release().await?;
-        } else {
-          warn!("Cell entry not found in map");
+          if !handle.release().await {
+            warn!(?cell_key, "Failed to release cell lock");
+          }
         }
 
         // The tempdir will be dropped at the end of this scope, cleaning up the socket file
@@ -615,7 +625,9 @@ impl CellManager {
 
           // Remove the entry from the map to avoid stale entries
           if let Some((_, handle)) = self.cells.remove(&cell_key) {
-            handle.release().await?;
+            if !handle.release().await {
+              warn!(?cell_key, "Failed to release cell lock");
+            }
           }
 
           // The tempdir will be dropped at the end of this scope, cleaning up the socket file
@@ -633,9 +645,8 @@ impl CellManager {
     for entry in &self.cells {
       let handle = entry.value();
       // TODO(magurotuna): Can we do this concurrently?
-      if let Err(e) = handle.release().await {
+      if !handle.release().await {
         error!(
-          error = ?e,
           descriptor = ?handle.descriptor(),
           "Error terminating the cell"
         );
