@@ -165,11 +165,9 @@ impl CellManager {
 
   /// Get the handle to the system cell if exists.
   pub async fn get_system_cell(&self) -> Option<LockHandle> {
-    let Some(entry) =
-      self.cells.get(&CellKey::new(SYSTEM_TENANT, SYSTEM_CELL_ID))
-    else {
-      return None;
-    };
+    let entry = self
+      .cells
+      .get(&CellKey::new(SYSTEM_TENANT, SYSTEM_CELL_ID))?;
 
     match entry.value().ping().await {
       Ok(status) => match status {
@@ -692,7 +690,7 @@ impl CellManager {
       );
 
       // Call ensure_restored to perform the restore with distributed locking
-      replica.ensure_restored(&lock_handle).await;
+      replica.ensure_restored(lock_handle).await;
       replica.start_replication().await?;
     } else if !db_path.exists() {
       // No replica, but we still need a database - create an empty one
@@ -702,7 +700,7 @@ impl CellManager {
         "No S3 replication, creating empty database"
       );
 
-      if let Err(e) = create_empty_database(&db_path) {
+      if let Err(e) = create_empty_database(db_path) {
         warn!("Failed to create empty database file: {}", e);
       }
     } else {

@@ -205,11 +205,12 @@ impl LockState {
 
         // Shutdown the protected resource (i.e. Deno process and then Litestream
         // replication) gracefully
-        if let Err(_) = tokio::time::timeout(
+        if tokio::time::timeout(
           Duration::from_secs(5),
           protected_resource.terminate(),
         )
         .await
+        .is_err()
         {
           // TODO(magurotuna): we should forcibly kill it here to ensure that
           // the cell stays alive after the lock is released.
@@ -263,8 +264,11 @@ struct PingRequest {
   res_chan: oneshot::Sender<LockStateKind>,
 }
 
+type OptionalResourceAccessor<T> =
+  Box<dyn FnOnce(&CellEntry) -> Option<T> + Send + Sync>;
+
 struct AccessOptionalResourceRequest<T> {
-  accessor: Box<dyn FnOnce(&CellEntry) -> Option<T> + Send + Sync>,
+  accessor: OptionalResourceAccessor<T>,
   res_chan: oneshot::Sender<Option<T>>,
 }
 
@@ -323,7 +327,7 @@ impl Drop for LockHandle {
     let (tx, _rx) = oneshot::channel();
     let req = LockStateRequest::Release(ReleaseRequest { res_chan: tx });
 
-    if let Err(_) = self.tx.send(req) {
+    if self.tx.send(req).is_err() {
       warn!("Failed to send release request to lock state loop (loop already exited)");
     }
   }
