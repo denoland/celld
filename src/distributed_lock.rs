@@ -99,7 +99,7 @@ enum LockState {
   },
   Released {
     descriptor: LockDescriptor,
-    reason: LockReleaseReason,
+    _reason: LockReleaseReason,
   },
 }
 
@@ -159,7 +159,7 @@ impl LockState {
 
         *self = LockState::Released {
           descriptor: descriptor.clone(),
-          reason,
+          _reason: reason,
         };
 
         true
@@ -168,8 +168,13 @@ impl LockState {
         let descriptor = descriptor.clone();
         // Set the state to Released before actually processing the resource
         // cleanup to get the ownership.
-        let state =
-          std::mem::replace(self, LockState::Released { descriptor, reason });
+        let state = std::mem::replace(
+          self,
+          LockState::Released {
+            descriptor,
+            _reason: reason,
+          },
+        );
 
         let LockState::Active {
           descriptor,
@@ -551,22 +556,22 @@ async fn lock_state_loop(
             handle_mutate_resource(req, &mut state);
           }
           Some(LockStateRequest::GetAlarm(req)) => {
-            handle_get_alarm(req, &mut state);
+            handle_get_alarm(req, &mut state).await;
           }
           Some(LockStateRequest::DeleteAlarm(req)) => {
-            handle_delete_alarm(req, &mut state);
+            handle_delete_alarm(req, &mut state).await;
           }
           Some(LockStateRequest::SetAlarm(req)) => {
-            handle_set_alarm(req, &mut state);
+            handle_set_alarm(req, &mut state).await;
           }
           Some(LockStateRequest::DispatchAlarms(req)) => {
-            handle_dispatch_alarms(req, &mut state);
+            handle_dispatch_alarms(req, &mut state).await;
           }
           Some(LockStateRequest::ReleaseIfIdle(req)) => {
-            handle_release_if_idle(req, &mut state);
+            handle_release_if_idle(req, &mut state).await;
           }
           Some(LockStateRequest::Release(req)) => {
-            handle_release(req, &mut state, &mut ttl_expiry_timer);
+            handle_release(req, &mut state, &mut ttl_expiry_timer).await;
           }
           None => {
             // LockHandle was dropped; at this point, the state must be `Released`
@@ -1562,7 +1567,7 @@ mod tests {
 
     for result in results {
       match result {
-        Ok(Ok(mut handle)) => {
+        Ok(Ok(handle)) => {
           success_count += 1;
           acquired_handle = Some(handle);
         }

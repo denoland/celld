@@ -318,20 +318,6 @@ impl CellManager {
     self.cells.retain(|key, _| !released_keys.contains(key));
   }
 
-  pub async fn wait_until_cell_cleanup_complete(&self) {
-    // Ensure all locks are released
-    for entry in &self.cells {
-      let cell = entry.value();
-      if let Err(e) = cell.release().await {
-        tracing::error!(
-          error = ?e,
-          descriptor = ?cell.descriptor(),
-          "Error waiting for the cell cleanup to complete"
-        );
-      }
-    }
-  }
-
   /// Track a new connection to the process
   pub async fn increment_connection_count(&self, cell_key: &CellKey) -> bool {
     let Some(entry) = self.cells.get(cell_key) else {

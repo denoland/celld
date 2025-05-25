@@ -40,8 +40,6 @@ pub struct Config {
   /// For example, if the value is 30 seconds, the lock guard will be renewed
   /// every 10 seconds.
   pub lock_guard_ttl: Duration,
-  /// Interval for system cell takeover
-  pub system_cell_takeover_interval: Duration,
   /// Interval for alarm scheduler
   pub alarm_scheduler_interval: Duration,
 }
@@ -162,14 +160,6 @@ impl Config {
       .unwrap_or(30);
     let lock_guard_ttl = Duration::from_secs(lock_guard_ttl_secs);
 
-    let system_cell_takeover_interval_secs =
-      var("CELL_SYSTEM_CELL_TAKEOVER_INTERVAL_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(10);
-    let system_cell_takeover_interval =
-      Duration::from_secs(system_cell_takeover_interval_secs);
-
     let alarm_scheduler_interval_secs =
       var("CELL_ALARM_SCHEDULER_INTERVAL_SECS")
         .ok()
@@ -199,7 +189,6 @@ impl Config {
       heartbeat_interval,
       staleness_threshold,
       lock_guard_ttl,
-      system_cell_takeover_interval,
       alarm_scheduler_interval,
       s3_endpoint,
       s3_bucket,
