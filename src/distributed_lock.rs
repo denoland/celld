@@ -55,10 +55,12 @@ pub struct LockDescriptor {
 pub trait DistributedLock: Send + Sync {
   /// Attempts to atomically acquire a distributed lock for a resource.
   async fn try_acquire(
-    self: Arc<Self>,
+    &self,
     lock_name: &str,
     node_id: &NodeId,
     ttl: Duration,
+    // The lock manager instance to be set for use by LockHandle.
+    lock_manager: Arc<dyn DistributedLock>,
   ) -> Result<LockHandle, LockAcquireError>;
 
   /// Releases a previously acquired distributed lock.
@@ -858,10 +860,11 @@ impl S3DistributedLock {
 #[async_trait]
 impl DistributedLock for S3DistributedLock {
   async fn try_acquire(
-    self: Arc<Self>,
+    &self,
     lock_name: &str,
     node_id: &NodeId,
     ttl: Duration,
+    lock_manager: Arc<dyn DistributedLock>,
   ) -> Result<LockHandle, LockAcquireError> {
     let lock_key = self.get_lock_key(lock_name);
     debug!(lock_key, ?node_id, ?ttl, "Attempting to acquire S3 lock");
@@ -898,7 +901,7 @@ impl DistributedLock for S3DistributedLock {
             lock_key,
             node_id: node_id.clone(),
           },
-          self,
+          lock_manager,
           ttl,
         ))
       }
@@ -994,7 +997,7 @@ impl DistributedLock for S3DistributedLock {
                         lock_key,
                         node_id: node_id.clone(),
                       },
-                      self,
+                      lock_manager,
                       ttl,
                     ))
                   }
@@ -1052,7 +1055,7 @@ impl DistributedLock for S3DistributedLock {
                         lock_key,
                         node_id: node_id.clone(),
                       },
-                      self,
+                      lock_manager,
                       ttl,
                     ))
                   }
@@ -1314,17 +1317,18 @@ pub struct StandaloneDistributedLock;
 #[async_trait]
 impl DistributedLock for StandaloneDistributedLock {
   async fn try_acquire(
-    self: Arc<Self>,
+    &self,
     lock_name: &str,
     node_id: &NodeId,
     ttl: Duration,
+    lock_manager: Arc<dyn DistributedLock>,
   ) -> Result<LockHandle, LockAcquireError> {
     Ok(LockHandle::new(
       LockDescriptor {
         lock_key: lock_name.to_string(),
         node_id: node_id.clone(),
       },
-      self,
+      lock_manager,
       ttl,
     ))
   }
@@ -1417,7 +1421,7 @@ mod tests {
 
     let handle = lock_manager
       .clone()
-      .try_acquire(lock_name, &node_id, ttl)
+      .try_acquire(lock_name, &node_id, ttl, lock_manager.clone())
       .await
       .expect("Failed to acquire lock");
 
@@ -1456,13 +1460,13 @@ mod tests {
 
     let handle_a = lock_manager
       .clone()
-      .try_acquire(lock_name, &node_a, ttl)
+      .try_acquire(lock_name, &node_a, ttl, lock_manager.clone())
       .await
       .expect("Node A failed to acquire lock");
 
     let handle_b = lock_manager
       .clone()
-      .try_acquire(lock_name, &node_b, ttl)
+      .try_acquire(lock_name, &node_b, ttl, lock_manager.clone())
       .await;
 
     match handle_b {
@@ -1479,7 +1483,7 @@ mod tests {
 
     // Now node B should be able to acquire the lock
     let handle_b = lock_manager
-      .try_acquire(lock_name, &node_b, ttl)
+      .try_acquire(lock_name, &node_b, ttl, lock_manager.clone())
       .await
       .expect("Node B failed to acquire lock after release");
 
@@ -1490,6 +1494,43 @@ mod tests {
   async fn test_acquire_succeeds_if_expired() {
     let (lock_manager, _bucket, _minio) = setup_test_env().await;
 
+    // LockManager which fails to renew the lock. Other operations are delegated
+    // to the underlying S3DistributedLock.
+    struct LockManagerWrapper(Arc<S3DistributedLock>);
+
+    #[async_trait]
+    impl DistributedLock for LockManagerWrapper {
+      async fn try_acquire(
+        &self,
+        lock_name: &str,
+        node_id: &NodeId,
+        ttl: Duration,
+        lock_manager: Arc<dyn DistributedLock>,
+      ) -> Result<LockHandle, LockAcquireError> {
+        self
+          .0
+          .try_acquire(lock_name, node_id, ttl, lock_manager)
+          .await
+      }
+
+      async fn release(
+        &self,
+        lock_descriptor: &LockDescriptor,
+      ) -> anyhow::Result<()> {
+        self.0.release(lock_descriptor).await
+      }
+
+      async fn renew(
+        &self,
+        _lock_descriptor: &LockDescriptor,
+        _new_ttl: Duration,
+      ) -> Result<LockDescriptor, LockAcquireError> {
+        Err(LockAcquireError::S3Error("fake error".to_string()))
+      }
+    }
+
+    let lock_manager = Arc::new(LockManagerWrapper(lock_manager));
+
     let lock_name = "test_lock_3";
     let node_a = NodeId::new("node_a");
     let node_b = NodeId::new("node_b");
@@ -1498,7 +1539,7 @@ mod tests {
 
     let handle_a = lock_manager
       .clone()
-      .try_acquire(lock_name, &node_a, short_ttl)
+      .try_acquire(lock_name, &node_a, short_ttl, lock_manager.clone())
       .await
       .expect("Node A failed to acquire lock with short TTL");
 
@@ -1506,7 +1547,7 @@ mod tests {
     sleep(short_ttl + Duration::from_secs(1)).await;
 
     let handle_b = lock_manager
-      .try_acquire(lock_name, &node_b, long_ttl)
+      .try_acquire(lock_name, &node_b, long_ttl, lock_manager.clone())
       .await
       .expect("Node B failed to acquire expired lock");
 
@@ -1558,7 +1599,9 @@ mod tests {
       let lock_manager_ = lock_manager.clone();
       let node_id = node_id.clone();
       let handle = tokio::spawn(async move {
-        lock_manager_.try_acquire(lock_name, &node_id, ttl).await
+        lock_manager_
+          .try_acquire(lock_name, &node_id, ttl, lock_manager_.clone())
+          .await
       });
       handles.push(handle);
     }
@@ -1611,7 +1654,7 @@ mod tests {
     // First acquire the lock
     let handle = lock_manager
       .clone()
-      .try_acquire(lock_name, &node_id, ttl)
+      .try_acquire(lock_name, &node_id, ttl, lock_manager.clone())
       .await
       .expect("Failed to acquire lock initially");
 
