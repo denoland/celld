@@ -57,7 +57,7 @@ impl ProxyHttp for InternalAPI {
   async fn request_filter(
     &self,
     session: &mut Session,
-    ctx: &mut Self::CTX,
+    _ctx: &mut Self::CTX,
   ) -> Result<bool> {
     let req_header = session.req_header();
 
