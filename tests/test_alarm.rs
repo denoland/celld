@@ -379,7 +379,7 @@ async fn test_system_cell_takeover() {
 }
 
 #[tokio::test]
-async fn alarm_crud_operations_forwarded_to_system_cell_node() {
+async fn test_alarm_crud_operations_forwarded_to_system_cell_node() {
   let client = reqwest::Client::new();
 
   let test_env = TestEnv::new(2);
