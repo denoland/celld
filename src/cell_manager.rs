@@ -196,6 +196,7 @@ impl CellManager {
     maybe_handle
   }
 
+  #[instrument(skip(self, node_state))]
   pub async fn ensure_system_cell_spawned(
     &self,
     node_state: Arc<NodeState>,
@@ -226,6 +227,7 @@ impl CellManager {
     Err(anyhow::anyhow!("Failed to spawn system cell"))
   }
 
+  #[instrument(skip(self, node_state))]
   async fn spawn_system_cell(
     &self,
     node_state: Arc<NodeState>,

@@ -17,6 +17,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::{interval, sleep_until, Instant, Sleep};
+use tracing::instrument;
 use tracing::{debug, error, info, warn};
 
 use crate::alarm_processor::Alarm;
@@ -871,6 +872,7 @@ impl S3DistributedLock {
 
 #[async_trait]
 impl DistributedLock for S3DistributedLock {
+  #[instrument(skip(self, lock_manager))]
   async fn try_acquire(
     &self,
     lock_name: &str,
@@ -895,11 +897,7 @@ impl DistributedLock for S3DistributedLock {
       }
     };
 
-    warn!(line = line!(), "😀😀😀😀😀 try_acquire before yield_now");
-
-    tokio::task::yield_now().await;
-
-    warn!(line = line!(), "😀😀😀😀😀 try_acquire after yield_now");
+    warn!(line = line!(), "😀😀😀😀😀 try_acquire before put_object");
 
     let put_result = self
       .s3_client
