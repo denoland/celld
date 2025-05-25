@@ -156,7 +156,10 @@ impl TestEnv {
     let server_cmd = Command::new(env!("CARGO_BIN_EXE_celld"));
     let server_cmd_setup = |cmd: &mut Command| {
       cmd
-        .env("RUST_LOG", "info")
+        .env(
+          "RUST_LOG",
+          "celld=info,aws_smithy_http=trace,aws_sdk_s3=trace",
+        )
         .env("ADVERTISE_ADDR", &advertise_addr)
         .env("INTERNAL_LISTEN_ADDR", &internal_addr)
         .current_dir(temp_dir.path())
@@ -170,7 +173,7 @@ impl TestEnv {
         .env("CELL_ALARM_SCHEDULER_INTERVAL_SECS", "1")
         .env(
           "CELL_S3_ENDPOINT",
-          format!("http://localhost:{}", self.minio_server.port),
+          format!("http://127.0.0.1:{}", self.minio_server.port),
         )
         .env("CELL_S3_BUCKET", &self.bucket_name)
         .env("CELL_S3_REGION", "us-east-1")

@@ -40,7 +40,7 @@ impl MinioTestServer {
     std::thread::spawn(move || {
       for line in reader.lines() {
         let line = line.unwrap();
-        trace!("[minio] {line}");
+        println!("[minio] {line}");
       }
     });
 
@@ -50,7 +50,7 @@ impl MinioTestServer {
     std::thread::spawn(move || {
       for line in reader.lines() {
         let line = line.unwrap();
-        trace!("[minio] {line}");
+        eprintln!("[minio] {line}");
         if let Some(port) = extract_minio_api_port(&line) {
           port_tx.send(port).unwrap();
         }
@@ -65,14 +65,14 @@ impl MinioTestServer {
       tempdir,
       port,
       process,
-      endpoint: format!("http://localhost:{}", port),
+      endpoint: format!("http://127.0.0.1:{}", port),
     }
   }
 
   pub fn create_bucket(&self, bucket_name: &str) -> Result<(), String> {
     // Configure the minio client with environment variables
     let mc_env = format!(
-      "http://{}:{}@localhost:{}",
+      "http://{}:{}@127.0.0.1:{}",
       self.access_key_id, self.secret_access_key, self.port
     );
 
@@ -104,7 +104,7 @@ impl MinioTestServer {
   pub fn has_files_for_cell(&self, bucket: &str, cell_id: &str) -> bool {
     // Configure the minio client with environment variables
     let mc_env = format!(
-      "http://{}:{}@localhost:{}",
+      "http://{}:{}@127.0.0.1:{}",
       self.access_key_id, self.secret_access_key, self.port
     );
 
@@ -127,7 +127,7 @@ impl MinioTestServer {
   ) -> Result<(), anyhow::Error> {
     // Configure the minio client with environment variables
     let mc_env = format!(
-      "http://{}:{}@localhost:{}",
+      "http://{}:{}@127.0.0.1:{}",
       self.access_key_id, self.secret_access_key, self.port
     );
 

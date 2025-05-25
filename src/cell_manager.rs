@@ -165,31 +165,35 @@ impl CellManager {
 
   /// Get the handle to the system cell if exists.
   pub async fn get_system_cell(&self) -> Option<LockHandle> {
-    let entry = self
-      .cells
-      .get(&CellKey::new(SYSTEM_TENANT, SYSTEM_CELL_ID))?;
+    let system_cell_key = CellKey::new(SYSTEM_TENANT, SYSTEM_CELL_ID);
 
-    match entry.value().ping().await {
-      Ok(status) => match status {
-        LockStateKind::Init => {
-          unreachable!("CellEntry should be inserted to self.cells after it transitioned to Active state");
+    let (maybe_handle, should_remove) = {
+      let entry = self.cells.get(&system_cell_key)?;
+
+      match entry.value().ping().await {
+        Ok(status) => match status {
+          LockStateKind::Init => {
+            unreachable!("CellEntry should be inserted to self.cells after it transitioned to Active state");
+          }
+          LockStateKind::Active => (Some(entry.value().clone()), false),
+          LockStateKind::Released => (None, true),
+        },
+        Err(e) => {
+          error!(
+            error = ?e,
+            key = ?entry.key(),
+            "Error pinging system cell, removing it from cells"
+          );
+          (None, true)
         }
-        LockStateKind::Active => Some(entry.value().clone()),
-        LockStateKind::Released => {
-          self.cells.remove(entry.key());
-          None
-        }
-      },
-      Err(e) => {
-        error!(
-          error = ?e,
-          key = ?entry.key(),
-          "Error pinging system cell, removing it from cells"
-        );
-        self.cells.remove(entry.key());
-        None
       }
+    };
+
+    if should_remove {
+      self.cells.remove(&system_cell_key);
     }
+
+    maybe_handle
   }
 
   pub async fn ensure_system_cell_spawned(
@@ -307,6 +311,7 @@ impl CellManager {
     for entry in &self.cells {
       let key = entry.key();
       if !peer_manager.is_local_owner(&key.host, &key.cell_id) {
+        warn!(line = line!(), "😀😀😀😀😀 terminate_unowned_cells");
         if entry.value().release().await {
           released_keys.insert(key.clone());
         } else {
@@ -321,13 +326,18 @@ impl CellManager {
     self.cells.retain(|key, _| !released_keys.contains(key));
   }
 
+  fn get_cell_handle(&self, cell_key: &CellKey) -> Option<LockHandle> {
+    let entry = self.cells.get(cell_key)?;
+    Some(entry.value().clone())
+  }
+
   /// Track a new connection to the process
   pub async fn increment_connection_count(&self, cell_key: &CellKey) -> bool {
-    let Some(entry) = self.cells.get(cell_key) else {
+    let Some(handle) = self.get_cell_handle(cell_key) else {
       return false;
     };
 
-    match entry
+    match handle
       .mutate_resource(Box::new(|cell_entry| match cell_entry.inner {
         CellEntryInner::Normal {
           ref mut incoming_connections,
@@ -354,11 +364,11 @@ impl CellManager {
 
   /// Track a closed connection to the process
   pub async fn decrement_connection_count(&self, cell_key: &CellKey) -> bool {
-    let Some(entry) = self.cells.get(cell_key) else {
+    let Some(handle) = self.get_cell_handle(cell_key) else {
       return false;
     };
 
-    match entry
+    match handle
       .mutate_resource(Box::new(|cell_entry| match cell_entry.inner {
         CellEntryInner::Normal {
           ref mut incoming_connections,
@@ -396,7 +406,7 @@ impl CellManager {
 
     // First, try to find and connect to an existing ready cell
     if_chain! {
-      if let Some(handle) = self.cells.get(&cell_key);
+      if let Some(handle) = self.get_cell_handle(&cell_key);
       if let Ok(Some(socket_path)) = handle.get_socket_path().await;
       if let Ok(stream) = UnixStream::connect(&socket_path).await;
       then {
@@ -563,6 +573,7 @@ impl CellManager {
 
         // Remove the entry from the map to avoid stale entries
         if let Some((_, handle)) = self.cells.remove(&cell_key) {
+          warn!(line = line!(), "😀😀😀😀😀 get_or_spawn_normal_cell");
           if !handle.release().await {
             warn!(?cell_key, "Failed to release cell lock");
           }
@@ -625,6 +636,7 @@ impl CellManager {
 
           // Remove the entry from the map to avoid stale entries
           if let Some((_, handle)) = self.cells.remove(&cell_key) {
+            warn!(line = line!(), "😀😀😀😀😀 get_or_spawn_normal_cell");
             if !handle.release().await {
               warn!(?cell_key, "Failed to release cell lock");
             }
@@ -642,8 +654,8 @@ impl CellManager {
   }
 
   pub async fn terminate_all(&self) {
-    for entry in &self.cells {
-      let handle = entry.value();
+    warn!(line = line!(), "😀😀😀😀😀 terminate_all");
+    for handle in self.cells.iter().map(|entry| entry.value().clone()) {
       // TODO(magurotuna): Can we do this concurrently?
       if !handle.release().await {
         error!(

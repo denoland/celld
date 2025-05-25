@@ -85,6 +85,8 @@ pub trait DistributedLock: Send + Sync {
 enum LockReleaseReason {
   /// The lock was released because the lock was explicitly released
   ExplicitRelease,
+  /// The lock was released because the cell was idle
+  Idle,
   /// The lock was released because the ttl expired
   TTLExpired,
 }
@@ -150,6 +152,8 @@ impl LockState {
     reason: LockReleaseReason,
     ttl_expiry_timer: Option<&mut Pin<&mut Sleep>>,
   ) -> anyhow::Result<bool> {
+    warn!(file = file!(), line = line!(), ?reason, "😀😀😀😀😀");
+
     let released = match self {
       LockState::Init {
         descriptor,
@@ -322,17 +326,6 @@ struct ReleaseRequest {
 pub struct LockHandle {
   descriptor: LockDescriptor,
   tx: mpsc::UnboundedSender<LockStateRequest>,
-}
-
-impl Drop for LockHandle {
-  fn drop(&mut self) {
-    let (tx, _rx) = oneshot::channel();
-    let req = LockStateRequest::Release(ReleaseRequest { res_chan: tx });
-
-    if self.tx.send(req).is_err() {
-      warn!("Failed to send release request to lock state loop (loop already exited)");
-    }
-  }
 }
 
 impl LockHandle {
@@ -560,6 +553,8 @@ async fn lock_state_loop(
       }
 
       _ = ttl_renewal_interval.tick() => {
+        info!(line = line!(), descriptor = ?state.descriptor(), "😀😀😀😀😀 ttl_renewal_interval");
+
         // Renew the TTL using the lock manager
         if let Err(e) = state.renew_ttl(ttl, &mut ttl_expiry_timer).await {
           error!(error = ?e, descriptor = ?state.descriptor(), "Failed to renew TTL");
@@ -824,9 +819,7 @@ async fn handle_release_if_idle(
       protected_resource, ..
     } => {
       if protected_resource.is_idle(req.idle_timeout) {
-        let res = state
-          .release_lock(LockReleaseReason::ExplicitRelease, None)
-          .await;
+        let res = state.release_lock(LockReleaseReason::Idle, None).await;
         let _ = req.res_chan.send(res);
       } else {
         let _ = req.res_chan.send(Ok(false));
@@ -902,6 +895,12 @@ impl DistributedLock for S3DistributedLock {
       }
     };
 
+    warn!(line = line!(), "😀😀😀😀😀 try_acquire before yield_now");
+
+    tokio::task::yield_now().await;
+
+    warn!(line = line!(), "😀😀😀😀😀 try_acquire after yield_now");
+
     let put_result = self
       .s3_client
       .put_object()
@@ -912,6 +911,7 @@ impl DistributedLock for S3DistributedLock {
       .send()
       .await;
 
+    warn!(line = line!(), "😀😀😀😀😀 try_acquire");
     match put_result {
       Ok(_) => {
         info!(lock_key, ?node_id, "Successfully acquired S3 lock");

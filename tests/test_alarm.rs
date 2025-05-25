@@ -2,10 +2,13 @@ mod common;
 
 use common::TestEnv;
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_alarm_crud_in_single_node_cluster() {
+  tracing::info!("test {}", line!());
   let test_env = TestEnv::new(1);
+  tracing::info!("test {}", line!());
   let port = test_env.public_ports[0];
+  tracing::info!("test {}", line!());
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
   let url = format!("http://localhost:{}/cell/{}", port, cell_id);
@@ -13,20 +16,24 @@ async fn test_alarm_crud_in_single_node_cluster() {
 
   // Get alarm (none is set)
   {
+    tracing::info!("test {}", line!());
     let res = client
       .get(&url)
       .header("host", "alarm.localhost")
       .send()
       .await
       .unwrap();
+    println!("test {}", line!());
     assert_eq!(res.status(), 200);
 
     let content = res.text().await.unwrap();
+    println!("test {}", line!());
     assert_eq!(content, "null");
   }
 
   // Delete alarm (nothing deleted)
   {
+    println!("test {}", line!());
     let res = client
       .delete(&url)
       .header("host", "alarm.localhost")
@@ -35,7 +42,9 @@ async fn test_alarm_crud_in_single_node_cluster() {
       .unwrap();
     assert_eq!(res.status(), 200);
 
+    println!("test {}", line!());
     let content = res.text().await.unwrap();
+    println!("test {}", line!());
     assert_eq!(content, r#"{"deleted":false}"#);
   }
 

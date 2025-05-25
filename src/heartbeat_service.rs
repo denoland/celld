@@ -22,10 +22,13 @@ impl BackgroundService for HeartbeatService {
     let interval = self.interval;
 
     let mut interval_timer = tokio::time::interval(interval);
+    info!(?interval, "Heartbeat service started");
 
     loop {
       tokio::select! {
         _ = interval_timer.tick() => {
+          info!("!!!!!!!!!!!!!!Sending heartbeat to S3");
+
           // Send heartbeat to S3
           match cluster_membership.heartbeat().await {
             Ok(_) => debug!("Sent heartbeat to S3 successfully"),
@@ -52,8 +55,11 @@ impl BackgroundService for HeartbeatService {
             let peer_manager = self.node_state.peer_manager.clone();
             async move {
               if peer_manager.is_local_owner(SYSTEM_TENANT, SYSTEM_CELL_ID) {
+                info!(node_id = ?self.node_state.node_id, "this node is the owner of the system cell. spawning system cell😀😀");
                 if let Err(e) = cell_manager.ensure_system_cell_spawned(self.node_state.clone()).await {
                   error!(error = ?e, "Failed to ensure system cell is spawned");
+                } else {
+                  info!(node_id = ?self.node_state.node_id, "spawned system cell😀😀");
                 }
               }
             }
