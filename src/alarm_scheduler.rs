@@ -15,6 +15,18 @@ pub struct AlarmScheduler {
 #[async_trait::async_trait]
 impl BackgroundService for AlarmScheduler {
   async fn start(&self, mut shutdown: ShutdownWatch) {
+    {
+      let handle = tokio::runtime::Handle::current();
+      let id = handle.id();
+      let metrics = handle.metrics();
+      let num_workers = metrics.num_workers();
+
+      tracing::warn!(
+        line = line!(),
+        "[AlarmScheduler] id: {id}, num_workers: {num_workers}"
+      );
+    }
+
     info!(
       "Starting alarm scheduler service with interval: {:?}",
       self.interval

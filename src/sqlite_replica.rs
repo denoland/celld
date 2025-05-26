@@ -429,6 +429,7 @@ impl SqliteReplica {
   }
 
   /// Spawns `litestream replicate -config ...` in background
+  #[instrument(skip(self))]
   pub async fn start_replication(&self) -> Result<()> {
     // Make sure we have a config file
     self.write_config()?;
@@ -452,15 +453,34 @@ impl SqliteReplica {
       .arg("replicate")
       .arg("-config")
       .arg(&self.config_path)
-      .stdout(Stdio::piped())
-      .stderr(Stdio::piped())
+      // .stdout(Stdio::piped())
+      // .stderr(Stdio::piped())
+      .stdout(
+        std::fs::File::create(format!(
+          "/tmp/litestream_{}_{}.stdout",
+          self.tenant, self.cell_id
+        ))
+        .unwrap(),
+      )
+      .stderr(
+        std::fs::File::create(format!(
+          "/tmp/litestream_{}_{}.stderr",
+          self.tenant, self.cell_id
+        ))
+        .unwrap(),
+      )
       .spawn()
       .context("Failed to start litestream replicate")?;
 
     *process_guard = Some(child);
     drop(process_guard);
 
-    debug!("Litestream replication started");
+    info!(
+      tenant = %self.tenant,
+      cell_id = %self.cell_id,
+      db_path = %self.db_path.display(),
+      "Litestream replication started"
+    );
     Ok(())
   }
 

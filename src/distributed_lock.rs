@@ -243,6 +243,7 @@ impl LockState {
   }
 }
 
+#[derive(Debug)]
 enum LockStateRequest {
   SetResource(SetResourceRequest),
   Ping(PingRequest),
@@ -256,17 +257,20 @@ enum LockStateRequest {
   Release(ReleaseRequest),
 }
 
+#[derive(Debug)]
 struct SetResourceRequest {
   resource: CellEntry,
   res_chan: oneshot::Sender<()>,
 }
 
+#[derive(Debug)]
 pub enum LockStateKind {
   Init,
   Active,
   Released,
 }
 
+#[derive(Debug)]
 struct PingRequest {
   res_chan: oneshot::Sender<LockStateKind>,
 }
@@ -279,27 +283,49 @@ struct AccessOptionalResourceRequest<T> {
   res_chan: oneshot::Sender<Option<T>>,
 }
 
+impl<T: std::fmt::Debug> std::fmt::Debug for AccessOptionalResourceRequest<T> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("AccessOptionalResourceRequest")
+      .field("accessor", &"...")
+      .field("res_chan", &self.res_chan)
+      .finish()
+  }
+}
+
 struct MutateResourceRequest {
   mutator: Box<dyn FnOnce(&mut CellEntry) + Send + Sync>,
   res_chan: oneshot::Sender<()>,
 }
 
+impl std::fmt::Debug for MutateResourceRequest {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("MutateResourceRequest")
+      .field("mutator", &"...")
+      .field("res_chan", &self.res_chan)
+      .finish()
+  }
+}
+
+#[derive(Debug)]
 struct GetAlarmRequest {
   tenant: String,
   cell_id: String,
   res_chan: oneshot::Sender<Option<GetAlarmResponse>>,
 }
 
+#[derive(Debug)]
 struct GetAlarmResponse {
   scheduled_time_unix_ms: u64,
 }
 
+#[derive(Debug)]
 struct DeleteAlarmRequest {
   tenant: String,
   cell_id: String,
   res_chan: oneshot::Sender<anyhow::Result<()>>,
 }
 
+#[derive(Debug)]
 struct SetAlarmRequest {
   tenant: String,
   cell_id: String,
@@ -314,11 +340,24 @@ struct DispatchAlarmsRequest {
   res_chan: oneshot::Sender<anyhow::Result<()>>,
 }
 
+impl std::fmt::Debug for DispatchAlarmsRequest {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("DispatchAlarmsRequest")
+      .field("node_state", &"...")
+      .field("now", &self.now)
+      .field("limit", &self.limit)
+      .field("res_chan", &self.res_chan)
+      .finish()
+  }
+}
+
+#[derive(Debug)]
 struct ReleaseIfIdleRequest {
   idle_timeout: Duration,
   res_chan: oneshot::Sender<anyhow::Result<bool>>,
 }
 
+#[derive(Debug)]
 struct ReleaseRequest {
   res_chan: oneshot::Sender<anyhow::Result<bool>>,
 }
@@ -532,11 +571,12 @@ async fn lock_state_loop(
   let mut ttl_expiry_timer = std::pin::pin!(sleep_until(Instant::now() + ttl));
 
   loop {
+    info!(descriptor = ?state.descriptor(), "[lock_state_loop] start 👿");
     tokio::select! {
       biased;
 
       _ = &mut ttl_expiry_timer => {
-        info!(descriptor = ?state.descriptor(), "TTL expired; forcibly releasing lock");
+        info!(descriptor = ?state.descriptor(), "TTL expired; forcibly releasing lock 👿");
         // TTL expired; forcibly release the lock and exit the loop
 
         // TODO(magurotuna): actually, it is too late to terminate the process
@@ -550,19 +590,25 @@ async fn lock_state_loop(
           error!(error = ?e, descriptor = ?state.descriptor(), "Failed to release lock");
         }
 
+        info!(line = line!(), descriptor = ?state.descriptor(), "TTL expired; release finished 🎃");
+
         return;
       }
 
       _ = ttl_renewal_interval.tick() => {
-        info!(line = line!(), descriptor = ?state.descriptor(), "😀😀😀😀😀 ttl_renewal_interval");
+        info!(line = line!(), descriptor = ?state.descriptor(), "ttl_renewal_interval tick 👿");
 
         // Renew the TTL using the lock manager
         if let Err(e) = state.renew_ttl(ttl, &mut ttl_expiry_timer).await {
           error!(error = ?e, descriptor = ?state.descriptor(), "Failed to renew TTL");
         }
+
+        info!(line = line!(), descriptor = ?state.descriptor(), "ttl_renewal_interval finished 🎃");
       }
 
       req = request_rx.recv() => {
+        info!(descriptor = ?state.descriptor(), ?req, "[lock_state_loop] req recv 👿");
+
         match req {
           Some(LockStateRequest::SetResource(req)) => {
             handle_set_resource(req, &mut state);
@@ -601,6 +647,7 @@ async fn lock_state_loop(
             }
           }
         }
+        info!(line = line!(), descriptor = ?state.descriptor(), "lock_state_loop req finished 🎃");
       }
     }
   }
@@ -899,18 +946,15 @@ impl DistributedLock for S3DistributedLock {
 
     // Will this succeed????
     {
+      let handle = tokio::runtime::Handle::current();
+      let id = handle.id();
+      let metrics = handle.metrics();
+      let num_workers = metrics.num_workers();
+
       warn!(
         line = line!(),
-        "😀😀😀😀😀 try_acquire before head_object 1"
+        "😀😀😀😀😀 id: {id}, num_workers: {num_workers}"
       );
-      let res = self
-        .s3_client
-        .list_buckets()
-        // .bucket(&self.bucket)
-        // .key(format!("magurotuna-{}", uuid::Uuid::new_v4().simple()))
-        .send()
-        .await;
-      warn!(line = line!(), result = ?res, "😀😀😀😀😀 try_acquire after head_object 1");
     }
 
     warn!(line = line!(), "😀😀😀😀😀 try_acquire before put_object 2");
