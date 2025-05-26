@@ -144,6 +144,7 @@ impl TestEnv {
     server.child_mut().wait().unwrap();
   }
 
+  #[allow(dead_code)]
   pub fn graceful_shutdown_cell_instance(&mut self, index: usize) {
     let mut server = self.servers.remove(index);
     let _ = self.ports.remove(index);
