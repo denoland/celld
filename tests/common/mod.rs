@@ -5,7 +5,7 @@ mod test_utils;
 use captured_subprocess::CapturedSubprocess;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -35,6 +35,9 @@ pub struct TestEnv {
   pub internal_ports: Vec<u16>,
   /// Temporary directories for each server instance's data
   pub server_dirs: Vec<TempDir>,
+  /// Environment variables to set for each server instance. Overrides the
+  /// default ones if name collides.
+  envs: HashMap<String, String>,
 }
 
 impl TestEnv {
@@ -66,9 +69,12 @@ impl TestEnv {
     Self::new_with_ports(&ports)
   }
 
-  // Backwards compatibility method that takes explicit ports
   pub fn new_with_ports(ports: &[u16]) -> Self {
-    // Mark all the provided ports and their internal ports as used
+    Self::new_with_ports_and_envs(ports, &[])
+  }
+
+  pub fn new_with_ports_and_envs(ports: &[u16], envs: &[(&str, &str)]) -> Self {
+    // Ensure all the provided ports and their internal ports are marked as used
     let mut lock = USED_PORTS.lock().unwrap();
     for &port in ports {
       lock.insert(port);
@@ -96,6 +102,10 @@ impl TestEnv {
       public_ports: public_ports.clone(),
       internal_ports: internal_ports.clone(),
       server_dirs: Vec::new(),
+      envs: envs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect(),
     };
 
     for &port in ports.iter() {
@@ -182,7 +192,8 @@ impl TestEnv {
         .env(
           "CELL_S3_SECRET_ACCESS_KEY",
           &self.minio_server.secret_access_key,
-        );
+        )
+        .envs(&self.envs);
     };
     let server = CapturedSubprocess::new(
       format!("celld({port})"),
