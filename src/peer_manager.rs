@@ -48,7 +48,7 @@ impl PeerManager {
     let builder = match seed {
       Some(seed) => HashBuilderWrapper::Seeded(SipHasherKeys {
         key0: seed,
-        key1: 42, // arbitrarlily chosen value
+        key1: 42, // arbitrarily chosen value
       }),
       None => HashBuilderWrapper::Default(hashring::DefaultHashBuilder),
     };
