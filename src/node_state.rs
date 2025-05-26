@@ -170,7 +170,11 @@ impl NodeState {
     };
 
     // Create peer manager with only local node
-    let peer_manager = PeerManager::new(config.advertise_addr, node_id.clone());
+    let peer_manager = PeerManager::new(
+      config.advertise_addr,
+      node_id.clone(),
+      config.hashring_seed,
+    );
     debug!("Peer manager initialized in standalone mode");
 
     // Create config Arc for NodeState
@@ -200,7 +204,8 @@ impl NodeState {
     let node_id = NodeId::new("benchmark-node");
 
     // Create minimal peer manager and node_state for benchmark
-    let peer_manager = PeerManager::new(addr, node_id.clone());
+    let peer_manager =
+      PeerManager::new(addr, node_id.clone(), config.hashring_seed);
 
     Arc::new(NodeState {
       node_id: node_id.clone(),

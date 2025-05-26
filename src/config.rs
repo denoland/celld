@@ -42,6 +42,8 @@ pub struct Config {
   pub lock_guard_ttl: Duration,
   /// Interval for alarm scheduler
   pub alarm_scheduler_interval: Duration,
+  /// Seed for deterministic hash ring (for testing)
+  pub hashring_seed: Option<u64>,
   /// Single tenant mode configuration
   pub single_tenant: Option<SingleTenantConfig>,
 }
@@ -191,6 +193,11 @@ impl Config {
       .or_else(|_| var("AWS_SECRET_ACCESS_KEY"))
       .ok();
 
+    // Get optional hashring seed for deterministic hashing (primarily for testing)
+    let hashring_seed = var("CELL_HASHRING_SEED")
+      .ok()
+      .and_then(|s| s.parse::<u64>().ok());
+
     Ok(Config {
       listen_addr,
       advertise_addr,
@@ -206,6 +213,7 @@ impl Config {
       s3_path,
       s3_access_key_id,
       s3_secret_access_key,
+      hashring_seed,
       single_tenant: None,
     })
   }

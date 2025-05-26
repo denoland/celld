@@ -13,6 +13,7 @@ aws-smithy-types = "1.1.6"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 hashring = "0.3.6"
+siphasher = "0.3.1"
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["full"] }
