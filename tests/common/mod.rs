@@ -168,7 +168,7 @@ impl TestEnv {
         .env("CELL_GRACE_PERIOD_SECONDS", "5")
         // Use a shorter staleness threshold for tests to detect failures faster
         .env("CELL_STALENESS_THRESHOLD_SECS", "6")
-        .env("CELL_LOCK_GUARD_TTL_SECS", "6")
+        .env("CELL_LOCK_GUARD_TTL_SECS", "30")
         // Configure alarm scheduler to check alarms every second
         .env("CELL_ALARM_SCHEDULER_INTERVAL_SECS", "1")
         .env(

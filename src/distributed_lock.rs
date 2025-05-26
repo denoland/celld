@@ -897,7 +897,23 @@ impl DistributedLock for S3DistributedLock {
       }
     };
 
-    warn!(line = line!(), "😀😀😀😀😀 try_acquire before put_object");
+    // Will this succeed????
+    {
+      warn!(
+        line = line!(),
+        "😀😀😀😀😀 try_acquire before head_object 1"
+      );
+      let res = self
+        .s3_client
+        .list_buckets()
+        // .bucket(&self.bucket)
+        // .key(format!("magurotuna-{}", uuid::Uuid::new_v4().simple()))
+        .send()
+        .await;
+      warn!(line = line!(), result = ?res, "😀😀😀😀😀 try_acquire after head_object 1");
+    }
+
+    warn!(line = line!(), "😀😀😀😀😀 try_acquire before put_object 2");
 
     let put_result = self
       .s3_client
