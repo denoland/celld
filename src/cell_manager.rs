@@ -49,7 +49,7 @@ impl CellEntry {
         parent_exit_guard.kill(Signal::SIGTERM);
         parent_exit_guard.wait();
       }
-      CellEntryInner::System { alarm_processor } => {
+      CellEntryInner::SystemMain { alarm_processor } => {
         if let Err(e) = alarm_processor.shutdown().await {
           error!(
             error = ?e,
@@ -69,28 +69,30 @@ impl CellEntry {
     }
   }
 
+  /// Get the UDS path through which the cell is listening for incoming HTTP
+  /// requests.
   pub fn get_socket_path(&self) -> Option<&Path> {
     match &self.inner {
       CellEntryInner::Normal { socket_path, .. } => Some(socket_path.as_path()),
-      CellEntryInner::System { .. } => None,
+      CellEntryInner::SystemMain { .. } => None,
     }
   }
 
-  /// Get the alarm processor if this is the system cell.
+  /// Get the alarm processor if this is the system main cell.
   pub fn alarm_processor(&self) -> Option<&AlarmProcessor> {
     match &self.inner {
-      CellEntryInner::System { alarm_processor } => Some(alarm_processor),
+      CellEntryInner::SystemMain { alarm_processor } => Some(alarm_processor),
       CellEntryInner::Normal { .. } => None,
     }
   }
 
   /// Returns true if the cell is considered idle.
-  /// Note that the system cell is never considered idle. The only case where it
-  /// is evicted is when the system cell needs to be relocated to another node
-  /// in the cluster.
+  /// Note that the system main cell is never considered idle. The only case
+  /// where it is evicted is when the system main cell needs to be relocated to
+  /// another node in the cluster.
   pub fn is_idle(&self, idle_timeout: Duration) -> bool {
     match &self.inner {
-      CellEntryInner::System { .. } => false,
+      CellEntryInner::SystemMain { .. } => false,
       CellEntryInner::Normal {
         incoming_connections,
         pid,
@@ -110,7 +112,7 @@ impl CellEntry {
 
 #[derive(Debug)]
 enum CellEntryInner {
-  System {
+  SystemMain {
     alarm_processor: AlarmProcessor,
   },
   Normal {
@@ -164,13 +166,13 @@ impl CellManager {
     }
   }
 
-  /// Get the handle to the system cell if exists.
-  pub async fn get_system_cell(&self) -> Option<LockHandle> {
-    let system_cell_key = CellKey::new(SYSTEM_TENANT, SYSTEM_CELL_ID);
+  /// Get the handle to the system main cell if exists.
+  pub async fn get_system_main_cell(&self) -> Option<LockHandle> {
+    let system_main_cell_key = CellKey::new(SYSTEM_TENANT, SYSTEM_CELL_ID);
 
     // Get the clone of the key and handle with minimum lock contention
     let (key, handle) = {
-      let entry = self.cells.get(&system_cell_key)?;
+      let entry = self.cells.get(&system_main_cell_key)?;
       let key = entry.key().clone();
       let handle = entry.value().clone();
       (key, handle)
@@ -189,7 +191,7 @@ impl CellManager {
           error!(
             error = ?e,
             ?key,
-            "Error pinging system cell, removing it from cells"
+            "Error pinging system main cell, removing it from cells"
           );
           (None, true)
         }
@@ -197,14 +199,14 @@ impl CellManager {
     };
 
     if should_remove {
-      self.cells.remove(&system_cell_key);
+      self.cells.remove(&system_main_cell_key);
     }
 
     maybe_handle
   }
 
   #[instrument(skip(self, node_state))]
-  pub async fn ensure_system_cell_spawned(
+  pub async fn ensure_system_main_cell_spawned(
     &self,
     node_state: Arc<NodeState>,
   ) -> anyhow::Result<()> {
@@ -213,29 +215,29 @@ impl CellManager {
     // We may want to adjust this number based on the actual delay and what
     // value is set as the heartbeat interval.
     for _ in 0..10 {
-      if self.get_system_cell().await.is_some() {
+      if self.get_system_main_cell().await.is_some() {
         return Ok(());
       }
 
-      match self.spawn_system_cell(node_state.clone()).await {
+      match self.spawn_system_main_cell(node_state.clone()).await {
         Ok(()) => {
           return Ok(());
         }
         Err(e) => {
           error!(
             error = ?e,
-            "Failed to spawn system cell"
+            "Failed to spawn system main cell"
           );
           sleep(Duration::from_millis(100)).await;
         }
       }
     }
 
-    Err(anyhow::anyhow!("Failed to spawn system cell"))
+    Err(anyhow::anyhow!("Failed to spawn system main cell"))
   }
 
   #[instrument(skip(self, node_state))]
-  async fn spawn_system_cell(
+  async fn spawn_system_main_cell(
     &self,
     node_state: Arc<NodeState>,
   ) -> Result<(), CellManagerError> {
@@ -299,7 +301,7 @@ impl CellManager {
       .await?;
 
     let entry = CellEntry {
-      inner: CellEntryInner::System {
+      inner: CellEntryInner::SystemMain {
         alarm_processor: AlarmProcessor::new(&db_path)?,
       },
       replica: replica.clone(),
@@ -312,8 +314,8 @@ impl CellManager {
     Ok(())
   }
 
-  /// Terminate cells (including both normal cells and the system cell) that are
-  /// no longer owned by this node according the the peer manager.
+  /// Terminate cells (including both normal cells and the system main cell)
+  /// that are no longer owned by this node according the the peer manager.
   pub async fn terminate_unowned_cells(&self, peer_manager: &PeerManager) {
     let mut released_keys = HashSet::new();
 
@@ -355,7 +357,7 @@ impl CellManager {
           *incoming_connections += 1;
           *last_used = Instant::now();
         }
-        CellEntryInner::System { .. } => {}
+        CellEntryInner::SystemMain { .. } => {}
       }))
       .await
     {
@@ -387,7 +389,7 @@ impl CellManager {
           *incoming_connections -= 1;
           *last_used = Instant::now();
         }
-        CellEntryInner::System { .. } => {}
+        CellEntryInner::SystemMain { .. } => {}
       }))
       .await
     {

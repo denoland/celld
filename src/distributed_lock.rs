@@ -436,6 +436,10 @@ impl LockHandle {
     rx.await.context("Lock state loop exited unexpectedly")
   }
 
+  /// Get the UDS path through which the cell is listening for incoming HTTP
+  /// requests. `None` is returned in either of the following cases:
+  /// - the cell is not the system main cell
+  /// - the cell is normal cell but not in `Active` state
   pub async fn get_socket_path(&self) -> anyhow::Result<Option<PathBuf>> {
     let (tx, rx) = oneshot::channel();
     self.tx.send(LockStateRequest::GetSocketPath(
@@ -780,7 +784,7 @@ async fn handle_delete_alarm(req: DeleteAlarmRequest, state: &mut LockState) {
       let Some(alarm_processor) = protected_resource.alarm_processor() else {
         let _ = req
           .res_chan
-          .send(Err(anyhow::anyhow!("Cell is not the system cell")));
+          .send(Err(anyhow::anyhow!("Cell is not the system main cell")));
         return;
       };
 
@@ -811,7 +815,7 @@ async fn handle_set_alarm(req: SetAlarmRequest, state: &mut LockState) {
       let Some(alarm_processor) = protected_resource.alarm_processor() else {
         let _ = req
           .res_chan
-          .send(Err(anyhow::anyhow!("Cell is not the system cell")));
+          .send(Err(anyhow::anyhow!("Cell is not the system main cell")));
         return;
       };
 
@@ -848,7 +852,7 @@ async fn handle_dispatch_alarms(
       let Some(alarm_processor) = protected_resource.alarm_processor() else {
         let _ = req
           .res_chan
-          .send(Err(anyhow::anyhow!("Cell is not the system cell")));
+          .send(Err(anyhow::anyhow!("Cell is not the system main cell")));
         return;
       };
 

@@ -5,8 +5,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info};
 
-/// Service that periodically sends heartbeats to the cluster membership service
-/// and updates the peer manager with active peers
+/// Service that periodically performs cluster-related tasks:
+/// 1. Sends heartbeats to the cluster membership service (e.g., S3).
+/// 2. Fetches the list of active peers and updates the local PeerManager.
+/// 3. Based on updated peer ownership, it may:
+///    a. Ensure the system main cell is spawned if this node becomes its owner.
+///    b. Terminate any normal cells that are no longer owned by this node.
 pub struct HeartbeatService {
   /// The node state for this node
   pub node_state: Arc<NodeState>,
@@ -46,15 +50,18 @@ impl BackgroundService for HeartbeatService {
             }
           }
 
-          // Ensure system cell is spawned when this node is the owner of the
-          // system cell as a result of the membership change.
-          let system_cell_creation_fut = {
+          // Ensure system main cell is spawned when this node is the owner of
+          // the system main cell as a result of the membership change.
+          let system_main_cell_creation_fut = {
             let cell_manager = self.node_state.cell_manager.clone();
             let peer_manager = self.node_state.peer_manager.clone();
             async move {
               if peer_manager.is_local_owner(SYSTEM_TENANT, SYSTEM_CELL_ID) {
-                if let Err(e) = cell_manager.ensure_system_cell_spawned(self.node_state.clone()).await {
-                  error!(error = ?e, "Failed to ensure system cell is spawned");
+                if let Err(e) = cell_manager.ensure_system_main_cell_spawned(self.node_state.clone()).await {
+                  error!(
+                    error = ?e,
+                    "Failed to ensure system main cell is spawned"
+                  );
                 }
               }
             }
@@ -64,7 +71,10 @@ impl BackgroundService for HeartbeatService {
           // owner nodes can take over without waiting for TTL expiration.
           let cell_termination_fut = self.node_state.cell_manager.terminate_unowned_cells(&peer_manager);
 
-          futures::future::join(system_cell_creation_fut, cell_termination_fut).await;
+          futures::future::join(
+            system_main_cell_creation_fut,
+            cell_termination_fut,
+          ).await;
         }
 
         _ = shutdown.changed() => {

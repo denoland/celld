@@ -37,15 +37,8 @@ pub struct Ctx {
   pub cell_key: Option<CellKey>,
 }
 
+#[derive(Debug)]
 pub struct InternalCtx {}
-
-impl std::fmt::Debug for InternalCtx {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    f.debug_struct("InternalCtx")
-      .field("system_cell_subscription", &"...")
-      .finish()
-  }
-}
 
 #[async_trait::async_trait]
 impl ProxyHttp for InternalAPI {
@@ -177,10 +170,10 @@ impl ProxyHttp for InternalAPI {
 
     // Handle the alarms endpoint
     if path.starts_with("/_internal/alarms") {
-      let Some(system_cell_handle) =
-        self.node_state.cell_manager.get_system_cell().await
+      let Some(system_main_cell_handle) =
+        self.node_state.cell_manager.get_system_main_cell().await
       else {
-        error!("System cell not found; most likely the system cell is running on another node");
+        error!("System main cell not found; most likely the system main cell is running on another node");
         let resp = pingora::http::ResponseHeader::build(
           StatusCode::INTERNAL_SERVER_ERROR,
           Some(0),
@@ -199,7 +192,7 @@ impl ProxyHttp for InternalAPI {
         .unwrap_or_else(|| http_body_util::Empty::new().boxed());
       let req = hyper::Request::from_parts(parts, req_body);
 
-      match locally_handle_internal_alarms(req, system_cell_handle).await {
+      match locally_handle_internal_alarms(req, system_main_cell_handle).await {
         Ok(res) => {
           let (parts, body) = res.into_parts();
           session

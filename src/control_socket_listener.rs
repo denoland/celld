@@ -67,14 +67,14 @@ impl BackgroundService for ControlSocketListener {
 
             async move {
               if req.uri().path() == "/_internal/alarms" {
-                match node_state.cell_manager.get_system_cell().await {
-                  Some(system_cell_handle) => {
-                    locally_handle_internal_alarms(req, system_cell_handle).await
+                match node_state.cell_manager.get_system_main_cell().await {
+                  Some(system_main_cell_handle) => {
+                    locally_handle_internal_alarms(req, system_main_cell_handle).await
                   }
                   None => {
-                    // Forward to the owner of the system cell
-                    let system_cell_owner = node_state.peer_manager.get_owner_peer(SYSTEM_TENANT, SYSTEM_CELL_ID);
-                    send_alarm_to_system_cell_owner(system_cell_owner, req).await
+                    // Forward to the owner of the system main cell
+                    let system_main_cell_owner = node_state.peer_manager.get_owner_peer(SYSTEM_TENANT, SYSTEM_CELL_ID);
+                    send_alarm_to_system_main_cell_owner(system_main_cell_owner, req).await
                   }
                 }
               } else {
@@ -100,7 +100,7 @@ impl BackgroundService for ControlSocketListener {
 
 pub async fn locally_handle_internal_alarms<B, E>(
   req: hyper::Request<B>,
-  system_cell_handle: LockHandle,
+  system_main_cell_handle: LockHandle,
 ) -> anyhow::Result<hyper::Response<BoxBody<Bytes, hyper::Error>>>
 where
   B: hyper::body::Body<Error = E>,
@@ -157,7 +157,7 @@ where
           return Ok(res);
         }
       };
-      let alarm = match system_cell_handle
+      let alarm = match system_main_cell_handle
         .get_alarm(&data.tenant, &data.cell_id)
         .await
       {
@@ -191,7 +191,7 @@ where
             return Ok(res);
           }
         };
-      if let Err(e) = system_cell_handle
+      if let Err(e) = system_main_cell_handle
         .delete_alarm(&data.tenant, &data.cell_id)
         .await
       {
@@ -212,7 +212,7 @@ where
             return Ok(res);
           }
         };
-      if let Err(e) = system_cell_handle
+      if let Err(e) = system_main_cell_handle
         .set_alarm(&data.tenant, &data.cell_id, data.scheduled_time_unix_ms)
         .await
       {
@@ -230,23 +230,24 @@ where
   }
 }
 
-async fn send_alarm_to_system_cell_owner(
-  system_cell_owner: SocketAddr,
+async fn send_alarm_to_system_main_cell_owner(
+  system_main_cell_owner: SocketAddr,
   req: hyper::Request<hyper::body::Incoming>,
 ) -> anyhow::Result<hyper::Response<BoxBody<Bytes, hyper::Error>>> {
   // TODO(magurotuna): Can we have a better way to get internal address?
-  let system_cell_owner_internal_addr = {
-    let mut a = system_cell_owner;
-    a.set_port(system_cell_owner.port() + 1);
+  let system_main_cell_owner_internal_addr = {
+    let mut a = system_main_cell_owner;
+    a.set_port(system_main_cell_owner.port() + 1);
     a
   };
-  let tcp_stream = TcpStream::connect(system_cell_owner_internal_addr).await?;
+  let tcp_stream =
+    TcpStream::connect(system_main_cell_owner_internal_addr).await?;
   let io = hyper_util::rt::TokioIo::new(tcp_stream);
   let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
 
   tokio::spawn(async move {
     if let Err(e) = conn.await {
-      error!(error = ?e, ?system_cell_owner, "Failed to send alarm to system cell owner");
+      error!(error = ?e, ?system_main_cell_owner, "Failed to send alarm to system main cell owner");
     }
   });
 

@@ -362,7 +362,7 @@ async fn dispatch_alarm_remotely(
 
   tokio::spawn(async move {
     if let Err(e) = conn.await {
-      error!(%cell_owner, error = ?e, "Failed to send alarm to system cell owner");
+      error!(%cell_owner, error = ?e, "Failed to send alarm to system main cell owner");
     }
   });
 

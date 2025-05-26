@@ -25,16 +25,16 @@ impl BackgroundService for AlarmScheduler {
     loop {
       tokio::select! {
         _ = shutdown.changed() => {
-            info!("Alarm scheduler received shutdown signal after receiving system cell");
+            info!("Alarm scheduler received shutdown signal");
             break;
         }
         _ = interval.tick() => {
-          let Some(system_cell_handle) = self.node_state.cell_manager.get_system_cell().await else {
-            // System cell not found, indicating that its owner is not self now.
+          let Some(system_main_cell_handle) = self.node_state.cell_manager.get_system_main_cell().await else {
+            // System main cell not found, indicating that its owner is not self now.
             continue;
           };
 
-          if let Err(e) = system_cell_handle.dispatch_alarms(self.node_state.clone(), Utc::now(), 100).await {
+          if let Err(e) = system_main_cell_handle.dispatch_alarms(self.node_state.clone(), Utc::now(), 100).await {
             error!(error = ?e, "Error dispatching due alarms");
           }
         }

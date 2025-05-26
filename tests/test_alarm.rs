@@ -279,12 +279,12 @@ async fn test_multiple_cells_alarm_dispatch_in_single_node_cluster() {
 }
 
 #[tokio::test]
-async fn test_system_cell_takeover() {
+async fn test_system_main_cell_takeover() {
   let client = reqwest::Client::new();
 
   let mut test_env = TestEnv::new(2);
 
-  let mut system_cell_index = None;
+  let mut system_main_cell_index = None;
   let mut secondary_cell_external_ports = Vec::new();
 
   for (index, internal_port) in test_env.internal_ports.iter().enumerate() {
@@ -300,13 +300,13 @@ async fn test_system_cell_takeover() {
       .await
       .unwrap();
     if owner_resp["is_local"].as_bool().unwrap() {
-      system_cell_index = Some(index);
+      system_main_cell_index = Some(index);
     } else {
       secondary_cell_external_ports.push(test_env.public_ports[index]);
     }
   }
 
-  let system_cell_index = system_cell_index.unwrap();
+  let system_main_cell_index = system_main_cell_index.unwrap();
   assert!(!secondary_cell_external_ports.is_empty());
 
   let test_cell_id = uuid::Uuid::new_v4().simple().to_string();
@@ -315,7 +315,7 @@ async fn test_system_cell_takeover() {
   {
     let test_cell_url = format!(
       "http://localhost:{}/cell/{}",
-      test_env.public_ports[system_cell_index], test_cell_id
+      test_env.public_ports[system_main_cell_index], test_cell_id
     );
 
     let res = client
@@ -330,11 +330,11 @@ async fn test_system_cell_takeover() {
     assert_eq!(content, "null");
   }
 
-  // Set a new alarm to save something to the system cell's DB
+  // Set a new alarm to save something to the system main cell's DB
   {
     let test_cell_url = format!(
       "http://localhost:{}/cell/{}",
-      test_env.public_ports[system_cell_index], test_cell_id
+      test_env.public_ports[system_main_cell_index], test_cell_id
     );
 
     let res = client
@@ -351,14 +351,14 @@ async fn test_system_cell_takeover() {
   println!("Waiting for Litestream to replicate data to S3...");
   tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-  // Shutdown the node that the system cell belongs to
-  test_env.graceful_shutdown_cell_instance(system_cell_index);
+  // Shutdown the node that the system main cell belongs to
+  test_env.graceful_shutdown_cell_instance(system_main_cell_index);
 
   // Wait for the shutdown to be detected
   println!("Waiting for primary node failure to be detected...");
   tokio::time::sleep(std::time::Duration::from_secs(8)).await;
 
-  // Get the set alarm through the secondary node to see the system cell's DB has been restored
+  // Get the set alarm through the secondary node to see the system main cell's DB has been restored
   {
     let test_cell_url = format!(
       "http://localhost:{}/cell/{}",
@@ -379,19 +379,19 @@ async fn test_system_cell_takeover() {
 }
 
 #[tokio::test]
-async fn test_alarm_crud_operations_forwarded_to_system_cell_node() {
+async fn test_alarm_crud_operations_forwarded_to_system_main_cell_node() {
   let client = reqwest::Client::new();
 
   let test_env = TestEnv::new(2);
 
-  let mut system_cell_index = None;
+  let mut system_main_cell_index = None;
   struct Port {
     internal: u16,
     external: u16,
   }
   let mut secondary_cell_ports = Vec::new();
 
-  // Identify the node where the system cell is running
+  // Identify the node where the system main cell is running
   for (index, internal_port) in test_env.internal_ports.iter().enumerate() {
     let owner_url = format!(
       "http://localhost:{internal_port}/_internal/mesh/owner/_system/main"
@@ -405,7 +405,7 @@ async fn test_alarm_crud_operations_forwarded_to_system_cell_node() {
       .await
       .unwrap();
     if owner_resp["is_local"].as_bool().unwrap() {
-      system_cell_index = Some(index);
+      system_main_cell_index = Some(index);
     } else {
       secondary_cell_ports.push(Port {
         internal: test_env.internal_ports[index],
@@ -414,10 +414,10 @@ async fn test_alarm_crud_operations_forwarded_to_system_cell_node() {
     }
   }
 
-  let system_cell_index = system_cell_index.unwrap();
+  let system_main_cell_index = system_main_cell_index.unwrap();
   assert!(!secondary_cell_ports.is_empty());
 
-  // Find a cell ID that does NOT belong to the system cell's node
+  // Find a cell ID that does NOT belong to the system main cell's node
   let test_cell_id = {
     let mut test_cell_id = None;
     for _ in 0.. {
@@ -445,11 +445,11 @@ async fn test_alarm_crud_operations_forwarded_to_system_cell_node() {
 
   // Attempt to get an alarm (none should exist)
   // Request flow should look like this:
-  // client -> primary node -> secondary node (where test_cell_id runs) -> isolate (which issues GetAlarm request) -> secondary node -> primary node -> system cell -> primary node -> secondary node -> isolate
+  // client -> primary node -> secondary node (where test_cell_id runs) -> isolate (which issues GetAlarm request) -> secondary node -> primary node -> system main cell -> primary node -> secondary node -> isolate
   {
     let test_cell_url = format!(
       "http://localhost:{}/cell/{}",
-      test_env.public_ports[system_cell_index], test_cell_id
+      test_env.public_ports[system_main_cell_index], test_cell_id
     );
 
     let res = client
@@ -464,11 +464,11 @@ async fn test_alarm_crud_operations_forwarded_to_system_cell_node() {
     assert_eq!(content, "null");
   }
 
-  // Set a new alarm to save something to the system cell's DB
+  // Set a new alarm to save something to the system main cell's DB
   {
     let test_cell_url = format!(
       "http://localhost:{}/cell/{}",
-      test_env.public_ports[system_cell_index], test_cell_id
+      test_env.public_ports[system_main_cell_index], test_cell_id
     );
 
     let res = client
@@ -481,7 +481,7 @@ async fn test_alarm_crud_operations_forwarded_to_system_cell_node() {
     assert_eq!(res.status(), 200);
   }
 
-  // Get the alarm through the secondary node to see the system cell's DB has been updated
+  // Get the alarm through the secondary node to see the system main cell's DB has been updated
   {
     let test_cell_url = format!(
       "http://localhost:{}/cell/{}",
@@ -537,7 +537,7 @@ async fn test_alarm_crud_operations_forwarded_to_system_cell_node() {
 }
 
 // There are two celld nodes in the cluster:
-// 1. A primary node (where the system cell is running)
+// 1. A primary node (where the system main cell is running)
 // 2. A secondary node (where "alarm.localhost/<some-cell-id>" is running)
 // This test verifies that the primary node will dispatch an alarm to the secondary node and then alarm.localhost's alarm handler will be triggered.
 #[tokio::test]
@@ -546,7 +546,7 @@ async fn test_alarm_dispatch_to_remote_cell_owner() {
 
   let test_env = TestEnv::new(2);
 
-  let mut system_cell_index = None;
+  let mut system_main_cell_index = None;
   struct Port {
     internal: u16,
     #[allow(dead_code)]
@@ -554,7 +554,7 @@ async fn test_alarm_dispatch_to_remote_cell_owner() {
   }
   let mut secondary_cell_ports = Vec::new();
 
-  // Identify the node where the system cell is running
+  // Identify the node where the system main cell is running
   for (index, internal_port) in test_env.internal_ports.iter().enumerate() {
     let owner_url = format!(
       "http://localhost:{internal_port}/_internal/mesh/owner/_system/main"
@@ -568,7 +568,7 @@ async fn test_alarm_dispatch_to_remote_cell_owner() {
       .await
       .unwrap();
     if owner_resp["is_local"].as_bool().unwrap() {
-      system_cell_index = Some(index);
+      system_main_cell_index = Some(index);
     } else {
       secondary_cell_ports.push(Port {
         internal: test_env.internal_ports[index],
@@ -577,10 +577,10 @@ async fn test_alarm_dispatch_to_remote_cell_owner() {
     }
   }
 
-  let system_cell_index = system_cell_index.unwrap();
+  let system_main_cell_index = system_main_cell_index.unwrap();
   assert!(!secondary_cell_ports.is_empty());
 
-  // Find a cell ID that does NOT belong to the system cell's node
+  // Find a cell ID that does NOT belong to the system main cell's node
   let test_cell_id = {
     let mut test_cell_id = None;
     for _ in 0.. {
@@ -608,7 +608,7 @@ async fn test_alarm_dispatch_to_remote_cell_owner() {
 
   let cell_url = format!(
     "http://localhost:{}/cell/{}",
-    test_env.public_ports[system_cell_index], test_cell_id
+    test_env.public_ports[system_main_cell_index], test_cell_id
   );
   let alarm_count_url = format!("{cell_url}/getAlarmCount");
 
