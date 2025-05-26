@@ -218,8 +218,6 @@ impl LockState {
     reason: LockReleaseReason,
     ttl_expiry_timer: Option<&mut Pin<&mut Sleep>>,
   ) -> anyhow::Result<bool> {
-    warn!(file = file!(), line = line!(), ?reason, "😀😀😀😀😀");
-
     let released = match self {
       LockState::Init {
         descriptor,
@@ -619,8 +617,6 @@ async fn lock_state_loop(
       }
 
       _ = ttl_renewal_interval.tick() => {
-        info!(line = line!(), descriptor = ?state.descriptor(), "😀😀😀😀😀 ttl_renewal_interval");
-
         // Renew the TTL using the lock manager
         if let Err(e) = state.renew_ttl(ttl, &mut ttl_expiry_timer).await {
           error!(error = ?e, descriptor = ?state.descriptor(), "Failed to renew TTL");
@@ -962,24 +958,6 @@ impl DistributedLock for S3DistributedLock {
       }
     };
 
-    // Will this succeed????
-    {
-      warn!(
-        line = line!(),
-        "😀😀😀😀😀 try_acquire before head_object 1"
-      );
-      let res = self
-        .s3_client
-        .list_buckets()
-        // .bucket(&self.bucket)
-        // .key(format!("magurotuna-{}", uuid::Uuid::new_v4().simple()))
-        .send()
-        .await;
-      warn!(line = line!(), result = ?res, "😀😀😀😀😀 try_acquire after head_object 1");
-    }
-
-    warn!(line = line!(), "😀😀😀😀😀 try_acquire before put_object 2");
-
     let put_result = self
       .s3_client
       .put_object()
@@ -990,7 +968,6 @@ impl DistributedLock for S3DistributedLock {
       .send()
       .await;
 
-    warn!(line = line!(), "😀😀😀😀😀 try_acquire");
     match put_result {
       Ok(_) => {
         info!(lock_key, ?node_id, "Successfully acquired S3 lock");

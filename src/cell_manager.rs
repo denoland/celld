@@ -320,7 +320,6 @@ impl CellManager {
     for entry in &self.cells {
       let key = entry.key();
       if !peer_manager.is_local_owner(&key.host, &key.cell_id) {
-        warn!(line = line!(), "😀😀😀😀😀 terminate_unowned_cells");
         if entry.value().release().await {
           released_keys.insert(key.clone());
         } else {
@@ -594,7 +593,6 @@ impl CellManager {
 
         // Remove the entry from the map to avoid stale entries
         if let Some((_, handle)) = self.cells.remove(&cell_key) {
-          warn!(line = line!(), "😀😀😀😀😀 get_or_spawn_normal_cell");
           if !handle.release().await {
             warn!(?cell_key, "Failed to release cell lock");
           }
@@ -657,7 +655,6 @@ impl CellManager {
 
           // Remove the entry from the map to avoid stale entries
           if let Some((_, handle)) = self.cells.remove(&cell_key) {
-            warn!(line = line!(), "😀😀😀😀😀 get_or_spawn_normal_cell");
             if !handle.release().await {
               warn!(?cell_key, "Failed to release cell lock");
             }
@@ -675,7 +672,6 @@ impl CellManager {
   }
 
   pub async fn terminate_all(&self) {
-    warn!(line = line!(), "😀😀😀😀😀 terminate_all");
     for handle in self.cells.iter().map(|entry| entry.value().clone()) {
       // TODO(magurotuna): Can we do this concurrently?
       if !handle.release().await {
