@@ -42,6 +42,16 @@ pub struct Config {
   pub lock_guard_ttl: Duration,
   /// Interval for alarm scheduler
   pub alarm_scheduler_interval: Duration,
+  /// Single tenant mode configuration
+  pub single_tenant: Option<SingleTenantConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SingleTenantConfig {
+  /// Source file for the default tenant
+  pub src_file: PathBuf,
+  /// Static files directory for the default tenant
+  pub static_dir: Option<PathBuf>,
 }
 
 /// Configuration for a MinIO or S3 replica target
@@ -196,6 +206,7 @@ impl Config {
       s3_path,
       s3_access_key_id,
       s3_secret_access_key,
+      single_tenant: None,
     })
   }
 

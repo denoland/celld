@@ -47,10 +47,14 @@ docker run --rm -it -p 8000:8000 -v "./cell-data:/data" \
 
 Create `./cell-data/<hostname>/src/main.ts` for your Cell logic.
 
+For requests without a Host header or with unrecognized hostnames, the system
+falls back to a "default" tenant located at `./cell-data/default/src/main.ts`.
+
 ## Accessing Cells
 
 - `http://<tenant-hostname>:<port>/cell/<cell-id>` (HTTP)
 - `ws://<tenant-hostname>:<port>/cell/<cell-id>` (WebSocket)
+- `http://localhost:8000/cell/<cell-id>` (no Host header - uses default tenant)
 
 Routing is based on the request Host and cell ID:
 

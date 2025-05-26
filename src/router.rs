@@ -2,6 +2,7 @@ use http_body_util::BodyExt;
 use pingora::http::StatusCode;
 use pingora::prelude::*;
 use pingora::upstreams::peer::HttpPeer;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
@@ -348,7 +349,7 @@ impl ProxyHttp for Proxy {
   ) -> Result<bool> {
     let req_header = session.req_header();
 
-    // Extract and validate host header
+    // Extract host header, fall back to "default" if missing
     let host =
       if let Some(header_value) = req_header.headers.get(http::header::HOST) {
         header_value.to_str().map_err(|_| {
@@ -359,24 +360,35 @@ impl ProxyHttp for Proxy {
           )
         })?
       } else {
-        error!("Missing host header");
-        return Err(pingora::Error::explain(
-          ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
-          "Missing Host header",
-        ));
+        "default"
       };
 
-    // Extract hostname without port
-    let hostname = host.split(':').next().unwrap_or(host);
-    ctx.tenant = hostname.to_string();
+    // In single-tenant mode, always use "default" tenant
+    let tenant = if self.node_state.config.single_tenant.is_some() {
+      "default".to_string()
+    } else {
+      // Extract hostname without port
+      let hostname = host.split(':').next().unwrap_or(host);
+      let mut tenant = hostname.to_string();
 
-    // Validate host format briefly (prevent directory traversal)
-    if ctx.tenant.contains('/') || ctx.tenant.contains("..") {
-      return Err(pingora::Error::explain(
-        ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
-        "Invalid Host header",
-      ));
-    }
+      // Validate host format briefly (prevent directory traversal)
+      if tenant.contains('/') || tenant.contains("..") {
+        return Err(pingora::Error::explain(
+          ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
+          "Invalid Host header",
+        ));
+      }
+
+      // Check if tenant directory exists, fall back to "default" if not
+      let tenant_dir = self.node_state.cell_manager.data_dir.join(&tenant);
+      if !tenant_dir.exists() {
+        tenant = "default".to_string();
+      }
+
+      tenant
+    };
+
+    ctx.tenant = tenant;
 
     // Get the path
     let path = req_header.uri.path();
@@ -445,8 +457,18 @@ impl ProxyHttp for Proxy {
     };
 
     // Construct the file path
-    let tenant_dir = self.node_state.cell_manager.data_dir.join(&ctx.tenant);
-    let static_dir = tenant_dir.join("static");
+    let static_dir = if let Some(ref single_tenant) =
+      self.node_state.config.single_tenant
+    {
+      // In single-tenant mode, use the specified static directory or fall back to current dir
+      single_tenant.static_dir.clone().unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+      })
+    } else {
+      // In multi-tenant mode, use the standard path structure
+      let tenant_dir = self.node_state.cell_manager.data_dir.join(&ctx.tenant);
+      tenant_dir.join("static")
+    };
     let file_path = static_dir.join(&rel_path_);
 
     // Try to read the file
