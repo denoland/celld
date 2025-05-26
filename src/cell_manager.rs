@@ -167,21 +167,27 @@ impl CellManager {
   pub async fn get_system_cell(&self) -> Option<LockHandle> {
     let system_cell_key = CellKey::new(SYSTEM_TENANT, SYSTEM_CELL_ID);
 
-    let (maybe_handle, should_remove) = {
+    // Get the clone of the key and handle with minimum lock contention
+    let (key, handle) = {
       let entry = self.cells.get(&system_cell_key)?;
+      let key = entry.key().clone();
+      let handle = entry.value().clone();
+      (key, handle)
+    };
 
-      match entry.value().ping().await {
+    let (maybe_handle, should_remove) = {
+      match handle.ping().await {
         Ok(status) => match status {
           LockStateKind::Init => {
             unreachable!("CellEntry should be inserted to self.cells after it transitioned to Active state");
           }
-          LockStateKind::Active => (Some(entry.value().clone()), false),
+          LockStateKind::Active => (Some(handle), false),
           LockStateKind::Released => (None, true),
         },
         Err(e) => {
           error!(
             error = ?e,
-            key = ?entry.key(),
+            ?key,
             "Error pinging system cell, removing it from cells"
           );
           (None, true)
