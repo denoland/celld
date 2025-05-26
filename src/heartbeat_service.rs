@@ -17,18 +17,6 @@ pub struct HeartbeatService {
 #[async_trait::async_trait]
 impl BackgroundService for HeartbeatService {
   async fn start(&self, mut shutdown: ShutdownWatch) {
-    {
-      let handle = tokio::runtime::Handle::current();
-      let id = handle.id();
-      let metrics = handle.metrics();
-      let num_workers = metrics.num_workers();
-
-      tracing::warn!(
-        line = line!(),
-        "[HeartbeatService] id: {id}, num_workers: {num_workers}"
-      );
-    }
-
     let cluster_membership = self.node_state.cluster_membership.clone();
     let peer_manager = self.node_state.peer_manager.clone();
     let interval = self.interval;
@@ -39,7 +27,7 @@ impl BackgroundService for HeartbeatService {
     loop {
       tokio::select! {
         _ = interval_timer.tick() => {
-          info!("Sending heartbeat to S3 🥳");
+          info!("!!!!!!!!!!!!!!Sending heartbeat to S3");
 
           // Send heartbeat to S3
           match cluster_membership.heartbeat().await {

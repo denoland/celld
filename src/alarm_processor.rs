@@ -97,18 +97,6 @@ impl AlarmProcessor {
       let local = tokio::task::LocalSet::new();
 
       local.spawn_local(async move {
-        {
-          let handle = tokio::runtime::Handle::current();
-          let id = handle.id();
-          let metrics = handle.metrics();
-          let num_workers = metrics.num_workers();
-
-          tracing::warn!(
-            line = line!(),
-            "[AlarmProcessor] id: {id}, num_workers: {num_workers}"
-          );
-        }
-
         while let Some(request) = rx.recv().await {
           match request {
             AlarmProcessRequest::Get {

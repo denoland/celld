@@ -5,7 +5,7 @@ use http_body_util::{combinators::BoxBody, BodyExt as _, Empty, Full};
 use pingora::{server::ShutdownWatch, services::background::BackgroundService};
 use tempfile::TempDir;
 use tokio::net::{TcpStream, UnixListener};
-use tracing::{debug, error, info, instrument};
+use tracing::{error, info};
 
 use crate::{
   cell_manager::{SYSTEM_CELL_ID, SYSTEM_TENANT},
@@ -59,25 +59,19 @@ impl BackgroundService for ControlSocketListener {
             }
           };
 
-          debug!("Control socket listener accepted a connection");
-
           let io = hyper_util::rt::TokioIo::new(stream);
           let node_state = self.node_state.clone();
 
           let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-            debug!(uri = %req.uri(), method = %req.method(), "Control socket listener received a request");
             let node_state = node_state.clone();
 
             async move {
               if req.uri().path() == "/_internal/alarms" {
-                debug!("Handling /_internal/alarms");
                 match node_state.cell_manager.get_system_cell().await {
                   Some(system_cell_handle) => {
-                    debug!("Handling /_internal/alarms with system cell handle");
                     locally_handle_internal_alarms(req, system_cell_handle).await
                   }
                   None => {
-                    debug!("No system cell handle found, forwarding to owner");
                     // Forward to the owner of the system cell
                     let system_cell_owner = node_state.peer_manager.get_owner_peer(SYSTEM_TENANT, SYSTEM_CELL_ID);
                     send_alarm_to_system_cell_owner(system_cell_owner, req).await
@@ -104,7 +98,6 @@ impl BackgroundService for ControlSocketListener {
   }
 }
 
-#[instrument(skip(req, system_cell_handle))]
 pub async fn locally_handle_internal_alarms<B, E>(
   req: hyper::Request<B>,
   system_cell_handle: LockHandle,
@@ -149,8 +142,6 @@ where
 
   match parts.method {
     hyper::Method::GET => {
-      debug!("GET /_internal/alarms");
-
       let Some(query) = parts.uri.query() else {
         let res = hyper::Response::builder()
           .status(400)
@@ -191,8 +182,6 @@ where
       Ok(res)
     }
     hyper::Method::DELETE => {
-      debug!("DELETE /_internal/alarms");
-
       let data: DeleteAlarmRequest =
         match serde_json::from_reader(req_body.aggregate().reader()) {
           Ok(data) => data,
@@ -214,8 +203,6 @@ where
       Ok(res)
     }
     hyper::Method::POST => {
-      debug!("POST /_internal/alarms");
-
       let data: SetAlarmRequest =
         match serde_json::from_reader(req_body.aggregate().reader()) {
           Ok(data) => data,
@@ -243,13 +230,10 @@ where
   }
 }
 
-#[instrument(skip(system_cell_owner, req))]
 async fn send_alarm_to_system_cell_owner(
   system_cell_owner: SocketAddr,
   req: hyper::Request<hyper::body::Incoming>,
 ) -> anyhow::Result<hyper::Response<BoxBody<Bytes, hyper::Error>>> {
-  debug!(?system_cell_owner, "Sending alarm to system cell owner");
-
   // TODO(magurotuna): Can we have a better way to get internal address?
   let system_cell_owner_internal_addr = {
     let mut a = system_cell_owner;

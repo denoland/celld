@@ -43,22 +43,8 @@ fn start_server(config: config::Config) -> Server {
       .ok()
       .and_then(|s| s.parse().ok());
 
-  pingora_config.work_stealing = true;
-  pingora_config.threads = 2;
-
   // not sure why we need this...
-  let pingora_config2 = Arc::new({
-    let mut pingora_config = ServerConf::new().unwrap();
-    //pingora_config.graceful_shutdown_timeout_seconds = Some(1);
-    pingora_config.grace_period_seconds =
-      std::env::var("CELL_GRACE_PERIOD_SECONDS")
-        .ok()
-        .and_then(|s| s.parse().ok());
-
-    pingora_config.work_stealing = true;
-    pingora_config.threads = 2;
-    pingora_config
-  });
+  let pingora_config2 = Arc::new(ServerConf::new().unwrap());
 
   let mut server = Server::new_with_opt_and_conf(None, pingora_config);
 
