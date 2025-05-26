@@ -100,7 +100,7 @@ enum LockState {
   Active {
     descriptor: LockDescriptor,
     lock_manager: Arc<dyn DistributedLock>,
-    protected_resource: CellEntry,
+    protected_resource: Box<CellEntry>,
   },
   Released {
     descriptor: LockDescriptor,
@@ -619,7 +619,7 @@ fn handle_set_resource(req: SetResourceRequest, state: &mut LockState) {
       *state = LockState::Active {
         descriptor: descriptor.clone(),
         lock_manager: lock_manager.clone(),
-        protected_resource: req.resource,
+        protected_resource: Box::new(req.resource),
       };
 
       let _ = req.res_chan.send(());
