@@ -21,6 +21,7 @@ use crate::child_on_parent_exit::ChildOnParentExit;
 use crate::control_socket_listener::ControlSocket;
 use crate::distributed_lock::LockAcquireError;
 use crate::distributed_lock::LockHandle;
+use crate::distributed_lock::LockInfo;
 use crate::distributed_lock::LockStateKind;
 use crate::peer_manager::PeerManager;
 use crate::router::ProxyError;
@@ -266,7 +267,7 @@ impl CellManager {
               Some(lock_info) if lock_info.node_id == *node_id => {
                 CellManagerError::CellCreationInProgress
               }
-              _ => CellManagerError::LockContention,
+              _ => CellManagerError::LockContention(maybe_lock_info),
             }
           }
           LockAcquireError::UnableToRenewExpiredLock(_) => {
@@ -469,7 +470,7 @@ impl CellManager {
               Some(lock_info) if lock_info.node_id == *node_id => {
                 CellManagerError::CellCreationInProgress
               }
-              _ => CellManagerError::LockContention,
+              _ => CellManagerError::LockContention(maybe_lock_info),
             }
           }
           LockAcquireError::UnableToRenewExpiredLock(_) => {
@@ -752,8 +753,8 @@ impl CellManager {
 pub enum CellManagerError {
   #[error("Cell creation in progress; retry later")]
   CellCreationInProgress,
-  #[error("Cell lock held by another node")]
-  LockContention,
+  #[error("Cell lock held by another node: {0:?}")]
+  LockContention(Option<LockInfo>),
   #[error("S3 operation failed: {0}")]
   S3(String),
   #[error(transparent)]
@@ -772,7 +773,7 @@ impl From<CellManagerError> for Box<pingora::Error> {
         ),
         "Failed to get or spawn cell",
       ),
-      LockContention => pingora::Error::explain(
+      LockContention(_) => pingora::Error::explain(
         pingora::ErrorType::HTTPStatus(
           http::StatusCode::INTERNAL_SERVER_ERROR.into(),
         ),

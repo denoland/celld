@@ -608,8 +608,9 @@ impl ProxyHttp for Proxy {
           tokio::time::sleep(RETRY_INTERVAL).await;
           continue;
         }
-        Err(error @ CellManagerError::LockContention) => {
+        Err(error @ CellManagerError::LockContention(_)) => {
           debug!(
+            ?error,
             "Lock is held by another node that is responsible for this cell"
           );
           // TODO: forward the request to the lock holder?
