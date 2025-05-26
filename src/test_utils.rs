@@ -40,7 +40,7 @@ impl MinioTestServer {
     std::thread::spawn(move || {
       for line in reader.lines() {
         let line = line.unwrap();
-        println!("[minio] {line}");
+        trace!("[minio] {line}");
       }
     });
 
@@ -50,7 +50,7 @@ impl MinioTestServer {
     std::thread::spawn(move || {
       for line in reader.lines() {
         let line = line.unwrap();
-        eprintln!("[minio] {line}");
+        trace!("[minio] {line}");
         if let Some(port) = extract_minio_api_port(&line) {
           port_tx.send(port).unwrap();
         }
