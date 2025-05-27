@@ -210,11 +210,14 @@ impl CellManager {
     &self,
     node_state: Arc<NodeState>,
   ) -> anyhow::Result<()> {
-    // Retry 10 times with 100ms interval to accout for the delay in the
-    // propagation of cluster membership change.
+    let retry_count = node_state.config.system_main_cell_spawn_retries;
+    let retry_delay = node_state.config.system_main_cell_retry_delay;
+
+    // Retry with configurable count and interval to account for the delay in
+    // the propagation of cluster membership change.
     // We may want to adjust this number based on the actual delay and what
     // value is set as the heartbeat interval.
-    for _ in 0..10 {
+    for _ in 0..retry_count {
       if self.get_system_main_cell().await.is_some() {
         return Ok(());
       }
@@ -228,7 +231,7 @@ impl CellManager {
             error = ?e,
             "Failed to spawn system main cell"
           );
-          sleep(Duration::from_millis(100)).await;
+          sleep(retry_delay).await;
         }
       }
     }

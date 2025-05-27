@@ -44,6 +44,10 @@ pub struct Config {
   pub alarm_scheduler_interval: Duration,
   /// Seed for deterministic hash ring (for testing)
   pub hashring_seed: Option<u64>,
+  /// Number of retries for system main cell spawning
+  pub system_main_cell_spawn_retries: u32,
+  /// Delay between retries for system main cell spawning
+  pub system_main_cell_retry_delay: Duration,
   /// Single tenant mode configuration
   pub single_tenant: Option<SingleTenantConfig>,
 }
@@ -198,6 +202,21 @@ impl Config {
       .ok()
       .and_then(|s| s.parse::<u64>().ok());
 
+    // Get system main cell spawn retry configuration
+    let system_main_cell_spawn_retries =
+      var("CELLD_SYSTEM_MAIN_CELL_SPAWN_RETRIES")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(10);
+
+    let system_main_cell_retry_delay_ms =
+      var("CELLD_SYSTEM_MAIN_CELL_RETRY_DELAY_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(100);
+    let system_main_cell_retry_delay =
+      Duration::from_millis(system_main_cell_retry_delay_ms);
+
     Ok(Config {
       listen_addr,
       advertise_addr,
@@ -214,6 +233,8 @@ impl Config {
       s3_access_key_id,
       s3_secret_access_key,
       hashring_seed,
+      system_main_cell_spawn_retries,
+      system_main_cell_retry_delay,
       single_tenant: None,
     })
   }

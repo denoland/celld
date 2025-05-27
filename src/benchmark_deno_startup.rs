@@ -28,6 +28,8 @@ pub async fn run(iterations: usize) -> Result<()> {
         lock_guard_ttl: Duration::from_secs(30),
         alarm_scheduler_interval: Duration::from_secs(5),
         hashring_seed: None,
+        system_main_cell_spawn_retries: 10,
+        system_main_cell_retry_delay: Duration::from_millis(100),
         single_tenant: None,
       }
     }
