@@ -61,8 +61,11 @@ Triggers a workflow by event name. This is used for workflows defined with an
 `event` trigger.
 
 ```ts
-await workflow.dispatch("user.signup", { userId: "abc123" });
+const runId = await workflow.dispatch("user.signup", { userId: "abc123" });
 ```
+
+`await`ing on the promise returned by `workflow.dispatch` just returns the ID of
+the dispatched workflow run. This ID can be used to track its progress.
 
 ## Step Functions
 
