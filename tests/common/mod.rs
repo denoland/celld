@@ -5,7 +5,7 @@ mod test_utils;
 use captured_subprocess::CapturedSubprocess;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -35,6 +35,9 @@ pub struct TestEnv {
   pub internal_ports: Vec<u16>,
   /// Temporary directories for each server instance's data
   pub server_dirs: Vec<TempDir>,
+  /// Environment variables to set for each server instance. Overrides the
+  /// default ones if name collides.
+  envs: HashMap<String, String>,
 }
 
 impl TestEnv {
@@ -66,9 +69,12 @@ impl TestEnv {
     Self::new_with_ports(&ports)
   }
 
-  // Backwards compatibility method that takes explicit ports
   pub fn new_with_ports(ports: &[u16]) -> Self {
-    // Mark all the provided ports and their internal ports as used
+    Self::new_with_ports_and_envs(ports, &[])
+  }
+
+  pub fn new_with_ports_and_envs(ports: &[u16], envs: &[(&str, &str)]) -> Self {
+    // Ensure all the provided ports and their internal ports are marked as used
     let mut lock = USED_PORTS.lock().unwrap();
     for &port in ports {
       lock.insert(port);
@@ -96,6 +102,10 @@ impl TestEnv {
       public_ports: public_ports.clone(),
       internal_ports: internal_ports.clone(),
       server_dirs: Vec::new(),
+      envs: envs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect(),
     };
 
     for &port in ports.iter() {
@@ -134,6 +144,7 @@ impl TestEnv {
     server.child_mut().wait().unwrap();
   }
 
+  #[allow(dead_code)]
   pub fn graceful_shutdown_cell_instance(&mut self, index: usize) {
     let mut server = self.servers.remove(index);
     let _ = self.ports.remove(index);
@@ -156,7 +167,10 @@ impl TestEnv {
     let server_cmd = Command::new(env!("CARGO_BIN_EXE_celld"));
     let server_cmd_setup = |cmd: &mut Command| {
       cmd
-        .env("RUST_LOG", "info")
+        .env(
+          "RUST_LOG",
+          "celld=info,aws_smithy_http=trace,aws_sdk_s3=trace",
+        )
         .env("ADVERTISE_ADDR", &advertise_addr)
         .env("INTERNAL_LISTEN_ADDR", &internal_addr)
         .current_dir(temp_dir.path())
@@ -166,12 +180,11 @@ impl TestEnv {
         // Use a shorter staleness threshold for tests to detect failures faster
         .env("CELL_STALENESS_THRESHOLD_SECS", "6")
         .env("CELL_LOCK_GUARD_TTL_SECS", "6")
-        .env("CELL_SYSTEM_CELL_TAKEOVER_INTERVAL_SECS", "2")
         // Configure alarm scheduler to check alarms every second
         .env("CELL_ALARM_SCHEDULER_INTERVAL_SECS", "1")
         .env(
           "CELL_S3_ENDPOINT",
-          format!("http://localhost:{}", self.minio_server.port),
+          format!("http://127.0.0.1:{}", self.minio_server.port),
         )
         .env("CELL_S3_BUCKET", &self.bucket_name)
         .env("CELL_S3_REGION", "us-east-1")
@@ -180,7 +193,8 @@ impl TestEnv {
         .env(
           "CELL_S3_SECRET_ACCESS_KEY",
           &self.minio_server.secret_access_key,
-        );
+        )
+        .envs(&self.envs);
     };
     let server = CapturedSubprocess::new(
       format!("celld({port})"),

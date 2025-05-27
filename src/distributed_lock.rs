@@ -62,16 +62,14 @@
 //!
 //! The content of this object would be a JSON representation of the `LockInfo`
 //! struct.
-//!
-//! ## Usage
-//!
-//! This module defines the `DistributedLock` trait and provides the
-//! `S3DistributedLock` implementation. Components like `SqliteReplica` or
-//! `ProcessManager` use an instance conforming to this trait (typically
-//! injected via `NodeState`) to acquire and release locks before performing
-//! operations like `litestream restore`.
 
-use anyhow::{Context, Error as AnyhowError};
+use std::error::Error as _;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Context as _;
 use async_trait::async_trait;
 use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::error::SdkError;
@@ -80,15 +78,19 @@ use aws_sdk_s3::Client as S3Client;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::error::Error as StdError;
-use std::fmt;
-use std::sync::Arc;
-use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio::time::{interval, sleep_until, Instant, Sleep};
+use tracing::instrument;
 use tracing::{debug, error, info, warn};
 
+use crate::alarm_processor::Alarm;
+use crate::cell_manager::CellEntry;
 use crate::cluster_membership::NodeId;
+use crate::node_state::NodeState;
 
+/// Serialization format of the lock saved in the backing storage for sync
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LockInfo {
   pub node_id: NodeId,
@@ -101,6 +103,8 @@ pub struct LockInfo {
 pub enum LockAcquireError {
   #[error("Lock already held: {0:?}")]
   LockHeld(Option<LockInfo>),
+  #[error("Unable to renew expired lock: {0:?}")]
+  UnableToRenewExpiredLock(Option<LockInfo>),
   #[error("S3 operation failed: {0}")]
   S3Error(String),
   #[error("Failed to serialize or deserialize lock data: {0}")]
@@ -108,171 +112,800 @@ pub enum LockAcquireError {
 }
 
 #[derive(Debug, Clone)]
-pub struct LockHandle {
+pub struct LockDescriptor {
   pub lock_key: String,
-  node_id: NodeId,
-}
-
-// Should not be Clone
-pub struct LockGuard {
-  lock_key: String,
-  node_id: NodeId,
-  /// Reference back to the manager to call release
-  /// Use Arc if the manager itself is shared via Arc
-  lock_manager: Arc<dyn DistributedLock>,
-  /// If present, this guard will notify the given channel when the lock is released.
-  release_notifier:
-    Option<tokio::sync::oneshot::Sender<Result<(), anyhow::Error>>>,
-  /// A channel to request a ttl renewal for the lock
-  ttl_renewal_request_chan: tokio::sync::mpsc::Sender<Duration>,
-  /// A tokio task that waits for ttl renewal requests and performs the renewal
-  ttl_update_task: tokio::task::JoinHandle<()>,
-}
-
-impl LockGuard {
-  fn new(
-    lock_key: String,
-    node_id: NodeId,
-    lock_manager: Arc<dyn DistributedLock>,
-  ) -> Self {
-    let (ttl_renewal_request_tx, mut ttl_renewal_request_rx) =
-      tokio::sync::mpsc::channel(1);
-
-    let ttl_update_task = tokio::spawn({
-      let lock_manager = lock_manager.clone();
-      let handle = LockHandle {
-        lock_key: lock_key.clone(),
-        node_id: node_id.clone(),
-      };
-
-      async move {
-        while let Some(new_ttl) = ttl_renewal_request_rx.recv().await {
-          // Call the underlying lock manager's renew function
-          match lock_manager.renew(handle.clone(), new_ttl).await {
-            Ok(_) => {
-              // Successfully renewed. The LockGuard remains valid.
-              // The timestamp/TTL was updated in S3 by the lock manager.
-              debug!(
-                lock_key = handle.lock_key,
-                "Successfully renewed lock key"
-              );
-            }
-            Err(lock_err) => {
-              // Renewal failed. The lock might be lost.
-              error!(
-                error = ?lock_err,
-                lock_key = handle.lock_key,
-                "Failed to renew lock key"
-              );
-              // TODO: Maybe we should report the error to the renewal requester in some way
-              return;
-            }
-          }
-        }
-      }
-    });
-
-    Self {
-      lock_key,
-      node_id,
-      lock_manager,
-      release_notifier: None,
-      ttl_renewal_request_chan: ttl_renewal_request_tx,
-      ttl_update_task,
-    }
-  }
-
-  /// Request a ttl renewal for the lock. If there is already a renewal request enqueued, no action is taken.
-  pub fn request_ttl_renewal(&self, new_ttl: Duration) {
-    if let Err(e) = self.ttl_renewal_request_chan.try_send(new_ttl) {
-      warn!(
-        lock_key = %self.lock_key,
-        node_id = ?self.node_id,
-        error = ?e,
-        "Failed to request lock ttl renewal"
-      );
-    }
-  }
-
-  /// Set a notifier that will be notified when the lock is released.
-  pub fn set_release_notifier(
-    &mut self,
-    notifier: tokio::sync::oneshot::Sender<Result<(), anyhow::Error>>,
-  ) {
-    self.release_notifier = Some(notifier);
-  }
-}
-
-impl fmt::Debug for LockGuard {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    f.debug_struct("LockGuard")
-      .field("lock_key", &self.lock_key)
-      .field("node_id", &self.node_id)
-      // Since Arc<dyn DistributedLock> isn't Debug, provide a placeholder
-      .field("lock_manager", &"<DistributedLock Manager>")
-      .finish() // Complete the struct formatting
-  }
-}
-
-/// Release the lock in the background task on drop.
-impl Drop for LockGuard {
-  fn drop(&mut self) {
-    self.ttl_update_task.abort();
-
-    let handle = LockHandle {
-      lock_key: self.lock_key.clone(),
-      node_id: self.node_id.clone(),
-    };
-    let lock_manager = self.lock_manager.clone();
-    let release_notifier = self.release_notifier.take();
-
-    tracing::debug!(
-      lock_key = %self.lock_key,
-      node_id = ?self.node_id,
-      "Dropping LockGuard, releasing lock"
-    );
-
-    // It's okay not even to catch any errors with the release here since the
-    // lock will time out by itself eventually after the TTL expires.
-    tokio::spawn(async move {
-      let release_result = lock_manager.release(handle).await;
-      if let Some(notifier) = release_notifier {
-        if let Err(e) = notifier.send(release_result) {
-          tracing::error!(
-            error = ?e,
-            "Error sending release notification",
-          );
-        }
-      }
-      tracing::debug!("LockGuard dropped, lock released");
-    });
-  }
+  pub node_id: NodeId,
 }
 
 #[async_trait]
 pub trait DistributedLock: Send + Sync {
   /// Attempts to atomically acquire a distributed lock for a resource.
   async fn try_acquire(
-    self: Arc<Self>,
+    &self,
     lock_name: &str,
     node_id: &NodeId,
     ttl: Duration,
-  ) -> Result<LockGuard, LockAcquireError>;
+    // The lock manager instance to be set for use by LockHandle.
+    lock_manager: Arc<dyn DistributedLock>,
+  ) -> Result<LockHandle, LockAcquireError>;
 
   /// Releases a previously acquired distributed lock.
-  async fn release(&self, handle: LockHandle) -> Result<(), AnyhowError>;
+  async fn release(
+    &self,
+    lock_descriptor: &LockDescriptor,
+  ) -> anyhow::Result<()>;
 
   /// Renews an existing lock by updating its timestamp and TTL.
   /// This extends the lock's expiration time without releasing and re-acquiring it.
   ///
   /// Returns a new LockHandle with the updated information on success.
   /// Fails if the lock doesn't exist or is held by a different node.
-  #[allow(dead_code)]
   async fn renew(
     &self,
-    handle: LockHandle,
+    lock_descriptor: &LockDescriptor,
     new_ttl: Duration,
-  ) -> Result<LockHandle, LockAcquireError>;
+  ) -> Result<LockDescriptor, LockAcquireError>;
+}
+
+#[derive(Debug)]
+enum LockReleaseReason {
+  /// The lock was released because the lock was explicitly released
+  ExplicitRelease,
+  /// The lock was released because the cell was idle
+  Idle,
+  /// The lock was released because the ttl expired
+  TTLExpired,
+}
+
+enum LockState {
+  Init {
+    descriptor: LockDescriptor,
+    lock_manager: Arc<dyn DistributedLock>,
+  },
+  Active {
+    descriptor: LockDescriptor,
+    lock_manager: Arc<dyn DistributedLock>,
+    protected_resource: Box<CellEntry>,
+  },
+  Released {
+    descriptor: LockDescriptor,
+    _reason: LockReleaseReason,
+  },
+}
+
+impl LockState {
+  fn descriptor(&self) -> &LockDescriptor {
+    match self {
+      LockState::Init { descriptor, .. } => descriptor,
+      LockState::Active { descriptor, .. } => descriptor,
+      LockState::Released { descriptor, .. } => descriptor,
+    }
+  }
+
+  async fn renew_ttl(
+    &self,
+    ttl: Duration,
+    ttl_expiry_timer: &mut Pin<&mut Sleep>,
+  ) -> anyhow::Result<()> {
+    match self {
+      LockState::Init {
+        descriptor,
+        lock_manager,
+      } => {
+        let now = Instant::now();
+        lock_manager.renew(descriptor, ttl).await?;
+        ttl_expiry_timer.as_mut().reset(now + ttl);
+      }
+      LockState::Active {
+        lock_manager,
+        descriptor,
+        ..
+      } => {
+        let now = Instant::now();
+        lock_manager.renew(descriptor, ttl).await?;
+        ttl_expiry_timer.as_mut().reset(now + ttl);
+      }
+      LockState::Released { .. } => {
+        // Do nothing
+      }
+    }
+
+    Ok(())
+  }
+
+  async fn release_lock(
+    &mut self,
+    reason: LockReleaseReason,
+    ttl_expiry_timer: Option<&mut Pin<&mut Sleep>>,
+  ) -> anyhow::Result<bool> {
+    let released = match self {
+      LockState::Init {
+        descriptor,
+        lock_manager,
+      } => {
+        // Release the lock
+        lock_manager.release(descriptor).await?;
+        debug!(?descriptor, "Lock released");
+
+        *self = LockState::Released {
+          descriptor: descriptor.clone(),
+          _reason: reason,
+        };
+
+        true
+      }
+      LockState::Active { descriptor, .. } => {
+        let descriptor = descriptor.clone();
+        // Set the state to Released before actually processing the resource
+        // cleanup to get the ownership.
+        let state = std::mem::replace(
+          self,
+          LockState::Released {
+            descriptor,
+            _reason: reason,
+          },
+        );
+
+        let LockState::Active {
+          descriptor,
+          lock_manager,
+          protected_resource,
+        } = state
+        else {
+          unreachable!("We already checked that the state is Active in the match statement");
+        };
+
+        // Releasing the resource gracefully may be taking some time.
+        // To ensure that no other node will detect the lock as expired during the
+        // release process, if the deadline is close, we first extend it before
+        // releasing the lock.
+        if let Some(timer) = ttl_expiry_timer {
+          let now = Instant::now();
+          let deadline = timer.deadline();
+          if deadline < now + Duration::from_secs(10) {
+            // The current deadline is too close. Reset it to 30 seconds from now.
+            let new_ttl = Duration::from_secs(30);
+            lock_manager.renew(&descriptor, new_ttl).await?;
+            timer.as_mut().reset(now + new_ttl);
+          }
+        }
+
+        // The release order matters. Deno process and Litestream replication must
+        // be stopped *before* other nodes detect the lock as released.
+
+        // Shutdown the protected resource (i.e. Deno process and then Litestream
+        // replication) gracefully
+        if tokio::time::timeout(
+          Duration::from_secs(5),
+          protected_resource.terminate(),
+        )
+        .await
+        .is_err()
+        {
+          // TODO(magurotuna): we should forcibly kill it here to ensure that
+          // the cell stays alive after the lock is released.
+          error!(
+            ?descriptor,
+            "Timed out while terminating protected resource gracefully"
+          );
+        }
+
+        // Release the lock
+        lock_manager.release(&descriptor).await?;
+        debug!(?descriptor, "Lock released");
+
+        true
+      }
+      LockState::Released { .. } => {
+        // Lock was already released. Do nothing.
+        false
+      }
+    };
+
+    Ok(released)
+  }
+}
+
+enum LockStateRequest {
+  SetResource(SetResourceRequest),
+  Ping(PingRequest),
+  GetSocketPath(AccessOptionalResourceRequest<PathBuf>),
+  MutateResource(MutateResourceRequest),
+  GetAlarm(GetAlarmRequest),
+  DeleteAlarm(DeleteAlarmRequest),
+  SetAlarm(SetAlarmRequest),
+  DispatchAlarms(DispatchAlarmsRequest),
+  ReleaseIfIdle(ReleaseIfIdleRequest),
+  Release(ReleaseRequest),
+}
+
+struct SetResourceRequest {
+  resource: Box<CellEntry>,
+  res_chan: oneshot::Sender<()>,
+}
+
+pub enum LockStateKind {
+  Init,
+  Active,
+  Released,
+}
+
+struct PingRequest {
+  res_chan: oneshot::Sender<LockStateKind>,
+}
+
+type OptionalResourceAccessor<T> =
+  Box<dyn FnOnce(&CellEntry) -> Option<T> + Send + Sync>;
+
+struct AccessOptionalResourceRequest<T> {
+  accessor: OptionalResourceAccessor<T>,
+  res_chan: oneshot::Sender<Option<T>>,
+}
+
+struct MutateResourceRequest {
+  mutator: Box<dyn FnOnce(&mut CellEntry) + Send + Sync>,
+  res_chan: oneshot::Sender<()>,
+}
+
+struct GetAlarmRequest {
+  tenant: String,
+  cell_id: String,
+  res_chan: oneshot::Sender<Option<GetAlarmResponse>>,
+}
+
+struct GetAlarmResponse {
+  scheduled_time_unix_ms: u64,
+}
+
+struct DeleteAlarmRequest {
+  tenant: String,
+  cell_id: String,
+  res_chan: oneshot::Sender<anyhow::Result<()>>,
+}
+
+struct SetAlarmRequest {
+  tenant: String,
+  cell_id: String,
+  scheduled_time_unix_ms: u64,
+  res_chan: oneshot::Sender<anyhow::Result<()>>,
+}
+
+struct DispatchAlarmsRequest {
+  node_state: Arc<NodeState>,
+  now: DateTime<Utc>,
+  limit: u32,
+  res_chan: oneshot::Sender<anyhow::Result<()>>,
+}
+
+struct ReleaseIfIdleRequest {
+  idle_timeout: Duration,
+  res_chan: oneshot::Sender<anyhow::Result<bool>>,
+}
+
+struct ReleaseRequest {
+  res_chan: oneshot::Sender<anyhow::Result<bool>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LockHandle {
+  descriptor: LockDescriptor,
+  tx: mpsc::UnboundedSender<LockStateRequest>,
+}
+
+impl LockHandle {
+  pub fn new(
+    lock_descriptor: LockDescriptor,
+    lock_manager: Arc<dyn DistributedLock>,
+    ttl: Duration,
+  ) -> Self {
+    let (tx, rx) = mpsc::unbounded_channel();
+
+    tokio::spawn({
+      let descriptor = lock_descriptor.clone();
+      let lock_manager = lock_manager.clone();
+
+      lock_state_loop(descriptor, lock_manager, ttl, rx)
+    });
+
+    Self {
+      tx,
+      descriptor: lock_descriptor,
+    }
+  }
+
+  pub fn descriptor(&self) -> &LockDescriptor {
+    &self.descriptor
+  }
+
+  pub async fn set_resource(&self, resource: CellEntry) -> anyhow::Result<()> {
+    let (tx, rx) = oneshot::channel();
+    self
+      .tx
+      .send(LockStateRequest::SetResource(SetResourceRequest {
+        resource: Box::new(resource),
+        res_chan: tx,
+      }))?;
+    rx.await.context("Lock state loop exited unexpectedly")
+  }
+
+  pub async fn ping(&self) -> anyhow::Result<LockStateKind> {
+    let (tx, rx) = oneshot::channel();
+    self
+      .tx
+      .send(LockStateRequest::Ping(PingRequest { res_chan: tx }))?;
+    rx.await.context("Lock state loop exited unexpectedly")
+  }
+
+  /// Get the UDS path through which the cell is listening for incoming HTTP
+  /// requests. `None` is returned in either of the following cases:
+  /// - the cell is not the system main cell
+  /// - the cell is normal cell but not in `Active` state
+  pub async fn get_socket_path(&self) -> anyhow::Result<Option<PathBuf>> {
+    let (tx, rx) = oneshot::channel();
+    self.tx.send(LockStateRequest::GetSocketPath(
+      AccessOptionalResourceRequest {
+        accessor: Box::new(|process_entry| {
+          process_entry.get_socket_path().map(|p| p.to_path_buf())
+        }),
+        res_chan: tx,
+      },
+    ))?;
+    rx.await.context("Lock state loop exited unexpectedly")
+  }
+
+  pub async fn mutate_resource(
+    &self,
+    mutator: Box<dyn FnOnce(&mut CellEntry) + Send + Sync>,
+  ) -> anyhow::Result<()> {
+    let (tx, rx) = oneshot::channel();
+    self
+      .tx
+      .send(LockStateRequest::MutateResource(MutateResourceRequest {
+        mutator,
+        res_chan: tx,
+      }))?;
+    rx.await.context("Lock state loop exited unexpectedly")
+  }
+
+  pub async fn get_alarm(
+    &self,
+    tenant: &str,
+    cell_id: &str,
+  ) -> anyhow::Result<Option<Alarm>> {
+    let (tx, rx) = oneshot::channel();
+    self.tx.send(LockStateRequest::GetAlarm(GetAlarmRequest {
+      tenant: tenant.to_string(),
+      cell_id: cell_id.to_string(),
+      res_chan: tx,
+    }))?;
+
+    match rx.await.context("Lock state loop exited unexpectedly")? {
+      Some(alarm) => Ok(Some(Alarm {
+        tenant: tenant.to_string(),
+        cell_id: cell_id.to_string(),
+        scheduled_time_unix_ms: alarm.scheduled_time_unix_ms,
+      })),
+      None => Ok(None),
+    }
+  }
+
+  pub async fn delete_alarm(
+    &self,
+    tenant: &str,
+    cell_id: &str,
+  ) -> anyhow::Result<()> {
+    let (tx, rx) = oneshot::channel();
+    self
+      .tx
+      .send(LockStateRequest::DeleteAlarm(DeleteAlarmRequest {
+        tenant: tenant.to_string(),
+        cell_id: cell_id.to_string(),
+        res_chan: tx,
+      }))?;
+    rx.await?
+  }
+
+  pub async fn set_alarm(
+    &self,
+    tenant: &str,
+    cell_id: &str,
+    scheduled_time_unix_ms: u64,
+  ) -> anyhow::Result<()> {
+    let (tx, rx) = oneshot::channel();
+    self.tx.send(LockStateRequest::SetAlarm(SetAlarmRequest {
+      tenant: tenant.to_string(),
+      cell_id: cell_id.to_string(),
+      scheduled_time_unix_ms,
+      res_chan: tx,
+    }))?;
+    rx.await?
+  }
+
+  pub async fn dispatch_alarms(
+    &self,
+    node_state: Arc<NodeState>,
+    now: DateTime<Utc>,
+    limit: u32,
+  ) -> anyhow::Result<()> {
+    let (tx, rx) = oneshot::channel();
+    self
+      .tx
+      .send(LockStateRequest::DispatchAlarms(DispatchAlarmsRequest {
+        node_state,
+        now,
+        limit,
+        res_chan: tx,
+      }))?;
+    rx.await?
+  }
+
+  /// Releases the lock if the resource is idle for the given duration. Returns `true` if the resource was released.
+  pub async fn release_if_idle(
+    &self,
+    idle_timeout: Duration,
+  ) -> anyhow::Result<bool> {
+    let (tx, rx) = oneshot::channel();
+    self
+      .tx
+      .send(LockStateRequest::ReleaseIfIdle(ReleaseIfIdleRequest {
+        idle_timeout,
+        res_chan: tx,
+      }))?;
+    rx.await?
+  }
+
+  /// Terminates the resource and releases the lock. Returns `true` if the
+  /// resource was released by this call, or already released before this call.
+  pub async fn release(&self) -> bool {
+    let (tx, rx) = oneshot::channel();
+    let send_result = self
+      .tx
+      .send(LockStateRequest::Release(ReleaseRequest { res_chan: tx }));
+
+    // send_result == Err means the lock state loop already exited, in which
+    // case the release was already done.
+    if send_result.is_err() {
+      return true;
+    }
+
+    match rx.await {
+      Err(_) => {
+        // In this error case, the sender was dropped and the lock state loop
+        // already exited. So the release was already done.
+        true
+      }
+      Ok(Ok(released)) => released,
+      Ok(Err(e)) => {
+        error!(error = ?e, "Failed to release lock");
+        false
+      }
+    }
+  }
+}
+
+async fn lock_state_loop(
+  descriptor: LockDescriptor,
+  lock_manager: Arc<dyn DistributedLock>,
+  ttl: Duration,
+  mut request_rx: mpsc::UnboundedReceiver<LockStateRequest>,
+) {
+  let mut state = LockState::Init {
+    descriptor,
+    lock_manager,
+  };
+
+  let mut ttl_renewal_interval = interval(ttl / 3);
+  // TODO: maybe subtract some second from this to account for the clock skew or network latency
+  let mut ttl_expiry_timer = std::pin::pin!(sleep_until(Instant::now() + ttl));
+
+  loop {
+    tokio::select! {
+      biased;
+
+      _ = &mut ttl_expiry_timer => {
+        info!(descriptor = ?state.descriptor(), "TTL expired; forcibly releasing lock");
+        // TTL expired; forcibly release the lock and exit the loop
+
+        // TODO(magurotuna): actually, it is too late to terminate the process
+        // here because at this point another node may acquire the lock i.e.
+        // there are two nodes running the same cell and its associated SQLite
+        // replication. Probably we should do two phase expiry management, where
+        // shorter deadline is used to start the release process and longer one
+        // represents the actual expiry visible to other nodes in the cluster.
+
+        if let Err(e) = state.release_lock(LockReleaseReason::TTLExpired, None).await {
+          error!(error = ?e, descriptor = ?state.descriptor(), "Failed to release lock");
+        }
+
+        return;
+      }
+
+      _ = ttl_renewal_interval.tick() => {
+        // Renew the TTL using the lock manager
+        if let Err(e) = state.renew_ttl(ttl, &mut ttl_expiry_timer).await {
+          error!(error = ?e, descriptor = ?state.descriptor(), "Failed to renew TTL");
+        }
+      }
+
+      req = request_rx.recv() => {
+        match req {
+          Some(LockStateRequest::SetResource(req)) => {
+            handle_set_resource(req, &mut state);
+          }
+          Some(LockStateRequest::Ping(req)) => {
+            handle_ping(req, &mut state);
+          }
+          Some(LockStateRequest::GetSocketPath(req)) => {
+            handle_get_socket_path(req, &mut state);
+          }
+          Some(LockStateRequest::MutateResource(req)) => {
+            handle_mutate_resource(req, &mut state);
+          }
+          Some(LockStateRequest::GetAlarm(req)) => {
+            handle_get_alarm(req, &mut state).await;
+          }
+          Some(LockStateRequest::DeleteAlarm(req)) => {
+            handle_delete_alarm(req, &mut state).await;
+          }
+          Some(LockStateRequest::SetAlarm(req)) => {
+            handle_set_alarm(req, &mut state).await;
+          }
+          Some(LockStateRequest::DispatchAlarms(req)) => {
+            handle_dispatch_alarms(req, &mut state).await;
+          }
+          Some(LockStateRequest::ReleaseIfIdle(req)) => {
+            handle_release_if_idle(req, &mut state).await;
+          }
+          Some(LockStateRequest::Release(req)) => {
+            handle_release(req, &mut state, &mut ttl_expiry_timer).await;
+          }
+          None => {
+            // LockHandle was dropped; at this point, the state must be `Released`
+            if !matches!(state, LockState::Released { .. }) {
+              error!("LockHandle was dropped while in unexpected state");
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/// Set the provided resource in the lock state, transitioning the state to `Active`.
+/// This must be called when the state is `Init`.
+fn handle_set_resource(req: SetResourceRequest, state: &mut LockState) {
+  assert!(matches!(state, LockState::Init { .. }));
+
+  match state {
+    LockState::Init {
+      descriptor,
+      lock_manager,
+    } => {
+      *state = LockState::Active {
+        descriptor: descriptor.clone(),
+        lock_manager: lock_manager.clone(),
+        protected_resource: req.resource,
+      };
+
+      let _ = req.res_chan.send(());
+    }
+    _ => unreachable!(),
+  }
+}
+
+fn handle_ping(req: PingRequest, state: &mut LockState) {
+  match state {
+    LockState::Init { .. } => {
+      let _ = req.res_chan.send(LockStateKind::Init);
+    }
+    LockState::Active { .. } => {
+      let _ = req.res_chan.send(LockStateKind::Active);
+    }
+    LockState::Released { .. } => {
+      let _ = req.res_chan.send(LockStateKind::Released);
+    }
+  }
+}
+
+fn handle_get_socket_path(
+  req: AccessOptionalResourceRequest<PathBuf>,
+  state: &mut LockState,
+) {
+  match state {
+    LockState::Init { .. } => {
+      // Do nothing
+      let _ = req.res_chan.send(None);
+    }
+    LockState::Active {
+      protected_resource, ..
+    } => {
+      let socket_path = (req.accessor)(protected_resource);
+      let _ = req.res_chan.send(socket_path);
+    }
+    LockState::Released { .. } => {
+      // Do nothing
+      let _ = req.res_chan.send(None);
+    }
+  }
+}
+
+fn handle_mutate_resource(req: MutateResourceRequest, state: &mut LockState) {
+  match state {
+    LockState::Init { .. } => {
+      // Do nothing
+    }
+    LockState::Active {
+      protected_resource, ..
+    } => {
+      (req.mutator)(protected_resource);
+    }
+    LockState::Released { .. } => {
+      // Do nothing
+    }
+  }
+
+  let _ = req.res_chan.send(());
+}
+
+async fn handle_get_alarm(req: GetAlarmRequest, state: &mut LockState) {
+  match state {
+    LockState::Init { .. } => {
+      let _ = req.res_chan.send(None);
+    }
+    LockState::Active {
+      protected_resource, ..
+    } => {
+      let Some(alarm_processor) = protected_resource.alarm_processor() else {
+        let _ = req.res_chan.send(None);
+        return;
+      };
+
+      let maybe_alarm = alarm_processor.get(req.tenant, req.cell_id).await.ok();
+      let _ = req.res_chan.send(maybe_alarm.map(|alarm| GetAlarmResponse {
+        scheduled_time_unix_ms: alarm.scheduled_time_unix_ms,
+      }));
+    }
+    LockState::Released { .. } => {
+      let _ = req.res_chan.send(None);
+    }
+  }
+}
+
+async fn handle_delete_alarm(req: DeleteAlarmRequest, state: &mut LockState) {
+  match state {
+    LockState::Init { .. } => {
+      let _ = req
+        .res_chan
+        .send(Err(anyhow::anyhow!("Cell is not initialized yet")));
+    }
+    LockState::Active {
+      protected_resource, ..
+    } => {
+      let Some(alarm_processor) = protected_resource.alarm_processor() else {
+        let _ = req
+          .res_chan
+          .send(Err(anyhow::anyhow!("Cell is not the system main cell")));
+        return;
+      };
+
+      if let Err(e) = alarm_processor.delete(req.tenant, req.cell_id).await {
+        let _ = req.res_chan.send(Err(e.into()));
+      } else {
+        let _ = req.res_chan.send(Ok(()));
+      }
+    }
+    LockState::Released { .. } => {
+      let _ = req
+        .res_chan
+        .send(Err(anyhow::anyhow!("Cell is already released")));
+    }
+  }
+}
+
+async fn handle_set_alarm(req: SetAlarmRequest, state: &mut LockState) {
+  match state {
+    LockState::Init { .. } => {
+      let _ = req
+        .res_chan
+        .send(Err(anyhow::anyhow!("Cell is not initialized yet")));
+    }
+    LockState::Active {
+      protected_resource, ..
+    } => {
+      let Some(alarm_processor) = protected_resource.alarm_processor() else {
+        let _ = req
+          .res_chan
+          .send(Err(anyhow::anyhow!("Cell is not the system main cell")));
+        return;
+      };
+
+      if let Err(e) = alarm_processor
+        .set(req.tenant, req.cell_id, req.scheduled_time_unix_ms)
+        .await
+      {
+        let _ = req.res_chan.send(Err(e.into()));
+      } else {
+        let _ = req.res_chan.send(Ok(()));
+      }
+    }
+    LockState::Released { .. } => {
+      let _ = req
+        .res_chan
+        .send(Err(anyhow::anyhow!("Cell is already released")));
+    }
+  }
+}
+
+async fn handle_dispatch_alarms(
+  req: DispatchAlarmsRequest,
+  state: &mut LockState,
+) {
+  match state {
+    LockState::Init { .. } => {
+      let _ = req
+        .res_chan
+        .send(Err(anyhow::anyhow!("Cell is not initialized yet")));
+    }
+    LockState::Active {
+      protected_resource, ..
+    } => {
+      let Some(alarm_processor) = protected_resource.alarm_processor() else {
+        let _ = req
+          .res_chan
+          .send(Err(anyhow::anyhow!("Cell is not the system main cell")));
+        return;
+      };
+
+      match alarm_processor
+        .dispatch(req.node_state, req.now, req.limit)
+        .await
+      {
+        Ok(_) => {
+          let _ = req.res_chan.send(Ok(()));
+        }
+        Err(e) => {
+          let _ = req.res_chan.send(Err(e.into()));
+        }
+      }
+    }
+    LockState::Released { .. } => {
+      let _ = req
+        .res_chan
+        .send(Err(anyhow::anyhow!("Cell is already released")));
+    }
+  }
+}
+
+async fn handle_release_if_idle(
+  req: ReleaseIfIdleRequest,
+  state: &mut LockState,
+) {
+  match state {
+    LockState::Active {
+      protected_resource, ..
+    } => {
+      if protected_resource.is_idle(req.idle_timeout) {
+        let res = state.release_lock(LockReleaseReason::Idle, None).await;
+        let _ = req.res_chan.send(res);
+      } else {
+        let _ = req.res_chan.send(Ok(false));
+      }
+    }
+    _ => {
+      let _ = req.res_chan.send(Ok(false));
+    }
+  }
+}
+
+async fn handle_release(
+  req: ReleaseRequest,
+  state: &mut LockState,
+  ttl_expiry_timer: &mut Pin<&mut Sleep>,
+) {
+  let res = state
+    .release_lock(LockReleaseReason::ExplicitRelease, Some(ttl_expiry_timer))
+    .await;
+  let _ = req.res_chan.send(res);
 }
 
 pub struct S3DistributedLock {
@@ -304,12 +937,14 @@ impl S3DistributedLock {
 
 #[async_trait]
 impl DistributedLock for S3DistributedLock {
+  #[instrument(skip(self, lock_manager))]
   async fn try_acquire(
-    self: Arc<Self>,
+    &self,
     lock_name: &str,
     node_id: &NodeId,
     ttl: Duration,
-  ) -> Result<LockGuard, LockAcquireError> {
+    lock_manager: Arc<dyn DistributedLock>,
+  ) -> Result<LockHandle, LockAcquireError> {
     let lock_key = self.get_lock_key(lock_name);
     debug!(lock_key, ?node_id, ?ttl, "Attempting to acquire S3 lock");
 
@@ -340,7 +975,14 @@ impl DistributedLock for S3DistributedLock {
     match put_result {
       Ok(_) => {
         info!(lock_key, ?node_id, "Successfully acquired S3 lock");
-        Ok(LockGuard::new(lock_key, node_id.clone(), self))
+        Ok(LockHandle::new(
+          LockDescriptor {
+            lock_key,
+            node_id: node_id.clone(),
+          },
+          lock_manager,
+          ttl,
+        ))
       }
       Err(SdkError::ServiceError(service_err)) => {
         let raw_err = service_err.into_err();
@@ -429,7 +1071,14 @@ impl DistributedLock for S3DistributedLock {
                       ?node_id,
                       "Successfully acquired S3 lock on retry"
                     );
-                    Ok(LockGuard::new(lock_key, node_id.clone(), self))
+                    Ok(LockHandle::new(
+                      LockDescriptor {
+                        lock_key,
+                        node_id: node_id.clone(),
+                      },
+                      lock_manager,
+                      ttl,
+                    ))
                   }
                   Err(SdkError::ServiceError(retry_service_err)) => {
                     let retry_put_err = retry_service_err.into_err();
@@ -480,7 +1129,14 @@ impl DistributedLock for S3DistributedLock {
                       ?node_id,
                       "Successfully acquired S3 lock on retry (after NoSuchKey)"
                     );
-                    Ok(LockGuard::new(lock_key, node_id.clone(), self))
+                    Ok(LockHandle::new(
+                      LockDescriptor {
+                        lock_key,
+                        node_id: node_id.clone(),
+                      },
+                      lock_manager,
+                      ttl,
+                    ))
                   }
                   Err(SdkError::ServiceError(retry_service_err)) => {
                     let retry_put_err = retry_service_err.into_err();
@@ -535,46 +1191,51 @@ impl DistributedLock for S3DistributedLock {
     }
   }
 
-  async fn release(&self, handle: LockHandle) -> Result<(), AnyhowError> {
-    debug!(lock_key = %handle.lock_key, node_id = ?handle.node_id, "Releasing S3 lock");
+  async fn release(
+    &self,
+    lock_descriptor: &LockDescriptor,
+  ) -> anyhow::Result<()> {
+    debug!(lock_key = %lock_descriptor.lock_key, node_id = ?lock_descriptor.node_id, "Releasing S3 lock");
     match self
       .s3_client
       .delete_object()
       .bucket(&self.bucket)
-      .key(&handle.lock_key)
+      .key(&lock_descriptor.lock_key)
       .send()
       .await
     {
       Ok(_) => {
-        info!(lock_key = %handle.lock_key, node_id = ?handle.node_id, "Successfully released S3 lock");
+        info!(lock_key = %lock_descriptor.lock_key, node_id = ?lock_descriptor.node_id, "Successfully released S3 lock");
         Ok(())
       }
       Err(SdkError::ServiceError(service_err)) => {
         let del_err = service_err.into_err();
         if del_err.code() == Some("NoSuchKey") {
-          warn!(lock_key = %handle.lock_key, node_id = ?handle.node_id, "Attempted to release a lock that does not exist (or was already released)");
+          warn!(lock_key = %lock_descriptor.lock_key, node_id = ?lock_descriptor.node_id, "Attempted to release a lock that does not exist (or was already released)");
           Ok(())
         } else {
-          warn!(error = ?del_err, lock_key = %handle.lock_key, node_id = ?handle.node_id, "Failed to release S3 lock (Service Error)");
-          Err(AnyhowError::new(del_err))
-            .context(format!("Failed to release S3 lock: {}", handle.lock_key))
+          warn!(error = ?del_err, lock_key = %lock_descriptor.lock_key, node_id = ?lock_descriptor.node_id, "Failed to release S3 lock (Service Error)");
+          Err(del_err).with_context(|| {
+            format!("Failed to release S3 lock: {}", lock_descriptor.lock_key)
+          })
         }
       }
       Err(e) => {
-        warn!(error = ?e, lock_key = %handle.lock_key, node_id = ?handle.node_id, "Failed to release S3 lock (SDK Error)");
-        Err(AnyhowError::new(e))
-          .context(format!("SDK Error releasing S3 lock: {}", handle.lock_key))
+        warn!(error = ?e, lock_key = %lock_descriptor.lock_key, node_id = ?lock_descriptor.node_id, "Failed to release S3 lock (SDK Error)");
+        Err(e).with_context(|| {
+          format!("SDK Error releasing S3 lock: {}", lock_descriptor.lock_key)
+        })
       }
     }
   }
 
   async fn renew(
     &self,
-    handle: LockHandle,
+    lock_descriptor: &LockDescriptor,
     new_ttl: Duration,
-  ) -> Result<LockHandle, LockAcquireError> {
-    let lock_key = &handle.lock_key;
-    let node_id = &handle.node_id;
+  ) -> Result<LockDescriptor, LockAcquireError> {
+    let lock_key = &lock_descriptor.lock_key;
+    let node_id = &lock_descriptor.node_id;
 
     debug!(lock_key, ?node_id, ?new_ttl, "Attempting to renew S3 lock");
 
@@ -622,6 +1283,17 @@ impl DistributedLock for S3DistributedLock {
           return Err(LockAcquireError::LockHeld(Some(existing_lock_info)));
         }
 
+        // Verify the lock has not expired
+        if existing_lock_info.timestamp
+          + Duration::from_secs(existing_lock_info.ttl_secs)
+          < Utc::now()
+        {
+          warn!(lock_key, "Cannot renew lock: lock has expired");
+          return Err(LockAcquireError::UnableToRenewExpiredLock(Some(
+            existing_lock_info,
+          )));
+        }
+
         // Create updated lock info with new timestamp and TTL
         let updated_lock_info = LockInfo {
           node_id: node_id.clone(),
@@ -657,7 +1329,7 @@ impl DistributedLock for S3DistributedLock {
         match put_request.send().await {
           Ok(_) => {
             info!(lock_key, ?node_id, ?new_ttl, "Successfully renewed S3 lock");
-            Ok(LockHandle {
+            Ok(LockDescriptor {
               lock_key: lock_key.clone(),
               node_id: node_id.clone(),
             })
@@ -724,24 +1396,32 @@ pub struct StandaloneDistributedLock;
 #[async_trait]
 impl DistributedLock for StandaloneDistributedLock {
   async fn try_acquire(
-    self: Arc<Self>,
+    &self,
     lock_name: &str,
     node_id: &NodeId,
-    _ttl: Duration,
-  ) -> Result<LockGuard, LockAcquireError> {
-    Ok(LockGuard::new(lock_name.to_string(), node_id.clone(), self))
+    ttl: Duration,
+    lock_manager: Arc<dyn DistributedLock>,
+  ) -> Result<LockHandle, LockAcquireError> {
+    Ok(LockHandle::new(
+      LockDescriptor {
+        lock_key: lock_name.to_string(),
+        node_id: node_id.clone(),
+      },
+      lock_manager,
+      ttl,
+    ))
   }
 
-  async fn release(&self, _handle: LockHandle) -> Result<(), AnyhowError> {
+  async fn release(&self, _descriptor: &LockDescriptor) -> anyhow::Result<()> {
     Ok(())
   }
 
   async fn renew(
     &self,
-    handle: LockHandle,
+    handle: &LockDescriptor,
     _new_ttl: Duration,
-  ) -> Result<LockHandle, LockAcquireError> {
-    Ok(handle)
+  ) -> Result<LockDescriptor, LockAcquireError> {
+    Ok(handle.clone())
   }
 }
 
@@ -818,24 +1498,23 @@ mod tests {
     let node_id = NodeId::new("node_a");
     let ttl = Duration::from_secs(60);
 
-    let mut guard = lock_manager
+    let handle = lock_manager
       .clone()
-      .try_acquire(lock_name, &node_id, ttl)
+      .try_acquire(lock_name, &node_id, ttl, lock_manager.clone())
       .await
       .expect("Failed to acquire lock");
 
     assert!(
-      s3_object_exists(&lock_manager.s3_client, &bucket, &guard.lock_key).await,
+      s3_object_exists(
+        &lock_manager.s3_client,
+        &bucket,
+        &handle.descriptor.lock_key
+      )
+      .await,
       "Lock object should exist after acquire"
     );
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    guard.set_release_notifier(tx);
-
-    drop(guard);
-
-    // Wait until the release is complete
-    rx.await.unwrap().unwrap();
+    assert!(handle.release().await);
 
     let lock_key_after_release = lock_manager.get_lock_key(lock_name);
     assert!(
@@ -858,50 +1537,78 @@ mod tests {
     let node_b = NodeId::new("node_b");
     let ttl = Duration::from_secs(60);
 
-    let mut guard_a = lock_manager
+    let handle_a = lock_manager
       .clone()
-      .try_acquire(lock_name, &node_a, ttl)
+      .try_acquire(lock_name, &node_a, ttl, lock_manager.clone())
       .await
       .expect("Node A failed to acquire lock");
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    guard_a.set_release_notifier(tx);
-
-    let guard_b = lock_manager
+    let handle_b = lock_manager
       .clone()
-      .try_acquire(lock_name, &node_b, ttl)
+      .try_acquire(lock_name, &node_b, ttl, lock_manager.clone())
       .await;
 
-    match guard_b {
+    match handle_b {
       Err(LockAcquireError::LockHeld(Some(info))) => {
         assert_eq!(info.node_id, node_a);
       }
-      _ => panic!("Node B should have failed with LockHeld, got {:?}", guard_b),
+      _ => panic!(
+        "Node B should have failed with LockHeld, got {:?}",
+        handle_b
+      ),
     }
 
-    drop(guard_a);
-
-    // Wait until the release is complete
-    rx.await.unwrap().unwrap();
+    assert!(handle_a.release().await);
 
     // Now node B should be able to acquire the lock
-    let mut guard_b = lock_manager
-      .try_acquire(lock_name, &node_b, ttl)
+    let handle_b = lock_manager
+      .try_acquire(lock_name, &node_b, ttl, lock_manager.clone())
       .await
       .expect("Node B failed to acquire lock after release");
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    guard_b.set_release_notifier(tx);
-
-    drop(guard_b);
-
-    // Wait until the release is complete and ensure it succeeded
-    rx.await.unwrap().unwrap();
+    assert!(handle_b.release().await);
   }
 
   #[test_log::test(tokio::test)]
   async fn test_acquire_succeeds_if_expired() {
     let (lock_manager, _bucket, _minio) = setup_test_env().await;
+
+    // LockManager which fails to renew the lock. Other operations are delegated
+    // to the underlying S3DistributedLock.
+    struct LockManagerWrapper(Arc<S3DistributedLock>);
+
+    #[async_trait]
+    impl DistributedLock for LockManagerWrapper {
+      async fn try_acquire(
+        &self,
+        lock_name: &str,
+        node_id: &NodeId,
+        ttl: Duration,
+        lock_manager: Arc<dyn DistributedLock>,
+      ) -> Result<LockHandle, LockAcquireError> {
+        self
+          .0
+          .try_acquire(lock_name, node_id, ttl, lock_manager)
+          .await
+      }
+
+      async fn release(
+        &self,
+        lock_descriptor: &LockDescriptor,
+      ) -> anyhow::Result<()> {
+        self.0.release(lock_descriptor).await
+      }
+
+      async fn renew(
+        &self,
+        _lock_descriptor: &LockDescriptor,
+        _new_ttl: Duration,
+      ) -> Result<LockDescriptor, LockAcquireError> {
+        Err(LockAcquireError::S3Error("fake error".to_string()))
+      }
+    }
+
+    let lock_manager = Arc::new(LockManagerWrapper(lock_manager));
 
     let lock_name = "test_lock_3";
     let node_a = NodeId::new("node_a");
@@ -909,39 +1616,25 @@ mod tests {
     let short_ttl = Duration::from_secs(2);
     let long_ttl = Duration::from_secs(60);
 
-    let mut guard_a = lock_manager
+    let handle_a = lock_manager
       .clone()
-      .try_acquire(lock_name, &node_a, short_ttl)
+      .try_acquire(lock_name, &node_a, short_ttl, lock_manager.clone())
       .await
       .expect("Node A failed to acquire lock with short TTL");
 
-    let (tx_guard_a, rx_guard_a) = tokio::sync::oneshot::channel();
-    guard_a.set_release_notifier(tx_guard_a);
-
+    // Wait until the lock expires
     sleep(short_ttl + Duration::from_secs(1)).await;
 
-    let mut guard_b = lock_manager
-      .try_acquire(lock_name, &node_b, long_ttl)
+    let handle_b = lock_manager
+      .try_acquire(lock_name, &node_b, long_ttl, lock_manager.clone())
       .await
       .expect("Node B failed to acquire expired lock");
 
-    let (tx_guard_b, rx_guard_b) = tokio::sync::oneshot::channel();
-    guard_b.set_release_notifier(tx_guard_b);
+    assert_eq!(handle_b.descriptor.node_id, node_b);
 
-    assert_eq!(guard_b.node_id, node_b);
-
-    drop(guard_a);
-    // Wait until the release of guard_a is complete
-    let release_a_result = rx_guard_a.await.unwrap();
-
-    assert!(
-      release_a_result.is_ok(),
-      "Releasing stale handle should be okay (lock already gone or owned by B)"
-    );
-
-    drop(guard_b);
-    // Wait until the release of guard_b is complete and ensure it succeeded
-    rx_guard_b.await.unwrap().unwrap();
+    // Call to `release` on the expired lock handle should return true
+    assert!(handle_a.release().await);
+    assert!(handle_b.release().await);
   }
 
   #[test_log::test(tokio::test)]
@@ -951,12 +1644,12 @@ mod tests {
     let lock_name = "test_lock_non_existent";
     let node_id = NodeId::new("node_a");
 
-    let fake_handle = LockHandle {
+    let fake_handle = LockDescriptor {
       lock_key: lock_manager.get_lock_key(lock_name),
       node_id,
     };
 
-    let result = lock_manager.release(fake_handle).await;
+    let result = lock_manager.release(&fake_handle).await;
 
     assert!(
       result.is_ok(),
@@ -982,7 +1675,9 @@ mod tests {
       let lock_manager_ = lock_manager.clone();
       let node_id = node_id.clone();
       let handle = tokio::spawn(async move {
-        lock_manager_.try_acquire(lock_name, &node_id, ttl).await
+        lock_manager_
+          .try_acquire(lock_name, &node_id, ttl, lock_manager_.clone())
+          .await
       });
       handles.push(handle);
     }
@@ -991,18 +1686,13 @@ mod tests {
 
     let mut success_count = 0;
     let mut held_count = 0;
-    let mut acquired_guard: Option<LockGuard> = None;
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let mut tx = Some(tx);
+    let mut acquired_handle: Option<LockHandle> = None;
 
     for result in results {
       match result {
-        Ok(Ok(mut guard)) => {
+        Ok(Ok(handle)) => {
           success_count += 1;
-          if let Some(tx) = tx.take() {
-            guard.set_release_notifier(tx);
-          }
-          acquired_guard = Some(guard);
+          acquired_handle = Some(handle);
         }
         Ok(Err(LockAcquireError::LockHeld(_))) => {
           held_count += 1;
@@ -1023,10 +1713,8 @@ mod tests {
       "All other nodes should fail with LockHeld"
     );
 
-    if let Some(guard) = acquired_guard {
-      drop(guard);
-      // Wait until the release is complete and ensure it succeeded
-      rx.await.unwrap().unwrap();
+    if let Some(handle) = acquired_handle {
+      assert!(handle.release().await);
     }
   }
 
@@ -1036,68 +1724,69 @@ mod tests {
 
     let lock_name = "test_lock_renewal";
     let node_id = NodeId::new("node_a");
-    let initial_ttl = Duration::from_secs(10);
-    let new_ttl = Duration::from_secs(60);
+    // Lock renewal happens every one third of the TTL i.e. 2 seconds.
+    let ttl = Duration::from_secs(6);
 
     // First acquire the lock
-    let mut guard = lock_manager
+    let handle = lock_manager
       .clone()
-      .try_acquire(lock_name, &node_id, initial_ttl)
+      .try_acquire(lock_name, &node_id, ttl, lock_manager.clone())
       .await
       .expect("Failed to acquire lock initially");
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    guard.set_release_notifier(tx);
-
     // Check lock exists
     assert!(
-      s3_object_exists(&lock_manager.s3_client, &bucket, &guard.lock_key).await,
+      s3_object_exists(
+        &lock_manager.s3_client,
+        &bucket,
+        &handle.descriptor.lock_key
+      )
+      .await,
       "Lock object should exist after acquire"
     );
 
     // Get the initial lock info to verify timestamps later
-    let initial_lock_info =
-      get_lock_info(&lock_manager.s3_client, &bucket, &guard.lock_key)
-        .await
-        .expect("Failed to get initial lock info");
+    let initial_lock_info = get_lock_info(
+      &lock_manager.s3_client,
+      &bucket,
+      &handle.descriptor.lock_key,
+    )
+    .await
+    .expect("Failed to get initial lock info");
 
-    // Sleep a bit to ensure timestamp will be different
-    sleep(Duration::from_secs(1)).await; // Increased sleep time to ensure timestamp difference
-
-    // Renew the lock with a longer TTL
-    guard.request_ttl_renewal(new_ttl);
-
-    // Wait for the renewal to complete
-    // TODO(magurotuna): introduce more reliable, less flaky way to wait for the renewal to complete
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Sleep for 5 seconds to ensure the lock will have been renewed
+    sleep(Duration::from_secs(5)).await;
 
     // Lock should still exist
     assert!(
-      s3_object_exists(&lock_manager.s3_client, &bucket, &guard.lock_key).await,
+      s3_object_exists(
+        &lock_manager.s3_client,
+        &bucket,
+        &handle.descriptor.lock_key
+      )
+      .await,
       "Lock object should still exist after renewal"
     );
 
     // Get the updated lock info
-    let renewed_lock_info =
-      get_lock_info(&lock_manager.s3_client, &bucket, &guard.lock_key)
-        .await
-        .expect("Failed to get renewed lock info");
+    let renewed_lock_info = get_lock_info(
+      &lock_manager.s3_client,
+      &bucket,
+      &handle.descriptor.lock_key,
+    )
+    .await
+    .expect("Failed to get renewed lock info");
 
     // Print timestamps for debugging
     println!("Initial timestamp: {:?}", initial_lock_info.timestamp);
     println!("Renewed timestamp: {:?}", renewed_lock_info.timestamp);
 
-    // Verify the TTL was updated
-    assert_eq!(
-      renewed_lock_info.ttl_secs,
-      new_ttl.as_secs(),
-      "TTL should be updated to the new value"
-    );
-
     // Verify the timestamp was updated (renewed)
     assert!(
       renewed_lock_info.timestamp > initial_lock_info.timestamp,
-      "Lock timestamp should be updated during renewal"
+      "Lock timestamp should be updated during renewal, but got renewed timestamp {:?} and initial timestamp {:?}",
+      renewed_lock_info.timestamp,
+      initial_lock_info.timestamp
     );
 
     // Verify the owner stayed the same
@@ -1108,12 +1797,12 @@ mod tests {
 
     // Test that another node can't renew our lock
     let different_node_id = NodeId::new("node_b");
-    let invalid_handle = LockHandle {
-      lock_key: guard.lock_key.clone(),
+    let invalid_descriptor = LockDescriptor {
+      lock_key: handle.descriptor.lock_key.clone(),
       node_id: different_node_id,
     };
 
-    match lock_manager.renew(invalid_handle, new_ttl).await {
+    match lock_manager.renew(&invalid_descriptor, ttl).await {
       Err(LockAcquireError::LockHeld(Some(info))) => {
         assert_eq!(
           info.node_id, node_id,
@@ -1123,9 +1812,7 @@ mod tests {
       other => panic!("Expected LockHeld error, got {:?}", other),
     }
 
-    // Wait until the release is complete and ensure it succeeded
-    drop(guard);
-    rx.await.unwrap().unwrap();
+    assert!(handle.release().await);
   }
 
   // Helper function to get lock info from S3

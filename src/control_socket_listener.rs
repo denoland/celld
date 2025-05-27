@@ -1,18 +1,15 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use bytes::{Buf as _, Bytes};
-use futures::future::{BoxFuture, Shared};
 use http_body_util::{combinators::BoxBody, BodyExt as _, Empty, Full};
 use pingora::{server::ShutdownWatch, services::background::BackgroundService};
 use tempfile::TempDir;
-use tokio::{
-  net::{TcpStream, UnixListener},
-  sync::broadcast::error::RecvError,
-};
+use tokio::net::{TcpStream, UnixListener};
 use tracing::{error, info};
 
 use crate::{
-  system_cell::{SystemCell, SYSTEM_CELL_ID, SYSTEM_TENANT},
+  cell_manager::{SYSTEM_CELL_ID, SYSTEM_TENANT},
+  distributed_lock::LockHandle,
   NodeState,
 };
 
@@ -34,8 +31,6 @@ impl ControlSocket {
 
 pub struct ControlSocketListener {
   pub node_state: Arc<NodeState>,
-  pub system_cell_rx:
-    Shared<BoxFuture<'static, Result<Arc<SystemCell>, RecvError>>>,
 }
 
 #[async_trait::async_trait]
@@ -48,68 +43,54 @@ impl BackgroundService for ControlSocketListener {
 
     loop {
       tokio::select! {
-          biased;
+        biased;
 
-          _ = shutdown.changed() => {
-              info!("Control socket listener shutting down");
-              break;
-          }
+        _ = shutdown.changed() => {
+          info!("Control socket listener shutting down");
+          break;
+        }
 
-          stream = listener.accept() => {
-              let stream = match stream {
-                Ok((stream, _)) => stream,
-                Err(e) => {
-                    error!(error = ?e, "Control socket listener error");
-                    continue;
-                }
-              };
+        stream = listener.accept() => {
+          let stream = match stream {
+            Ok((stream, _)) => stream,
+            Err(e) => {
+                error!(error = ?e, "Control socket listener error");
+                continue;
+            }
+          };
 
-              let io = hyper_util::rt::TokioIo::new(stream);
-              let system_cell_rx = self.system_cell_rx.clone();
-              let node_state = self.node_state.clone();
+          let io = hyper_util::rt::TokioIo::new(stream);
+          let node_state = self.node_state.clone();
 
-              let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                let system_cell_rx = system_cell_rx.clone();
-                let node_state = node_state.clone();
+          let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+            let node_state = node_state.clone();
 
-                async move {
-                  if req.uri().path() == "/_internal/alarms" {
-                    tokio::select! {
-                        biased;
-
-                        system_cell_res = system_cell_rx => {
-                          match system_cell_res {
-                            Ok(system_cell) => {
-                              locally_handle_internal_alarms(req, system_cell).await
-                            }
-                            Err(e) => {
-                              error!(error = ?e, "Control socket listener error");
-                              let res = hyper::Response::builder().status(500).body(empty())?;
-                              Ok(res)
-                            }
-                          }
-                        }
-
-                        _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
-                          // Forward to the owner of the system cell
-                          let system_cell_owner = node_state.peer_manager.get_owner_peer(SYSTEM_TENANT, SYSTEM_CELL_ID);
-                          send_alarm_to_system_cell_owner(system_cell_owner, req).await
-                        }
-                    }
-                  } else {
-                    // Paths other than /_internal/alarms are not supported now
-                    let res = hyper::Response::builder().status(404).body(empty())?;
-                    Ok(res)
+            async move {
+              if req.uri().path() == "/_internal/alarms" {
+                match node_state.cell_manager.get_system_main_cell().await {
+                  Some(system_main_cell_handle) => {
+                    locally_handle_internal_alarms(req, system_main_cell_handle).await
+                  }
+                  None => {
+                    // Forward to the owner of the system main cell
+                    let system_main_cell_owner = node_state.peer_manager.get_owner_peer(SYSTEM_TENANT, SYSTEM_CELL_ID);
+                    send_alarm_to_system_main_cell_owner(system_main_cell_owner, req).await
                   }
                 }
-              });
+              } else {
+                // Paths other than /_internal/alarms are not supported now
+                let res = hyper::Response::builder().status(404).body(empty())?;
+                Ok(res)
+              }
+            }
+          });
 
-              tokio::spawn(async move {
-                  if let Err(err) = hyper::server::conn::http1::Builder::new().serve_connection(io, svc).await {
-                    error!(error = ?err, "Control socket listener error");
-                  }
-              });
-          }
+          tokio::spawn(async move {
+            if let Err(err) = hyper::server::conn::http1::Builder::new().serve_connection(io, svc).await {
+              error!(error = ?err, "Control socket listener error");
+            }
+          });
+        }
       }
     }
 
@@ -119,7 +100,7 @@ impl BackgroundService for ControlSocketListener {
 
 pub async fn locally_handle_internal_alarms<B, E>(
   req: hyper::Request<B>,
-  system_cell: Arc<SystemCell>,
+  system_main_cell_handle: LockHandle,
 ) -> anyhow::Result<hyper::Response<BoxBody<Bytes, hyper::Error>>>
 where
   B: hyper::body::Body<Error = E>,
@@ -176,12 +157,15 @@ where
           return Ok(res);
         }
       };
-      let alarm = match system_cell
-        .alarm_processor()
-        .get(data.tenant, data.cell_id)
+      let alarm = match system_main_cell_handle
+        .get_alarm(&data.tenant, &data.cell_id)
         .await
       {
-        Ok(alarm) => alarm,
+        Ok(Some(alarm)) => alarm,
+        Ok(None) => {
+          let res = hyper::Response::builder().status(404).body(empty())?;
+          return Ok(res);
+        }
         Err(e) => {
           error!(error = ?e, "Failed to get alarm");
           let res = hyper::Response::builder()
@@ -207,9 +191,8 @@ where
             return Ok(res);
           }
         };
-      if let Err(e) = system_cell
-        .alarm_processor()
-        .delete(data.tenant, data.cell_id)
+      if let Err(e) = system_main_cell_handle
+        .delete_alarm(&data.tenant, &data.cell_id)
         .await
       {
         error!(error = ?e, "Failed to delete alarm");
@@ -229,9 +212,8 @@ where
             return Ok(res);
           }
         };
-      if let Err(e) = system_cell
-        .alarm_processor()
-        .set(data.tenant, data.cell_id, data.scheduled_time_unix_ms)
+      if let Err(e) = system_main_cell_handle
+        .set_alarm(&data.tenant, &data.cell_id, data.scheduled_time_unix_ms)
         .await
       {
         error!(error = ?e, "Failed to set alarm");
@@ -248,23 +230,24 @@ where
   }
 }
 
-async fn send_alarm_to_system_cell_owner(
-  system_cell_owner: SocketAddr,
+async fn send_alarm_to_system_main_cell_owner(
+  system_main_cell_owner: SocketAddr,
   req: hyper::Request<hyper::body::Incoming>,
 ) -> anyhow::Result<hyper::Response<BoxBody<Bytes, hyper::Error>>> {
   // TODO(magurotuna): Can we have a better way to get internal address?
-  let system_cell_owner_internal_addr = {
-    let mut a = system_cell_owner;
-    a.set_port(system_cell_owner.port() + 1);
+  let system_main_cell_owner_internal_addr = {
+    let mut a = system_main_cell_owner;
+    a.set_port(system_main_cell_owner.port() + 1);
     a
   };
-  let tcp_stream = TcpStream::connect(system_cell_owner_internal_addr).await?;
+  let tcp_stream =
+    TcpStream::connect(system_main_cell_owner_internal_addr).await?;
   let io = hyper_util::rt::TokioIo::new(tcp_stream);
   let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
 
   tokio::spawn(async move {
     if let Err(e) = conn.await {
-      error!(error = ?e, ?system_cell_owner, "Failed to send alarm to system cell owner");
+      error!(error = ?e, ?system_main_cell_owner, "Failed to send alarm to system main cell owner");
     }
   });
 

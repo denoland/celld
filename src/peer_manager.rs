@@ -1,6 +1,32 @@
 use crate::cluster_membership::{NodeId, NodeInfo};
-use hashring::HashRing;
+use siphasher::sip::SipHasher;
 use std::{net::SocketAddr, sync::RwLock};
+
+type HashRing<T> = hashring::HashRing<T, HashBuilderWrapper>;
+
+enum HashBuilderWrapper {
+  Default(hashring::DefaultHashBuilder),
+  Seeded(SipHasherKeys),
+}
+
+impl std::hash::BuildHasher for HashBuilderWrapper {
+  type Hasher = SipHasher;
+
+  fn build_hasher(&self) -> Self::Hasher {
+    match self {
+      HashBuilderWrapper::Default(builder) => builder.build_hasher(),
+      HashBuilderWrapper::Seeded(keys) => {
+        SipHasher::new_with_keys(keys.key0, keys.key1)
+      }
+    }
+  }
+}
+
+#[derive(Clone, Debug)]
+struct SipHasherKeys {
+  key0: u64,
+  key1: u64,
+}
 
 // A separate struct to hold the state that will be updated via RwLock
 struct PeerManagerState {
@@ -12,14 +38,31 @@ pub struct PeerManager {
   state: RwLock<PeerManagerState>,
   self_node_id: NodeId,
   self_advertise_addr: SocketAddr,
+  hashring_seed: Option<u64>,
 }
 
 impl PeerManager {
-  /// Create a new PeerManager with the given node_id and advertise_addr
-  /// This creates a peer manager with just the local node initially
-  pub fn new(self_advertise_addr: SocketAddr, self_node_id: NodeId) -> Self {
+  /// Create a new HashRing, optionally using a seeded hasher for deterministic
+  /// behavior (primarily for testing)
+  fn create_hash_ring(seed: Option<u64>) -> HashRing<SocketAddr> {
+    let builder = match seed {
+      Some(seed) => HashBuilderWrapper::Seeded(SipHasherKeys {
+        key0: seed,
+        key1: 42, // arbitrarily chosen value
+      }),
+      None => HashBuilderWrapper::Default(hashring::DefaultHashBuilder),
+    };
+    HashRing::with_hasher(builder)
+  }
+
+  /// Create a new PeerManager with an optional seed for deterministic hashing
+  pub fn new(
+    self_advertise_addr: SocketAddr,
+    self_node_id: NodeId,
+    hashring_seed: Option<u64>,
+  ) -> Self {
     // Initialize with just the local node
-    let mut ring = HashRing::new();
+    let mut ring = Self::create_hash_ring(hashring_seed);
     ring.add(self_advertise_addr);
 
     let self_node = NodeInfo {
@@ -37,6 +80,7 @@ impl PeerManager {
       state: RwLock::new(initial_state),
       self_node_id,
       self_advertise_addr,
+      hashring_seed,
     }
   }
 
@@ -45,7 +89,7 @@ impl PeerManager {
   pub fn update_peers(&self, active_peers: Vec<NodeInfo>) {
     let mut state = self.state.write().unwrap();
     state.peers = active_peers;
-    let mut new_ring = HashRing::new();
+    let mut new_ring = Self::create_hash_ring(self.hashring_seed);
     for peer in &state.peers {
       new_ring.add(peer.advertise_addr);
     }
@@ -95,8 +139,8 @@ impl PeerManager {
       for addr in potential_owners {
         // Filter out any nodes that are no longer considered active
         if self.is_peer_active(addr) {
-          owners.push(addr); // Clone the address string
-                             // Stop once we have enough active owners
+          owners.push(addr);
+          // Stop once we have enough active owners
           if owners.len() >= MAX_OWNERS {
             break;
           }

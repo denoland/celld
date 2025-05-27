@@ -2,26 +2,22 @@ mod active_connections;
 mod alarm_processor;
 mod alarm_scheduler;
 mod benchmark_deno_startup;
+mod cell_manager;
 mod child_on_parent_exit;
 mod cluster_membership;
 mod config;
 mod control_socket_listener;
 mod distributed_lock;
 mod heartbeat_service;
-mod lock_guard_ttl_updater;
 mod node_state;
 mod peer_manager;
-mod process_manager;
 mod process_reaper;
 mod router;
 mod sqlite_replica;
-mod system_cell;
-mod system_cell_takeover;
 #[cfg(test)]
 pub mod test_utils;
 
 use clap::{Arg, Command};
-use futures::FutureExt as _;
 use pingora::prelude::*;
 use pingora::server::configuration::ServerConf;
 use pingora::services::background::background_service;
@@ -168,15 +164,9 @@ fn start_server(config: config::Config) -> Server {
   // Configure the proxy service to listen on the specified address
   proxy_service.add_tcp(&node_state.config.listen_addr.to_string());
 
-  let (system_cell_broadcast, mut system_cell_rx) =
-    tokio::sync::broadcast::channel(1);
-  let system_cell_rx = async move { system_cell_rx.recv().await }.boxed();
-  let system_cell_rx = system_cell_rx.shared();
-
   // Create the internal API handler
   let internal_api = InternalAPI {
     node_state: node_state.clone(),
-    system_cell_rx: system_cell_rx.clone(),
   };
 
   // Create an HTTP service for the internal API
@@ -194,46 +184,12 @@ fn start_server(config: config::Config) -> Server {
     ),
   ));
 
-  server.add_service(background_service(
-    "process_guard_lock_ttl_updater",
-    lock_guard_ttl_updater::LockGuardTTLUpdater {
-      interval: node_state.config.lock_guard_ttl / 3,
-      process_manager: node_state.process_manager.clone(),
-      ttl: node_state.config.lock_guard_ttl,
-    },
-  ));
-
   // Add a background service for S3 heartbeat and peer discovery
   server.add_service(background_service(
     "s3_heartbeat",
     heartbeat_service::HeartbeatService {
-      cluster_membership: node_state.cluster_membership.clone(),
-      peer_manager: node_state.peer_manager.clone(),
+      node_state: node_state.clone(),
       interval: node_state.config.heartbeat_interval,
-    },
-  ));
-
-  // Add a background service for system cell takeover
-  server.add_service(background_service(
-    "system_cell_takeover",
-    system_cell_takeover::SystemCellTakeover {
-      interval: node_state.config.system_cell_takeover_interval,
-      broadcast: system_cell_broadcast,
-      lock_manager: node_state.distributed_lock.clone(),
-      node_id: node_state.peer_manager.get_local_node_id().clone(),
-      system_cell_factory: {
-        let node_state = node_state.clone();
-        Box::new(move |lock_guard| {
-          let node_state = node_state.clone();
-          async move {
-            let system_cell =
-              system_cell::SystemCell::new(node_state.clone(), lock_guard)
-                .await?;
-            Ok(Arc::new(system_cell))
-          }
-          .boxed()
-        })
-      },
     },
   ));
 
@@ -242,7 +198,6 @@ fn start_server(config: config::Config) -> Server {
     "alarm_scheduler",
     alarm_scheduler::AlarmScheduler {
       node_state: node_state.clone(),
-      system_cell_rx: system_cell_rx.clone(),
       interval: node_state.config.alarm_scheduler_interval,
     },
   ));
@@ -252,7 +207,6 @@ fn start_server(config: config::Config) -> Server {
     "control_socket_listener",
     control_socket_listener::ControlSocketListener {
       node_state: node_state.clone(),
-      system_cell_rx: system_cell_rx.clone(),
     },
   ));
 

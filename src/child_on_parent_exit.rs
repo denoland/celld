@@ -106,7 +106,6 @@ impl ChildOnParentExit {
   }
 
   /// Close the pipe (triggering kill on macOS) and wait for the watcher.
-  #[allow(dead_code)]
   pub fn wait(mut self) {
     if let Some(w) = self.death_pipe_w.take() {
       drop(w); // Close the pipe by dropping OwnedFd

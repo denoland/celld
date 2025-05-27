@@ -1,18 +1,15 @@
-use futures::future::{BoxFuture, Shared};
 use http_body_util::BodyExt;
 use pingora::http::StatusCode;
 use pingora::prelude::*;
 use pingora::upstreams::peer::HttpPeer;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, error, info};
 
 use crate::alarm_processor::{dispatch_alarm_locally, Alarm};
+use crate::cell_manager::{CellKey, CellManagerError};
 use crate::control_socket_listener::locally_handle_internal_alarms;
 use crate::node_state::NodeState;
-use crate::process_manager::{ProcessKey, ProcessManagerError};
-use crate::system_cell::SystemCell;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
@@ -31,44 +28,30 @@ pub struct Proxy {
 
 pub struct InternalAPI {
   pub node_state: Arc<NodeState>,
-  pub system_cell_rx:
-    Shared<BoxFuture<'static, Result<Arc<SystemCell>, RecvError>>>,
 }
 
 #[derive(Debug, Default)]
 pub struct Ctx {
   pub tenant: String,
   pub cell_id: Option<String>,
-  pub process_key: Option<ProcessKey>,
+  pub cell_key: Option<CellKey>,
 }
 
-pub struct InternalCtx {
-  system_cell_rx:
-    Shared<BoxFuture<'static, Result<Arc<SystemCell>, RecvError>>>,
-}
-
-impl std::fmt::Debug for InternalCtx {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    f.debug_struct("InternalCtx")
-      .field("system_cell_subscription", &"...")
-      .finish()
-  }
-}
+#[derive(Debug)]
+pub struct InternalCtx {}
 
 #[async_trait::async_trait]
 impl ProxyHttp for InternalAPI {
   type CTX = InternalCtx;
 
   fn new_ctx(&self) -> Self::CTX {
-    InternalCtx {
-      system_cell_rx: self.system_cell_rx.clone(),
-    }
+    InternalCtx {}
   }
 
   async fn request_filter(
     &self,
     session: &mut Session,
-    ctx: &mut Self::CTX,
+    _ctx: &mut Self::CTX,
   ) -> Result<bool> {
     let req_header = session.req_header();
 
@@ -187,34 +170,18 @@ impl ProxyHttp for InternalAPI {
 
     // Handle the alarms endpoint
     if path.starts_with("/_internal/alarms") {
-      let system_cell = tokio::select! {
-        system_cell_res = ctx.system_cell_rx.clone() => {
-          match system_cell_res {
-            Ok(system_cell) => system_cell,
-            Err(e) => {
-              error!(error = ?e, "Error receiving system cell");
-              let resp = pingora::http::ResponseHeader::build(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Some(0),
-              )
-              .unwrap();
-              session.set_keepalive(None);
-              session.write_response_header(Box::new(resp), true).await?;
-              return Ok(true);
-            }
-          }
-        }
-
-        _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
-          error!("Timeout waiting for system cell; most likely the system cell is running on another node");
-          let resp = pingora::http::ResponseHeader::build(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Some(0),
-          ).unwrap();
-          session.set_keepalive(None);
-          session.write_response_header(Box::new(resp), true).await?;
-          return Ok(true);
-        }
+      let Some(system_main_cell_handle) =
+        self.node_state.cell_manager.get_system_main_cell().await
+      else {
+        error!("System main cell not found; most likely the system main cell is running on another node");
+        let resp = pingora::http::ResponseHeader::build(
+          StatusCode::INTERNAL_SERVER_ERROR,
+          Some(0),
+        )
+        .unwrap();
+        session.set_keepalive(None);
+        session.write_response_header(Box::new(resp), true).await?;
+        return Ok(true);
       };
 
       let parts = session.req_header().as_ref().clone();
@@ -225,7 +192,7 @@ impl ProxyHttp for InternalAPI {
         .unwrap_or_else(|| http_body_util::Empty::new().boxed());
       let req = hyper::Request::from_parts(parts, req_body);
 
-      match locally_handle_internal_alarms(req, system_cell).await {
+      match locally_handle_internal_alarms(req, system_main_cell_handle).await {
         Ok(res) => {
           let (parts, body) = res.into_parts();
           session
@@ -359,10 +326,10 @@ impl ProxyHttp for Proxy {
     _e: Option<&pingora::Error>,
     ctx: &mut Self::CTX,
   ) {
-    if let Some(process_key) = &ctx.process_key {
+    if let Some(process_key) = &ctx.cell_key {
       let _ = self
         .node_state
-        .process_manager
+        .cell_manager
         .decrement_connection_count(process_key)
         .await;
     }
@@ -406,7 +373,7 @@ impl ProxyHttp for Proxy {
       }
 
       // Check if tenant directory exists, fall back to "default" if not
-      let tenant_dir = self.node_state.process_manager.data_dir.join(&tenant);
+      let tenant_dir = self.node_state.cell_manager.data_dir.join(&tenant);
       if !tenant_dir.exists() {
         tenant = "default".to_string();
       }
@@ -483,18 +450,18 @@ impl ProxyHttp for Proxy {
     };
 
     // Construct the file path
-    let static_dir =
-      if let Some(ref single_tenant) = self.node_state.config.single_tenant {
-        // In single-tenant mode, use the specified static directory or fall back to current dir
-        single_tenant.static_dir.clone().unwrap_or_else(|| {
-          std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-        })
-      } else {
-        // In multi-tenant mode, use the standard path structure
-        let tenant_dir =
-          self.node_state.process_manager.data_dir.join(&ctx.tenant);
-        tenant_dir.join("static")
-      };
+    let static_dir = if let Some(ref single_tenant) =
+      self.node_state.config.single_tenant
+    {
+      // In single-tenant mode, use the specified static directory or fall back to current dir
+      single_tenant.static_dir.clone().unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+      })
+    } else {
+      // In multi-tenant mode, use the standard path structure
+      let tenant_dir = self.node_state.cell_manager.data_dir.join(&ctx.tenant);
+      tenant_dir.join("static")
+    };
     let file_path = static_dir.join(&rel_path_);
 
     // Try to read the file
@@ -631,8 +598,8 @@ impl ProxyHttp for Proxy {
     for _ in 0..RETRY_COUNT {
       match self
         .node_state
-        .process_manager
-        .get_or_spawn_process(&ctx.tenant, cell_id, self.node_state.clone())
+        .cell_manager
+        .get_or_spawn_normal_cell(&ctx.tenant, cell_id, self.node_state.clone())
         .await
       {
         Ok((path, _stream, process_key)) => {
@@ -640,38 +607,39 @@ impl ProxyHttp for Proxy {
           // Increment active connection count
           self
             .node_state
-            .process_manager
+            .cell_manager
             .increment_connection_count(&process_key)
             .await;
-          ctx.process_key = Some(process_key);
+          ctx.cell_key = Some(process_key);
           socket_path = Some(path);
           break;
         }
-        Err(ProcessManagerError::ProcessCreationInProgress) => {
+        Err(CellManagerError::CellCreationInProgress) => {
           info!(
             node_id = ?self.node_state.node_id,
-            "Lock is held by this node, meaning a deno process creation is already in progress. Retry in {:?}",
+            "Lock is held by this node, meaning a cell creation is already in progress. Retry in {:?}",
             RETRY_INTERVAL
           );
           tokio::time::sleep(RETRY_INTERVAL).await;
           continue;
         }
-        Err(error @ ProcessManagerError::LockContention) => {
+        Err(error @ CellManagerError::LockContention(_)) => {
           debug!(
+            ?error,
             "Lock is held by another node that is responsible for this cell"
           );
           // TODO: forward the request to the lock holder?
           return Err(error.into());
         }
-        Err(error @ ProcessManagerError::S3(_)) => {
+        Err(error @ CellManagerError::S3(_)) => {
           debug!(?error, "S3 operation failed");
           return Err(error.into());
         }
-        Err(error @ ProcessManagerError::Serde(_)) => {
+        Err(error @ CellManagerError::Serde(_)) => {
           debug!(?error, "Failed to serialize or deserialize lock data");
           return Err(error.into());
         }
-        Err(error @ ProcessManagerError::Internal(_)) => {
+        Err(error @ CellManagerError::Internal(_)) => {
           error!(?error, "Error getting or spawning process");
           return Err(error.into());
         }

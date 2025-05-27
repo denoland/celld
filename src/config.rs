@@ -40,10 +40,14 @@ pub struct Config {
   /// For example, if the value is 30 seconds, the lock guard will be renewed
   /// every 10 seconds.
   pub lock_guard_ttl: Duration,
-  /// Interval for system cell takeover
-  pub system_cell_takeover_interval: Duration,
   /// Interval for alarm scheduler
   pub alarm_scheduler_interval: Duration,
+  /// Seed for deterministic hash ring (for testing)
+  pub hashring_seed: Option<u64>,
+  /// Number of retries for system main cell spawning
+  pub system_main_cell_spawn_retries: u32,
+  /// Delay between retries for system main cell spawning
+  pub system_main_cell_retry_delay: Duration,
   /// Single tenant mode configuration
   pub single_tenant: Option<SingleTenantConfig>,
 }
@@ -172,14 +176,6 @@ impl Config {
       .unwrap_or(30);
     let lock_guard_ttl = Duration::from_secs(lock_guard_ttl_secs);
 
-    let system_cell_takeover_interval_secs =
-      var("CELL_SYSTEM_CELL_TAKEOVER_INTERVAL_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(10);
-    let system_cell_takeover_interval =
-      Duration::from_secs(system_cell_takeover_interval_secs);
-
     let alarm_scheduler_interval_secs =
       var("CELL_ALARM_SCHEDULER_INTERVAL_SECS")
         .ok()
@@ -201,6 +197,26 @@ impl Config {
       .or_else(|_| var("AWS_SECRET_ACCESS_KEY"))
       .ok();
 
+    // Get optional hashring seed for deterministic hashing (primarily for testing)
+    let hashring_seed = var("CELL_HASHRING_SEED")
+      .ok()
+      .and_then(|s| s.parse::<u64>().ok());
+
+    // Get system main cell spawn retry configuration
+    let system_main_cell_spawn_retries =
+      var("CELLD_SYSTEM_MAIN_CELL_SPAWN_RETRIES")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(10);
+
+    let system_main_cell_retry_delay_ms =
+      var("CELLD_SYSTEM_MAIN_CELL_RETRY_DELAY_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(100);
+    let system_main_cell_retry_delay =
+      Duration::from_millis(system_main_cell_retry_delay_ms);
+
     Ok(Config {
       listen_addr,
       advertise_addr,
@@ -209,7 +225,6 @@ impl Config {
       heartbeat_interval,
       staleness_threshold,
       lock_guard_ttl,
-      system_cell_takeover_interval,
       alarm_scheduler_interval,
       s3_endpoint,
       s3_bucket,
@@ -217,6 +232,9 @@ impl Config {
       s3_path,
       s3_access_key_id,
       s3_secret_access_key,
+      hashring_seed,
+      system_main_cell_spawn_retries,
+      system_main_cell_retry_delay,
       single_tenant: None,
     })
   }

@@ -1,17 +1,14 @@
-use crate::{system_cell::SystemCell, NodeState};
+use crate::node_state::NodeState;
+
 use chrono::Utc;
-use futures::future::{BoxFuture, Shared};
 use pingora::server::ShutdownWatch;
 use pingora::services::background::BackgroundService;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::broadcast::error::RecvError;
 use tracing::{error, info};
 
 pub struct AlarmScheduler {
   pub node_state: Arc<NodeState>,
-  pub system_cell_rx:
-    Shared<BoxFuture<'static, Result<Arc<SystemCell>, RecvError>>>,
   pub interval: Duration,
 }
 
@@ -23,29 +20,24 @@ impl BackgroundService for AlarmScheduler {
       self.interval
     );
 
-    let system_cell = tokio::select! {
-      _ = shutdown.changed() => {
-        info!("Alarm scheduler received shutdown signal before receiving system cell");
-        return;
-      }
-      system_cell = self.system_cell_rx.clone() => {
-        system_cell.unwrap()
-      }
-    };
-
     let mut interval = tokio::time::interval(self.interval);
 
     loop {
       tokio::select! {
-          _ = shutdown.changed() => {
-              info!("Alarm scheduler received shutdown signal after receiving system cell");
-              break;
+        _ = shutdown.changed() => {
+            info!("Alarm scheduler received shutdown signal");
+            break;
+        }
+        _ = interval.tick() => {
+          let Some(system_main_cell_handle) = self.node_state.cell_manager.get_system_main_cell().await else {
+            // System main cell not found, indicating that its owner is not self now.
+            continue;
+          };
+
+          if let Err(e) = system_main_cell_handle.dispatch_alarms(self.node_state.clone(), Utc::now(), 100).await {
+            error!(error = ?e, "Error dispatching due alarms");
           }
-          _ = interval.tick() => {
-            if let Err(e) = system_cell.alarm_processor().dispatch(self.node_state.clone(), Utc::now(), 100).await {
-              error!(error = ?e, "Error dispatching due alarms");
-            }
-          }
+        }
       }
     }
 

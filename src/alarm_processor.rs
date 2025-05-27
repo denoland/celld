@@ -50,8 +50,12 @@ pub enum AlarmProcessRequest {
     limit: u32,
     response: tokio::sync::oneshot::Sender<Result<(), AlarmError>>,
   },
+  Shutdown {
+    response: tokio::sync::oneshot::Sender<()>,
+  },
 }
 
+#[derive(Debug)]
 pub struct AlarmProcessor {
   _handle: std::thread::JoinHandle<()>,
   request_tx: tokio::sync::mpsc::Sender<AlarmProcessRequest>,
@@ -135,6 +139,10 @@ impl AlarmProcessor {
               )
               .await;
               let _ = response.send(res);
+            }
+            AlarmProcessRequest::Shutdown { response } => {
+              let _ = response.send(());
+              break;
             }
           }
         }
@@ -225,6 +233,19 @@ impl AlarmProcessor {
       .await?;
     res_rx.await?
   }
+
+  /// Shutdown the alarm processor.
+  /// This will resolve when the alarm processor has finished processing all
+  /// requests.
+  pub async fn shutdown(self) -> Result<(), AlarmError> {
+    let (res_tx, res_rx) = tokio::sync::oneshot::channel();
+    self
+      .request_tx
+      .send(AlarmProcessRequest::Shutdown { response: res_tx })
+      .await?;
+    res_rx.await?;
+    Ok(())
+  }
 }
 
 fn get_alarm(
@@ -286,8 +307,8 @@ pub async fn dispatch_alarm_locally(
   node_state: Arc<NodeState>,
 ) -> anyhow::Result<Alarm> {
   let (_sock_path, stream, _process_key) = node_state
-    .process_manager
-    .get_or_spawn_process(&alarm.tenant, &alarm.cell_id, node_state.clone())
+    .cell_manager
+    .get_or_spawn_normal_cell(&alarm.tenant, &alarm.cell_id, node_state.clone())
     .await?;
 
   let io = hyper_util::rt::TokioIo::new(stream);
@@ -341,7 +362,7 @@ async fn dispatch_alarm_remotely(
 
   tokio::spawn(async move {
     if let Err(e) = conn.await {
-      error!(%cell_owner, error = ?e, "Failed to send alarm to system cell owner");
+      error!(%cell_owner, error = ?e, "Failed to send alarm to system main cell owner");
     }
   });
 

@@ -26,8 +26,10 @@ pub async fn run(iterations: usize) -> Result<()> {
         heartbeat_interval: Duration::from_secs(30),
         staleness_threshold: Duration::from_secs(90),
         lock_guard_ttl: Duration::from_secs(30),
-        system_cell_takeover_interval: Duration::from_secs(10),
         alarm_scheduler_interval: Duration::from_secs(5),
+        hashring_seed: None,
+        system_main_cell_spawn_retries: 10,
+        system_main_cell_retry_delay: Duration::from_millis(100),
         single_tenant: None,
       }
     }
@@ -56,8 +58,8 @@ pub async fn run(iterations: usize) -> Result<()> {
     let start = Instant::now();
 
     let (_socket_path, _stream, _process_key) = node_state
-      .process_manager
-      .get_or_spawn_process(host, &cell_id, node_state.clone())
+      .cell_manager
+      .get_or_spawn_normal_cell(host, &cell_id, node_state.clone())
       .await?;
     let elapsed = start.elapsed();
 
@@ -98,7 +100,7 @@ pub async fn run(iterations: usize) -> Result<()> {
     println!("p99: {} ms", p99.as_millis());
   }
 
-  node_state.process_manager.terminate_all().await;
+  node_state.cell_manager.terminate_all().await;
 
   Ok(())
 }

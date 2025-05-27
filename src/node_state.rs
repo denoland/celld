@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
+use crate::cell_manager::CellManager;
 use crate::cluster_membership::{
   ClusterMembership, NodeId, S3ClusterMembership, StandaloneClusterMembership,
 };
@@ -11,7 +12,6 @@ use crate::distributed_lock::{
   DistributedLock, S3DistributedLock, StandaloneDistributedLock,
 };
 use crate::peer_manager::PeerManager;
-use crate::process_manager::ProcessManager;
 
 /// Represents the global state shared across the application.
 ///
@@ -21,8 +21,8 @@ pub struct NodeState {
   /// Unique identifier for the node
   pub node_id: NodeId,
 
-  /// Manager for Deno processes running in the system
-  pub process_manager: Arc<ProcessManager>,
+  /// Manager for cells running in the system
+  pub cell_manager: Arc<CellManager>,
 
   /// Manager for peer node information and coordination
   pub peer_manager: Arc<PeerManager>,
@@ -45,8 +45,8 @@ impl NodeState {
     let control_socket = ControlSocket::new();
 
     // Create the process manager with the configured data directory
-    let process_manager =
-      ProcessManager::new(config.data_dir.clone(), &control_socket);
+    let cell_manager =
+      CellManager::new(config.data_dir.clone(), &control_socket);
 
     // Generate a unique node ID (UUID) for this instance
     let node_id = NodeId::new_uuid_v4();
@@ -170,7 +170,11 @@ impl NodeState {
     };
 
     // Create peer manager with only local node
-    let peer_manager = PeerManager::new(config.advertise_addr, node_id.clone());
+    let peer_manager = PeerManager::new(
+      config.advertise_addr,
+      node_id.clone(),
+      config.hashring_seed,
+    );
     debug!("Peer manager initialized in standalone mode");
 
     // Create config Arc for NodeState
@@ -179,7 +183,7 @@ impl NodeState {
     // Create NodeState container with cluster membership if available
     let node_state = Arc::new(NodeState {
       node_id,
-      process_manager: Arc::new(process_manager),
+      cell_manager: Arc::new(cell_manager),
       peer_manager: Arc::new(peer_manager),
       cluster_membership,
       distributed_lock,
@@ -194,17 +198,18 @@ impl NodeState {
   pub fn new_for_benchmark(config: config::Config) -> Arc<Self> {
     let data_dir = PathBuf::from("./data");
     let control_socket = ControlSocket::new();
-    let process_manager = ProcessManager::new(data_dir, &control_socket);
+    let cell_manager = CellManager::new(data_dir, &control_socket);
 
     let addr = "127.0.0.1:8000".parse().unwrap();
     let node_id = NodeId::new("benchmark-node");
 
     // Create minimal peer manager and node_state for benchmark
-    let peer_manager = PeerManager::new(addr, node_id.clone());
+    let peer_manager =
+      PeerManager::new(addr, node_id.clone(), config.hashring_seed);
 
     Arc::new(NodeState {
       node_id: node_id.clone(),
-      process_manager: Arc::new(process_manager),
+      cell_manager: Arc::new(cell_manager),
       peer_manager: Arc::new(peer_manager),
       cluster_membership: Arc::new(StandaloneClusterMembership::new(
         node_id, addr,
