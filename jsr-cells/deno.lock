@@ -1,0 +1,27 @@
+{
+  "version": "5",
+  "specifiers": {
+    "jsr:@std/testing@*": "1.0.9",
+    "jsr:@std/testing@1.0.13": "1.0.13",
+    "npm:@types/node@*": "22.14.1"
+  },
+  "jsr": {
+    "@std/testing@1.0.9": {
+      "integrity": "9bdd4ac07cb13e7594ac30e90f6ceef7254ac83a9aeaa089be0008f33aab5cd4"
+    },
+    "@std/testing@1.0.13": {
+      "integrity": "74418be16f627dfe996937ab0ffbdbda9c1f35534b78724658d981492f121e71"
+    }
+  },
+  "npm": {
+    "@types/node@22.14.1": {
+      "integrity": "sha512-u0HuPQwe/dHrItgHHpmw3N2fYCR6x4ivMNbPHRkBVP4CvN+kiRrKHWk3i8tXiO/joPwXLMYvF9TTF0eqgHIuOw==",
+      "dependencies": [
+        "undici-types"
+      ]
+    },
+    "undici-types@6.21.0": {
+      "integrity": "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ=="
+    }
+  }
+}
