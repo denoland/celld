@@ -136,8 +136,7 @@ impl NodeState {
 
           let s3_client = aws_sdk_s3::Client::from_conf(cfg);
 
-          // Create lock prefix (locks/restore/ by default)
-          let lock_prefix = s3_config.subpath("locks/restore");
+          let lock_prefix = s3_config.subpath("locks");
 
           // Create the distributed lock manager
           info!(

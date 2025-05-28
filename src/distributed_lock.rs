@@ -919,9 +919,6 @@ impl S3DistributedLock {
     if !prefix.is_empty() && !prefix.ends_with('/') {
       prefix.push('/');
     }
-    if prefix.is_empty() {
-      prefix = "cluster_state/locks/restore/".to_string();
-    }
     Self {
       s3_client,
       bucket,
@@ -930,8 +927,17 @@ impl S3DistributedLock {
   }
 
   fn get_lock_key(&self, lock_name: &str) -> String {
-    let hash = Sha256::digest(lock_name.as_bytes());
-    format!("{}{:x}.lock", self.prefix, hash)
+    assert!(self.prefix.ends_with('/'));
+    assert!(!lock_name.is_empty(), "Lock name must not be empty");
+    // Check that lock_name is valid string for S3 key
+    fn is_safe_s3_key_char(c: char) -> bool {
+      c.is_ascii_alphanumeric() || "-._~/".contains(c)
+    }
+    assert!(
+      lock_name.chars().all(is_safe_s3_key_char),
+      "Lock name '{lock_name}' contains invalid characters"
+    );
+    format!("{}{}.lock", self.prefix, lock_name)
   }
 }
 
