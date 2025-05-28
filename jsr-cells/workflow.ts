@@ -18,6 +18,7 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
         created_at TEXT NOT NULL DEFAULT (datetime('now', 'utc'))
       );
     `);
+
     cell.db.exec(`
       CREATE TABLE IF NOT EXISTS workflow_runs (
         id TEXT PRIMARY KEY NOT NULL,
