@@ -3,14 +3,24 @@
   "specifiers": {
     "jsr:@std/testing@*": "1.0.9",
     "jsr:@std/testing@1.0.13": "1.0.13",
+    "jsr:@std/ulid@1.0.0": "1.0.0",
     "npm:@types/node@*": "22.14.1"
   },
   "jsr": {
+    "@std/assert@1.0.13": {
+      "integrity": "ae0d31e41919b12c656c742b22522c32fb26ed0cba32975cb0de2a273cb68b29"
+    },
+    "@std/internal@1.0.8": {
+      "integrity": "fc66e846d8d38a47cffd274d80d2ca3f0de71040f855783724bb6b87f60891f5"
+    },
     "@std/testing@1.0.9": {
       "integrity": "9bdd4ac07cb13e7594ac30e90f6ceef7254ac83a9aeaa089be0008f33aab5cd4"
     },
     "@std/testing@1.0.13": {
       "integrity": "74418be16f627dfe996937ab0ffbdbda9c1f35534b78724658d981492f121e71"
+    },
+    "@std/ulid@1.0.0": {
+      "integrity": "d41c3d27a907714413649fee864b7cde8d42ee68437d22b79d5de4f81d808780"
     }
   },
   "npm": {

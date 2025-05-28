@@ -1,9 +1,153 @@
+import { cell } from "./cell.ts";
+import { ulid } from "jsr:@std/ulid@1.0.0";
+import { assert } from "jsr:@std/assert@1.0.13";
+
 export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
+  #handlers: {
+    [K in keyof WorkflowInputs]?: WorkflowDefinition<
+      WorkflowInputs,
+      K
+    >["handler"];
+  } = {};
+
+  constructor() {
+    // Create tables if not exist yet
+    cell.db.exec(`
+      CREATE TABLE IF NOT EXISTS workflows (
+        name TEXT PRIMARY KEY NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now', 'utc'))
+      );
+    `);
+    cell.db.exec(`
+      CREATE TABLE IF NOT EXISTS workflow_runs (
+        id TEXT PRIMARY KEY NOT NULL,
+        workflow_name TEXT NOT NULL REFERENCES workflows(name) ON DELETE CASCADE,
+        input_data TEXT NOT NULL,
+        dispatched_at TEXT NOT NULL DEFAULT (datetime('now', 'utc'))
+        completed_at TEXT
+      );
+    `);
+
+    cell.db.exec(`
+      CREATE TABLE IF NOT EXISTS workflow_steps (
+        workflow_run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        index INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        output_data TEXT NOT NULL,
+        completed_at TEXT NOT NULL DEFAULT (datetime('now', 'utc')),
+        UNIQUE(workflow_run_id, index)
+      );
+    `);
+  }
+
   define<WorkflowName extends keyof WorkflowInputs>(
     definition: WorkflowDefinition<WorkflowInputs, WorkflowName>,
   ) {
-    // TODO
+    cell.db.prepare(
+      `INSERT OR IGNORE INTO workflows (name) VALUES (?)`,
+    ).run(definition.name.toString());
+    this.#handlers[definition.name] = definition.handler;
   }
+
+  dispatch<WorkflowName extends keyof WorkflowInputs>(
+    workflowName: WorkflowName,
+    inputData: WorkflowInputs[WorkflowName],
+  ): WorkflowRunId | null {
+    const handler = this.#handlers[workflowName];
+    if (!handler) {
+      return null;
+    }
+
+    const runId = workflowRunId(ulid());
+    // Insert a new workflow run.
+    cell.db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_name, input_data) VALUES (?, ?, ?)`,
+    ).run(runId, workflowName.toString(), JSON.stringify(inputData));
+
+    const step = new WorkflowStep(runId);
+
+    // Dispatch a new workflow run as a fire-and-forget promise.
+    handler({
+      event: {
+        id: runId,
+        name: workflowName,
+        data: inputData,
+      },
+      step,
+      attempt: 1,
+    }).then(() => {
+      // Mark the workflow run as completed.
+      cell.db.prepare(
+        `UPDATE workflow_runs SET completed_at = datetime('now', 'utc') WHERE id = ?`,
+      ).run(runId);
+    });
+
+    return runId;
+  }
+}
+
+class WorkflowStep {
+  #currentIndex: number;
+  #runId: WorkflowRunId;
+
+  constructor(runId: WorkflowRunId) {
+    this.#currentIndex = 0;
+    this.#runId = runId;
+  }
+
+  async run<StepOutput extends JSONValue>(
+    name: string,
+    fn: () => StepOutput | Promise<StepOutput>,
+  ): Promise<StepOutput> {
+    // TODO(magurotuna): We solely rely on the order of steps executed to
+    // retrieve memoized results. This scheme would not work if the order is not
+    // guaranteed, for instance:
+    //
+    // ```
+    // if (Math.random() > 0.5) {
+    //   await step.run("if-branch", () => { /* do something */ });
+    // } else {
+    //   await step.run("else-branch", () => { /* do something */ });
+    // }
+    // ```
+    //
+    // This issue is very similar to React Hooks, and they force users not to
+    // use hooks in conditionals. We may want to consider a similar approach.
+    this.#currentIndex++;
+
+    // Check if the step for this run was already executed.
+    // If it was, return the result from the DB.
+
+    const memoizedResult = cell.db.prepare(
+      `SELECT output_data FROM workflow_steps WHERE workflow_run_id = ? AND index = ?`,
+    )
+      .get(this.#runId, this.#currentIndex);
+    if (memoizedResult) {
+      assert(typeof memoizedResult.output_data === "string");
+      return JSON.parse(memoizedResult.output_data) as StepOutput;
+    }
+
+    // Otherwise, run the provided function and store the result in the DB.
+    // TODO(magurotuna): do error handling
+    const result = await fn();
+    cell.db.prepare(
+      `INSERT INTO workflow_steps (workflow_run_id, index, name, output_data) VALUES (?, ?, ?, ?)`,
+    )
+      .run(this.#runId, this.#currentIndex, name, JSON.stringify(result));
+
+    return result;
+  }
+
+  // TODO: add more methods like sleep, sleepUntil, invoke, etc.
+}
+
+declare const __brand: unique symbol;
+type Brand<T, TBrand> = T & { [__brand]: TBrand };
+
+type WorkflowRunId = Brand<string, "WorkflowRunId">;
+
+function workflowRunId(value: string): WorkflowRunId {
+  return value as WorkflowRunId;
 }
 
 type JSONPrimitive = string | number | boolean | null;
@@ -19,6 +163,7 @@ type WorkflowDefinition<
   name: WorkflowName;
   handler: (ctx: {
     event: {
+      id: WorkflowRunId;
       name: WorkflowName;
       data: WorkflowInputs[WorkflowName];
     };
@@ -26,43 +171,3 @@ type WorkflowDefinition<
     attempt: number;
   }) => Promise<void>;
 };
-
-type WorkflowStep = {
-  run: <StepOutput extends JSONValue>(
-    name: string,
-    fn: () => StepOutput | Promise<StepOutput>,
-  ) => Promise<StepOutput>;
-  // TODO: add more methods like sleep, sleepUntil, invoke, etc.
-};
-
-type MyWorkflow = {
-  "user.signup": {
-    userId: string;
-    email: string;
-  };
-  "user.login": {
-    userId: string;
-  };
-};
-
-const workflow1 = new Workflow<MyWorkflow>();
-workflow1.define({
-  name: "user.signup",
-  handler: async ({ event, step, attempt }) => {
-    const userInfo = await step.run("fetch-user", () => {
-      // do something...
-      return {
-        userName: "Yusuke",
-        age: 20,
-        region: "Japan",
-      };
-    });
-
-    await step.run("send-email", () => {
-      // do something with userInfo
-      return true;
-    });
-  },
-});
-
-const workflow2 = new Workflow();

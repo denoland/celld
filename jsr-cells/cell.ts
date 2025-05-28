@@ -235,3 +235,6 @@ export class Cell {
     console.log("Shutdown complete");
   }
 }
+
+// Export a singleton instance of the Cell class
+export const cell: Cell = new Cell();
