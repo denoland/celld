@@ -7,6 +7,7 @@ RUN apt update -y && apt install -y \
     build-essential \
     pkg-config \
     libssl-dev \
+    libsqlite3-dev \
     cmake \
     && rm -rf /var/lib/apt/lists/*
 
