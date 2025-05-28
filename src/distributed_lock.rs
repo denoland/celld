@@ -933,7 +933,8 @@ impl S3DistributedLock {
     }
     assert!(
       lock_name.chars().all(is_safe_s3_key_char),
-      "Lock name '{lock_name}' contains invalid characters"
+      "Lock name '{}' contains invalid characters",
+      lock_name
     );
     format!("{}{}.lock", self.prefix, lock_name)
   }
