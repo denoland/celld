@@ -1,6 +1,6 @@
 import { cell } from "./cell.ts";
-import { ulid } from "jsr:@std/ulid@1.0.0";
-import { assert } from "jsr:@std/assert@1.0.13";
+import { ulid } from "@std/ulid";
+import { assert } from "@std/assert";
 
 export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
   #handlers: {

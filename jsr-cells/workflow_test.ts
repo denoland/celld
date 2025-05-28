@@ -1,5 +1,5 @@
 import { Workflow } from "./workflow.ts";
-import { assertType, type IsExact } from "jsr:@std/testing@1.0.13/types";
+import { assertType, type IsExact } from "@std/testing/types";
 
 Deno.test("Workflow type", () => {
   type MyWorkflow = {
