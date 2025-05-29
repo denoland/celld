@@ -36,7 +36,7 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
     this.#dbAccessor.db.exec(`
       CREATE TABLE IF NOT EXISTS workflows (
         name TEXT PRIMARY KEY NOT NULL,
-        created_at TEXT NOT NULL DEFAULT (datetime('now', 'utc'))
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now', 'utc'))
       );
     `);
 
@@ -45,7 +45,7 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
         id TEXT PRIMARY KEY NOT NULL,
         workflow_name TEXT NOT NULL REFERENCES workflows(name) ON DELETE CASCADE,
         input_data TEXT NOT NULL,
-        dispatched_at TEXT NOT NULL DEFAULT (datetime('now', 'utc')),
+        dispatched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now', 'utc')),
         completed_at TEXT
       );
     `);
@@ -56,7 +56,7 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
         step_index INTEGER NOT NULL,
         name TEXT NOT NULL,
         output_data TEXT NOT NULL,
-        completed_at TEXT NOT NULL DEFAULT (datetime('now', 'utc')),
+        completed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now', 'utc')),
         UNIQUE(workflow_run_id, step_index)
       );
     `);
@@ -161,7 +161,8 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
         step,
         attempt: 1,
       });
-    } catch {
+    } catch (e) {
+      console.error(e);
       // Schedule a retry in 1 second.
       this.#scheduleRetry(runId, Date.now() + 1000);
       return;
@@ -171,7 +172,7 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
 
     // Mark the workflow run as completed.
     this.#dbAccessor.db.prepare(
-      `UPDATE workflow_runs SET completed_at = datetime('now', 'utc') WHERE id = ?`,
+      `UPDATE workflow_runs SET completed_at = strftime('%Y-%m-%d %H:%M:%f', 'now', 'utc') WHERE id = ?`,
     ).run(runId);
   }
 
