@@ -3,9 +3,9 @@
 # docker push 588642314931.dkr.ecr.us-east-2.amazonaws.com/deno-cells:ecs
 
 # Accept base image tag as build argument
-ARG CELLS_BASE_IMAGE_TAG=latest
+ARG CELL_BASE_IMAGE_TAG=latest
 # Use your existing celld image as the base
-FROM ghcr.io/denoland/cells:${CELLS_BASE_IMAGE_TAG}
+FROM ghcr.io/denoland/cells:${CELL_BASE_IMAGE_TAG}
 
 # Switch to root user to install packages
 USER root
