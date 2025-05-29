@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import type { DbAccessor, Task, TaskScheduler } from "./types.ts";
-import { Scheduler } from "./scheduler.ts";
+import { Workflow } from "./workflow.ts";
 
 // Create a Cell class to track sockets and provide broadcast functionality
 export class Cell implements DbAccessor, TaskScheduler {
@@ -261,9 +261,14 @@ export class Cell implements DbAccessor, TaskScheduler {
     }
     this.sockets.clear();
 
-    // TODO(magurotuna): Check if there are ongoing workflow runs.
-    // If so, schedule a new alarm to ask the system main cell to wake up this
-    // cell again later in order to resume the pending runs.
+    // If there are ongoing workflow runs, schedule a task to resume them on
+    // another node later.
+    if (Workflow.runningWorkflows() > 0) {
+      await this.schedule({
+        kind: "resume-all-pending-workflow-runs",
+        scheduledTimeUnixMs: Date.now() + 10_000,
+      });
+    }
 
     // Close database connection if open
     if (this.dbInstance) {

@@ -24,6 +24,10 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
     >["handler"];
   } = {};
 
+  static runningWorkflows() {
+    return this.#runningWorkflows;
+  }
+
   constructor(dbAccessor: DbAccessor, taskScheduler: TaskScheduler) {
     this.#dbAccessor = dbAccessor;
     this.#taskScheduler = taskScheduler;
