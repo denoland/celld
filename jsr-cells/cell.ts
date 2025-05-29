@@ -6,7 +6,9 @@ export class Cell {
   id: string;
   ctlClient: Deno.HttpClient;
   sockets: Map<string, WebSocket>;
+
   private server: Deno.HttpServer | null = null;
+  private dbPath: string;
   private dbInstance: DatabaseSync | null = null;
   private onRequestCallback:
     | ((req: Request) => Promise<Response> | Response | void)
@@ -31,11 +33,27 @@ export class Cell {
     | (() => Promise<void> | void)
     | null = null;
 
-  constructor() {
-    // Get the config params from env var when the process starts
-    this.tenant = Deno.env.get("X-Tenant")!;
-    this.id = Deno.env.get("X-Cell-Id")!;
-    const ctlSockPath = Deno.env.get("CELL_CONTROL_SOCKET")!;
+  static #defaultTenant: string;
+  static #defaultId: string;
+  static #defaultDbPath: string;
+  static #defaultCtlSockPath: string;
+  static {
+    this.#defaultTenant = Deno.env.get("X-Tenant")!;
+    this.#defaultId = Deno.env.get("X-Cell-Id")!;
+    this.#defaultDbPath = `./sqlite/${this.#defaultId}.db`;
+    this.#defaultCtlSockPath = Deno.env.get("CELL_CONTROL_SOCKET")!;
+  }
+
+  constructor(args?: {
+    tenant?: string;
+    id?: string;
+    dbPath?: string;
+    ctlSockPath?: string;
+  }) {
+    this.tenant = args?.tenant ?? Cell.#defaultTenant;
+    this.id = args?.id ?? Cell.#defaultId;
+    this.dbPath = args?.dbPath ?? Cell.#defaultDbPath;
+    const ctlSockPath = args?.ctlSockPath ?? Cell.#defaultCtlSockPath;
     this.ctlClient = Deno.createHttpClient({
       proxy: {
         transport: "unix",
@@ -136,7 +154,7 @@ export class Cell {
 
   get db(): DatabaseSync {
     if (!this.dbInstance) {
-      this.dbInstance = new DatabaseSync(`./sqlite/${this.id}.db`);
+      this.dbInstance = new DatabaseSync(this.dbPath);
     }
     return this.dbInstance;
   }
