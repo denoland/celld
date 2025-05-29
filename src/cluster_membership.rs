@@ -1,11 +1,7 @@
 use crate::config::S3Config;
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
-use aws_sdk_s3::{
-  config::{Credentials, ProvideCredentials},
-  primitives::ByteStream,
-  Client,
-};
+use aws_sdk_s3::{config::Credentials, primitives::ByteStream, Client};
 use aws_smithy_types::timeout::TimeoutConfig;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -105,22 +101,24 @@ impl S3ClusterMembership {
         TimeoutConfig::builder()
           .operation_timeout(Duration::from_secs(10))
           .build(),
-      ).credentials_provider(
-        if cfg.access_key_id.is_some() && cfg.secret_access_key.is_some() {
-          debug!("Using explicit S3 credentials");
-          Credentials::new(
-            cfg.access_key_id.unwrap(),
-            cfg.secret_access_key.unwrap(),
-            None,
-            None,
-            "static-credentials",
-          )
-        } else {
-          // Use the default credentials provider if access keys are not explicitly provided
-          debug!("No explicit S3 credentials provided, using default credentials provider");
-          aws_config::default_provider::credentials::default_provider().await.provide_credentials().await.expect("No valid credentials provider found")
-        }
       );
+
+    if cfg.access_key_id.is_some() && cfg.secret_access_key.is_some() {
+      debug!("Using explicit S3 credentials for ClusterMembership");
+      let static_credentials = Credentials::new(
+        cfg.access_key_id.as_ref().unwrap().clone(),
+        cfg.secret_access_key.as_ref().unwrap().clone(),
+        None,
+        None,
+        "static-cluster-membership-credentials",
+      );
+      s3_builder = s3_builder.credentials_provider(static_credentials);
+    } else {
+      debug!("No explicit S3 credentials provided for ClusterMembership, using default credentials provider chain");
+      let default_provider_chain =
+        aws_config::default_provider::credentials::default_provider().await;
+      s3_builder = s3_builder.credentials_provider(default_provider_chain);
+    }
 
     if let Some(endpoint) = cfg.endpoint {
       s3_builder = s3_builder.endpoint_url(endpoint);
