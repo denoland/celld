@@ -61,9 +61,9 @@ ROUTING:
   ws://<tenant_host>/cell/<cell_id>    ->  Activates Cell
   http://<tenant_host>/<path>          ->  Serves static file
 
-  Example: http://myapp.localhost:8000/cell/chat1
-           └──────────┬────────┘ └───┬────┘
-            tenant domain      cell ID
+  Example: http://myapp.localhost:3000/cell/chat1
+                  └─────┬───────┘           └─┬─┘
+                  tenant domain           cell ID
 
 DATA LAYOUT:
   <data-dir>/

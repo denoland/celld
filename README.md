@@ -38,11 +38,7 @@ replication, and failover.
 mkdir ./cell-data
 # Run (replace S3 details and <hostname>)
 docker run --rm -it -p 8000:8000 -v "./cell-data:/data" \
-  -e CELL_S3_ENDPOINT=<your_s3_endpoint> \
-  -e CELL_S3_BUCKET=<your_s3_bucket> \
-  -e CELL_S3_ACCESS_KEY_ID=<your_access_key> \
-  -e CELL_S3_SECRET_ACCESS_KEY=<your_secret_key> \
-  denoland/cell:latest
+  ghcr.io/denoland/cells:latest
 ```
 
 Create `./cell-data/<hostname>/src/main.ts` for your Cell logic.
@@ -56,12 +52,12 @@ falls back to a "default" tenant located at `./cell-data/default/src/main.ts`.
 - `ws://<tenant-hostname>:<port>/cell/<cell-id>` (WebSocket)
 - `http://localhost:8000/cell/<cell-id>` (no Host header - uses default tenant)
 
-Routing is based on the request Host and cell ID:
+Routing is based on the request Host header and cell ID:
 
 ```
 http://myapp.localhost:3000/cell/chat1
-      └──────────┬────────┘ └───┬────┘
-           tenant domain      cell ID
+       └─────┬───────┘           └─┬─┘
+       tenant domain           cell ID
 ```
 
 Each cell runs in an isolated subprocess with its own state and lifecycle. Cells
