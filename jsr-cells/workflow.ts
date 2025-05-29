@@ -90,6 +90,44 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
     return runId;
   }
 
+  /**
+   * Retry a workflow run.
+   *
+   * @param runId The ID of the workflow run to retry.
+   * @returns `true` if the workflow run was retried, `false` otherwise.
+   */
+  retry(runId: WorkflowRunId): boolean {
+    const runResult = this.#dbAccessor.db.prepare(
+      `SELECT
+        workflow_name,
+        input_data,
+        completed_at
+      FROM workflow_runs
+      WHERE id = ?
+    `,
+    ).get(runId);
+    if (!runResult) {
+      return false;
+    }
+
+    const workflowName = runResult.workflow_name as string;
+    const inputData = JSON.parse(
+      runResult.input_data as string,
+    ) as WorkflowInputs[string];
+
+    const handler = this.#handlers[workflowName];
+    if (!handler) {
+      return false;
+    }
+
+    const step = new WorkflowStepImpl(runId, this.#dbAccessor);
+
+    // Dispatch a new workflow run as a fire-and-forget promise.
+    this.#dispatchInner(handler, runId, workflowName, inputData, step);
+
+    return true;
+  }
+
   async #dispatchInner<WorkflowName extends keyof WorkflowInputs>(
     handler: WorkflowDefinition<WorkflowInputs, WorkflowName>["handler"],
     runId: WorkflowRunId,
@@ -110,7 +148,8 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
         attempt: 1,
       });
     } catch {
-      // TODO(magurotuna): schedule a retry
+      // Schedule a retry in 1 second.
+      this.#scheduleRetry(runId, Date.now() + 1000);
       return;
     } finally {
       Workflow.#runningWorkflows--;
@@ -122,9 +161,13 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
     ).run(runId);
   }
 
-  // async #scheduleRetry(runId: WorkflowRunId) {
-  //   this.#taskScheduler.schedule();
-  // }
+  #scheduleRetry(runId: WorkflowRunId, scheduledTimeUnixMs: number) {
+    this.#taskScheduler.schedule({
+      kind: "retry-workflow-run",
+      scheduledTimeUnixMs,
+      workflowRunId: runId,
+    });
+  }
 
   getRunProgress(runId: WorkflowRunId): WorkflowRunProgress | null {
     // Retrieve the workflow run joined with its workflow steps from DB.
