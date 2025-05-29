@@ -2,8 +2,10 @@
 # aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin 588642314931.dkr.ecr.us-east-2.amazonaws.com
 # docker push 588642314931.dkr.ecr.us-east-2.amazonaws.com/deno-cells:ecs
 
+# Accept base image tag as build argument
+ARG CELCD_BASE_IMAGE_TAG=latest
 # Use your existing celld image as the base
-FROM deno-cells:latest
+FROM ghcr.io/denoland/cells:${CELCD_BASE_IMAGE_TAG}
 
 # Switch to root user to install packages
 USER root
