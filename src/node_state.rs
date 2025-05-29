@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, error, info};
 
 use crate::cell_manager::CellManager;
 use crate::cluster_membership::{
   ClusterMembership, NodeId, S3ClusterMembership, StandaloneClusterMembership,
 };
-use crate::config;
+use crate::config::{self, S3Config};
 use crate::control_socket_listener::ControlSocket;
 use crate::distributed_lock::{
   DistributedLock, S3DistributedLock, StandaloneDistributedLock,
@@ -40,6 +41,39 @@ pub struct NodeState {
 }
 
 impl NodeState {
+  /// Creates a configured S3 client based on the provided S3Config
+  pub async fn create_s3_client(s3_config: &S3Config) -> aws_sdk_s3::Client {
+    let mut aws_config_builder =
+      aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_config::Region::new(s3_config.region.clone()));
+    if let (Some(access_key), Some(secret_key)) =
+      (&s3_config.access_key_id, &s3_config.secret_access_key)
+    {
+      debug!("Using explicit S3 credentials");
+      aws_config_builder = aws_config_builder.credentials_provider(
+        aws_sdk_s3::config::Credentials::new(
+          access_key,
+          secret_key,
+          None,
+          None,
+          "static-s3-credentials",
+        ),
+      );
+    }
+    let aws_config = aws_config_builder.load().await;
+    let mut s3_config_builder = aws_sdk_s3::config::Builder::from(&aws_config)
+      .force_path_style(true)
+      .timeout_config(
+        aws_smithy_types::timeout::TimeoutConfig::builder()
+          .operation_timeout(Duration::from_secs(10))
+          .build(),
+      );
+    if let Some(endpoint) = s3_config.endpoint.as_ref() {
+      s3_config_builder = s3_config_builder.endpoint_url(endpoint);
+    }
+    aws_sdk_s3::Client::from_conf(s3_config_builder.build())
+  }
+
   /// Creates a new NodeState with the given configuration
   pub fn new(config: config::Config) -> Result<Arc<Self>, anyhow::Error> {
     let control_socket = ControlSocket::new();
@@ -68,27 +102,22 @@ impl NodeState {
           debug!("S3 cluster membership config: {:?}", config);
           let s3_config = config.to_s3_config().unwrap();
 
-          // Create membership using from_config with configured staleness threshold
-          let membership = match S3ClusterMembership::from_config(
-            s3_config.clone(),
+          // Create shared S3 client
+          let s3_client = Self::create_s3_client(&s3_config).await;
+          info!(
+            "Created S3 client for bucket {} in region {}",
+            s3_config.bucket, s3_config.region
+          );
+
+          // Create membership using the shared S3 client
+          let membership = S3ClusterMembership::new(
+            s3_client.clone(),
+            s3_config.bucket.clone(),
+            s3_config.subpath("cluster_state/nodes"),
             config.advertise_addr,
-            Some(node_id.clone()),
-            Some(config.staleness_threshold),
-          )
-          .await
-          {
-            Ok(membership) => {
-              info!(
-                "Initializing S3 cluster membership with bucket {}",
-                membership.bucket()
-              );
-              membership
-            }
-            Err(e) => {
-              error!("Failed to create S3 cluster membership: {}", e);
-              std::process::exit(1);
-            }
-          };
+            node_id.clone(),
+            config.staleness_threshold,
+          );
 
           // Register the node with the cluster
           info!("Registering node {node_id:?} with S3 cluster");
@@ -97,45 +126,7 @@ impl NodeState {
             std::process::exit(1);
           }
 
-          // Initialize the S3 client for distributed lock
-          // Configure builder with region
-          let builder =
-            aws_config::defaults(aws_config::BehaviorVersion::latest())
-              .region(aws_config::Region::new(s3_config.region.clone()));
-
-          // Load the AWS config
-          let aws_config = builder.load().await;
-
-          // Start with basic S3 client builder
-          let mut s3_client_builder =
-            aws_sdk_s3::config::Builder::from(&aws_config)
-              .force_path_style(true);
-
-          // Set S3 endpoint if configured
-          if let Some(endpoint) = s3_config.endpoint.as_ref() {
-            s3_client_builder = s3_client_builder.endpoint_url(endpoint);
-          }
-
-          // Set explicit credentials if available in S3Config
-          if let (Some(access_key), Some(secret_key)) =
-            (&s3_config.access_key_id, &s3_config.secret_access_key)
-          {
-            debug!("Using explicit S3 credentials for distributed lock");
-            s3_client_builder = s3_client_builder.credentials_provider(
-              aws_sdk_s3::config::Credentials::new(
-                access_key,
-                secret_key,
-                None,
-                None,
-                "static-distributed-lock-credentials",
-              ),
-            );
-          }
-
-          let cfg = s3_client_builder.build();
-
-          let s3_client = aws_sdk_s3::Client::from_conf(cfg);
-
+          // Use the shared S3 client for distributed lock
           let lock_prefix = s3_config.subpath("locks");
 
           // Create the distributed lock manager
