@@ -30,6 +30,7 @@ async fn test_alarm_crud_in_single_node_cluster() {
     let res = client
       .delete(&url)
       .header("host", "alarm.localhost")
+      .query(&[("id", "not-existing-id")])
       .send()
       .await
       .unwrap();

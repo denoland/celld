@@ -22,7 +22,7 @@ cell.request(async (req: Request) => {
         });
       }
       const id = await cell.setAlarm(Date.now() + alarmSchedule);
-      return Response.json(id);
+      return new Response(id);
     }
     case "DELETE": {
       const id = url.searchParams.get("id");

@@ -129,8 +129,12 @@ export class Cell implements DbAccessor, TaskScheduler {
     if (id === undefined) {
       // Get the closest "user-defined-alarm" task
       const result = this.db.prepare(`
-          SELECT scheduled_time_unix_ms FROM scheduled_tasks WHERE kind = 'user-defined-alarm' ORDER BY scheduled_time_unix_ms ASC LIMIT 1
-        `).get();
+        SELECT
+          scheduled_time_unix_ms
+        FROM scheduled_tasks
+        WHERE JSON_EXTRACT(payload, '$.kind') = 'user-defined-alarm'
+        ORDER BY scheduled_time_unix_ms ASC LIMIT 1
+      `).get();
       if (!result) {
         return null;
       }
