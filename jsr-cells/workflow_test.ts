@@ -36,7 +36,7 @@ function generateMockTaskScheduler(dbAccessor: DbAccessor): TaskScheduler {
   `);
 
   return {
-    schedule: async (task) => {
+    schedule: (task) => {
       dbAccessor.db.prepare(`
         INSERT INTO scheduled_tasks (scheduled_time_unix_ms, payload) VALUES (?, ?)
       `).run(task.scheduledTimeUnixMs, JSON.stringify(task));

@@ -20,7 +20,7 @@ export type ResumeAllPendingWorkflowRuns = {
 };
 
 export interface TaskScheduler {
-  schedule(task: Task): Promise<void>;
+  schedule(task: Task): Promise<void> | void;
 }
 
 export type WorkflowRunProgress = {

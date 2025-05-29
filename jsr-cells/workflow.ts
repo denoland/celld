@@ -8,7 +8,7 @@ import {
   type WorkflowRunId,
   workflowRunId,
   type WorkflowRunProgress,
-  WorkflowStep,
+  type WorkflowStep,
 } from "./types.ts";
 
 export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
