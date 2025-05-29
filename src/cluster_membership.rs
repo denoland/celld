@@ -1,8 +1,5 @@
-use crate::config::S3Config;
 use async_trait::async_trait;
-use aws_config::BehaviorVersion;
-use aws_sdk_s3::{config::Credentials, primitives::ByteStream, Client};
-use aws_smithy_types::timeout::TimeoutConfig;
+use aws_sdk_s3::{primitives::ByteStream, Client};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -73,77 +70,61 @@ pub struct S3ClusterMembership {
 }
 
 impl S3ClusterMembership {
-  /// Create a new S3ClusterMembership instance from Config
-  pub async fn from_config(
-    cfg: S3Config,
+  /// Create a new S3ClusterMembership instance with a shared S3 client
+  pub fn new(
+    s3_client: Client,
+    bucket: String,
+    prefix: String,
     advertise_addr: SocketAddr,
-    node_id: Option<NodeId>,
-    staleness_threshold: Option<Duration>,
-  ) -> anyhow::Result<Self> {
-    let node_id = node_id.unwrap_or_else(NodeId::new_uuid_v4);
-
+    node_id: NodeId,
+    staleness_threshold: Duration,
+  ) -> Self {
     let node_info = NodeInfo {
       node_id,
       advertise_addr,
       heartbeat_timestamp: Utc::now(),
     };
 
-    let prefix = cfg.subpath("cluster_state/nodes");
-
-    // Create the client with the path style config for MinIO compatibility
-
-    let mut s3_builder = aws_sdk_s3::config::Builder::new()
-      .behavior_version(BehaviorVersion::latest())
-      .region(aws_config::Region::new(cfg.region))
-      .force_path_style(true)
-      // Add timeout configuration to avoid hanging in tests
-      .timeout_config(
-        TimeoutConfig::builder()
-          .operation_timeout(Duration::from_secs(10))
-          .build(),
-      );
-
-    if cfg.access_key_id.is_some() && cfg.secret_access_key.is_some() {
-      debug!("Using explicit S3 credentials for ClusterMembership");
-      let static_credentials = Credentials::new(
-        cfg.access_key_id.as_ref().unwrap().clone(),
-        cfg.secret_access_key.as_ref().unwrap().clone(),
-        None,
-        None,
-        "static-cluster-membership-credentials",
-      );
-      s3_builder = s3_builder.credentials_provider(static_credentials);
-    } else {
-      debug!("No explicit S3 credentials provided for ClusterMembership, using default credentials provider chain");
-      let default_provider_chain =
-        aws_config::default_provider::credentials::default_provider().await;
-      s3_builder = s3_builder.credentials_provider(default_provider_chain);
-    }
-
-    if let Some(endpoint) = cfg.endpoint {
-      s3_builder = s3_builder.endpoint_url(endpoint);
-    }
-
-    let s3_client = Client::from_conf(s3_builder.build());
-
-    Ok(Self {
+    Self {
       s3_client,
-      bucket: cfg.bucket,
+      bucket,
       prefix,
       node_info,
-      staleness_threshold: staleness_threshold
-        .unwrap_or(DEFAULT_STALENESS_THRESHOLD),
-    })
+      staleness_threshold,
+    }
+  }
+
+  /// Create a new S3ClusterMembership instance from Config
+  /// (Kept for backward compatibility and tests)
+  #[cfg(test)]
+  pub async fn from_config(
+    cfg: crate::config::S3Config,
+    advertise_addr: SocketAddr,
+    node_id: Option<NodeId>,
+    staleness_threshold: Option<Duration>,
+  ) -> anyhow::Result<Self> {
+    // Import NodeState to use its S3 client creation method
+    use crate::node_state::NodeState;
+
+    let node_id = node_id.unwrap_or_else(NodeId::new_uuid_v4);
+    let prefix = cfg.subpath("cluster_state/nodes");
+
+    // Create S3 client using the centralized method
+    let s3_client = NodeState::create_s3_client(&cfg).await;
+
+    Ok(Self::new(
+      s3_client,
+      cfg.bucket,
+      prefix,
+      advertise_addr,
+      node_id,
+      staleness_threshold.unwrap_or(DEFAULT_STALENESS_THRESHOLD),
+    ))
   }
 
   /// Get the full S3 key for this node
   fn get_node_key(&self) -> String {
     format!("{}{}.json", self.prefix, self.node_info.node_id.0)
-  }
-
-  /// Get the bucket name
-  pub fn bucket(&self) -> &str {
-    &self.bucket
   }
 
   /// Check if a node is stale based on its heartbeat timestamp
@@ -366,7 +347,7 @@ mod tests {
     let _ = minio.create_bucket(&bucket);
 
     // Create with a short staleness threshold for tests (2 seconds)
-    let cfg = S3Config {
+    let cfg = crate::config::S3Config {
       endpoint: Some(format!("http://127.0.0.1:{}", minio.port)),
       bucket,
       region: "us-east-1".to_string(),
