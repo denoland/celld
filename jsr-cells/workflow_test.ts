@@ -301,7 +301,7 @@ Deno.test("Define a workflow with three steps and dispatch it - confirming the v
       const step1Result = await ctx.step.run(
         "generate a random integer",
         () => {
-          return randomIntegerBetween(0, 1000000000);
+          return randomIntegerBetween(0, 1 << 30);
         },
       );
 
