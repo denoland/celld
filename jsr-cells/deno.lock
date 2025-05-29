@@ -9,6 +9,7 @@
     "jsr:@std/internal@^1.0.8": "1.0.8",
     "jsr:@std/path@^1.0.9": "1.1.0",
     "jsr:@std/path@^1.1.0": "1.1.0",
+    "jsr:@std/random@~0.1.1": "0.1.1",
     "jsr:@std/testing@*": "1.0.9",
     "jsr:@std/testing@1.0.13": "1.0.13",
     "jsr:@std/testing@^1.0.13": "1.0.13",
@@ -40,6 +41,9 @@
     },
     "@std/path@1.1.0": {
       "integrity": "ddc94f8e3c275627281cbc23341df6b8bcc874d70374f75fec2533521e3d6886"
+    },
+    "@std/random@0.1.1": {
+      "integrity": "e17e164558f9f209da3c254670378404677b36dcafe3b823eca1b2a52e3b6d4d"
     },
     "@std/testing@1.0.9": {
       "integrity": "9bdd4ac07cb13e7594ac30e90f6ceef7254ac83a9aeaa089be0008f33aab5cd4"
@@ -73,6 +77,7 @@
     "dependencies": [
       "jsr:@std/assert@^1.0.13",
       "jsr:@std/async@^1.0.13",
+      "jsr:@std/random@~0.1.1",
       "jsr:@std/testing@^1.0.13",
       "jsr:@std/ulid@1"
     ]

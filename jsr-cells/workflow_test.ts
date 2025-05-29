@@ -1,11 +1,12 @@
 import { DatabaseSync } from "node:sqlite";
-import {
-  type DbAccessor,
-  type JSONValue,
-  Workflow,
-  type WorkflowRunId,
-  type WorkflowRunProgress,
-} from "./workflow.ts";
+import { Workflow } from "./workflow.ts";
+import type {
+  DbAccessor,
+  JSONValue,
+  TaskScheduler,
+  WorkflowRunId,
+  WorkflowRunProgress,
+} from "./types.ts";
 import { assertType, type IsExact } from "@std/testing/types";
 import { assertEquals, assertExists } from "@std/assert";
 import { delay } from "@std/async";
@@ -19,25 +20,48 @@ function generateTempDbAccessor(): DbAccessor {
   };
 }
 
-async function waitUntilWorkflowRunCompleted<
-  T extends Record<string, JSONValue>,
->(
+function generateMockTaskScheduler(dbAccessor: DbAccessor): TaskScheduler {
+  return {
+    schedule: async (_task) => {
+      // no-op
+    },
+  };
+}
+
+async function waitUntilPredicate<T extends Record<string, JSONValue>>(
   workflow: Workflow<T>,
   runId: WorkflowRunId,
+  predicate: (progress: WorkflowRunProgress) => boolean,
 ): Promise<WorkflowRunProgress> {
   const MAX_RETRIES = 100;
   const INTERVAL_MS = 100;
 
   for (let i = 0; i < MAX_RETRIES; i++) {
     const progress = workflow.getRunProgress(runId);
-    if (progress?.completedAt) {
+    if (!progress) {
+      throw new Error(`workflow run not found for the given runId: ${runId}`);
+    }
+    if (predicate(progress)) {
       return progress;
     }
     await delay(INTERVAL_MS);
   }
 
   throw new Error(
-    `Workflow run did not complete after ${MAX_RETRIES} retries with ${INTERVAL_MS}ms interval`,
+    `Predicate did not return true after ${MAX_RETRIES} retries with ${INTERVAL_MS}ms interval`,
+  );
+}
+
+function waitUntilWorkflowRunCompleted<
+  T extends Record<string, JSONValue>,
+>(
+  workflow: Workflow<T>,
+  runId: WorkflowRunId,
+): Promise<WorkflowRunProgress> {
+  return waitUntilPredicate(
+    workflow,
+    runId,
+    (progress) => progress.completedAt !== null,
   );
 }
 
@@ -52,7 +76,10 @@ Deno.test("Workflow type", () => {
     };
   };
 
-  const workflow = new Workflow<MyWorkflow>(generateTempDbAccessor());
+  const dbAccessor = generateTempDbAccessor();
+  const taskScheduler = generateMockTaskScheduler(dbAccessor);
+
+  const workflow = new Workflow<MyWorkflow>(dbAccessor, taskScheduler);
 
   // workflow.define should accept only "user.signup" or "user.login"
   type WorkflowNames = Parameters<typeof workflow.define>[0]["name"];
@@ -86,28 +113,30 @@ Deno.test("Workflow type", () => {
 });
 
 Deno.test("Dispatch a workflow that is not defined returns null and nothing happens", () => {
-  const dbAccessor = generateTempDbAccessor();
-
   type MyWorkflow = {
     "foo": null;
   };
 
-  const workflow = new Workflow<MyWorkflow>(dbAccessor);
+  const dbAccessor = generateTempDbAccessor();
+  const taskScheduler = generateMockTaskScheduler(dbAccessor);
+
+  const workflow = new Workflow<MyWorkflow>(dbAccessor, taskScheduler);
 
   const runId = workflow.dispatch("foo", null);
   assertEquals(runId, null);
 });
 
 Deno.test("Define a workflow with no step and dispatch it", async () => {
-  const dbAccessor = generateTempDbAccessor();
-
   type MyWorkflow = {
     "no-step": {
       value: number;
     };
   };
 
-  const workflow = new Workflow<MyWorkflow>(dbAccessor);
+  const dbAccessor = generateTempDbAccessor();
+  const taskScheduler = generateMockTaskScheduler(dbAccessor);
+
+  const workflow = new Workflow<MyWorkflow>(dbAccessor, taskScheduler);
 
   let payload: number | null = null;
 
@@ -126,15 +155,16 @@ Deno.test("Define a workflow with no step and dispatch it", async () => {
 });
 
 Deno.test("Define a workflow with one step and dispatch it", async () => {
-  const dbAccessor = generateTempDbAccessor();
-
   type MyWorkflow = {
     "one-step": {
       value: number;
     };
   };
 
-  const workflow = new Workflow<MyWorkflow>(dbAccessor);
+  const dbAccessor = generateTempDbAccessor();
+  const taskScheduler = generateMockTaskScheduler(dbAccessor);
+
+  const workflow = new Workflow<MyWorkflow>(dbAccessor, taskScheduler);
 
   workflow.define({
     name: "one-step",
@@ -163,15 +193,16 @@ Deno.test("Define a workflow with one step and dispatch it", async () => {
 });
 
 Deno.test("Define a workflow with two steps and dispatch it", async () => {
-  const dbAccessor = generateTempDbAccessor();
-
   type MyWorkflow = {
     "two-steps": {
       value: number;
     };
   };
 
-  const workflow = new Workflow<MyWorkflow>(dbAccessor);
+  const dbAccessor = generateTempDbAccessor();
+  const taskScheduler = generateMockTaskScheduler(dbAccessor);
+
+  const workflow = new Workflow<MyWorkflow>(dbAccessor, taskScheduler);
 
   workflow.define({
     name: "two-steps",

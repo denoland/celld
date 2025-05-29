@@ -1,15 +1,21 @@
 import { ulid } from "@std/ulid";
 import { assert } from "@std/assert";
-import type { DatabaseSync } from "node:sqlite";
-
-export interface DbAccessor {
-  get db(): DatabaseSync;
-}
+import {
+  type DbAccessor,
+  type JSONValue,
+  type TaskScheduler,
+  type WorkflowDefinition,
+  type WorkflowRunId,
+  workflowRunId,
+  type WorkflowRunProgress,
+  WorkflowStep,
+} from "./types.ts";
 
 export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
   static #runningWorkflows = 0;
 
   #dbAccessor: DbAccessor;
+  #taskScheduler: TaskScheduler;
 
   #handlers: {
     [K in keyof WorkflowInputs]?: WorkflowDefinition<
@@ -18,8 +24,9 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
     >["handler"];
   } = {};
 
-  constructor(dbAccessor: DbAccessor) {
+  constructor(dbAccessor: DbAccessor, taskScheduler: TaskScheduler) {
     this.#dbAccessor = dbAccessor;
+    this.#taskScheduler = taskScheduler;
 
     // Create tables if not exist yet
     this.#dbAccessor.db.exec(`
@@ -75,7 +82,7 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
       `INSERT INTO workflow_runs (id, workflow_name, input_data) VALUES (?, ?, ?)`,
     ).run(runId, workflowName.toString(), JSON.stringify(inputData));
 
-    const step = new WorkflowStep(runId, this.#dbAccessor);
+    const step = new WorkflowStepImpl(runId, this.#dbAccessor);
 
     // Dispatch a new workflow run as a fire-and-forget promise.
     this.#dispatchInner(handler, runId, workflowName, inputData, step);
@@ -88,7 +95,7 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
     runId: WorkflowRunId,
     workflowName: WorkflowName,
     inputData: WorkflowInputs[WorkflowName],
-    step: WorkflowStep,
+    step: WorkflowStepImpl,
   ) {
     Workflow.#runningWorkflows++;
 
@@ -114,6 +121,10 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
       `UPDATE workflow_runs SET completed_at = datetime('now', 'utc') WHERE id = ?`,
     ).run(runId);
   }
+
+  // async #scheduleRetry(runId: WorkflowRunId) {
+  //   this.#taskScheduler.schedule();
+  // }
 
   getRunProgress(runId: WorkflowRunId): WorkflowRunProgress | null {
     // Retrieve the workflow run joined with its workflow steps from DB.
@@ -160,7 +171,7 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
   }
 }
 
-class WorkflowStep {
+class WorkflowStepImpl implements WorkflowStep {
   #currentIndex: number;
   #runId: WorkflowRunId;
   #dbAccessor: DbAccessor;
@@ -220,47 +231,3 @@ class WorkflowStep {
 function parseUTCDateTime(utcString: string): Date {
   return new Date(utcString + "Z");
 }
-
-export type WorkflowRunProgress = {
-  id: WorkflowRunId;
-  workflowName: string;
-  dispatchedAt: Date;
-  completedAt: Date | null;
-  steps: {
-    stepIndex: number;
-    name: string;
-    outputData: JSONValue;
-    completedAt: Date;
-  }[];
-};
-
-declare const __brand: unique symbol;
-type Brand<T, TBrand> = T & { [__brand]: TBrand };
-
-export type WorkflowRunId = Brand<string, "WorkflowRunId">;
-
-function workflowRunId(value: string): WorkflowRunId {
-  return value as WorkflowRunId;
-}
-
-type JSONPrimitive = string | number | boolean | null;
-export type JSONValue =
-  | JSONPrimitive
-  | { [key: string]: JSONValue }
-  | JSONValue[];
-
-type WorkflowDefinition<
-  WorkflowInputs extends Record<string, JSONValue>,
-  WorkflowName extends keyof WorkflowInputs,
-> = {
-  name: WorkflowName;
-  handler: (ctx: {
-    event: {
-      id: WorkflowRunId;
-      name: WorkflowName;
-      data: WorkflowInputs[WorkflowName];
-    };
-    step: WorkflowStep;
-    attempt: number;
-  }) => Promise<void> | void;
-};
