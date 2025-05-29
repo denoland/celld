@@ -34,7 +34,7 @@ impl BackgroundService for HeartbeatService {
           // Send heartbeat to S3
           match cluster_membership.heartbeat().await {
             Ok(_) => debug!("Sent heartbeat to S3 successfully"),
-            Err(e) => error!("Failed to send heartbeat to S3: {}", e),
+            Err(e) => error!(error = ?e, "Failed to send heartbeat to S3"),
           }
 
           // Get active peers from S3 and update peer manager
@@ -45,7 +45,7 @@ impl BackgroundService for HeartbeatService {
               peer_manager.update_peers(active_peers);
             },
             Err(e) => {
-              error!("Failed to get active peers from S3: {}", e);
+              error!(error = ?e, "Failed to get active peers from S3");
               continue;
             }
           }
