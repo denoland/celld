@@ -8,6 +8,7 @@ import {
 } from "./types.ts";
 import { Workflow } from "./workflow.ts";
 import { ulid } from "@std/ulid/ulid";
+import { assertNever } from "@std/assert/unstable-never";
 
 // Create a Cell class to track sockets and provide broadcast functionality
 export class Cell implements DbAccessor, TaskScheduler {
@@ -150,6 +151,40 @@ export class Cell implements DbAccessor, TaskScheduler {
     return result.changes > 0;
   }
 
+  private async handleAlarm(scheduledTimeUnixMs: number): Promise<void> {
+    // Retrieve tasks scheduled at the given timestamp
+    const tasks = this.db.prepare(`
+      SELECT id, payload FROM scheduled_tasks WHERE scheduled_time_unix_ms = ?
+    `).all(scheduledTimeUnixMs);
+
+    // Dispatch the associated operations based on the task kind
+    for (const task of tasks) {
+      const payload = JSON.parse(task.payload as string) as Task;
+      switch (payload.kind) {
+        case "user-defined-alarm": {
+          await this.onAlarmCallback?.();
+          break;
+        }
+        case "resume-all-pending-workflow-runs": {
+          // TODO
+          break;
+        }
+        case "retry-workflow-run": {
+          // TODO
+          break;
+        }
+        default: {
+          assertNever(payload);
+        }
+      }
+
+      // Delete the task
+      this.db.prepare(`
+        DELETE FROM scheduled_tasks WHERE id = ?
+      `).run(task.id);
+    }
+  }
+
   connect(cb: (socket: WebSocket, id: string) => Promise<void> | void): void {
     this.onConnectCallback = cb;
   }
@@ -223,9 +258,24 @@ export class Cell implements DbAccessor, TaskScheduler {
       const url = new URL(req.url);
 
       if (req.method === "POST" && url.pathname === "/_internal/alarm") {
-        // Invoke the alarm callback
-        if (this.onAlarmCallback) {
-          await this.onAlarmCallback();
+        const body = await req.text();
+        const scheduledTimeUnixMs = parseInt(body, 10);
+        if (Number.isNaN(scheduledTimeUnixMs)) {
+          return new Response(`Unable to parse scheduled time: ${body}`, {
+            status: 400,
+          });
+        }
+
+        await this.handleAlarm(scheduledTimeUnixMs);
+
+        // Get the next task's scheduled time and schedule it as a global alarm
+        const nextTask = this.db.prepare(`
+        SELECT scheduled_time_unix_ms FROM scheduled_tasks ORDER BY scheduled_time_unix_ms ASC LIMIT 1
+      `).get();
+        if (nextTask !== undefined) {
+          await this.scheduleGlobalAlarm(
+            nextTask.scheduled_time_unix_ms as number,
+          );
         }
 
         return new Response("OK", { status: 200 });
@@ -303,17 +353,23 @@ export class Cell implements DbAccessor, TaskScheduler {
       INSERT INTO scheduled_tasks (id, scheduled_time_unix_ms, payload) VALUES (?, ?, ?)
     `).run(id, task.scheduledTimeUnixMs, JSON.stringify(task));
 
+    await this.scheduleGlobalAlarm(task.scheduledTimeUnixMs);
+
+    return id;
+  }
+
+  private async scheduleGlobalAlarm(
+    scheduledTimeUnixMs: number,
+  ): Promise<void> {
     await fetch("http://localhost/_internal/alarms", {
       client: this.ctlClient,
       method: "POST",
       body: JSON.stringify({
         tenant: this.tenant,
         cell_id: this.id,
-        scheduled_time_unix_ms: task.scheduledTimeUnixMs,
+        scheduled_time_unix_ms: scheduledTimeUnixMs,
       }),
     });
-
-    return id;
   }
 }
 
