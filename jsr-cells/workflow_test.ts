@@ -161,3 +161,50 @@ Deno.test("Define a workflow with one step and dispatch it", async () => {
   assertEquals(progress2.steps[0].name, "sleep 10ms and then multiply by 2");
   assertEquals(progress2.steps[0].outputData, 84);
 });
+
+Deno.test("Define a workflow with two steps and dispatch it", async () => {
+  const dbAccessor = generateTempDbAccessor();
+
+  type MyWorkflow = {
+    "two-steps": {
+      value: number;
+    };
+  };
+
+  const workflow = new Workflow<MyWorkflow>(dbAccessor);
+
+  workflow.define({
+    name: "two-steps",
+    handler: async (ctx) => {
+      const step1Result = await ctx.step.run(
+        "sleep 10ms and then multiply by 2",
+        async () => {
+          await delay(10);
+          return ctx.event.data.value * 2;
+        },
+      );
+
+      await ctx.step.run("sleep 10ms and then add 1", async () => {
+        await delay(10);
+        return step1Result + 1;
+      });
+    },
+  });
+
+  const runId = workflow.dispatch("two-steps", { value: 42 });
+  assertExists(runId);
+
+  const progress1 = workflow.getRunProgress(runId);
+  assertExists(progress1);
+  assertEquals(progress1.completedAt, null);
+
+  const progress2 = await waitUntilWorkflowRunCompleted(workflow, runId);
+  assertExists(progress2);
+  assertExists(progress2.completedAt);
+
+  assertEquals(progress2.steps.length, 2);
+  assertEquals(progress2.steps[0].name, "sleep 10ms and then multiply by 2");
+  assertEquals(progress2.steps[0].outputData, 84);
+  assertEquals(progress2.steps[1].name, "sleep 10ms and then add 1");
+  assertEquals(progress2.steps[1].outputData, 85);
+});
