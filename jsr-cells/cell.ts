@@ -214,7 +214,7 @@ export class Cell {
     });
   }
 
-  async shutdown(): Promise<void> {
+  async shutdown(): Promise<never> {
     if (this.server) {
       await this.server.shutdown();
       this.server = null;
@@ -226,6 +226,10 @@ export class Cell {
     }
     this.sockets.clear();
 
+    // TODO(magurotuna): Check if there are ongoing workflow runs.
+    // If so, schedule a new alarm to ask the system main cell to wake up this
+    // cell again later in order to resume the pending runs.
+
     // Close database connection if open
     if (this.dbInstance) {
       this.dbInstance.close();
@@ -233,6 +237,7 @@ export class Cell {
     }
 
     console.log("Shutdown complete");
+    Deno.exit(0);
   }
 }
 
