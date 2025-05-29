@@ -8,7 +8,14 @@ export type Task = {
   scheduledTimeUnixMs: number;
 } & TaskKind;
 
-export type TaskKind = RetryWorkflowRun | ResumeAllPendingWorkflowRuns;
+export type TaskKind =
+  | UserDefinedAlarm
+  | RetryWorkflowRun
+  | ResumeAllPendingWorkflowRuns;
+
+export type UserDefinedAlarm = {
+  kind: "user-defined-alarm";
+};
 
 export type RetryWorkflowRun = {
   kind: "retry-workflow-run";
@@ -20,7 +27,7 @@ export type ResumeAllPendingWorkflowRuns = {
 };
 
 export interface TaskScheduler {
-  schedule(task: Task): Promise<void> | void;
+  schedule(task: Task): Promise<ScheduledTaskId> | ScheduledTaskId;
 }
 
 export type WorkflowRunProgress = {
@@ -43,6 +50,12 @@ export type WorkflowRunId = Brand<string, "WorkflowRunId">;
 
 export function workflowRunId(value: string): WorkflowRunId {
   return value as WorkflowRunId;
+}
+
+export type ScheduledTaskId = Brand<string, "ScheduledTaskId">;
+
+export function scheduledTaskId(value: string): ScheduledTaskId {
+  return value as ScheduledTaskId;
 }
 
 export type JSONPrimitive = string | number | boolean | null;

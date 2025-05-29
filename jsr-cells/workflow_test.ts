@@ -1,17 +1,19 @@
 import { DatabaseSync } from "node:sqlite";
 import { Workflow } from "./workflow.ts";
-import type {
-  DbAccessor,
-  JSONValue,
-  Task,
-  TaskScheduler,
-  WorkflowRunId,
-  WorkflowRunProgress,
+import {
+  type DbAccessor,
+  type JSONValue,
+  scheduledTaskId,
+  type Task,
+  type TaskScheduler,
+  type WorkflowRunId,
+  type WorkflowRunProgress,
 } from "./types.ts";
 import { assertType, type IsExact } from "@std/testing/types";
 import { assertEquals, assertExists } from "@std/assert";
 import { delay } from "@std/async";
 import { randomIntegerBetween } from "@std/random";
+import { ulid } from "@std/ulid";
 
 function generateTempDbAccessor(): DbAccessor {
   const db = new DatabaseSync(":memory:");
@@ -26,7 +28,7 @@ function generateMockTaskScheduler(dbAccessor: DbAccessor): TaskScheduler {
   // Ensure `scheduled_tasks` table exists.
   dbAccessor.db.exec(`
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT PRIMARY KEY NOT NULL,
       scheduled_time_unix_ms INTEGER NOT NULL,
       payload TEXT NOT NULL
     )
@@ -37,9 +39,11 @@ function generateMockTaskScheduler(dbAccessor: DbAccessor): TaskScheduler {
 
   return {
     schedule: (task) => {
+      const id = scheduledTaskId(ulid());
       dbAccessor.db.prepare(`
-        INSERT INTO scheduled_tasks (scheduled_time_unix_ms, payload) VALUES (?, ?)
-      `).run(task.scheduledTimeUnixMs, JSON.stringify(task));
+        INSERT INTO scheduled_tasks (id, scheduled_time_unix_ms, payload) VALUES (?, ?, ?)
+      `).run(id, task.scheduledTimeUnixMs, JSON.stringify(task));
+      return id;
     },
   };
 }

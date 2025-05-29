@@ -1,6 +1,13 @@
 import { DatabaseSync } from "node:sqlite";
-import type { DbAccessor, Task, TaskScheduler } from "./types.ts";
+import {
+  type DbAccessor,
+  type ScheduledTaskId,
+  scheduledTaskId,
+  type Task,
+  type TaskScheduler,
+} from "./types.ts";
 import { Workflow } from "./workflow.ts";
+import { ulid } from "@std/ulid/ulid";
 
 // Create a Cell class to track sockets and provide broadcast functionality
 export class Cell implements DbAccessor, TaskScheduler {
@@ -95,42 +102,52 @@ export class Cell implements DbAccessor, TaskScheduler {
     this.onAlarmCallback = cb;
   }
 
-  async getAlarm(): Promise<number | null> {
-    const res = await fetch(
-      `http://localhost/_internal/alarms?tenant=${this.tenant}&cell_id=${this.id}`,
-      {
-        client: this.ctlClient,
-      },
-    );
-    if (res.status !== 200) {
+  /**
+   * Get the scheduled time of the next alarm.
+   *
+   * @param id - The ID of the task to get. If not provided, the next alarm is returned.
+   * @returns The scheduled time of the next alarm, or null if no such task exists.
+   */
+  getAlarm(id?: ScheduledTaskId): number | null {
+    if (id === undefined) {
+      // Get the closest "user-defined-alarm" task
+      const result = this.db.prepare(`
+          SELECT scheduled_time_unix_ms FROM scheduled_tasks WHERE kind = 'user-defined-alarm' ORDER BY scheduled_time_unix_ms ASC LIMIT 1
+        `).get();
+      if (!result) {
+        return null;
+      }
+      return result.scheduled_time_unix_ms as number;
+    }
+
+    const result = this.db.prepare(`
+      SELECT scheduled_time_unix_ms FROM scheduled_tasks WHERE id = ?
+    `).get(id);
+    if (!result) {
       return null;
     }
-    const data = await res.json();
-    return data.scheduled_time_unix_ms;
+    return result.scheduled_time_unix_ms as number;
   }
 
-  async setAlarm(scheduledTimeUnixMs: number): Promise<void> {
-    await fetch("http://localhost/_internal/alarms", {
-      client: this.ctlClient,
-      method: "POST",
-      body: JSON.stringify({
-        tenant: this.tenant,
-        cell_id: this.id,
-        scheduled_time_unix_ms: scheduledTimeUnixMs,
-      }),
+  setAlarm(scheduledTimeUnixMs: number): Promise<ScheduledTaskId> {
+    return this.schedule({
+      kind: "user-defined-alarm",
+      scheduledTimeUnixMs,
     });
   }
 
-  async deleteAlarm(): Promise<boolean> {
-    const res = await fetch("http://localhost/_internal/alarms", {
-      client: this.ctlClient,
-      method: "DELETE",
-      body: JSON.stringify({
-        tenant: this.tenant,
-        cell_id: this.id,
-      }),
-    });
-    return res.status === 200;
+  deleteAlarm(id: ScheduledTaskId): boolean {
+    const result = this.db.prepare(`
+      DELETE FROM scheduled_tasks WHERE id = ?
+    `).run(id);
+
+    // We don't bother to delete a global_alarms record here because "spurious"
+    // alarm invocation does not have any bad effect on the correctness.
+    // In other words, it's okay to receive an alarm issued by the system main
+    // cell even if that alarm is supposed to trigger the deleted task, because
+    // a task is executed only when the scheduled timestamp matches.
+
+    return result.changes > 0;
   }
 
   connect(cb: (socket: WebSocket, id: string) => Promise<void> | void): void {
@@ -239,7 +256,7 @@ export class Cell implements DbAccessor, TaskScheduler {
     // Ensure `scheduled_tasks` table exists.
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS scheduled_tasks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT PRIMARY KEY NOT NULL,
         scheduled_time_unix_ms INTEGER NOT NULL,
         payload TEXT NOT NULL
       )
@@ -280,11 +297,23 @@ export class Cell implements DbAccessor, TaskScheduler {
     Deno.exit(0);
   }
 
-  async schedule(task: Task) {
+  async schedule(task: Task): Promise<ScheduledTaskId> {
+    const id = scheduledTaskId(ulid());
     this.db.prepare(`
-      INSERT INTO scheduled_tasks (scheduled_time_unix_ms, payload) VALUES (?, ?)
-    `).run(task.scheduledTimeUnixMs, JSON.stringify(task));
-    await this.setAlarm(task.scheduledTimeUnixMs);
+      INSERT INTO scheduled_tasks (id, scheduled_time_unix_ms, payload) VALUES (?, ?, ?)
+    `).run(id, task.scheduledTimeUnixMs, JSON.stringify(task));
+
+    await fetch("http://localhost/_internal/alarms", {
+      client: this.ctlClient,
+      method: "POST",
+      body: JSON.stringify({
+        tenant: this.tenant,
+        cell_id: this.id,
+        scheduled_time_unix_ms: task.scheduledTimeUnixMs,
+      }),
+    });
+
+    return id;
   }
 }
 
