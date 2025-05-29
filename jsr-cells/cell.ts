@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import {
   type DbAccessor,
+  JSONValue,
   type ScheduledTaskId,
   scheduledTaskId,
   type Task,
@@ -20,6 +21,7 @@ export class Cell implements DbAccessor, TaskScheduler {
   private server: Deno.HttpServer | null = null;
   private dbPath: string;
   private dbInstance: DatabaseSync | null = null;
+  private workflow: Workflow<Record<string, JSONValue>> | null = null;
   private onRequestCallback:
     | ((req: Request) => Promise<Response> | Response | void)
     | null = null;
@@ -85,6 +87,21 @@ export class Cell implements DbAccessor, TaskScheduler {
         conn.send(msg);
       }
     }
+  }
+
+  /**
+   * Initialize a workflow. This method can be called only once.
+   *
+   * @param T - The type of the workflow inputs.
+   * @returns The initialized workflow.
+   */
+  initWorkflow<T extends Record<string, JSONValue>>(): Workflow<T> {
+    if (this.workflow) {
+      throw new Error("Workflow already initialized");
+    }
+    const workflow = new Workflow<T>(this, this);
+    this.workflow = workflow as Workflow<Record<string, JSONValue>>;
+    return workflow;
   }
 
   getWebSocket(id: string): WebSocket | undefined {
@@ -166,11 +183,15 @@ export class Cell implements DbAccessor, TaskScheduler {
           break;
         }
         case "resume-all-pending-workflow-runs": {
-          // TODO
+          if (this.workflow) {
+            this.workflow.resumeAllPendingWorkflowRuns();
+          }
           break;
         }
         case "retry-workflow-run": {
-          // TODO
+          if (this.workflow) {
+            this.workflow.retry(payload.workflowRunId);
+          }
           break;
         }
         default: {

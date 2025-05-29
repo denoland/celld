@@ -132,6 +132,16 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
     return true;
   }
 
+  resumeAllPendingWorkflowRuns() {
+    const pendingRunIds = this.#dbAccessor.db.prepare(
+      `SELECT id FROM workflow_runs WHERE completed_at IS NULL`,
+    ).all();
+
+    for (const { id } of pendingRunIds) {
+      this.retry(id as WorkflowRunId);
+    }
+  }
+
   async #dispatchInner<WorkflowName extends keyof WorkflowInputs>(
     handler: WorkflowDefinition<WorkflowInputs, WorkflowName>["handler"],
     runId: WorkflowRunId,
