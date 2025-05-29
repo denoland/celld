@@ -25,13 +25,20 @@ async function waitUntilWorkflowRunCompleted<
   workflow: Workflow<T>,
   runId: WorkflowRunId,
 ): Promise<WorkflowRunProgress> {
-  while (true) {
+  const MAX_RETRIES = 100;
+  const INTERVAL_MS = 100;
+
+  for (let i = 0; i < MAX_RETRIES; i++) {
     const progress = workflow.getRunProgress(runId);
     if (progress?.completedAt) {
       return progress;
     }
-    await delay(100);
+    await delay(INTERVAL_MS);
   }
+
+  throw new Error(
+    `Workflow run did not complete after ${MAX_RETRIES} retries with ${INTERVAL_MS}ms interval`,
+  );
 }
 
 Deno.test("Workflow type", () => {
