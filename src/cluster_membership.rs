@@ -94,34 +94,6 @@ impl S3ClusterMembership {
     }
   }
 
-  /// Create a new S3ClusterMembership instance from Config
-  /// (Kept for backward compatibility and tests)
-  #[cfg(test)]
-  pub async fn from_config(
-    cfg: crate::config::S3Config,
-    advertise_addr: SocketAddr,
-    node_id: Option<NodeId>,
-    staleness_threshold: Option<Duration>,
-  ) -> anyhow::Result<Self> {
-    // Import NodeState to use its S3 client creation method
-    use crate::node_state::NodeState;
-
-    let node_id = node_id.unwrap_or_else(NodeId::new_uuid_v4);
-    let prefix = cfg.subpath("cluster_state/nodes");
-
-    // Create S3 client using the centralized method
-    let s3_client = NodeState::create_s3_client(&cfg).await;
-
-    Ok(Self::new(
-      s3_client,
-      cfg.bucket,
-      prefix,
-      advertise_addr,
-      node_id,
-      staleness_threshold.unwrap_or(DEFAULT_STALENESS_THRESHOLD),
-    ))
-  }
-
   /// Get the full S3 key for this node
   fn get_node_key(&self) -> String {
     format!("{}{}.json", self.prefix, self.node_info.node_id.0)
@@ -346,24 +318,27 @@ mod tests {
     let bucket = "cluster-test".to_string();
     let _ = minio.create_bucket(&bucket);
 
-    // Create with a short staleness threshold for tests (2 seconds)
     let cfg = crate::config::S3Config {
       endpoint: Some(format!("http://127.0.0.1:{}", minio.port)),
-      bucket,
+      bucket: bucket.clone(),
       region: "us-east-1".to_string(),
       path: Some("cluster_state/nodes/".to_string()),
       access_key_id: Some(minio.access_key_id.clone()),
       secret_access_key: Some(minio.secret_access_key.clone()),
     };
 
-    S3ClusterMembership::from_config(
-      cfg,
+    let node_id = node_id.unwrap_or_else(NodeId::new_uuid_v4);
+    let prefix = cfg.subpath("cluster_state/nodes");
+    let s3_client = crate::node_state::NodeState::create_s3_client(&cfg).await;
+    
+    S3ClusterMembership::new(
+      s3_client,
+      bucket,
+      prefix,
       advertise_addr.parse().unwrap(),
       node_id,
-      Some(Duration::from_secs(2)), // Custom short threshold for tests
+      Duration::from_secs(2), // Short threshold for tests
     )
-    .await
-    .unwrap()
   }
 
   #[tokio::test]
