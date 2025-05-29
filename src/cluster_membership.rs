@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 // Default heartbeat interval and staleness threshold
-const DEFAULT_STALENESS_THRESHOLD: Duration = Duration::from_secs(90);
+pub const DEFAULT_STALENESS_THRESHOLD: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeId(String);
