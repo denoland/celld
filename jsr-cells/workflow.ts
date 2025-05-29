@@ -134,6 +134,7 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
       SELECT
         step_index,
         name,
+        output_data,
         completed_at
       FROM workflow_steps
       WHERE workflow_run_id = ?
@@ -151,6 +152,7 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
         return {
           stepIndex: row.step_index as number,
           name: row.name as string,
+          outputData: JSON.parse(row.output_data as string),
           completedAt: parseUTCDateTime(row.completed_at as string),
         };
       }),
@@ -224,7 +226,12 @@ export type WorkflowRunProgress = {
   workflowName: string;
   dispatchedAt: Date;
   completedAt: Date | null;
-  steps: { stepIndex: number; name: string; completedAt: Date }[];
+  steps: {
+    stepIndex: number;
+    name: string;
+    outputData: JSONValue;
+    completedAt: Date;
+  }[];
 };
 
 declare const __brand: unique symbol;

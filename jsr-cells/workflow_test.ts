@@ -78,6 +78,19 @@ Deno.test("Workflow type", () => {
   >(true);
 });
 
+Deno.test("Dispatch a workflow that is not defined returns null and nothing happens", () => {
+  const dbAccessor = generateTempDbAccessor();
+
+  type MyWorkflow = {
+    "foo": null;
+  };
+
+  const workflow = new Workflow<MyWorkflow>(dbAccessor);
+
+  const runId = workflow.dispatch("foo", null);
+  assertEquals(runId, null);
+});
+
 Deno.test("Define a workflow with no step and dispatch it", async () => {
   const dbAccessor = generateTempDbAccessor();
 
@@ -103,4 +116,41 @@ Deno.test("Define a workflow with no step and dispatch it", async () => {
   const progress = await waitUntilWorkflowRunCompleted(workflow, runId);
   assertEquals(progress.steps.length, 0);
   assertEquals(payload, 42);
+});
+
+Deno.test("Define a workflow with one step and dispatch it", async () => {
+  const dbAccessor = generateTempDbAccessor();
+
+  type MyWorkflow = {
+    "one-step": {
+      value: number;
+    };
+  };
+
+  const workflow = new Workflow<MyWorkflow>(dbAccessor);
+
+  workflow.define({
+    name: "one-step",
+    handler: async (ctx) => {
+      await ctx.step.run("sleep 10ms and then multiply by 2", async () => {
+        await delay(10);
+        return ctx.event.data.value * 2;
+      });
+    },
+  });
+
+  const runId = workflow.dispatch("one-step", { value: 42 });
+  assertExists(runId);
+
+  const progress1 = workflow.getRunProgress(runId);
+  assertExists(progress1);
+  assertEquals(progress1.completedAt, null);
+
+  const progress2 = await waitUntilWorkflowRunCompleted(workflow, runId);
+  assertExists(progress2);
+  assertExists(progress2.completedAt);
+
+  assertEquals(progress2.steps.length, 1);
+  assertEquals(progress2.steps[0].name, "sleep 10ms and then multiply by 2");
+  assertEquals(progress2.steps[0].outputData, 84);
 });
