@@ -43,12 +43,9 @@ pub struct NodeState {
 impl NodeState {
   /// Creates a configured S3 client based on the provided S3Config
   pub async fn create_s3_client(s3_config: &S3Config) -> aws_sdk_s3::Client {
-    // Configure AWS SDK with region and behavior version
     let mut aws_config_builder =
       aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(aws_config::Region::new(s3_config.region.clone()));
-
-    // If explicit credentials are provided, use them
     if let (Some(access_key), Some(secret_key)) =
       (&s3_config.access_key_id, &s3_config.secret_access_key)
     {
@@ -63,11 +60,7 @@ impl NodeState {
         ),
       );
     }
-
-    // Load the AWS config
     let aws_config = aws_config_builder.load().await;
-
-    // Create S3-specific config
     let mut s3_config_builder = aws_sdk_s3::config::Builder::from(&aws_config)
       .force_path_style(true)
       .timeout_config(
@@ -75,13 +68,9 @@ impl NodeState {
           .operation_timeout(Duration::from_secs(10))
           .build(),
       );
-
-    // Set S3 endpoint if configured
     if let Some(endpoint) = s3_config.endpoint.as_ref() {
       s3_config_builder = s3_config_builder.endpoint_url(endpoint);
     }
-
-    // Build and return the client
     aws_sdk_s3::Client::from_conf(s3_config_builder.build())
   }
 

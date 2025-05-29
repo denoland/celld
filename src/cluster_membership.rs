@@ -330,7 +330,7 @@ mod tests {
     let node_id = node_id.unwrap_or_else(NodeId::new_uuid_v4);
     let prefix = cfg.subpath("cluster_state/nodes");
     let s3_client = crate::node_state::NodeState::create_s3_client(&cfg).await;
-    
+
     S3ClusterMembership::new(
       s3_client,
       bucket,
