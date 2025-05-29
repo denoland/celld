@@ -3,6 +3,8 @@ import { ulid } from "@std/ulid";
 import { assert } from "@std/assert";
 
 export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
+  static #runningWorkflows = 0;
+
   #handlers: {
     [K in keyof WorkflowInputs]?: WorkflowDefinition<
       WorkflowInputs,
@@ -67,6 +69,8 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
 
     const step = new WorkflowStep(runId);
 
+    Workflow.#runningWorkflows++;
+
     // Dispatch a new workflow run as a fire-and-forget promise.
     handler({
       event: {
@@ -77,13 +81,59 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
       step,
       attempt: 1,
     }).then(() => {
+      Workflow.#runningWorkflows--;
       // Mark the workflow run as completed.
       cell.db.prepare(
         `UPDATE workflow_runs SET completed_at = datetime('now', 'utc') WHERE id = ?`,
       ).run(runId);
+    }).catch(() => {
+      Workflow.#runningWorkflows--;
+      // TODO(magurotuna): schedule a retry
     });
 
     return runId;
+  }
+
+  getRunProgress(runId: WorkflowRunId): WorkflowRunProgress | null {
+    // Retrieve the workflow run joined with its workflow steps from DB.
+    const runResult = cell.db.prepare(`
+      SELECT
+        id,
+        workflow_name,
+        dispatched_at,
+        completed_at
+      FROM workflow_runs
+      WHERE id = ?
+    `).get(runId);
+    if (!runResult) {
+      return null;
+    }
+
+    const stepsResult = cell.db.prepare(`
+      SELECT
+        index,
+        name,
+        completed_at
+      FROM workflow_steps
+      WHERE workflow_run_id = ?
+      ORDER BY index ASC
+    `).all(runId);
+
+    return {
+      id: workflowRunId(runResult.id as string),
+      workflowName: runResult.workflow_name as string,
+      dispatchedAt: parseUTCDateTime(runResult.dispatched_at as string),
+      completedAt: runResult.completed_at
+        ? parseUTCDateTime(runResult.completed_at as string)
+        : null,
+      steps: stepsResult.map((row) => {
+        return {
+          index: row.index as number,
+          name: row.name as string,
+          completedAt: parseUTCDateTime(row.completed_at as string),
+        };
+      }),
+    };
   }
 }
 
@@ -141,6 +191,18 @@ class WorkflowStep {
 
   // TODO: add more methods like sleep, sleepUntil, invoke, etc.
 }
+
+function parseUTCDateTime(utcString: string): Date {
+  return new Date(utcString + "Z");
+}
+
+type WorkflowRunProgress = {
+  id: WorkflowRunId;
+  workflowName: string;
+  dispatchedAt: Date;
+  completedAt: Date | null;
+  steps: { index: number; name: string; completedAt: Date }[];
+};
 
 declare const __brand: unique symbol;
 type Brand<T, TBrand> = T & { [__brand]: TBrand };
