@@ -258,8 +258,11 @@ class WorkflowStepImpl implements WorkflowStep {
     }
 
     // Otherwise, run the provided function and store the result in the DB.
-    // TODO(magurotuna): do error handling
+
+    // If this function throws an error, that is bubbled up to the workflow
+    // handler then caught, in which case the retry is scheduled.
     const result = await fn();
+
     this.#dbAccessor.db.prepare(
       `INSERT INTO workflow_steps (workflow_run_id, step_index, name, output_data) VALUES (?, ?, ?, ?)`,
     )

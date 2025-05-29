@@ -1,7 +1,9 @@
 import { DatabaseSync } from "node:sqlite";
+import type { DbAccessor, Task, TaskScheduler } from "./types.ts";
+import { Scheduler } from "./scheduler.ts";
 
 // Create a Cell class to track sockets and provide broadcast functionality
-export class Cell {
+export class Cell implements DbAccessor, TaskScheduler {
   tenant: string;
   id: string;
   ctlClient: Deno.HttpClient;
@@ -62,6 +64,7 @@ export class Cell {
     });
     this.sockets = new Map<string, WebSocket>();
     this.setupServer();
+    this.setupTables();
   }
 
   broadcast(
@@ -232,6 +235,20 @@ export class Cell {
     });
   }
 
+  private setupTables(): void {
+    // Ensure `scheduled_tasks` table exists.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS scheduled_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scheduled_time_unix_ms INTEGER NOT NULL,
+        payload TEXT NOT NULL
+      )
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_schedule_time ON scheduled_tasks (scheduled_time_unix_ms)
+    `);
+  }
+
   async shutdown(): Promise<never> {
     if (this.server) {
       await this.server.shutdown();
@@ -256,6 +273,13 @@ export class Cell {
 
     console.log("Shutdown complete");
     Deno.exit(0);
+  }
+
+  async schedule(task: Task) {
+    this.db.prepare(`
+      INSERT INTO scheduled_tasks (scheduled_time_unix_ms, payload) VALUES (?, ?)
+    `).run(task.scheduledTimeUnixMs, JSON.stringify(task));
+    await this.setAlarm(task.scheduledTimeUnixMs);
   }
 }
 
