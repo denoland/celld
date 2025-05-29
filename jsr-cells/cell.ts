@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import {
   type DbAccessor,
-  JSONValue,
+  type JSONValue,
   type ScheduledTaskId,
   scheduledTaskId,
   type Task,
