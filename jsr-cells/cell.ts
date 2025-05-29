@@ -8,8 +8,7 @@ import {
   type TaskScheduler,
 } from "./types.ts";
 import { Workflow } from "./workflow.ts";
-import { ulid } from "@std/ulid/ulid";
-import { assertNever } from "@std/assert/unstable-never";
+import { ulid } from "jsr:@std/ulid@^1.0.0/ulid";
 
 // Create a Cell class to track sockets and provide broadcast functionality
 export class Cell implements DbAccessor, TaskScheduler {
@@ -195,7 +194,7 @@ export class Cell implements DbAccessor, TaskScheduler {
           break;
         }
         default: {
-          assertNever(payload);
+          throw new Error(`Unknown task kind: ${payload satisfies never}`);
         }
       }
 

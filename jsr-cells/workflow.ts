@@ -1,5 +1,5 @@
-import { ulid } from "@std/ulid";
-import { assert } from "@std/assert";
+import { ulid } from "jsr:@std/ulid@^1.0.0/ulid";
+import { assert } from "jsr:@std/assert@^1.0.13/assert";
 import {
   type DbAccessor,
   type JSONValue,
