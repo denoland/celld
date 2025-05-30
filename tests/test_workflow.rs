@@ -260,6 +260,9 @@ async fn test_workflow_automatic_resume_after_node_failure() {
   }
   let generated_random_number = generated_random_number.unwrap();
 
+  info!("Waiting for Litestream to replicate data to S3...");
+  tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
   // Shutdown the primary owner
   test_env.graceful_shutdown_cell_instance(primary_owner_index);
 
