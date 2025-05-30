@@ -259,6 +259,9 @@ impl SqliteReplica {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
+    warn!("litestream restore stdout:\n{}", stdout);
+    warn!("litestream restore stderr:\n{}", stderr);
+
     if !output.status.success() {
       // Check for the specific "no matching backup" messages which mean there's no backup yet
       if stdout.contains("no matching backups")
@@ -416,6 +419,8 @@ impl SqliteReplica {
     let yaml = serde_yaml::to_string(&config)
       .context("Failed to serialize Litestream config")?;
 
+    warn!("{}", yaml);
+
     let mut file = File::create(&self.config_path).with_context(|| {
       format!("Failed to create config file: {:?}", self.config_path)
     })?;
@@ -487,12 +492,15 @@ impl SqliteReplica {
       // Wait for process to exit (without holding the lock)
       match child.wait().await {
         Ok(status) => {
-          debug!("Replication process exited with status: {:?}", status)
+          info!(
+            db_path = %self.db_path.display(),
+            "Replication process exited with status: {:?}", status
+          )
         }
         Err(e) => warn!("Error waiting for replication process to exit: {}", e),
       }
     } else {
-      debug!("No replication process to shutdown");
+      info!("No replication process to shutdown");
     }
 
     Ok(())

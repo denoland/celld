@@ -106,7 +106,7 @@ impl Drop for CapturedSubprocess {
       }
     }
 
-    if std::thread::panicking() {
+    if std::thread::panicking() || true {
       println!(
         "---- {} stdout ----\n{}",
         self.process_name,
