@@ -36,7 +36,7 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
     this.#dbAccessor.db.exec(`
       CREATE TABLE IF NOT EXISTS workflows (
         name TEXT PRIMARY KEY NOT NULL,
-        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now', 'utc'))
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc'))
       );
     `);
 
@@ -45,7 +45,7 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
         id TEXT PRIMARY KEY NOT NULL,
         workflow_name TEXT NOT NULL REFERENCES workflows(name) ON DELETE CASCADE,
         input_data TEXT NOT NULL,
-        dispatched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now', 'utc')),
+        dispatched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc')),
         completed_at TEXT
       );
     `);
@@ -56,7 +56,7 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
         step_index INTEGER NOT NULL,
         name TEXT NOT NULL,
         output_data TEXT NOT NULL,
-        completed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now', 'utc')),
+        completed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc')),
         UNIQUE(workflow_run_id, step_index)
       );
     `);
@@ -172,7 +172,7 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
 
     // Mark the workflow run as completed.
     this.#dbAccessor.db.prepare(
-      `UPDATE workflow_runs SET completed_at = strftime('%Y-%m-%d %H:%M:%f', 'now', 'utc') WHERE id = ?`,
+      `UPDATE workflow_runs SET completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc') WHERE id = ?`,
     ).run(runId);
   }
 
@@ -213,16 +213,16 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
     return {
       id: workflowRunId(runResult.id as string),
       workflowName: runResult.workflow_name as string,
-      dispatchedAt: parseUTCDateTime(runResult.dispatched_at as string),
+      dispatchedAt: new Date(runResult.dispatched_at as string),
       completedAt: runResult.completed_at
-        ? parseUTCDateTime(runResult.completed_at as string)
+        ? new Date(runResult.completed_at as string)
         : null,
       steps: stepsResult.map((row) => {
         return {
           stepIndex: row.step_index as number,
           name: row.name as string,
           outputData: JSON.parse(row.output_data as string),
-          completedAt: parseUTCDateTime(row.completed_at as string),
+          completedAt: new Date(row.completed_at as string),
         };
       }),
     };
@@ -287,8 +287,4 @@ class WorkflowStepImpl implements WorkflowStep {
   }
 
   // TODO: add more methods like sleep, sleepUntil, invoke, etc.
-}
-
-function parseUTCDateTime(utcString: string): Date {
-  return new Date(utcString + "Z");
 }
