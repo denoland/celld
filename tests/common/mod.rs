@@ -82,10 +82,7 @@ impl TestEnv {
   // Check if a port is actually available by attempting to bind to it
   #[allow(dead_code)]
   fn is_port_available(port: u16) -> bool {
-    match std::net::TcpListener::bind(format!("127.0.0.1:{}", port)) {
-      Ok(_) => true,
-      Err(_) => false,
-    }
+    std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok()
   }
 
   /// Find two available ports that will trigger cell relocation for any tenant/cell
