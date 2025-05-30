@@ -275,7 +275,7 @@ class WorkflowStepImpl implements WorkflowStep {
     // Otherwise, run the provided function and store the result in the DB.
 
     // If this function throws an error, that is bubbled up to the workflow
-    // handler then caught, in which case the retry is scheduled.
+    // handler, caught there, and then the retry is scheduled.
     const result = await fn();
 
     this.#dbAccessor.db.prepare(
