@@ -4,7 +4,7 @@ use common::TestEnv;
 use serde_json::json;
 
 #[test_log::test(tokio::test)]
-async fn test_workflow_in_single_node_cluster() {
+async fn test_reliable_workflow_in_single_node_cluster() {
   let test_env = TestEnv::new(1);
   let port = test_env.public_ports[0];
 
@@ -12,10 +12,10 @@ async fn test_workflow_in_single_node_cluster() {
   let url = format!("http://localhost:{}/cell/{}", port, cell_id);
   let client = reqwest::Client::new();
 
-  // Make a request to POST /signup
+  // Make a request to POST /reliable to dispatch the workflow
   let run_id = {
     let res = client
-      .post(format!("{}/signup", url))
+      .post(format!("{}/reliable", url))
       .header("host", "workflow.localhost")
       .json(&json!({
         "username": "magurotuna",
@@ -43,7 +43,7 @@ async fn test_workflow_in_single_node_cluster() {
     assert_eq!(res.status(), 200);
 
     let content = res.json::<serde_json::Value>().await.unwrap();
-    assert_eq!(content["workflowName"], "user.signup");
+    assert_eq!(content["workflowName"], "reliable");
     if !content["completedAt"].is_null() {
       completed = true;
       break;

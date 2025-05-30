@@ -10,7 +10,7 @@ cell.db.exec(`
 `);
 
 type MyWorkflow = {
-  "user.signup": {
+  "reliable": {
     username: string;
     email: string;
     phoneNumber: string;
@@ -18,7 +18,7 @@ type MyWorkflow = {
 };
 const workflow = cell.initWorkflow<MyWorkflow>();
 workflow.define({
-  name: "user.signup",
+  name: "reliable",
   handler: async (ctx) => {
     await ctx.step.run("send-email", async () => {
       // Simulate a delay of sending email
@@ -62,9 +62,9 @@ cell.request(async (req: Request) => {
     return Response.json(logs);
   }
 
-  if (lastPathSegment === "signup" && req.method === "POST") {
+  if (lastPathSegment === "reliable" && req.method === "POST") {
     const { username, email, phoneNumber } = await req.json();
-    const runId = workflow.dispatch("user.signup", {
+    const runId = workflow.dispatch("reliable", {
       username,
       email,
       phoneNumber,
