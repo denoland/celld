@@ -5,9 +5,11 @@ mod test_utils;
 use captured_subprocess::CapturedSubprocess;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
+use siphasher::sip::SipHasher;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -18,6 +20,21 @@ use uuid::Uuid;
 
 lazy_static::lazy_static! {
   static ref USED_PORTS: Mutex<HashSet<u16>> = Mutex::new(HashSet::new());
+}
+
+/// Test hash builder that replicates the behavior from peer_manager.rs
+#[derive(Clone)]
+struct TestHashBuilder {
+  seed: u64,
+}
+
+impl std::hash::BuildHasher for TestHashBuilder {
+  type Hasher = SipHasher;
+
+  fn build_hasher(&self) -> Self::Hasher {
+    // Use the same key derivation as in peer_manager.rs
+    SipHasher::new_with_keys(self.seed, 42) // 42 is the same arbitrary value as in peer_manager.rs
+  }
 }
 
 pub struct TestEnv {
@@ -74,58 +91,73 @@ impl TestEnv {
   /// Find two available ports that will trigger system main cell relocation
   /// when the second node joins, given a specific hashring seed.
   ///
-  /// Since we can't easily import the hash ring logic in tests, we'll use
-  /// a simpler approach: try known good port combinations that work with
-  /// the given seed, and fall back to available ports if needed.
+  /// This implementation uses the actual consistent hash algorithm to dynamically
+  /// find port pairs that will cause "_system/main" ownership to transfer.
   #[allow(dead_code)]
   pub fn find_relocation_ports(seed: u64) -> Option<(u16, u16)> {
-    // For seed 42, we know these combinations work (if available):
-    let known_combinations = if seed == 42 {
-      vec![
-        (42000, 42200),
-        (40000, 40200),
-        (41000, 41200),
-        (43000, 43200),
-      ]
-    } else {
-      vec![
-        (40000, 40200),
-        (41000, 41200),
-        (42000, 42200),
-        (43000, 43200),
-      ]
-    };
+    // Search for available port pairs and test them with the hash ring
+    // Use mid-range port numbers to avoid common dev ports (8000, 3000, etc.)
+    // and ephemeral port range (32768-65535)
+    let mut base_port = 20000;
 
-    // Try known combinations first
-    for (port1, port2) in known_combinations {
-      if Self::is_port_available(port1)
-        && Self::is_port_available(port1 + 1)
-        && Self::is_port_available(port2)
-        && Self::is_port_available(port2 + 1)
-      {
-        return Some((port1, port2));
-      }
-    }
-
-    // Fall back to searching for any available pair
-    let mut base_port = 45000;
-    while base_port < 50000 {
-      for spacing in [200, 300, 400, 500] {
+    while base_port < 30000 {
+      for spacing in [200, 300, 400, 500, 1000] {
         let port1 = base_port;
         let port2 = base_port + spacing;
 
+        // Check if all 4 ports are available (port1, port1+1, port2, port2+1)
         if Self::is_port_available(port1)
           && Self::is_port_available(port1 + 1)
           && Self::is_port_available(port2)
           && Self::is_port_available(port2 + 1)
         {
-          return Some((port1, port2));
+          // Test if this port combination causes relocation using actual hash ring
+          if Self::test_relocation_with_hash_ring(port1, port2, seed) {
+            return Some((port1, port2));
+          }
         }
       }
       base_port += 100;
     }
 
     None
+  }
+
+  /// Test whether adding a second node with port2 causes "_system/main"
+  /// to relocate from port1 to port2, using the actual hash ring algorithm
+  fn test_relocation_with_hash_ring(port1: u16, port2: u16, seed: u64) -> bool {
+    let addr1: SocketAddr = format!("127.0.0.1:{}", port1).parse().unwrap();
+    let addr2: SocketAddr = format!("127.0.0.1:{}", port2).parse().unwrap();
+
+    // Create a minimal hash ring implementation that matches peer_manager.rs
+    let mut ring1 = Self::create_test_hash_ring(seed);
+    ring1.add(addr1);
+
+    let mut ring2 = Self::create_test_hash_ring(seed);
+    ring2.add(addr1);
+    ring2.add(addr2);
+
+    // Use the same cell hash key format as peer_manager.rs
+    let cell_key = Self::cell_hash_key("_system", "main");
+
+    let owner_before = ring1.get(&cell_key).copied().unwrap();
+    let owner_after = ring2.get(&cell_key).copied().unwrap();
+
+    // Return true if ownership changed from addr1 to addr2
+    owner_before == addr1 && owner_after == addr2
+  }
+
+  /// Create a test hash ring that matches the algorithm in peer_manager.rs
+  fn create_test_hash_ring(
+    seed: u64,
+  ) -> hashring::HashRing<SocketAddr, TestHashBuilder> {
+    let builder = TestHashBuilder { seed };
+    hashring::HashRing::with_hasher(builder)
+  }
+
+  /// Create the same cell hash key format as peer_manager.rs
+  fn cell_hash_key(tenant: &str, cell_id: &str) -> String {
+    format!("{}/{}", tenant, cell_id)
   }
 
   // Start mesh nodes with auto-allocated non-conflicting ports
