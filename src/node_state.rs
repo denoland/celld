@@ -69,8 +69,7 @@ impl NodeState {
           .build(),
       );
     if let Some(endpoint) = s3_config.endpoint.as_ref() {
-      s3_config_builder =
-        s3_config_builder.endpoint_url(format!("http://{endpoint}"));
+      s3_config_builder = s3_config_builder.endpoint_url(endpoint);
     }
     aws_sdk_s3::Client::from_conf(s3_config_builder.build())
   }
