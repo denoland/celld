@@ -51,13 +51,12 @@
 //! combined).
 //!
 //! For example, if the S3 bucket is `my-celld-state` and the lock prefix is
-//! configured as `cluster_state/locks/restore/`, acquiring a lock for the
-//! database corresponding to tenant `my-app.localhost` and cell
-//! `user-session-abc` might result in an attempt to atomically create an S3
-//! object like:
+//! configured as `locks/`, acquiring a lock for the database corresponding to
+//! tenant `my-app.localhost` and cell `user-session-abc` might result in an
+//! attempt to atomically create an S3 object like:
 //!
 //! ```text
-//! s3://my-celld-state/cluster_state/locks/restore/f8a3b1e4c9d0...{hash_of_"my-app.localhost/user-session-abc"}...e5f6a7b8.lock
+//! s3://my-celld-state/locks/my-app.localhost/user-session-abc.lock
 //! ```
 //!
 //! The content of this object would be a JSON representation of the `LockInfo`
@@ -77,7 +76,6 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -919,9 +917,6 @@ impl S3DistributedLock {
     if !prefix.is_empty() && !prefix.ends_with('/') {
       prefix.push('/');
     }
-    if prefix.is_empty() {
-      prefix = "cluster_state/locks/restore/".to_string();
-    }
     Self {
       s3_client,
       bucket,
@@ -930,8 +925,17 @@ impl S3DistributedLock {
   }
 
   fn get_lock_key(&self, lock_name: &str) -> String {
-    let hash = Sha256::digest(lock_name.as_bytes());
-    format!("{}{:x}.lock", self.prefix, hash)
+    assert!(self.prefix.ends_with('/'));
+    assert!(!lock_name.is_empty(), "Lock name must not be empty");
+    // Check that lock_name is valid string for S3 key
+    fn is_safe_s3_key_char(c: char) -> bool {
+      c.is_ascii_alphanumeric() || "-._~/".contains(c)
+    }
+    assert!(
+      lock_name.chars().all(is_safe_s3_key_char),
+      "Lock name '{lock_name}' contains invalid characters"
+    );
+    format!("{}{}.lock", self.prefix, lock_name)
   }
 }
 

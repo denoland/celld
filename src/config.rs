@@ -164,11 +164,11 @@ impl Config {
     let heartbeat_interval = Duration::from_secs(heartbeat_secs);
 
     // Get staleness threshold with fallback to 90 seconds
-    let staleness_secs = var("CELL_STALENESS_THRESHOLD_SECS")
+    let staleness_threshold = var("CELL_STALENESS_THRESHOLD_SECS")
       .ok()
       .and_then(|s| s.parse::<u64>().ok())
-      .unwrap_or(90);
-    let staleness_threshold = Duration::from_secs(staleness_secs);
+      .map(Duration::from_secs)
+      .unwrap_or(crate::cluster_membership::DEFAULT_STALENESS_THRESHOLD);
 
     let lock_guard_ttl_secs = var("CELL_LOCK_GUARD_TTL_SECS")
       .ok()
