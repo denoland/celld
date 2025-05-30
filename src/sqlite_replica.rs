@@ -69,10 +69,8 @@ struct LitestreamS3Replica {
   /// Optional replica name
   #[serde(skip_serializing_if = "Option::is_none")]
   pub name: Option<String>,
-  /// S3 bucket name
-  pub bucket: String,
-  /// S3 path prefix
-  pub path: String,
+  /// S3 URL
+  pub url: url::Url,
   /// S3 region
   pub region: String,
   /// S3 endpoint URL (for custom S3 implementations like MinIO)
@@ -247,9 +245,14 @@ impl SqliteReplica {
     // Try to restore from S3
     let output = Command::new("litestream")
       .arg("restore")
-      .arg("-config")
-      .arg(&self.config_path)
+      .arg("-o")
       .arg(&self.db_path)
+      .arg(
+        self
+          .s3_config
+          .full_url(&format!("sqlite/{}/{}", self.tenant, self.cell_id))
+          .to_string(),
+      )
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
       .output()
@@ -388,15 +391,13 @@ impl SqliteReplica {
 
     assert!(!self.tenant.contains('/'));
     assert!(!self.cell_id.contains('/'));
-    let path = self
-      .s3_config
-      .subpath(&format!("sqlite/{}/{}", self.tenant, self.cell_id));
 
     let replica = LitestreamS3Replica {
       replica_type: "s3".to_string(),
       name: Some(format!("{}-replica", self.cell_id)),
-      bucket: self.s3_config.bucket.clone(),
-      path,
+      url: self
+        .s3_config
+        .full_url(&format!("sqlite/{}/{}", self.tenant, self.cell_id)),
       region: self.s3_config.region.clone(),
       endpoint: self.s3_config.endpoint.clone(),
       access_key_id: self.s3_config.access_key_id.clone(),

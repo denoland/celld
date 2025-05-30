@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::str::FromStr as _;
 use std::time::Duration;
 use tracing::info;
+use url::Url;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -105,6 +106,14 @@ impl S3Config {
         }
       }
     }
+  }
+
+  /// Constructs a full URL for the given subpath. The resulting format is:
+  ///
+  /// `s3://<bucket>/<self.path>/<subpath>/`
+  pub fn full_url(&self, subpath: &str) -> Url {
+    Url::parse(&format!("s3://{}/{}", self.bucket, self.subpath(subpath)))
+      .unwrap()
   }
 }
 
