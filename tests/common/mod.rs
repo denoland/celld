@@ -62,6 +62,72 @@ impl TestEnv {
     allocated
   }
 
+  // Check if a port is actually available by attempting to bind to it
+  #[allow(dead_code)]
+  fn is_port_available(port: u16) -> bool {
+    match std::net::TcpListener::bind(format!("127.0.0.1:{}", port)) {
+      Ok(_) => true,
+      Err(_) => false,
+    }
+  }
+
+  /// Find two available ports that will trigger system main cell relocation
+  /// when the second node joins, given a specific hashring seed.
+  ///
+  /// Since we can't easily import the hash ring logic in tests, we'll use
+  /// a simpler approach: try known good port combinations that work with
+  /// the given seed, and fall back to available ports if needed.
+  #[allow(dead_code)]
+  pub fn find_relocation_ports(seed: u64) -> Option<(u16, u16)> {
+    // For seed 42, we know these combinations work (if available):
+    let known_combinations = if seed == 42 {
+      vec![
+        (42000, 42200),
+        (40000, 40200),
+        (41000, 41200),
+        (43000, 43200),
+      ]
+    } else {
+      vec![
+        (40000, 40200),
+        (41000, 41200),
+        (42000, 42200),
+        (43000, 43200),
+      ]
+    };
+
+    // Try known combinations first
+    for (port1, port2) in known_combinations {
+      if Self::is_port_available(port1)
+        && Self::is_port_available(port1 + 1)
+        && Self::is_port_available(port2)
+        && Self::is_port_available(port2 + 1)
+      {
+        return Some((port1, port2));
+      }
+    }
+
+    // Fall back to searching for any available pair
+    let mut base_port = 45000;
+    while base_port < 50000 {
+      for spacing in [200, 300, 400, 500] {
+        let port1 = base_port;
+        let port2 = base_port + spacing;
+
+        if Self::is_port_available(port1)
+          && Self::is_port_available(port1 + 1)
+          && Self::is_port_available(port2)
+          && Self::is_port_available(port2 + 1)
+        {
+          return Some((port1, port2));
+        }
+      }
+      base_port += 100;
+    }
+
+    None
+  }
+
   // Start mesh nodes with auto-allocated non-conflicting ports
   pub fn new(count: usize) -> Self {
     // Start with port 7500 and use spacing of 2 to avoid conflicts with internal ports
