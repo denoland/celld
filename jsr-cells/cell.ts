@@ -294,9 +294,11 @@ export class Cell implements DbAccessor, TaskScheduler {
 
         // Get the next task's scheduled time and schedule it as a global alarm
         const nextTask = this.db.prepare(`
-        SELECT scheduled_time_unix_ms FROM scheduled_tasks ORDER BY scheduled_time_unix_ms ASC LIMIT 1
-      `).get();
+          SELECT scheduled_time_unix_ms FROM scheduled_tasks ORDER BY scheduled_time_unix_ms ASC LIMIT 1
+        `).get();
         if (nextTask !== undefined) {
+          // TODO(magurotuna): The next task's schedule could be piggybacked on
+          // the response instead of a separate request.
           await this.scheduleGlobalAlarm(
             nextTask.scheduled_time_unix_ms as number,
           );
