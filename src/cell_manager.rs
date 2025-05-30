@@ -923,7 +923,8 @@ fn spawn_deno_process(
       serve_socket_path.display(),
       ctl_socket_canonicalized.display()
     ))
-    .arg("--allow-net");
+    .arg("--allow-net")
+    .arg("--allow-ffi"); // sqlite-vec extension
 
   // Only allow specifically named environment variables
   cmd.arg(format!("--allow-env={}", env_vars.join(",")));
