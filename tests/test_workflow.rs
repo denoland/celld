@@ -266,9 +266,6 @@ async fn test_workflow_automatic_resume_after_node_failure() {
   // Shutdown the primary owner
   test_env.graceful_shutdown_cell_instance(primary_owner_index);
 
-  // Do the investigation here
-  // tokio::time::sleep(std::time::Duration::from_secs(8888)).await;
-
   // Wait for the shutdown to be detected
   debug!("Waiting for primary node failure to be detected...");
   tokio::time::sleep(std::time::Duration::from_secs(8)).await;

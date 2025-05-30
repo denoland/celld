@@ -22,8 +22,6 @@ impl MinioTestServer {
 
     let tempdir = TempDir::new().unwrap();
 
-    tracing::warn!("Starting minio server in {:?}", tempdir.path());
-
     // Start minio process with in-memory storage
     let mut process = std::process::Command::new("minio")
       .args(["server", tempdir.path().to_str().unwrap(), "--address=:0"])

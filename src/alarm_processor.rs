@@ -358,8 +358,6 @@ async fn dispatch_alarm_remotely(
     a
   };
 
-  tracing::info!(%cell_owner, %cell_owner_internal_addr, "Dispatching alarm to remote cell owner");
-
   let tcp_stream = TcpStream::connect(cell_owner_internal_addr).await?;
   let io = hyper_util::rt::TokioIo::new(tcp_stream);
   let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
