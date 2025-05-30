@@ -17,7 +17,7 @@ async fn test_system_main_cell_relocation() {
       .expect("Could not find available ports that trigger relocation");
 
   let initial_ports = vec![initial_port];
-  let second_ports = vec![second_port];
+  let second_ports = [second_port];
 
   // Start with a single node cluster using a seeded hasher
   let mut test_env = TestEnv::new_with_ports_and_envs(
