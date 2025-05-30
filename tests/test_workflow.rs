@@ -15,7 +15,7 @@ async fn test_workflow_in_single_node_cluster() {
   // Make a request to POST /signup
   let run_id = {
     let res = client
-      .post(&format!("{}/signup", url))
+      .post(format!("{}/signup", url))
       .header("host", "workflow.localhost")
       .json(&json!({
         "username": "magurotuna",
@@ -34,7 +34,7 @@ async fn test_workflow_in_single_node_cluster() {
   let mut completed = false;
   for _ in 0..10 {
     let res = client
-      .get(&format!("{}/run-progress", url))
+      .get(format!("{}/run-progress", url))
       .header("host", "workflow.localhost")
       .query(&[("id", &run_id)])
       .send()
@@ -54,7 +54,7 @@ async fn test_workflow_in_single_node_cluster() {
 
   // Get logs
   let res = client
-    .get(&format!("{}/logs", url))
+    .get(format!("{}/logs", url))
     .header("host", "workflow.localhost")
     .send()
     .await
