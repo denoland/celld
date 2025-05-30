@@ -12,8 +12,9 @@ async fn test_system_main_cell_relocation() {
 
   // Find two available ports that will trigger relocation with the given seed
   let seed: u64 = CELL_HASHRING_SEED.parse().unwrap();
-  let (initial_port, second_port) = TestEnv::find_relocation_ports(seed)
-    .expect("Could not find available ports that trigger relocation");
+  let (initial_port, second_port) =
+    TestEnv::find_relocation_ports(seed, SYSTEM_TENANT, SYSTEM_CELL_ID)
+      .expect("Could not find available ports that trigger relocation");
 
   let initial_ports = vec![initial_port];
   let second_ports = vec![second_port];

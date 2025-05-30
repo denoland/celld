@@ -88,13 +88,17 @@ impl TestEnv {
     }
   }
 
-  /// Find two available ports that will trigger system main cell relocation
+  /// Find two available ports that will trigger cell relocation for any tenant/cell
   /// when the second node joins, given a specific hashring seed.
   ///
   /// This implementation uses the actual consistent hash algorithm to dynamically
-  /// find port pairs that will cause "_system/main" ownership to transfer.
+  /// find port pairs that will cause ownership to transfer from node1 to node2.
   #[allow(dead_code)]
-  pub fn find_relocation_ports(seed: u64) -> Option<(u16, u16)> {
+  pub fn find_relocation_ports(
+    seed: u64,
+    tenant: &str,
+    cell_id: &str,
+  ) -> Option<(u16, u16)> {
     // Search for available port pairs and test them with the hash ring
     // Use mid-range port numbers to avoid common dev ports (8000, 3000, etc.)
     // and ephemeral port range (32768-65535)
@@ -112,7 +116,9 @@ impl TestEnv {
           && Self::is_port_available(port2 + 1)
         {
           // Test if this port combination causes relocation using actual hash ring
-          if Self::test_relocation_with_hash_ring(port1, port2, seed) {
+          if Self::test_relocation_with_hash_ring(
+            port1, port2, seed, tenant, cell_id,
+          ) {
             return Some((port1, port2));
           }
         }
@@ -123,9 +129,15 @@ impl TestEnv {
     None
   }
 
-  /// Test whether adding a second node with port2 causes "_system/main"
+  /// Test whether adding a second node with port2 causes the specified cell
   /// to relocate from port1 to port2, using the actual hash ring algorithm
-  fn test_relocation_with_hash_ring(port1: u16, port2: u16, seed: u64) -> bool {
+  fn test_relocation_with_hash_ring(
+    port1: u16,
+    port2: u16,
+    seed: u64,
+    tenant: &str,
+    cell_id: &str,
+  ) -> bool {
     let addr1: SocketAddr = format!("127.0.0.1:{}", port1).parse().unwrap();
     let addr2: SocketAddr = format!("127.0.0.1:{}", port2).parse().unwrap();
 
@@ -138,7 +150,7 @@ impl TestEnv {
     ring2.add(addr2);
 
     // Use the same cell hash key format as peer_manager.rs
-    let cell_key = Self::cell_hash_key("_system", "main");
+    let cell_key = Self::cell_hash_key(tenant, cell_id);
 
     let owner_before = ring1.get(&cell_key).copied().unwrap();
     let owner_after = ring2.get(&cell_key).copied().unwrap();
