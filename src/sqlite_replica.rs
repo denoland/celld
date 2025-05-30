@@ -243,18 +243,35 @@ impl SqliteReplica {
     }
 
     // Try to restore from S3
-    let output = Command::new("litestream")
-      .arg("restore")
-      .arg("-o")
-      .arg(&self.db_path)
-      .arg(
-        self
-          .s3_config
-          .full_url(&format!("sqlite/{}/{}", self.tenant, self.cell_id))
-          .to_string(),
-      )
-      .stdout(Stdio::piped())
-      .stderr(Stdio::piped())
+    let mut cmd = {
+      let mut c = Command::new("litestream");
+
+      c.arg("restore")
+        .arg("-o")
+        .arg(&self.db_path)
+        .arg(
+          self
+            .s3_config
+            .full_url(&format!("sqlite/{}/{}", self.tenant, self.cell_id))
+            .to_string(),
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("AWS_REGION", self.s3_config.region.clone());
+
+      if let Some(access_key_id) = self.s3_config.access_key_id.clone() {
+        c.env("AWS_ACCESS_KEY_ID", access_key_id);
+      }
+
+      if let Some(secret_access_key) = self.s3_config.secret_access_key.clone()
+      {
+        c.env("AWS_SECRET_ACCESS_KEY", secret_access_key);
+      }
+
+      c
+    };
+
+    let output = cmd
       .output()
       .await
       .context("Failed to execute litestream restore")?;

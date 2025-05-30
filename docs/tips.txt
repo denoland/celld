@@ -7,5 +7,5 @@ docker run --network=host --rm -e MC_HOST_minio=http://minioadmin:minioadmin@127
 
 Run celld connected to minio
 ```
-CELL_S3_ENDPOINT=http://localhost:9000 CELL_S3_BUCKET=test CELL_S3_REGION=us-east-1 CELL_S3_ACCESS_KEY_ID=minioadmin CELL_S3_SECRET_ACCESS_KEY=minioadmin CELL_S3_PREFIX=x cargo run
+CELL_S3_ENDPOINT=localhost:9000 CELL_S3_BUCKET=test CELL_S3_REGION=us-east-1 CELL_S3_ACCESS_KEY_ID=minioadmin CELL_S3_SECRET_ACCESS_KEY=minioadmin CELL_S3_PREFIX=x cargo run
 ```

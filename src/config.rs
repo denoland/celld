@@ -110,10 +110,21 @@ impl S3Config {
 
   /// Constructs a full URL for the given subpath. The resulting format is:
   ///
-  /// `s3://<bucket>/<self.path>/<subpath>/`
+  /// `s3://<bucket>.<self.endpoint>/<self.path>/<subpath>/`
   pub fn full_url(&self, subpath: &str) -> Url {
-    Url::parse(&format!("s3://{}/{}", self.bucket, self.subpath(subpath)))
-      .unwrap()
+    let endpoint_part = if let Some(endpoint) = &self.endpoint {
+      format!(".{endpoint}")
+    } else {
+      "".to_string()
+    };
+
+    Url::parse(&format!(
+      "s3://{}{}/{}",
+      self.bucket,
+      endpoint_part,
+      self.subpath(subpath)
+    ))
+    .unwrap()
   }
 }
 

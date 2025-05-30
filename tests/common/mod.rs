@@ -181,7 +181,7 @@ impl TestEnv {
         .env("CELL_ALARM_SCHEDULER_INTERVAL_SECS", "1")
         .env(
           "CELL_S3_ENDPOINT",
-          format!("http://127.0.0.1:{}", self.minio_server.port),
+          format!("localhost:{}", self.minio_server.port),
         )
         .env("CELL_S3_BUCKET", &self.bucket_name)
         .env("CELL_S3_REGION", "us-east-1")
