@@ -33,11 +33,16 @@ replication, and failover.
 
 ## Quick Start (Single Node Docker)
 
+Get an overview of the CLI options:
+
+```bash
+docker run ghcr.io/denoland/cells:latest --help
+```
+
 ```bash
 # Make a data directory
 mkdir ./cell-data
-# Run (replace S3 details and <hostname>)
-docker run --rm -it -p 8000:8000 -v "./cell-data:/data" \
+docker run -p 8000:8000 -v "./cell-data:/data/default/src" \
   ghcr.io/denoland/cells:latest
 ```
 

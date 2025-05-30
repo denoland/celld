@@ -69,9 +69,7 @@ COPY --from=litestream /download/litestream /usr/local/bin/litestream
 # Switch to non-root user
 USER celld
 
-# Environment variables with defaults
-ENV RUST_LOG=info
+ENV RUST_LOG=warn
 ENV DATA="/data"
 
-# Command to run the application
-CMD ["celld"]
+ENTRYPOINT ["celld"]
