@@ -142,7 +142,13 @@ export class Cell {
   }
 
   private setupServer(): void {
-    this.server = Deno.serve(async (req) => {
+    this.server = Deno.serve(async (originalReq) => {
+      const req = new Request(
+        originalReq.url.replace(/^http\+unix:/, "http:"),
+        originalReq,
+      );
+      const url = new URL(req.url);
+
       // Handle WebSocket connections
       if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
         const { response, socket } = Deno.upgradeWebSocket(req);
@@ -181,8 +187,6 @@ export class Cell {
 
         return response;
       }
-
-      const url = new URL(req.url);
 
       if (req.method === "POST" && url.pathname === "/_internal/alarm") {
         // Invoke the alarm callback
