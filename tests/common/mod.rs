@@ -1,11 +1,13 @@
 mod captured_subprocess;
+#[path = "../../src/consistent_hash.rs"]
+mod consistent_hash;
 #[path = "../../src/test_utils.rs"]
 mod test_utils;
 
 use captured_subprocess::CapturedSubprocess;
+use consistent_hash::create_consistent_hash;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use siphasher::sip::SipHasher;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
@@ -20,21 +22,6 @@ use uuid::Uuid;
 
 lazy_static::lazy_static! {
   static ref USED_PORTS: Mutex<HashSet<u16>> = Mutex::new(HashSet::new());
-}
-
-/// Test hash builder that replicates the behavior from peer_manager.rs
-#[derive(Clone)]
-struct TestHashBuilder {
-  seed: u64,
-}
-
-impl std::hash::BuildHasher for TestHashBuilder {
-  type Hasher = SipHasher;
-
-  fn build_hasher(&self) -> Self::Hasher {
-    // Use the same key derivation as in peer_manager.rs
-    SipHasher::new_with_keys(self.seed, 42) // 42 is the same arbitrary value as in peer_manager.rs
-  }
 }
 
 pub struct TestEnv {
@@ -138,11 +125,10 @@ impl TestEnv {
     let addr1: SocketAddr = format!("127.0.0.1:{}", port1).parse().unwrap();
     let addr2: SocketAddr = format!("127.0.0.1:{}", port2).parse().unwrap();
 
-    // Create a minimal hash ring implementation that matches peer_manager.rs
-    let mut ring1 = Self::create_test_hash_ring(seed);
+    let mut ring1 = create_consistent_hash(Some(seed));
     ring1.add(addr1);
 
-    let mut ring2 = Self::create_test_hash_ring(seed);
+    let mut ring2 = create_consistent_hash(Some(seed));
     ring2.add(addr1);
     ring2.add(addr2);
 
@@ -154,14 +140,6 @@ impl TestEnv {
 
     // Return true if ownership changed from addr1 to addr2
     owner_before == addr1 && owner_after == addr2
-  }
-
-  /// Create a test hash ring that matches the algorithm in peer_manager.rs
-  fn create_test_hash_ring(
-    seed: u64,
-  ) -> hashring::HashRing<SocketAddr, TestHashBuilder> {
-    let builder = TestHashBuilder { seed };
-    hashring::HashRing::with_hasher(builder)
   }
 
   /// Create the same cell hash key format as peer_manager.rs
