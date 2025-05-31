@@ -730,6 +730,7 @@ fn remove_cell_id_from_uri(uri: http::Uri, cell_id: &str) -> http::Uri {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use proptest::prelude::*;
 
   #[test]
   fn test_remove_cell_id_from_uri() {
@@ -768,5 +769,41 @@ mod tests {
       new_uri.to_string(),
       "https://example.com/foo/bar?hello=world&food=sushi"
     );
+  }
+
+  fn uri_strategy() -> impl Strategy<Value = http::Uri> {
+    any::<(bool, String, String)>().prop_filter_map(
+      "uri must be valid",
+      |(https, path, query)| {
+        let scheme = if https { "https" } else { "http" };
+        use fake::Fake as _;
+        let domain: String = fake::faker::internet::en::DomainSuffix().fake();
+        let path: String = if path.is_empty() {
+          String::new()
+        } else {
+          format!("/{}", path.replace("/", "").replace("?", ""))
+        };
+        let query_part = if query.is_empty() {
+          String::new()
+        } else {
+          format!("?{}", query.replace("&", "").replace("=", "eq"))
+        };
+
+        format!("{}://example.{}{}{}", scheme, domain, path, query_part)
+          .parse::<http::Uri>()
+          .ok()
+      },
+    )
+  }
+
+  proptest! {
+    #[test]
+    fn prop_test_remove_cell_id_from_uri(uri in uri_strategy()) {
+      let normalized_uri = remove_cell_id_from_uri(uri, "deadbeef1234");
+      if let Some(path_and_query) = normalized_uri.path_and_query() {
+        let path = path_and_query.path();
+        prop_assert!(!path.starts_with("/cell/"));
+      }
+    }
   }
 }
