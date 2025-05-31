@@ -424,10 +424,18 @@ impl ProxyHttp for Proxy {
     // Check if this is a /cell/* path - if so, let the default proxy path handle it
     if let Some(cell_path) = path.strip_prefix("/cell/") {
       if !cell_path.is_empty() {
+        let mut segments = cell_path.split('/');
         // Store the cell ID as the first path segment
-        let cell_id = cell_path.split('/').next().unwrap_or(cell_path);
+        let cell_id = segments.next().unwrap_or(cell_path);
         // Store the cell ID in the context for later use
         ctx.cell_id = Some(cell_id.to_string());
+
+        if matches!(segments.next(), Some("_internal")) {
+          return Err(pingora::Error::explain(
+            ErrorType::HTTPStatus(StatusCode::FORBIDDEN.into()),
+            "Requests to internal endpoints are forbidden",
+          ));
+        }
 
         return Ok(false); // Let it be handled by the upstream_peer method
       }
