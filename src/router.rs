@@ -429,12 +429,6 @@ impl ProxyHttp for Proxy {
         // Store the cell ID in the context for later use
         ctx.cell_id = Some(cell_id.to_string());
 
-        // Remove `/cell/{cell_id}` from the URI so that the user program won't
-        // see this part
-        let normalized_uri =
-          remove_cell_id_from_uri(session.req_header().uri.clone(), cell_id);
-        session.req_header_mut().set_uri(normalized_uri);
-
         return Ok(false); // Let it be handled by the upstream_peer method
       }
     }
@@ -532,7 +526,7 @@ impl ProxyHttp for Proxy {
   // This method is called for each HTTP request to determine the upstream server
   async fn upstream_peer(
     &self,
-    _session: &mut Session,
+    session: &mut Session,
     ctx: &mut Self::CTX,
   ) -> pingora::Result<Box<HttpPeer>> {
     // Start timing the request path
@@ -689,6 +683,13 @@ impl ProxyHttp for Proxy {
           total_time_so_far = ?request_start.elapsed(),
           "Selected upstream UDS peer"
         );
+
+        // Remove `/cell/{cell_id}` from the URI so that the user program won't
+        // see this part
+        let normalized_uri =
+          remove_cell_id_from_uri(session.req_header().uri.clone(), cell_id);
+        session.req_header_mut().set_uri(normalized_uri);
+
         // Assume anything after this point is handled by Pingora proxy machinery
         Ok(Box::new(peer))
       }
