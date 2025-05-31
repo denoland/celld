@@ -842,7 +842,6 @@ dependencies = [
  "test-log",
  "thiserror 2.0.12",
  "tokio",
- "tokio-test",
  "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
