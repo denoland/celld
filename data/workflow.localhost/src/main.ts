@@ -33,11 +33,7 @@ workflow.define({
       // Simulate a delay of sending email
       await delay(500);
       // Save the email sent log to the database
-      cell.db.prepare(
-        `
-        INSERT INTO logs (text) VALUES (?)
-        `,
-      ).run(
+      cell.db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
         `${ctx.event.data.username} signup email sent to ${ctx.event.data.email}`,
       );
       return null;
@@ -47,11 +43,7 @@ workflow.define({
       // Simulate a delay of sending SMS
       await delay(800);
       // Save the SMS sent log to the database
-      cell.db.prepare(
-        `
-        INSERT INTO logs (text) VALUES (?)
-        `,
-      ).run(
+      cell.db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
         `${ctx.event.data.username} signup SMS sent to ${ctx.event.data.phoneNumber}`,
       );
       return null;
@@ -97,9 +89,8 @@ cell.request(async (req: Request) => {
   const lastPathSegment = url.pathname.split("/").at(-1);
 
   if (lastPathSegment === "logs" && req.method === "GET") {
-    const logs = cell.db.prepare(`
-      SELECT * FROM logs ORDER BY created_at DESC
-    `).all();
+    const logs = cell.db.prepare(`SELECT * FROM logs ORDER BY created_at DESC`)
+      .all();
     return Response.json(logs);
   }
 
@@ -108,19 +99,17 @@ cell.request(async (req: Request) => {
     if (!key) {
       return Response.json({ error: "key is required" }, { status: 400 });
     }
-    const value = cell.db.prepare(`
-      SELECT value FROM key_values WHERE key = ?
-    `).get(key);
+    const value = cell.db.prepare(`SELECT value FROM key_values WHERE key = ?`)
+      .get(key);
     return Response.json(value);
   }
 
   if (lastPathSegment === "kv" && req.method === "POST") {
     const { key, value } = await req.json();
-    cell.db.prepare(
-      `
-      INSERT INTO key_values (key, value) VALUES (?, ?)
-      `,
-    ).run(key, value);
+    cell.db.prepare(`INSERT INTO key_values (key, value) VALUES (?, ?)`).run(
+      key,
+      value,
+    );
     return new Response("OK");
   }
 
