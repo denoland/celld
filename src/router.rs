@@ -428,6 +428,13 @@ impl ProxyHttp for Proxy {
         let cell_id = cell_path.split('/').next().unwrap_or(cell_path);
         // Store the cell ID in the context for later use
         ctx.cell_id = Some(cell_id.to_string());
+
+        // Remove `/cell/{cell_id}` from the URI so that the user program won't
+        // see this part
+        let normalized_uri =
+          remove_cell_id_from_uri(session.req_header().uri.clone(), cell_id);
+        session.req_header_mut().set_uri(normalized_uri);
+
         return Ok(false); // Let it be handled by the upstream_peer method
       }
     }
@@ -694,5 +701,72 @@ impl ProxyHttp for Proxy {
         ))
       }
     }
+  }
+}
+
+/// Remove the `/cell/{cell_id}` prefix from the URI
+fn remove_cell_id_from_uri(uri: http::Uri, cell_id: &str) -> http::Uri {
+  let mut parts = uri.into_parts();
+
+  if let Some(path_and_query) = &mut parts.path_and_query {
+    let path = path_and_query.path();
+    let maybe_query = path_and_query.query();
+
+    let modified_path = path
+      .strip_prefix(&format!("/cell/{cell_id}"))
+      .unwrap_or(path);
+
+    let new_path_and_query = match maybe_query {
+      Some(query) => format!("{modified_path}?{query}"),
+      None => modified_path.to_string(),
+    };
+
+    *path_and_query = new_path_and_query.parse().unwrap();
+  }
+
+  http::Uri::from_parts(parts).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_remove_cell_id_from_uri() {
+    let uri = http::Uri::from_static("http://example.com");
+    let new_uri = remove_cell_id_from_uri(uri, "123");
+    assert_eq!(new_uri.to_string(), "http://example.com/");
+
+    let uri = http::Uri::from_static("http://example.com/cell/123");
+    let new_uri = remove_cell_id_from_uri(uri, "123");
+    assert_eq!(new_uri.to_string(), "http://example.com/");
+
+    let uri =
+      http::Uri::from_static("https://example.com/cell/deadbeef1234/foo");
+    let new_uri = remove_cell_id_from_uri(uri, "deadbeef1234");
+    assert_eq!(new_uri.to_string(), "https://example.com/foo");
+
+    let uri =
+      http::Uri::from_static("https://example.com/cell/deadbeef1234/foo/bar");
+    let new_uri = remove_cell_id_from_uri(uri, "deadbeef1234");
+    assert_eq!(new_uri.to_string(), "https://example.com/foo/bar");
+
+    let uri = http::Uri::from_static(
+      "https://example.com/cell/deadbeef1234/foo/bar?hello=world",
+    );
+    let new_uri = remove_cell_id_from_uri(uri, "deadbeef1234");
+    assert_eq!(
+      new_uri.to_string(),
+      "https://example.com/foo/bar?hello=world"
+    );
+
+    let uri = http::Uri::from_static(
+      "https://example.com/cell/deadbeef1234/foo/bar?hello=world&food=sushi",
+    );
+    let new_uri = remove_cell_id_from_uri(uri, "deadbeef1234");
+    assert_eq!(
+      new_uri.to_string(),
+      "https://example.com/foo/bar?hello=world&food=sushi"
+    );
   }
 }
