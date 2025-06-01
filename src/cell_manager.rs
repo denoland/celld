@@ -581,7 +581,6 @@ impl CellManager {
           status
         );
 
-        // Remove the entry from the map to avoid stale entries
         lock_handle.release().await;
 
         // The tempdir will be dropped at the end of this scope, cleaning up the socket file
