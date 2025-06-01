@@ -428,6 +428,7 @@ impl ProxyHttp for Proxy {
         let cell_id = cell_path.split('/').next().unwrap_or(cell_path);
         // Store the cell ID in the context for later use
         ctx.cell_id = Some(cell_id.to_string());
+
         return Ok(false); // Let it be handled by the upstream_peer method
       }
     }
@@ -525,7 +526,7 @@ impl ProxyHttp for Proxy {
   // This method is called for each HTTP request to determine the upstream server
   async fn upstream_peer(
     &self,
-    _session: &mut Session,
+    session: &mut Session,
     ctx: &mut Self::CTX,
   ) -> pingora::Result<Box<HttpPeer>> {
     // Start timing the request path
@@ -682,6 +683,13 @@ impl ProxyHttp for Proxy {
           total_time_so_far = ?request_start.elapsed(),
           "Selected upstream UDS peer"
         );
+
+        // Remove `/cell/{cell_id}` from the URI so that the user program won't
+        // see this part
+        let normalized_uri =
+          remove_cell_id_from_uri(session.req_header().uri.clone(), cell_id);
+        session.req_header_mut().set_uri(normalized_uri);
+
         // Assume anything after this point is handled by Pingora proxy machinery
         Ok(Box::new(peer))
       }
@@ -692,6 +700,110 @@ impl ProxyHttp for Proxy {
           "Failed to connect to upstream application",
           e,
         ))
+      }
+    }
+  }
+}
+
+/// Remove the `/cell/{cell_id}` prefix from the URI
+fn remove_cell_id_from_uri(uri: http::Uri, cell_id: &str) -> http::Uri {
+  let mut parts = uri.into_parts();
+
+  if let Some(path_and_query) = &mut parts.path_and_query {
+    let path = path_and_query.path();
+    let maybe_query = path_and_query.query();
+
+    let modified_path = path
+      .strip_prefix(&format!("/cell/{cell_id}"))
+      .unwrap_or(path);
+
+    let new_path_and_query = match maybe_query {
+      Some(query) => format!("{modified_path}?{query}"),
+      None => modified_path.to_string(),
+    };
+
+    *path_and_query = new_path_and_query.parse().unwrap();
+  }
+
+  http::Uri::from_parts(parts).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use proptest::prelude::*;
+
+  #[test]
+  fn test_remove_cell_id_from_uri() {
+    let uri = http::Uri::from_static("http://example.com");
+    let new_uri = remove_cell_id_from_uri(uri, "123");
+    assert_eq!(new_uri.to_string(), "http://example.com/");
+
+    let uri = http::Uri::from_static("http://example.com/cell/123");
+    let new_uri = remove_cell_id_from_uri(uri, "123");
+    assert_eq!(new_uri.to_string(), "http://example.com/");
+
+    let uri =
+      http::Uri::from_static("https://example.com/cell/deadbeef1234/foo");
+    let new_uri = remove_cell_id_from_uri(uri, "deadbeef1234");
+    assert_eq!(new_uri.to_string(), "https://example.com/foo");
+
+    let uri =
+      http::Uri::from_static("https://example.com/cell/deadbeef1234/foo/bar");
+    let new_uri = remove_cell_id_from_uri(uri, "deadbeef1234");
+    assert_eq!(new_uri.to_string(), "https://example.com/foo/bar");
+
+    let uri = http::Uri::from_static(
+      "https://example.com/cell/deadbeef1234/foo/bar?hello=world",
+    );
+    let new_uri = remove_cell_id_from_uri(uri, "deadbeef1234");
+    assert_eq!(
+      new_uri.to_string(),
+      "https://example.com/foo/bar?hello=world"
+    );
+
+    let uri = http::Uri::from_static(
+      "https://example.com/cell/deadbeef1234/foo/bar?hello=world&food=sushi",
+    );
+    let new_uri = remove_cell_id_from_uri(uri, "deadbeef1234");
+    assert_eq!(
+      new_uri.to_string(),
+      "https://example.com/foo/bar?hello=world&food=sushi"
+    );
+  }
+
+  fn uri_strategy() -> impl Strategy<Value = http::Uri> {
+    any::<(bool, String, String)>().prop_filter_map(
+      "uri must be valid",
+      |(https, path, query)| {
+        let scheme = if https { "https" } else { "http" };
+        use fake::Fake as _;
+        let domain: String = fake::faker::internet::en::DomainSuffix().fake();
+        let path: String = if path.is_empty() {
+          String::new()
+        } else {
+          format!("/{}", path.replace("/", "").replace("?", ""))
+        };
+        let query_part = if query.is_empty() {
+          String::new()
+        } else {
+          format!("?{}", query.replace("&", "").replace("=", "eq"))
+        };
+
+        format!("{}://example.{}{}{}", scheme, domain, path, query_part)
+          .parse::<http::Uri>()
+          .ok()
+      },
+    )
+  }
+
+  proptest! {
+    #[test]
+    fn prop_test_remove_cell_id_from_uri(uri in uri_strategy()) {
+      let normalized_uri = remove_cell_id_from_uri(uri, "deadbeef1234");
+      if let Some(path_and_query) = normalized_uri.path_and_query() {
+        let path = path_and_query.path();
+        prop_assert!(!path.starts_with("/cell/"));
       }
     }
   }

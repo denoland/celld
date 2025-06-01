@@ -195,7 +195,11 @@ export class Cell {
 
       // Handle HTTP requests
       if (this.onRequestCallback) {
-        const result = this.onRequestCallback(req);
+        const modifiedReq = new Request(
+          req.url.replace(/^http\+unix:/, "http:"),
+          req,
+        );
+        const result = this.onRequestCallback(modifiedReq);
         if (result instanceof Promise) {
           return await result;
         }
