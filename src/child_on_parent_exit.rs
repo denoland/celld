@@ -146,8 +146,16 @@ impl ChildOnParentExit {
               Ok(_) => unreachable!("Read more than one byte from pipe"),
               Err(nix::Error::EINTR) => {
                 // Interrupted by signal - check if child terminated
-                if CHILD_TERMINATED_FLAG.load(Ordering::SeqCst) {
-                  CHILD_TERMINATED_FLAG.store(false, Ordering::SeqCst);
+                if CHILD_TERMINATED_FLAG
+                  .compare_exchange(
+                    true,
+                    false,
+                    Ordering::SeqCst,
+                    Ordering::Relaxed,
+                  )
+                  .is_ok()
+                {
+                  // Flag was true and has been atomically reset to false.
                   match real_child.try_wait() {
                     Ok(Some(status)) => {
                       // Child has terminated
@@ -167,7 +175,7 @@ impl ChildOnParentExit {
                     }
                   }
                 } else {
-                  // Some other signal interrupted us, continue
+                  // EINTR was due to another signal or SIGCHLD flag was already handled.
                   continue;
                 }
               }
