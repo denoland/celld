@@ -29,7 +29,7 @@ lazy_static::lazy_static! {
 const SERVER_STARTUP_WAIT_SECS: u64 = 2;
 
 /// Interval in seconds between heartbeats that each cell sends.
-/// This is also the frequency of cluster membership updates. So to avoid flaky
+/// This is also the frequency of cluster membership sync. So to avoid flaky
 /// tests, this value should be smaller than [`SERVER_STARTUP_WAIT_SECS`].
 const CELL_HEARTBEAT_INTERVAL_SECS: u64 = 1;
 
