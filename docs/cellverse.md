@@ -42,7 +42,7 @@ applications.
          `docker run -e RUST_LOG=info -e CELL_DENO_OUTPUT=1 -p 8000:8000 -p 8001:8001 -v $PWD/cells:/app/src -v $PWD/celld_data:/data ghcr.io/denoland/cells:latest ./src/main.ts`
          (using `/app/src` for your Deno code and `/data` for persistent `celld`
          data).
-      - Done: see in src/cells/demos/cellverse
+     - Done: see in src/cells/demos/cellverse
   2. **Basic Vite Frontend:**
      - Initialize a Vite + Preact (or your choice) project.
      - Create a minimal landing page.
@@ -50,8 +50,8 @@ applications.
        `http://localhost:8000`.
      - Done: see in src/cells/demos/cellverse
   3. **Basic `celld` Setup:**
-     - Create a placeholder `cells/main.ts` for the default tenant's
-       cells. This will be expanded later.
+     - Create a placeholder `cells/main.ts` for the default tenant's cells. This
+       will be expanded later.
      - Ensure you can run `celld` via Docker and it serves a basic response from
        a test cell (e.g., `http://localhost:8000/cell/ping` returning "pong").
      - Done: see in src/cells/demos/cellverse/cells/main.ts
@@ -75,9 +75,45 @@ applications.
   - Does the Vite proxy seem to be configured correctly (even if there are no
     real endpoints yet)?
 
-phase 1 is complete. 
-Github Oauth app Client ID Ov23liRJiAlpktDPnJx1
-client secret: ad8ddca4d41ccf13b205205d8e835e33c5a5b493
+phase 1 is complete. Github Oauth app Client ID Ov23liRJiAlpktDPnJx1 client
+secret: ad8ddca4d41ccf13b205205d8e835e33c5a5b493
+
+---
+
+**Phase 2 Progress Update (June 1, 2025)**
+
+Phase 2 is now complete! GitHub OAuth authentication is fully working.
+
+**Implementation Notes:**
+
+- Auth cell implemented in `demos/cellverse/cells/main.ts` with all required
+  endpoints:
+  - `/github/login` - Initiates OAuth flow
+  - `/github/callback` - Handles OAuth callback and JWT generation
+  - `/me` - Returns authenticated user info
+- Frontend auth components implemented:
+  - `AuthService` class in `auth.ts` manages tokens and user state
+  - `AuthSuccess.tsx` handles OAuth callback redirect
+  - Main app shows login/logout UI based on auth state
+- SQLite database stores user info with proper node:sqlite API usage
+- JWT tokens stored in localStorage for session persistence
+
+**Key Fixes Applied:**
+
+- Hardcoded redirect URIs for local development (localhost:5173 for callback)
+- Fixed database API calls (changed from `cell.db.query()` to
+  `cell.db.prepare()`)
+- Removed environment variable access that caused permission errors in cells
+  runtime
+- GitHub OAuth app callback URL configured as
+  `http://localhost:5173/cell/auth/github/callback`
+
+**Current Status:**
+
+- Users can successfully login with GitHub
+- User info (username, avatar) displays after login
+- Logout functionality works properly
+- Ready to proceed to Phase 3: Basic Channel Management & UI
 
 ---
 
@@ -109,8 +145,7 @@ client secret: ad8ddca4d41ccf13b205205d8e835e33c5a5b493
        - Returns user info if valid.
   2. **Frontend Auth Logic (Vite/Preact):**
      - Create a simple UI with a "Login with GitHub" button.
-     - Clicking the button navigates to `/cell/auth/github/login`
-       (proxied).
+     - Clicking the button navigates to `/cell/auth/github/login` (proxied).
      - Handle the redirect back from the Auth Cell (e.g., on an `/auth-success`
        route):
        - Extract JWT from URL fragment.
@@ -120,8 +155,7 @@ client secret: ad8ddca4d41ccf13b205205d8e835e33c5a5b493
      - Implement a "Logout" button that clears the JWT and redirects to a
        logged-out state.
      - UI should conditionally show Login/Logout buttons and user info (e.g.,
-       "Logged in as [username]") by calling the `/cell/auth/me`
-       endpoint.
+       "Logged in as [username]") by calling the `/cell/auth/me` endpoint.
 - **Stopping Point for Sign-off (UI & Functionality):**
   - Can a user click "Login with GitHub," go through the GitHub flow, and be
     redirected back to the app?
@@ -139,8 +173,7 @@ client secret: ad8ddca4d41ccf13b205205d8e835e33c5a5b493
 - **Objective:** Allow users to see a list of channels and create new ones. The
   concept of a "channel" is still just metadata at this stage.
 - **Tasks:**
-  1. **Create "Channel Registry Cell"
-     (`cells/channel_registry_cell.ts`):**
+  1. **Create "Channel Registry Cell" (`cells/channel_registry_cell.ts`):**
      - This cell manages the metadata about channels.
      - Its SQLite DB will have a `channels` table (e.g., `id TEXT PRIMARY KEY`,
        `name TEXT`, `creator_github_id TEXT`, `created_at TIMESTAMP`).
@@ -179,8 +212,8 @@ client secret: ad8ddca4d41ccf13b205205d8e835e33c5a5b493
   channel, they enter a chat room powered by an LLM specific to that channel
   cell.
 - **Tasks:**
-  1. **Create "LLM Channel Cell" (`cells/llm_channel_cell.ts` or similar,
-     this will be the `main.ts` for cells like `/cell/llm-channel-<id>`):**
+  1. **Create "LLM Channel Cell" (`cells/llm_channel_cell.ts` or similar, this
+     will be the `main.ts` for cells like `/cell/llm-channel-<id>`):**
      - This is the `main.ts` that will run when a cell like
        `/cell/llm-channel-xyz` is activated.
      - **Initialization:** When this cell type is first activated for a specific
