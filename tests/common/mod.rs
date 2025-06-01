@@ -24,6 +24,15 @@ lazy_static::lazy_static! {
   static ref USED_PORTS: Mutex<HashSet<u16>> = Mutex::new(HashSet::new());
 }
 
+/// Time to wait for servers to be ready after they are started.
+/// This is important to give time for S3 registration and peer discovery.
+const SERVER_STARTUP_WAIT_SECS: u64 = 2;
+
+/// Interval in seconds between heartbeats that each cell sends.
+/// This is also the frequency of cluster membership updates. So to avoid flaky
+/// tests, this value should be smaller than [`SERVER_STARTUP_WAIT_SECS`].
+const CELL_HEARTBEAT_INTERVAL_SECS: u64 = 1;
+
 pub struct TestEnv {
   /// Celld servers
   servers: Vec<CapturedSubprocess>,
@@ -205,7 +214,7 @@ impl TestEnv {
 
     // Longer delay for peer exchange after TCP connections are ready
     // This is important to give time for S3 registration and peer discovery
-    std::thread::sleep(Duration::from_secs(2));
+    std::thread::sleep(Duration::from_secs(SERVER_STARTUP_WAIT_SECS));
     println!("All servers are ready now");
     test_env
   }
@@ -257,7 +266,10 @@ impl TestEnv {
         .env("INTERNAL_LISTEN_ADDR", &internal_addr)
         .current_dir(temp_dir.path())
         .env("DATA", &data_dir_path)
-        .env("CELL_HEARTBEAT_INTERVAL", "2")
+        .env(
+          "CELL_HEARTBEAT_INTERVAL",
+          CELL_HEARTBEAT_INTERVAL_SECS.to_string(),
+        )
         .env("CELL_GRACE_PERIOD_SECONDS", "5")
         // Use a shorter staleness threshold for tests to detect failures faster
         .env("CELL_STALENESS_THRESHOLD_SECS", "6")
