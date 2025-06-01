@@ -10,15 +10,14 @@ async fn test_system_main_cell_relocation() {
 
   let client = reqwest::Client::new();
 
-  // In this test, we rely on the following two specific port numbers to be
-  // allocated so that the system main cell relocation happens when the second
-  // node joins the cluster given the fixed seed.
-  // TODO(magurotuna): Find a better way that does not rely on these ports as
-  // these ports may not be available.
-  let initial_ports = TestEnv::allocate_ports(42000, 1, 2);
-  assert_eq!(initial_ports, [42000]);
-  let second_ports = TestEnv::allocate_ports(42200, 1, 2);
-  assert_eq!(second_ports, [42200]);
+  // Find two available ports that will trigger relocation with the given seed
+  let seed: u64 = CELL_HASHRING_SEED.parse().unwrap();
+  let (initial_port, second_port) =
+    TestEnv::find_relocation_ports(seed, SYSTEM_TENANT, SYSTEM_CELL_ID)
+      .expect("Could not find available ports that trigger relocation");
+
+  let initial_ports = vec![initial_port];
+  let second_ports = [second_port];
 
   // Start with a single node cluster using a seeded hasher
   let mut test_env = TestEnv::new_with_ports_and_envs(

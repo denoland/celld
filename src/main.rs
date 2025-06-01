@@ -6,6 +6,7 @@ mod cell_manager;
 mod child_on_parent_exit;
 mod cluster_membership;
 mod config;
+mod consistent_hash;
 mod control_socket_listener;
 mod distributed_lock;
 mod heartbeat_service;

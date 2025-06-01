@@ -1,13 +1,17 @@
 mod captured_subprocess;
+#[path = "../../src/consistent_hash.rs"]
+mod consistent_hash;
 #[path = "../../src/test_utils.rs"]
 mod test_utils;
 
 use captured_subprocess::CapturedSubprocess;
+use consistent_hash::create_consistent_hash;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -60,6 +64,87 @@ impl TestEnv {
     }
 
     allocated
+  }
+
+  // Check if a port is actually available by attempting to bind to it
+  #[allow(dead_code)]
+  fn is_port_available(port: u16) -> bool {
+    std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok()
+  }
+
+  /// Find two available ports that will trigger cell relocation for any tenant/cell
+  /// when the second node joins, given a specific hashring seed.
+  ///
+  /// This implementation uses the actual consistent hash algorithm to dynamically
+  /// find port pairs that will cause ownership to transfer from node1 to node2.
+  #[allow(dead_code)]
+  pub fn find_relocation_ports(
+    seed: u64,
+    tenant: &str,
+    cell_id: &str,
+  ) -> Option<(u16, u16)> {
+    // Search for available port pairs and test them with the hash ring
+    // Use mid-range port numbers to avoid common dev ports (8000, 3000, etc.)
+    // and ephemeral port range (32768-65535)
+    let mut base_port = 20000;
+
+    while base_port < 30000 {
+      for spacing in [200, 300, 400, 500, 1000] {
+        let port1 = base_port;
+        let port2 = base_port + spacing;
+
+        // Check if all 4 ports are available (port1, port1+1, port2, port2+1)
+        if Self::is_port_available(port1)
+          && Self::is_port_available(port1 + 1)
+          && Self::is_port_available(port2)
+          && Self::is_port_available(port2 + 1)
+        {
+          // Test if this port combination causes relocation using actual hash ring
+          if Self::test_relocation_with_hash_ring(
+            port1, port2, seed, tenant, cell_id,
+          ) {
+            return Some((port1, port2));
+          }
+        }
+      }
+      base_port += 100;
+    }
+
+    None
+  }
+
+  /// Test whether adding a second node with port2 causes the specified cell
+  /// to relocate from port1 to port2, using the actual hash ring algorithm
+  fn test_relocation_with_hash_ring(
+    port1: u16,
+    port2: u16,
+    seed: u64,
+    tenant: &str,
+    cell_id: &str,
+  ) -> bool {
+    let addr1: SocketAddr = format!("127.0.0.1:{}", port1).parse().unwrap();
+    let addr2: SocketAddr = format!("127.0.0.1:{}", port2).parse().unwrap();
+
+    let mut ring1 = create_consistent_hash(Some(seed));
+    ring1.add(addr1);
+
+    let mut ring2 = create_consistent_hash(Some(seed));
+    ring2.add(addr1);
+    ring2.add(addr2);
+
+    // Use the same cell hash key format as peer_manager.rs
+    let cell_key = Self::cell_hash_key(tenant, cell_id);
+
+    let owner_before = ring1.get(&cell_key).copied().unwrap();
+    let owner_after = ring2.get(&cell_key).copied().unwrap();
+
+    // Return true if ownership changed from addr1 to addr2
+    owner_before == addr1 && owner_after == addr2
+  }
+
+  /// Create the same cell hash key format as peer_manager.rs
+  fn cell_hash_key(tenant: &str, cell_id: &str) -> String {
+    format!("{}/{}", tenant, cell_id)
   }
 
   // Start mesh nodes with auto-allocated non-conflicting ports
@@ -167,10 +252,7 @@ impl TestEnv {
     let server_cmd = Command::new(env!("CARGO_BIN_EXE_celld"));
     let server_cmd_setup = |cmd: &mut Command| {
       cmd
-        .env(
-          "RUST_LOG",
-          "celld=info,aws_smithy_http=trace,aws_sdk_s3=trace",
-        )
+        .env("RUST_LOG", "info")
         .env("ADVERTISE_ADDR", &advertise_addr)
         .env("INTERNAL_LISTEN_ADDR", &internal_addr)
         .current_dir(temp_dir.path())
