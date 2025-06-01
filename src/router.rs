@@ -431,10 +431,22 @@ impl ProxyHttp for Proxy {
         ctx.cell_id = Some(cell_id.to_string());
 
         if matches!(segments.next(), Some("_internal")) {
-          return Err(pingora::Error::explain(
-            ErrorType::HTTPStatus(StatusCode::FORBIDDEN.into()),
-            "Requests to internal endpoints are forbidden",
-          ));
+          if let Err(e) = session
+            .respond_error_with_body(
+              StatusCode::FORBIDDEN.into(),
+              bytes::Bytes::from_static(
+                b"Requests to internal endpoints are forbidden",
+              ),
+            )
+            .await
+          {
+            error!(error = ?e, "Error responding to internal endpoint request with 403");
+            return Err(pingora::Error::explain(
+              ErrorType::HTTPStatus(StatusCode::FORBIDDEN.into()),
+              "Requests to internal endpoints are forbidden",
+            ));
+          }
+          return Ok(true);
         }
 
         return Ok(false); // Let it be handled by the upstream_peer method

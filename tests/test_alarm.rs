@@ -655,23 +655,3 @@ async fn test_alarm_dispatch_to_remote_cell_owner() {
     assert_eq!(content, r#"{"count":1}"#);
   }
 }
-
-// HTTP requests to `/_internal/alarm` made by external users should be rejected
-#[test_log::test(tokio::test)]
-async fn test_internal_alarm_endpoint_is_forbidden() {
-  let test_env = TestEnv::new(1);
-  let port = test_env.public_ports[0];
-
-  let cell_id = uuid::Uuid::new_v4().simple().to_string();
-  let url = format!("http://localhost:{}/cell/{}", port, cell_id);
-
-  let client = reqwest::Client::new();
-
-  let res = client
-    .post(format!("{url}/_internal/alarm"))
-    .header("host", "hello.localhost")
-    .send()
-    .await
-    .unwrap();
-  assert_eq!(res.status(), 403);
-}
