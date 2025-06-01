@@ -1,3 +1,23 @@
+//! Ensures a spawned subprocess terminates when its parent process exits.
+//!
+//! This module provides a `ChildOnParentExit` struct that wraps a child
+//! process, offering an interface similar to `std::process::Child`. Its primary
+//! goal is to ensure the child process is cleaned up if the parent process
+//! (holding the `ChildOnParentExit` guard) terminates unexpectedly.
+//!
+//! On Linux this uses `prctl(PR_SET_DEATHSIG, SIGTERM)`. The kernel directly
+//! sends `SIGTERM` to the child if the parent dies.
+//!
+//! On MacOS it employs an intermediate "watcher"  process due to the lack of a
+//! direct `PR_SET_DEATHSIG` equivalent.
+//! -   The main parent communicates with the watcher via a pipe. If the parent
+//!     exits, the pipe closes, signaling the watcher to terminate the "real child"
+//!     (the user's command) and then exit.
+//! -   If the "real child" exits on its own, the watcher receives `SIGCHLD`.
+//!     The watcher then reaps the real child and exits. This is handled by
+//!     setting a flag in the `SIGCHLD` handler, which interrupts the watcher's
+//!     blocking read on the parent pipe (returning `EINTR`), allowing it to
+//!     then check the flag and handle the real child's termination.
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::waitpid;
 use nix::sys::wait::WaitPidFlag;
