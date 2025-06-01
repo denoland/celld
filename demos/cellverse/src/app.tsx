@@ -1,43 +1,115 @@
-import { useState } from 'preact/hooks'
-import preactLogo from './assets/preact.svg'
-import viteLogo from '/vite.svg'
-import './app.css'
+import { useEffect, useState } from "preact/hooks";
+import { authService, type User } from "./auth";
+import { AuthSuccess } from "./AuthSuccess";
+import "./app.css";
 
 export function App() {
-  const [count, setCount] = useState(0)
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    // Check if this is the auth success route
+    if (window.location.pathname === "/auth-success") {
+      return;
+    }
+
+    // Load user on mount
+    const loadUser = async () => {
+      await authService.loadUser();
+      setUser(authService.getUser());
+      setLoading(false);
+    };
+    loadUser();
+  }, []);
+
+  // Handle auth success route
+  if (window.location.pathname === "/auth-success") {
+    return <AuthSuccess />;
+  }
+
+  const handleLogin = () => {
+    authService.login();
+  };
+
+  const handleLogout = () => {
+    authService.logout();
+    setUser(null);
+  };
+
+  if (loading) {
+    return (
+      <div style={{ textAlign: "center", marginTop: "50px" }}>
+        <h2>Loading...</h2>
+      </div>
+    );
+  }
 
   return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} class="logo" alt="Vite logo" />
-        </a>
-        <a href="https://preactjs.com" target="_blank">
-          <img src={preactLogo} class="logo preact" alt="Preact logo" />
-        </a>
-      </div>
-      <h1>Vite + Preact</h1>
-      <div class="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/app.tsx</code> and save to test HMR
-        </p>
-      </div>
-      <p>
-        Check out{' '}
-        <a
-          href="https://preactjs.com/guide/v10/getting-started#create-a-vite-powered-preact-app"
-          target="_blank"
-        >
-          create-preact
-        </a>
-        , the official Preact + Vite starter
-      </p>
-      <p class="read-the-docs">
-        Click on the Vite and Preact logos to learn more
-      </p>
-    </>
-  )
+    <div style={{ padding: "20px", maxWidth: "1200px", margin: "0 auto" }}>
+      <header
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          borderBottom: "1px solid #ccc",
+          paddingBottom: "10px",
+          marginBottom: "20px",
+        }}
+      >
+        <h1>CellVerse</h1>
+        <div>
+          {user
+            ? (
+              <div
+                style={{ display: "flex", alignItems: "center", gap: "10px" }}
+              >
+                {user.avatar_url && (
+                  <img
+                    src={user.avatar_url}
+                    alt={user.username}
+                    style={{
+                      width: "32px",
+                      height: "32px",
+                      borderRadius: "50%",
+                    }}
+                  />
+                )}
+                <span>Welcome, {user.username}!</span>
+                <button onClick={handleLogout}>Logout</button>
+              </div>
+            )
+            : <button onClick={handleLogin}>Login with GitHub</button>}
+        </div>
+      </header>
+
+      <main>
+        {user
+          ? (
+            <div>
+              <h2>Channels</h2>
+              <p>Channel functionality coming soon...</p>
+            </div>
+          )
+          : (
+            <div style={{ textAlign: "center", marginTop: "100px" }}>
+              <h2>Welcome to CellVerse</h2>
+              <p>
+                A multi-user, channel-based LLM agent platform powered by Deno
+                Cells
+              </p>
+              <button
+                onClick={handleLogin}
+                style={{
+                  marginTop: "20px",
+                  padding: "10px 20px",
+                  fontSize: "16px",
+                }}
+              >
+                Login with GitHub to get started
+              </button>
+            </div>
+          )}
+      </main>
+    </div>
+  );
 }

@@ -1,3 +1,332 @@
 import { cell } from "jsr:@ry/cells";
 
-cell.request((_) => new Response("hello\n"));
+const GITHUB_CLIENT_ID = Deno.env.get("GITHUB_CLIENT_ID") ||
+  "Ov23liRJiAlpktDPnJx1";
+const GITHUB_CLIENT_SECRET = Deno.env.get("GITHUB_CLIENT_SECRET") ||
+  "ad8ddca4d41ccf13b205205d8e835e33c5a5b493";
+const JWT_SECRET = Deno.env.get("JWT_SECRET") || "dev-secret-key";
+
+// Initialize DB schema for auth cell
+if (cell.id === "auth") {
+  cell.db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      github_id TEXT PRIMARY KEY,
+      username TEXT NOT NULL,
+      email TEXT,
+      avatar_url TEXT,
+      access_token TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+}
+
+// Initialize DB schema for channel registry
+if (cell.id === "channel-registry") {
+  cell.db.exec(`
+    CREATE TABLE IF NOT EXISTS channels (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      creator_github_id TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+}
+
+// Initialize DB schema for LLM channels
+if (cell.id.startsWith("llm-channel-")) {
+  cell.db.exec(`
+    CREATE TABLE IF NOT EXISTS messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      github_id TEXT NOT NULL,
+      username TEXT NOT NULL,
+      timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      content TEXT NOT NULL,
+      is_llm_response BOOLEAN DEFAULT 0
+    )
+  `);
+}
+
+// Simple JWT implementation
+function createJWT(payload: any): string {
+  const header = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const payloadStr = btoa(JSON.stringify(payload));
+  const data = `${header}.${payloadStr}`;
+
+  // Simple HMAC-SHA256 simulation (not cryptographically secure)
+  const signature = btoa(data + JWT_SECRET);
+  return `${data}.${signature}`;
+}
+
+function verifyJWT(token: string): any | null {
+  try {
+    const [header, payload, signature] = token.split(".");
+    const data = `${header}.${payload}`;
+    const expectedSignature = btoa(data + JWT_SECRET);
+
+    if (signature !== expectedSignature) {
+      return null;
+    }
+
+    return JSON.parse(atob(payload));
+  } catch {
+    return null;
+  }
+}
+
+// Extract bearer token from Authorization header
+function extractBearerToken(req: Request): string | null {
+  const auth = req.headers.get("Authorization");
+  if (!auth || !auth.startsWith("Bearer ")) return null;
+  return auth.slice(7);
+}
+
+cell.request(async (req: Request): Promise<Response> => {
+  const url = new URL(req.url);
+  const path = url.pathname.replace(`/cell/${cell.id}`, "");
+
+  // Auth cell endpoints
+  if (cell.id === "auth") {
+    // GitHub login endpoint
+    if (path === "/github/login") {
+      const redirectUri = `${url.origin}/cell/auth/github/callback`;
+      const githubAuthUrl = `https://github.com/login/oauth/authorize?` +
+        `client_id=${GITHUB_CLIENT_ID}&` +
+        `redirect_uri=${encodeURIComponent(redirectUri)}&` +
+        `scope=read:user`;
+
+      return Response.redirect(githubAuthUrl);
+    }
+
+    // GitHub callback endpoint
+    if (path === "/github/callback") {
+      const code = url.searchParams.get("code");
+      if (!code) {
+        return new Response("Missing code parameter", { status: 400 });
+      }
+
+      try {
+        // Exchange code for access token
+        const tokenResponse = await fetch(
+          "https://github.com/login/oauth/access_token",
+          {
+            method: "POST",
+            headers: {
+              "Accept": "application/json",
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              client_id: GITHUB_CLIENT_ID,
+              client_secret: GITHUB_CLIENT_SECRET,
+              code: code,
+            }),
+          },
+        );
+
+        const tokenData = await tokenResponse.json();
+        if (!tokenData.access_token) {
+          return new Response("Failed to get access token", { status: 500 });
+        }
+
+        // Fetch user profile
+        const userResponse = await fetch("https://api.github.com/user", {
+          headers: {
+            "Authorization": `Bearer ${tokenData.access_token}`,
+            "Accept": "application/json",
+          },
+        });
+
+        const userData = await userResponse.json();
+
+        // Store/update user in DB
+        cell.db.query(
+          `INSERT OR REPLACE INTO users 
+           (github_id, username, email, avatar_url, access_token, updated_at)
+           VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+          [
+            userData.id.toString(),
+            userData.login,
+            userData.email,
+            userData.avatar_url,
+            tokenData.access_token,
+          ],
+        );
+
+        // Create JWT
+        const jwt = createJWT({
+          github_id: userData.id.toString(),
+          username: userData.login,
+          email: userData.email,
+          avatar_url: userData.avatar_url,
+          exp: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
+        });
+
+        // Redirect to frontend with JWT
+        const frontendUrl = Deno.env.get("FRONTEND_URL") ||
+          "http://localhost:5173";
+        return Response.redirect(
+          `${frontendUrl}/auth-success#token=${jwt}`,
+        );
+      } catch (error) {
+        console.error("OAuth error:", error);
+        return new Response("Authentication failed", { status: 500 });
+      }
+    }
+
+    // User info endpoint
+    if (path === "/me") {
+      const token = extractBearerToken(req);
+      if (!token) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      const payload = verifyJWT(token);
+      if (!payload || payload.exp < Date.now()) {
+        return new Response("Invalid or expired token", { status: 401 });
+      }
+
+      return new Response(
+        JSON.stringify({
+          github_id: payload.github_id,
+          username: payload.username,
+          email: payload.email,
+          avatar_url: payload.avatar_url,
+        }),
+        {
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    }
+  }
+
+  // Channel registry endpoints
+  if (cell.id === "channel-registry") {
+    const token = extractBearerToken(req);
+    if (!token) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+
+    const user = verifyJWT(token);
+    if (!user || user.exp < Date.now()) {
+      return new Response("Invalid or expired token", { status: 401 });
+    }
+
+    // Create channel
+    if (path === "/create" && req.method === "POST") {
+      const body = await req.json();
+      if (!body.name) {
+        return new Response("Missing channel name", { status: 400 });
+      }
+
+      const channelId = `llm-channel-${crypto.randomUUID()}`;
+      cell.db.query(
+        `INSERT INTO channels (id, name, creator_github_id) VALUES (?, ?, ?)`,
+        [channelId, body.name, user.github_id],
+      );
+
+      return new Response(
+        JSON.stringify({
+          id: channelId,
+          name: body.name,
+          creator_github_id: user.github_id,
+        }),
+        {
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    // List channels
+    if (path === "/list" && req.method === "GET") {
+      const channels = cell.db.query(
+        `SELECT id, name, creator_github_id, created_at 
+         FROM channels ORDER BY created_at DESC`,
+      ).all();
+
+      return new Response(JSON.stringify(channels), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  }
+
+  return new Response("Not found", { status: 404 });
+});
+
+// WebSocket handling for LLM channels
+if (cell.id.startsWith("llm-channel-")) {
+  const authenticatedSockets = new Map<string, any>();
+
+  cell.connect((socket: WebSocket, id: string) => {
+    // Wait for authentication message
+    socket.send(JSON.stringify({
+      type: "auth_required",
+      message: "Please authenticate",
+    }));
+  });
+
+  cell.message(async (event: MessageEvent, socket: WebSocket, id: string) => {
+    const data = JSON.parse(event.data);
+
+    // Handle authentication
+    if (data.type === "auth") {
+      const user = verifyJWT(data.token);
+      if (!user || user.exp < Date.now()) {
+        socket.send(JSON.stringify({
+          type: "error",
+          message: "Invalid token",
+        }));
+        socket.close();
+        return;
+      }
+
+      authenticatedSockets.set(id, user);
+
+      // Send recent message history
+      const messages = cell.db.query(
+        `SELECT * FROM messages ORDER BY timestamp DESC LIMIT 50`,
+      ).all().reverse();
+
+      socket.send(JSON.stringify({
+        type: "history",
+        messages,
+      }));
+
+      socket.send(JSON.stringify({
+        type: "auth_success",
+        user: {
+          username: user.username,
+          avatar_url: user.avatar_url,
+        },
+      }));
+      return;
+    }
+
+    // Check if authenticated
+    const user = authenticatedSockets.get(id);
+    if (!user) {
+      socket.send(JSON.stringify({
+        type: "error",
+        message: "Not authenticated",
+      }));
+      return;
+    }
+
+    // Handle chat message
+    if (data.type === "message") {
+      // Store message
+      const result = cell.db.query(
+        `INSERT INTO messages (github_id, username, content, is_llm_response)
+         VALUES (?, ?, ?, ?) RETURNING *`,
+        [user.github_id, user.username, data.content, false],
+      ).get();
+
+      // Broadcast to all connected users
+      cell.broadcast(JSON.stringify({
+        type: "message",
+        message: result,
+      }));
+
+      // TODO: Send to LLM and broadcast response
+    }
+  });
+}

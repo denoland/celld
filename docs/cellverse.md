@@ -75,6 +75,10 @@ applications.
   - Does the Vite proxy seem to be configured correctly (even if there are no
     real endpoints yet)?
 
+phase 1 is complete. 
+Github Oauth app Client ID Ov23liRJiAlpktDPnJx1
+client secret: ad8ddca4d41ccf13b205205d8e835e33c5a5b493
+
 ---
 
 **Phase 2: Authentication Cell & Frontend Login/Logout**
