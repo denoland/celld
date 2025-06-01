@@ -58,6 +58,8 @@ pub struct SingleTenantConfig {
   pub src_file: PathBuf,
   /// Static files directory for the default tenant
   pub static_dir: Option<PathBuf>,
+  /// Environment file to load for the single tenant
+  pub env_file: Option<PathBuf>,
 }
 
 /// Configuration for a MinIO or S3 replica target
