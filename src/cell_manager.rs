@@ -937,6 +937,23 @@ fn spawn_deno_process(
     if let Some(ref env_file) = single_tenant.env_file {
       assert!(env_file.is_absolute(), "env_file path must be absolute");
       cmd.arg(format!("--env-file={}", env_file.display()));
+
+      // Parse the env file to add variables to --allow-env
+      match fs::read_to_string(env_file) {
+        Ok(env_contents) => {
+          let parsed_env_vars = parse_env_vars(&env_contents);
+          for (key, _) in parsed_env_vars {
+            env_vars.push(key);
+          }
+        }
+        Err(e) => {
+          warn!(
+            "Error reading environment file {}: {}",
+            env_file.display(),
+            e
+          );
+        }
+      }
     }
   }
 
