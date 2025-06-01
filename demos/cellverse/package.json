@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "npm-run-all --parallel dev:fe dev:be",
     "dev:fe": "vite",
-    "dev:be": "docker run -e RUST_LOG=info -e CELL_DENO_OUTPUT=0 -e CELL_GRACE_PERIOD_SECONDS=1 -p 8000:8000 -v $PWD:/app ghcr.io/denoland/cells cells/main.ts",
+    "dev:be": "docker run -e RUST_LOG=info -e CELL_DENO_OUTPUT=0 -e CELL_GRACE_PERIOD_SECONDS=1 -p 8000:8000 -v $PWD:/app cells:latest cells/main.ts",
     "build": "tsc -b && vite build",
     "preview": "vite preview"
   },
