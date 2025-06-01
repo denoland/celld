@@ -89,7 +89,7 @@ cell.request(async (req: Request): Promise<Response> => {
   if (cell.id === "auth") {
     // GitHub login endpoint
     if (path === "/github/login") {
-      const redirectUri = `${url.origin}/cell/auth/github/callback`;
+      const redirectUri = `http://localhost:5173/cell/auth/github/callback`;
       const githubAuthUrl = `https://github.com/login/oauth/authorize?` +
         `client_id=${GITHUB_CLIENT_ID}&` +
         `redirect_uri=${encodeURIComponent(redirectUri)}&` +
@@ -107,6 +107,7 @@ cell.request(async (req: Request): Promise<Response> => {
 
       try {
         // Exchange code for access token
+        console.log("Exchanging code for token:", code);
         const tokenResponse = await fetch(
           "https://github.com/login/oauth/access_token",
           {
@@ -124,7 +125,9 @@ cell.request(async (req: Request): Promise<Response> => {
         );
 
         const tokenData = await tokenResponse.json();
+        console.log("Token response:", tokenData);
         if (!tokenData.access_token) {
+          console.error("Token error:", tokenData);
           return new Response("Failed to get access token", { status: 500 });
         }
 
@@ -139,17 +142,16 @@ cell.request(async (req: Request): Promise<Response> => {
         const userData = await userResponse.json();
 
         // Store/update user in DB
-        cell.db.query(
+        cell.db.prepare(
           `INSERT OR REPLACE INTO users 
            (github_id, username, email, avatar_url, access_token, updated_at)
-           VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-          [
-            userData.id.toString(),
-            userData.login,
-            userData.email,
-            userData.avatar_url,
-            tokenData.access_token,
-          ],
+           VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+        ).run(
+          userData.id.toString(),
+          userData.login,
+          userData.email,
+          userData.avatar_url,
+          tokenData.access_token,
         );
 
         // Create JWT
@@ -162,8 +164,7 @@ cell.request(async (req: Request): Promise<Response> => {
         });
 
         // Redirect to frontend with JWT
-        const frontendUrl = Deno.env.get("FRONTEND_URL") ||
-          "http://localhost:5173";
+        const frontendUrl = "http://localhost:5173";
         return Response.redirect(
           `${frontendUrl}/auth-success#token=${jwt}`,
         );
@@ -219,10 +220,9 @@ cell.request(async (req: Request): Promise<Response> => {
       }
 
       const channelId = `llm-channel-${crypto.randomUUID()}`;
-      cell.db.query(
-        `INSERT INTO channels (id, name, creator_github_id) VALUES (?, ?, ?)`,
-        [channelId, body.name, user.github_id],
-      );
+      cell.db.prepare(
+        `INSERT INTO channels (id, name, creator_github_id) VALUES (?, ?, ?)`
+      ).run(channelId, body.name, user.github_id);
 
       return new Response(
         JSON.stringify({
@@ -238,9 +238,9 @@ cell.request(async (req: Request): Promise<Response> => {
 
     // List channels
     if (path === "/list" && req.method === "GET") {
-      const channels = cell.db.query(
+      const channels = cell.db.prepare(
         `SELECT id, name, creator_github_id, created_at 
-         FROM channels ORDER BY created_at DESC`,
+         FROM channels ORDER BY created_at DESC`
       ).all();
 
       return new Response(JSON.stringify(channels), {
@@ -282,8 +282,8 @@ if (cell.id.startsWith("llm-channel-")) {
       authenticatedSockets.set(id, user);
 
       // Send recent message history
-      const messages = cell.db.query(
-        `SELECT * FROM messages ORDER BY timestamp DESC LIMIT 50`,
+      const messages = cell.db.prepare(
+        `SELECT * FROM messages ORDER BY timestamp DESC LIMIT 50`
       ).all().reverse();
 
       socket.send(JSON.stringify({
@@ -314,11 +314,10 @@ if (cell.id.startsWith("llm-channel-")) {
     // Handle chat message
     if (data.type === "message") {
       // Store message
-      const result = cell.db.query(
+      const result = cell.db.prepare(
         `INSERT INTO messages (github_id, username, content, is_llm_response)
-         VALUES (?, ?, ?, ?) RETURNING *`,
-        [user.github_id, user.username, data.content, false],
-      ).get();
+         VALUES (?, ?, ?, ?) RETURNING *`
+      ).get(user.github_id, user.username, data.content, false);
 
       // Broadcast to all connected users
       cell.broadcast(JSON.stringify({
