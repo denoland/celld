@@ -647,4 +647,61 @@ mod tests {
       .unwrap();
     assert!(response.contains("default tenant"));
   }
+
+  #[tokio::test]
+  async fn test_internal_endpoint_is_not_accessible_to_external_clients() {
+    init();
+
+    let cell_id = uuid::Uuid::new_v4().simple().to_string();
+
+    let forbidden_endpoints = [
+      "/_internal",
+      "/_internal?foo=bar",
+      "/_internal/?foo=bar",
+      "/_internal/alarm",
+      "/_internal/alarm?foo=bar",
+      "/_internal/alarm2",
+      "/_internal/foo/bar",
+      "/_internal/foo/bar",
+    ];
+
+    for endpoint in forbidden_endpoints {
+      let response = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:6146/cell/{cell_id}{endpoint}"))
+        .header("Host", "hello.localhost")
+        .send()
+        .await
+        .unwrap();
+      assert_eq!(response.status(), 403);
+      let response_text = response.text().await.unwrap();
+      assert_eq!(
+        response_text,
+        "Requests to internal endpoints are forbidden"
+      );
+    }
+
+    let allowed_endpoints = [
+      "/",
+      "/internal",
+      "/internal?foo=bar",
+      "/internal_?foo=baaar",
+      "/_internal_",
+      "/_internal2",
+      "/_internal2/alarm",
+      "/_internal2/alarm?foo=bar",
+      "/_internal2/foo/bar",
+    ];
+
+    for endpoint in allowed_endpoints {
+      let response = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:6146/cell/{cell_id}{endpoint}"))
+        .header("Host", "hello.localhost")
+        .send()
+        .await
+        .unwrap();
+      assert_eq!(response.status(), 200);
+      let response_text = response.text().await.unwrap();
+      assert_eq!(response_text, "hello\n");
+    }
+  }
 }
