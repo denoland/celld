@@ -217,7 +217,12 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
       completedAt: runResult.completed_at
         ? new Date(runResult.completed_at as string)
         : null,
-      steps: stepsResult.map((row: any) => {
+      steps: stepsResult.map((row: {
+        step_index: number;
+        name: string;
+        output_data: string;
+        completed_at: string;
+      }) => {
         return {
           stepIndex: row.step_index as number,
           name: row.name as string,
