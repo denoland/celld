@@ -16,10 +16,10 @@ RUN apt-get update && \
         gnupg
 
 COPY . /app
-WORKDIR /app
-COPY dist /data/default/static
-COPY cells /data/default/src
+COPY dist/ /data/default/static
+COPY cells/ /data/default/src
 COPY .prod.vars /app/.env
+WORKDIR /app
 RUN deno install && deno run build
 RUN chown -R celld:celld /data
 COPY entrypoint-ecs.sh /usr/local/bin/entrypoint.sh
