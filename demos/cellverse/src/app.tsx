@@ -3,6 +3,7 @@ import { authService, type User } from "./auth";
 import { AuthSuccess } from "./AuthSuccess";
 import { Channels } from "./Channels";
 import { Chat } from "./Chat";
+import { Memory } from "./Memory";
 import "./app.css";
 
 export function App() {
@@ -11,19 +12,27 @@ export function App() {
   const [selectedChannel, setSelectedChannel] = useState<
     { id: string; name: string } | null
   >(null);
+  const [viewMode, setViewMode] = useState<"chat" | "memory">("chat");
 
   // Parse channel from URL on mount
   useEffect(() => {
     const path = window.location.pathname;
     if (path.startsWith("/c/")) {
-      const channelSlug = decodeURIComponent(path.substring(3));
+      const pathParts = path.substring(3).split("/");
+      const channelSlug = decodeURIComponent(pathParts[0]);
+
       if (channelSlug) {
-        // We'll need to fetch channel info or store it differently
-        // For now, use the slug as the name (can be improved)
         setSelectedChannel({
           id: `channel-${channelSlug}`,
           name: channelSlug,
         });
+
+        // Check if it's a memory route
+        if (pathParts[1] === "mem") {
+          setViewMode("memory");
+        } else {
+          setViewMode("chat");
+        }
       }
     }
   }, []);
@@ -31,11 +40,16 @@ export function App() {
   // Handle channel selection with URL update
   const handleSelectChannel = (
     channel: { id: string; name: string } | null,
+    mode: "chat" | "memory" = "chat",
   ) => {
     setSelectedChannel(channel);
+    setViewMode(mode);
     if (channel) {
       const channelSlug = channel.id.replace("channel-", "");
-      window.history.pushState({}, "", `/c/${channelSlug}`);
+      const url = mode === "memory"
+        ? `/c/${channelSlug}/mem`
+        : `/c/${channelSlug}`;
+      window.history.pushState({}, "", url);
     } else {
       window.history.pushState({}, "", "/");
     }
@@ -46,15 +60,25 @@ export function App() {
     const handlePopState = () => {
       const path = window.location.pathname;
       if (path.startsWith("/c/")) {
-        const channelSlug = decodeURIComponent(path.substring(3));
+        const pathParts = path.substring(3).split("/");
+        const channelSlug = decodeURIComponent(pathParts[0]);
+
         if (channelSlug) {
           setSelectedChannel({
             id: `channel-${channelSlug}`,
             name: channelSlug,
           });
+
+          // Check if it's a memory route
+          if (pathParts[1] === "mem") {
+            setViewMode("memory");
+          } else {
+            setViewMode("chat");
+          }
         }
       } else {
         setSelectedChannel(null);
+        setViewMode("chat");
       }
     };
 
@@ -131,11 +155,23 @@ export function App() {
           <main className="main-content">
             {selectedChannel
               ? (
-                <Chat
-                  channelId={selectedChannel.id}
-                  channelName={selectedChannel.name}
-                  onClose={() => handleSelectChannel(null)}
-                />
+                viewMode === "memory"
+                  ? (
+                    <Memory
+                      channelId={selectedChannel.id}
+                      channelName={selectedChannel.name}
+                      onClose={() => handleSelectChannel(null)}
+                    />
+                  )
+                  : (
+                    <Chat
+                      channelId={selectedChannel.id}
+                      channelName={selectedChannel.name}
+                      onClose={() => handleSelectChannel(null)}
+                      onSwitchToMemory={() =>
+                        handleSelectChannel(selectedChannel, "memory")}
+                    />
+                  )
               )
               : (
                 <Channels

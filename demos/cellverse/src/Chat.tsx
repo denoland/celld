@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { authService } from "./auth";
+import { type Channel } from "./channelService";
 
 interface Message {
   id: number;
@@ -14,17 +15,49 @@ interface ChatProps {
   channelId: string;
   channelName: string;
   onClose: () => void;
+  onSwitchToMemory?: () => void;
 }
 
-export function Chat({ channelId, channelName, onClose }: ChatProps) {
+export function Chat(
+  { channelId, channelName, onClose, onSwitchToMemory }: ChatProps,
+) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(true);
+  const [channel, setChannel] = useState<Channel | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  const user = authService.getUser();
+
   useEffect(() => {
+    // Fetch channel info
+    const fetchChannelInfo = async () => {
+      try {
+        const token = localStorage.getItem("auth_token");
+        if (!token) return;
+
+        const response = await fetch(
+          `/cell/channel-registry/get/${channelId}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          },
+        );
+
+        if (response.ok) {
+          const channelData = await response.json();
+          setChannel(channelData);
+        }
+      } catch (error) {
+        console.error("Error fetching channel info:", error);
+      }
+    };
+
+    fetchChannelInfo();
+
     // Connect to WebSocket
     const connectWebSocket = () => {
       const wsUrl = `ws://localhost:8000/cell/${channelId}`;
@@ -102,8 +135,6 @@ export function Chat({ channelId, channelName, onClose }: ChatProps) {
     setInputValue("");
   };
 
-  const user = authService.getUser();
-
   return (
     <div className="chat-container">
       <div className="chat-header">
@@ -117,9 +148,21 @@ export function Chat({ channelId, channelName, onClose }: ChatProps) {
               : "Disconnected"}
           </span>
         </div>
-        <button className="close-chat-btn" onClick={onClose}>
-          ✕
-        </button>
+        <div className="chat-header-actions">
+          {channel && user?.github_id === channel.creator_github_id &&
+            onSwitchToMemory && (
+            <button
+              className="memory-view-btn"
+              onClick={onSwitchToMemory}
+              title="Manage bot memories"
+            >
+              🧠 Memories
+            </button>
+          )}
+          <button className="close-chat-btn" onClick={onClose}>
+            ✕
+          </button>
+        </div>
       </div>
 
       <div className="messages-container">

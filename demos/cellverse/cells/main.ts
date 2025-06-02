@@ -1,4 +1,30 @@
 import { cell } from "jsr:@ry/cells";
+import { z } from "npm:zod";
+
+// Define Zod schema for bot structured responses
+const BotActionSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("respond"),
+    message: z.string(),
+  }),
+  z.object({
+    action: z.literal("store_memory"),
+    key: z.string(),
+    value: z.string(),
+    response: z.string().optional(),
+  }),
+  z.object({
+    action: z.literal("read_memories"),
+    filter: z.string().optional(),
+    response: z.string().optional(),
+  }),
+  z.object({
+    action: z.literal("no_response"),
+    reason: z.string().optional(),
+  }),
+]);
+
+type BotAction = z.infer<typeof BotActionSchema>;
 
 const GITHUB_CLIENT_ID = Deno.env.get("GITHUB_CLIENT_ID") ||
   "Ov23liRJiAlpktDPnJx1";
@@ -52,6 +78,17 @@ if (cell.id.startsWith("channel-")) {
     CREATE TABLE IF NOT EXISTS channel_config (
       key TEXT PRIMARY KEY,
       value TEXT
+    )
+  `);
+
+  // Create memories table for bot memory storage
+  cell.db.exec(`
+    CREATE TABLE IF NOT EXISTS memories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
 }
@@ -400,6 +437,113 @@ cell.request(async (req: Request): Promise<Response> => {
         });
       }
     }
+
+    // Get memories endpoint
+    if (path === "/memories" && req.method === "GET") {
+      const token = extractBearerToken(req);
+      if (!token) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      const user = verifyJWT(token);
+      if (!user || user.exp < Date.now()) {
+        return new Response("Invalid or expired token", { status: 401 });
+      }
+
+      // Get channel info from registry to check ownership
+      try {
+        const registryResponse = await fetch(
+          `http://localhost:8000/cell/channel-registry/get/${cell.id}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          },
+        );
+
+        if (!registryResponse.ok) {
+          return new Response("Failed to get channel info", { status: 500 });
+        }
+
+        const channelData = await registryResponse.json();
+
+        // Check if user is the owner
+        if (channelData.creator_github_id !== user.github_id) {
+          return new Response("Only the channel owner can view memories", {
+            status: 403,
+          });
+        }
+
+        // Get memories
+        const memories = cell.db.prepare(
+          `SELECT id, key, value, created_at, updated_at 
+           FROM memories 
+           ORDER BY updated_at DESC`,
+        ).all();
+
+        return new Response(JSON.stringify({ memories }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      } catch (error) {
+        console.error("Error fetching memories:", error);
+        return new Response("Internal server error", { status: 500 });
+      }
+    }
+
+    // Delete memory endpoint
+    if (path.startsWith("/memories/") && req.method === "DELETE") {
+      const memoryId = path.substring(10);
+      const token = extractBearerToken(req);
+      if (!token) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      const user = verifyJWT(token);
+      if (!user || user.exp < Date.now()) {
+        return new Response("Invalid or expired token", { status: 401 });
+      }
+
+      // Get channel info from registry to check ownership
+      try {
+        const registryResponse = await fetch(
+          `http://localhost:8000/cell/channel-registry/get/${cell.id}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          },
+        );
+
+        if (!registryResponse.ok) {
+          return new Response("Failed to get channel info", { status: 500 });
+        }
+
+        const channelData = await registryResponse.json();
+
+        // Check if user is the owner
+        if (channelData.creator_github_id !== user.github_id) {
+          return new Response("Only the channel owner can delete memories", {
+            status: 403,
+          });
+        }
+
+        // Delete memory
+        const result = cell.db.prepare(
+          `DELETE FROM memories WHERE id = ?`,
+        ).run(memoryId);
+
+        if (result.changes === 0) {
+          return new Response("Memory not found", { status: 404 });
+        }
+
+        return new Response(JSON.stringify({ success: true }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      } catch (error) {
+        console.error("Error deleting memory:", error);
+        return new Response("Internal server error", { status: 500 });
+      }
+    }
   }
 
   return new Response("Not found", { status: 404 });
@@ -482,13 +626,17 @@ if (cell.id.startsWith("channel-")) {
       // Send to LLM and broadcast response
       if (OPENAI_API_KEY) {
         try {
-          // Get recent message history for context
+          // Get 1 hour of message history for context
+          const oneHourAgo = new Date(
+            Date.now() - 60 * 60 * 1000,
+          ).toISOString();
           const recentMessages = cell.db.prepare(
-            `SELECT username, content, is_llm_response 
+            `SELECT username, content, is_llm_response, timestamp
              FROM messages 
+             WHERE timestamp >= ?
              ORDER BY timestamp DESC 
-             LIMIT 10`,
-          ).all().reverse();
+             LIMIT 100`,
+          ).all(oneHourAgo).reverse();
 
           // Build conversation history
           const messages = recentMessages.map((msg) => ({
@@ -514,11 +662,29 @@ if (cell.id.startsWith("channel-")) {
           ).get();
 
           if (personalityConfig && personalityConfig.value) {
-            systemPrompt = personalityConfig.value +
-              " Remember to keep responses concise and conversational.";
+            systemPrompt = personalityConfig.value;
           }
 
-          // Call OpenAI API
+          // Add structured response instructions
+          systemPrompt +=
+            `\n\nYou must respond with a JSON object matching one of these schemas:
+
+1. To respond to a message:
+{"action": "respond", "message": "your response here"}
+
+2. To store a memory for later:
+{"action": "store_memory", "key": "memory_key", "value": "memory_value", "response": "optional message to user"}
+
+3. To read memories:
+{"action": "read_memories", "filter": "optional_search_term", "response": "optional message to user"}
+
+4. To not respond:
+{"action": "no_response", "reason": "optional reason"}
+
+You should store memories about users, topics, or anything worth remembering.
+Respond naturally while occasionally storing or retrieving memories.`;
+
+          // Call OpenAI API with structured output
           const response = await fetch(
             "https://api.openai.com/v1/chat/completions",
             {
@@ -528,7 +694,7 @@ if (cell.id.startsWith("channel-")) {
                 "Authorization": `Bearer ${OPENAI_API_KEY}`,
               },
               body: JSON.stringify({
-                model: "gpt-3.5-turbo",
+                model: "gpt-4o-mini",
                 messages: [
                   {
                     role: "system",
@@ -537,26 +703,110 @@ if (cell.id.startsWith("channel-")) {
                   ...messages,
                 ],
                 temperature: 0.8,
-                max_tokens: 150,
+                max_tokens: 300,
+                response_format: { type: "json_object" },
               }),
             },
           );
 
           if (response.ok) {
             const aiData = await response.json();
-            const aiContent = aiData.choices[0].message.content;
+            const aiResponse = aiData.choices[0].message.content;
 
-            // Store AI response
-            const aiResult = cell.db.prepare(
-              `INSERT INTO messages (github_id, username, content, is_llm_response)
-               VALUES (?, ?, ?, ?) RETURNING *`,
-            ).get("ai", "bot", aiContent, 1);
+            // Parse and validate the structured response
+            const parsedResponse = JSON.parse(aiResponse);
+            const validatedAction = BotActionSchema.parse(parsedResponse);
 
-            // Broadcast AI response
-            cell.broadcast(JSON.stringify({
-              type: "message",
-              message: aiResult,
-            }));
+            // Handle different bot actions
+            switch (validatedAction.action) {
+              case "respond": {
+                // Store and broadcast the response
+                const aiResult = cell.db.prepare(
+                  `INSERT INTO messages (github_id, username, content, is_llm_response)
+                   VALUES (?, ?, ?, ?) RETURNING *`,
+                ).get("ai", "bot", validatedAction.message, 1);
+
+                cell.broadcast(JSON.stringify({
+                  type: "message",
+                  message: aiResult,
+                }));
+                break;
+              }
+
+              case "store_memory": {
+                // Store the memory
+                cell.db.prepare(
+                  `INSERT OR REPLACE INTO memories (key, value, updated_at)
+                   VALUES (?, ?, CURRENT_TIMESTAMP)`,
+                ).run(validatedAction.key, validatedAction.value);
+
+                // Send optional response
+                if (validatedAction.response) {
+                  const aiResult = cell.db.prepare(
+                    `INSERT INTO messages (github_id, username, content, is_llm_response)
+                     VALUES (?, ?, ?, ?) RETURNING *`,
+                  ).get("ai", "bot", validatedAction.response, 1);
+
+                  cell.broadcast(JSON.stringify({
+                    type: "message",
+                    message: aiResult,
+                  }));
+                }
+                break;
+              }
+
+              case "read_memories": {
+                // Read memories with optional filter
+                const memories = validatedAction.filter
+                  ? cell.db.prepare(
+                    `SELECT key, value FROM memories 
+                       WHERE key LIKE ? OR value LIKE ?
+                       ORDER BY updated_at DESC`,
+                  ).all(
+                    `%${validatedAction.filter}%`,
+                    `%${validatedAction.filter}%`,
+                  )
+                  : cell.db.prepare(
+                    `SELECT key, value FROM memories 
+                       ORDER BY updated_at DESC LIMIT 10`,
+                  ).all();
+
+                // Format memories response
+                let memoryResponse = "📚 My memories:\n";
+                if (memories.length === 0) {
+                  memoryResponse = "I don't have any memories yet.";
+                } else {
+                  memories.forEach((mem: any) => {
+                    memoryResponse += `\n• ${mem.key}: ${mem.value}`;
+                  });
+                }
+
+                if (validatedAction.response) {
+                  memoryResponse = validatedAction.response + "\n\n" +
+                    memoryResponse;
+                }
+
+                const aiResult = cell.db.prepare(
+                  `INSERT INTO messages (github_id, username, content, is_llm_response)
+                   VALUES (?, ?, ?, ?) RETURNING *`,
+                ).get("ai", "bot", memoryResponse, 1);
+
+                cell.broadcast(JSON.stringify({
+                  type: "message",
+                  message: aiResult,
+                }));
+                break;
+              }
+
+              case "no_response": {
+                // Bot chose not to respond - do nothing
+                console.log(
+                  "Bot chose not to respond:",
+                  validatedAction.reason,
+                );
+                break;
+              }
+            }
           } else {
             console.error("OpenAI API error:", await response.text());
           }

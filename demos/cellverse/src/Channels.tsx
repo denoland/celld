@@ -5,7 +5,10 @@ import { authService } from "./auth";
 
 interface ChannelsProps {
   selectedChannel: { id: string; name: string } | null;
-  onSelectChannel: (channel: { id: string; name: string } | null) => void;
+  onSelectChannel: (
+    channel: { id: string; name: string } | null,
+    mode?: "chat" | "memory",
+  ) => void;
 }
 
 export function Channels({ selectedChannel, onSelectChannel }: ChannelsProps) {
@@ -162,15 +165,27 @@ export function Channels({ selectedChannel, onSelectChannel }: ChannelsProps) {
                     {selectedChannel?.id === channel.id ? "Leave" : "Join"}
                   </button>
                   {currentUser?.github_id === channel.creator_github_id && (
-                    <button
-                      className="delete-channel-btn"
-                      onClick={() =>
-                        handleDeleteChannel(channel.id)}
-                      disabled={deleting === channel.id}
-                      title="Delete channel"
-                    >
-                      {deleting === channel.id ? "..." : "🗑️"}
-                    </button>
+                    <>
+                      <button
+                        className="memory-channel-btn"
+                        onClick={() =>
+                          onSelectChannel(
+                            { id: channel.id, name: channel.name },
+                            "memory",
+                          )}
+                        title="Manage bot memories"
+                      >
+                        🧠
+                      </button>
+                      <button
+                        className="delete-channel-btn"
+                        onClick={() => handleDeleteChannel(channel.id)}
+                        disabled={deleting === channel.id}
+                        title="Delete channel"
+                      >
+                        {deleting === channel.id ? "..." : "🗑️"}
+                      </button>
+                    </>
                   )}
                 </div>
               </div>
