@@ -105,7 +105,10 @@ jobs:
       run: cargo test --verbose
 
     - name: Run deno test
-      run: deno test
+      run: |
+        # For proper typing of node:sqlite
+        deno cache npm:@types/node
+        deno test
       working-directory: ./jsr-cells
 
   lint:
@@ -146,7 +149,10 @@ jobs:
       working-directory: ./jsr-cells
 
     - name: Typecheck jsr-cells
-      run: deno check
+      run: |
+        # For proper typing of node:sqlite
+        deno cache npm:@types/node
+        deno check
       working-directory: ./jsr-cells
 
     - name: Run deno lint for jsr-cells
