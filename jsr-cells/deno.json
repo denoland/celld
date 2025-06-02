@@ -7,10 +7,10 @@
   },
   "license": "MIT",
   "imports": {
-    "@std/assert": "jsr:@std/assert@^1.0.13",
-    "@std/async": "jsr:@std/async@^1.0.13",
+    "@std/assert": "jsr:@std/assert@1",
+    "@std/async": "jsr:@std/async@1",
     "@std/random": "jsr:@std/random@^0.1.1",
-    "@std/testing": "jsr:@std/testing@^1.0.13",
-    "@std/ulid": "jsr:@std/ulid@^1.0.0"
+    "@std/testing": "jsr:@std/testing@1",
+    "@std/ulid": "jsr:@std/ulid@1"
   }
 }
