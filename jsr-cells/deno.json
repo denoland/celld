@@ -1,7 +1,10 @@
 {
   "name": "@ry/cells",
-  "version": "0.2.0",
-  "exports": "./mod.ts",
+  "version": "0.3.0",
+  "exports": {
+    ".": "./mod.ts",
+    "./workflow": "./workflow.ts"
+  },
   "license": "MIT",
   "imports": {
     "@std/assert": "jsr:@std/assert@^1.0.13",

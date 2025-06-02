@@ -1,5 +1,5 @@
-import { ulid } from "jsr:@std/ulid@^1.0.0/ulid";
-import { assert } from "jsr:@std/assert@^1.0.13/assert";
+import { ulid } from "jsr:@std/ulid@1/ulid";
+import { assert } from "jsr:@std/assert@1/assert";
 import {
   type DbAccessor,
   type JSONValue,
@@ -217,7 +217,7 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
       completedAt: runResult.completed_at
         ? new Date(runResult.completed_at as string)
         : null,
-      steps: stepsResult.map((row) => {
+      steps: stepsResult.map((row: any) => {
         return {
           stepIndex: row.step_index as number,
           name: row.name as string,
