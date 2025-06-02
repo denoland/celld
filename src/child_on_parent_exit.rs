@@ -169,14 +169,11 @@ impl ChildOnParentExit {
                     Err(_) => {
                       // Error checking child status, kill and exit
                       let _ = kill(real_child_pid, Signal::SIGTERM);
-                      let error_code = match real_child.wait() {
-                        Ok(exit_status) => exit_status.code().unwrap_or(1),
-                        Err(_) => {
-                          // Failed to wait on child, exit with error code
-                          1
-                        }
+                      let exit_code = match real_child.wait() {
+                        Ok(status) => status.code().unwrap_or(1),
+                        Err(_) => 1,
                       };
-                      std::process::exit(error_code);
+                      std::process::exit(exit_code);
                     }
                   }
                 } else {
