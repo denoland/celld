@@ -7,38 +7,22 @@ ARG CELL_BASE_IMAGE_TAG=latest
 # Use your existing celld image as the base
 FROM ghcr.io/denoland/cells:${CELL_BASE_IMAGE_TAG}
 
-# Switch to root user to install packages
 USER root
-
-# Install curl, jq, and Node.js for building the Vite app
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
         jq \
         ca-certificates \
-        gnupg \
+        gnupg
 
-# Copy the entire project
 COPY . /app
 WORKDIR /app
-
-# Copy production environment variables
+COPY dist /data/default/static
+COPY cells /data/default/src
 COPY .prod.vars /app/.env
-
 RUN deno install && deno run build
-
-# Create data directories and copy built assets and source code
-RUN mkdir -p /data/default/static && \
-    cp -r dist/* /data/default/static/ && \
-    mkdir -p /data/default/src && \
-    cp -r cells/* /data/default/src/ && \
-    mkdir -p /data && \
-    chown -R celld:celld /data
-
+RUN chown -R celld:celld /data
 COPY entrypoint-ecs.sh /usr/local/bin/entrypoint.sh
-
 RUN chmod +x /usr/local/bin/entrypoint.sh
-
 USER celld
-
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
