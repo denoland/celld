@@ -145,7 +145,7 @@ cell.request(async (req: Request): Promise<Response> => {
         cell.db.prepare(
           `INSERT OR REPLACE INTO users 
            (github_id, username, email, avatar_url, access_token, updated_at)
-           VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+           VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
         ).run(
           userData.id.toString(),
           userData.login,
@@ -221,7 +221,7 @@ cell.request(async (req: Request): Promise<Response> => {
 
       const channelId = `llm-channel-${crypto.randomUUID()}`;
       cell.db.prepare(
-        `INSERT INTO channels (id, name, creator_github_id) VALUES (?, ?, ?)`
+        `INSERT INTO channels (id, name, creator_github_id) VALUES (?, ?, ?)`,
       ).run(channelId, body.name, user.github_id);
 
       return new Response(
@@ -240,7 +240,7 @@ cell.request(async (req: Request): Promise<Response> => {
     if (path === "/list" && req.method === "GET") {
       const channels = cell.db.prepare(
         `SELECT id, name, creator_github_id, created_at 
-         FROM channels ORDER BY created_at DESC`
+         FROM channels ORDER BY created_at DESC`,
       ).all();
 
       return new Response(JSON.stringify(channels), {
@@ -283,7 +283,7 @@ if (cell.id.startsWith("llm-channel-")) {
 
       // Send recent message history
       const messages = cell.db.prepare(
-        `SELECT * FROM messages ORDER BY timestamp DESC LIMIT 50`
+        `SELECT * FROM messages ORDER BY timestamp DESC LIMIT 50`,
       ).all().reverse();
 
       socket.send(JSON.stringify({
@@ -316,7 +316,7 @@ if (cell.id.startsWith("llm-channel-")) {
       // Store message
       const result = cell.db.prepare(
         `INSERT INTO messages (github_id, username, content, is_llm_response)
-         VALUES (?, ?, ?, ?) RETURNING *`
+         VALUES (?, ?, ?, ?) RETURNING *`,
       ).get(user.github_id, user.username, data.content, false);
 
       // Broadcast to all connected users
