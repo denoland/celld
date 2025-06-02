@@ -130,8 +130,6 @@ In single-tenant mode:
 - All requests are handled by the default tenant
 - The `--env-file` flag loads environment variables from a file into the Deno
   process
-- If no `--env-file` is specified, `celld` will automatically use `.env` if it
-  exists
 
 ## Configuration
 

@@ -293,7 +293,7 @@ fn main() {
       }
     }
 
-    // Resolve .env file path
+    // Resolve .env file path if explicitly provided
     let env_file = if let Some(env_file_path) = args.env_file {
       // User provided explicit --env-file path
       if !env_file_path.exists() {
@@ -309,17 +309,7 @@ fn main() {
       info!("Using environment file: {}", env_file_abs.display());
       Some(env_file_abs)
     } else {
-      // Check for default .env file in current directory
-      let default_env = PathBuf::from(".env");
-      if default_env.exists() {
-        // Canonicalize to get absolute path
-        let env_file_abs =
-          std::fs::canonicalize(&default_env).unwrap_or(default_env);
-        info!("Using default environment file: {}", env_file_abs.display());
-        Some(env_file_abs)
-      } else {
-        None
-      }
+      None
     };
 
     config.single_tenant = Some(config::SingleTenantConfig {
