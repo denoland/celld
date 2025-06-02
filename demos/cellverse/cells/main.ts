@@ -127,9 +127,7 @@ function extractBearerToken(req: Request): string | null {
 
 cell.request(async (req: Request): Promise<Response> => {
   const url = new URL(req.url);
-  console.log("incoming request url", url);
   const path = url.pathname.replace(`/cell/${cell.id}`, "");
-  console.log("incoming request path", path);
 
   // Auth cell endpoints
   if (cell.id === "auth") {
