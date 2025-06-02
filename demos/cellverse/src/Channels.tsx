@@ -1,7 +1,12 @@
 import { useEffect, useState } from "preact/hooks";
 import { type Channel, channelService } from "./channelService";
 
-export function Channels() {
+interface ChannelsProps {
+  selectedChannel: { id: string; name: string } | null;
+  onSelectChannel: (channel: { id: string; name: string } | null) => void;
+}
+
+export function Channels({ selectedChannel, onSelectChannel }: ChannelsProps) {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -102,7 +107,13 @@ export function Channels() {
                     Created {new Date(channel.created_at).toLocaleDateString()}
                   </p>
                 </div>
-                <button className="join-channel-btn">Join</button>
+                <button
+                  className="join-channel-btn"
+                  onClick={() =>
+                    onSelectChannel({ id: channel.id, name: channel.name })}
+                >
+                  {selectedChannel?.id === channel.id ? "Leave" : "Join"}
+                </button>
               </div>
             ))
           )}

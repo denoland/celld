@@ -42,7 +42,7 @@ if (cell.id.startsWith("llm-channel-")) {
       username TEXT NOT NULL,
       timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       content TEXT NOT NULL,
-      is_llm_response BOOLEAN DEFAULT 0
+      is_llm_response INTEGER DEFAULT 0
     )
   `);
 }
@@ -314,10 +314,11 @@ if (cell.id.startsWith("llm-channel-")) {
     // Handle chat message
     if (data.type === "message") {
       // Store message
-      const result = cell.db.prepare(
+      const stmt = cell.db.prepare(
         `INSERT INTO messages (github_id, username, content, is_llm_response)
          VALUES (?, ?, ?, ?) RETURNING *`,
-      ).get(user.github_id, user.username, data.content, false);
+      );
+      const result = stmt.get(user.github_id, user.username, data.content, 0);
 
       // Broadcast to all connected users
       cell.broadcast(JSON.stringify({

@@ -2,11 +2,15 @@ import { useEffect, useState } from "preact/hooks";
 import { authService, type User } from "./auth";
 import { AuthSuccess } from "./AuthSuccess";
 import { Channels } from "./Channels";
+import { Chat } from "./Chat";
 import "./app.css";
 
 export function App() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [selectedChannel, setSelectedChannel] = useState<
+    { id: string; name: string } | null
+  >(null);
 
   useEffect(() => {
     // Check if this is the auth success route
@@ -75,7 +79,20 @@ export function App() {
       {user
         ? (
           <main className="main-content">
-            <Channels />
+            {selectedChannel
+              ? (
+                <Chat
+                  channelId={selectedChannel.id}
+                  channelName={selectedChannel.name}
+                  onClose={() => setSelectedChannel(null)}
+                />
+              )
+              : (
+                <Channels
+                  selectedChannel={selectedChannel}
+                  onSelectChannel={setSelectedChannel}
+                />
+              )}
           </main>
         )
         : (
