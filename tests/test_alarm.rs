@@ -30,6 +30,7 @@ async fn test_alarm_crud_in_single_node_cluster() {
     let res = client
       .delete(&url)
       .header("host", "alarm.localhost")
+      .query(&[("id", "not-existing-id")])
       .send()
       .await
       .unwrap();
@@ -40,7 +41,7 @@ async fn test_alarm_crud_in_single_node_cluster() {
   }
 
   // Set alarm
-  {
+  let alarm_id = {
     let res = client
       .post(&url)
       .header("host", "alarm.localhost")
@@ -49,12 +50,15 @@ async fn test_alarm_crud_in_single_node_cluster() {
       .await
       .unwrap();
     assert_eq!(res.status(), 200);
-  }
+
+    res.text().await.unwrap()
+  };
 
   // Get alarm (should exist)
   {
     let res = client
       .get(&url)
+      .query(&[("id", &alarm_id)])
       .header("host", "alarm.localhost")
       .send()
       .await
@@ -69,6 +73,7 @@ async fn test_alarm_crud_in_single_node_cluster() {
   {
     let res = client
       .delete(&url)
+      .query(&[("id", &alarm_id)])
       .header("host", "alarm.localhost")
       .send()
       .await
@@ -83,6 +88,7 @@ async fn test_alarm_crud_in_single_node_cluster() {
   {
     let res = client
       .get(&url)
+      .query(&[("id", &alarm_id)])
       .header("host", "alarm.localhost")
       .send()
       .await
@@ -331,7 +337,7 @@ async fn test_system_main_cell_takeover() {
   }
 
   // Set a new alarm to save something to the system main cell's DB
-  {
+  let alarm_id = {
     let test_cell_url = format!(
       "http://localhost:{}/cell/{}",
       test_env.public_ports[system_main_cell_index], test_cell_id
@@ -345,7 +351,9 @@ async fn test_system_main_cell_takeover() {
       .await
       .unwrap();
     assert_eq!(res.status(), 200);
-  }
+
+    res.text().await.unwrap()
+  };
 
   // Wait for Litestream to replicate data to S3
   println!("Waiting for Litestream to replicate data to S3...");
@@ -367,6 +375,7 @@ async fn test_system_main_cell_takeover() {
 
     let res = client
       .get(&test_cell_url)
+      .query(&[("id", &alarm_id)])
       .header("host", "alarm.localhost")
       .send()
       .await
@@ -465,7 +474,7 @@ async fn test_alarm_crud_operations_forwarded_to_system_main_cell_node() {
   }
 
   // Set a new alarm to save something to the system main cell's DB
-  {
+  let alarm_id = {
     let test_cell_url = format!(
       "http://localhost:{}/cell/{}",
       test_env.public_ports[system_main_cell_index], test_cell_id
@@ -479,7 +488,9 @@ async fn test_alarm_crud_operations_forwarded_to_system_main_cell_node() {
       .await
       .unwrap();
     assert_eq!(res.status(), 200);
-  }
+
+    res.text().await.unwrap()
+  };
 
   // Get the alarm through the secondary node to see the system main cell's DB has been updated
   {
@@ -490,6 +501,7 @@ async fn test_alarm_crud_operations_forwarded_to_system_main_cell_node() {
 
     let res = client
       .get(&test_cell_url)
+      .query(&[("id", &alarm_id)])
       .header("host", "alarm.localhost")
       .send()
       .await
@@ -509,6 +521,7 @@ async fn test_alarm_crud_operations_forwarded_to_system_main_cell_node() {
 
     let res = client
       .delete(&test_cell_url)
+      .query(&[("id", &alarm_id)])
       .header("host", "alarm.localhost")
       .send()
       .await
@@ -627,7 +640,7 @@ async fn test_alarm_dispatch_to_remote_cell_owner() {
   }
 
   // Set a new alarm scheduled 1 second from now
-  {
+  let _alarm_id = {
     let res = client
       .post(&cell_url)
       .header("host", "alarm.localhost")
@@ -636,7 +649,9 @@ async fn test_alarm_dispatch_to_remote_cell_owner() {
       .await
       .unwrap();
     assert_eq!(res.status(), 200);
-  }
+
+    res.text().await.unwrap()
+  };
 
   // Wait for the alarm to be dispatched
   tokio::time::sleep(std::time::Duration::from_secs(3)).await;

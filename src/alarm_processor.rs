@@ -330,7 +330,9 @@ pub async fn dispatch_alarm_locally(
   let req = hyper::Request::builder()
     .uri("/_internal/alarm")
     .method(hyper::Method::POST)
-    .body(http_body_util::Empty::<bytes::Bytes>::new())
+    .body(http_body_util::Full::new(bytes::Bytes::from(
+      alarm.scheduled_time_unix_ms.to_string(),
+    )))
     .unwrap();
 
   let res = sender.send_request(req).await?;

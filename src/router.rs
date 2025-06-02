@@ -4,7 +4,7 @@ use pingora::prelude::*;
 use pingora::upstreams::peer::HttpPeer;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 
 use crate::alarm_processor::{dispatch_alarm_locally, Alarm};
 use crate::cell_manager::{CellKey, CellManagerError};
@@ -32,9 +32,16 @@ pub struct InternalAPI {
 
 #[derive(Debug, Default)]
 pub struct Ctx {
-  pub tenant: String,
-  pub cell_id: Option<String>,
-  pub cell_key: Option<CellKey>,
+  tenant: String,
+  cell_id: Option<String>,
+  cell_key: Option<CellKey>,
+  upstream_peer_kind: Option<UpstreamPeerKind>,
+}
+
+#[derive(Debug)]
+enum UpstreamPeerKind {
+  LocalUDS,
+  RemoteHTTP,
 }
 
 #[derive(Debug)]
@@ -585,6 +592,7 @@ impl ProxyHttp for Proxy {
         );
         let sni = ctx.tenant.clone();
         let peer = HttpPeer::new(primary_owner_addr, false, sni);
+        ctx.upstream_peer_kind = Some(UpstreamPeerKind::RemoteHTTP);
         return Ok(Box::new(peer));
       } else {
         // This case means no active owners were found according to PeerManager,
@@ -708,7 +716,14 @@ impl ProxyHttp for Proxy {
         // see this part
         let normalized_uri =
           remove_cell_id_from_uri(session.req_header().uri.clone(), cell_id);
+
+        // This seems to be necessary although we will update URI later in
+        // `upstream_request_filter` by `upstream_request.set_uri(normalized_uri)`.
+        // If we dropped either of these, path and query like `/?foo=bar` or
+        // `?foo=bar` would not work.
         session.req_header_mut().set_uri(normalized_uri);
+
+        ctx.upstream_peer_kind = Some(UpstreamPeerKind::LocalUDS);
 
         // Assume anything after this point is handled by Pingora proxy machinery
         Ok(Box::new(peer))
@@ -722,6 +737,50 @@ impl ProxyHttp for Proxy {
         ))
       }
     }
+  }
+
+  async fn upstream_request_filter(
+    &self,
+    _session: &mut Session,
+    upstream_request: &mut RequestHeader,
+    ctx: &mut Self::CTX,
+  ) -> pingora::Result<()> {
+    match ctx.upstream_peer_kind {
+      Some(UpstreamPeerKind::LocalUDS) => {
+        let cell_id = ctx
+          .cell_id
+          .as_ref()
+          .expect("cell_id should have been set in `request_filter`");
+
+        // Remove `/cell/{cell_id}` from the URI so that the user program won't
+        // see this part
+        let normalized_uri =
+          remove_cell_id_from_uri(upstream_request.uri.clone(), cell_id);
+
+        trace!(
+          original_uri = ?upstream_request.uri,
+          normalized_uri = ?normalized_uri,
+          "Normalized URI"
+        );
+
+        // This seems to be necessary although we updated URI earlier in `upstream_peer`
+        // by `session.req_header_mut().set_uri(normalized_uri)`. If we dropped
+        // either of these, path and query like `/?foo=bar` or `?foo=bar` would
+        // not work.
+        upstream_request.set_uri(normalized_uri);
+      }
+      Some(UpstreamPeerKind::RemoteHTTP) => {
+        // no need to normalize the URI
+        trace!(uri = ?upstream_request.uri, "Upstream request URI");
+      }
+      None => {
+        unreachable!(
+          "upstream_peer_kind should have been set in `upstream_peer`"
+        );
+      }
+    }
+
+    Ok(())
   }
 }
 
@@ -767,6 +826,16 @@ mod tests {
       http::Uri::from_static("https://example.com/cell/deadbeef1234/foo");
     let new_uri = remove_cell_id_from_uri(uri, "deadbeef1234");
     assert_eq!(new_uri.to_string(), "https://example.com/foo");
+
+    let uri =
+      http::Uri::from_static("https://example.com/cell/deadbeef1234?foo=bar");
+    let new_uri = remove_cell_id_from_uri(uri, "deadbeef1234");
+    assert_eq!(new_uri.to_string(), "https://example.com/?foo=bar");
+
+    let uri =
+      http::Uri::from_static("https://example.com/cell/deadbeef1234/?foo=bar");
+    let new_uri = remove_cell_id_from_uri(uri, "deadbeef1234");
+    assert_eq!(new_uri.to_string(), "https://example.com/?foo=bar");
 
     let uri =
       http::Uri::from_static("https://example.com/cell/deadbeef1234/foo/bar");

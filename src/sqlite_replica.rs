@@ -487,7 +487,10 @@ impl SqliteReplica {
       // Wait for process to exit (without holding the lock)
       match child.wait().await {
         Ok(status) => {
-          debug!("Replication process exited with status: {:?}", status)
+          debug!(
+            db_path = %self.db_path.display(),
+            "Replication process exited with status: {:?}", status
+          )
         }
         Err(e) => warn!("Error waiting for replication process to exit: {}", e),
       }

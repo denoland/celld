@@ -1,4 +1,4 @@
-import { cell } from "../../../jsr-cells/mod.ts";
+import { cell, types } from "../../../jsr-cells/mod.ts";
 
 let alarmCount = 0;
 
@@ -10,7 +10,8 @@ cell.request(async (req: Request) => {
 
   switch (req.method) {
     case "GET": {
-      const alarm = await cell.getAlarm();
+      const id = url.searchParams.get("id");
+      const alarm = cell.getAlarm(id ? types.scheduledTaskId(id) : undefined);
       return Response.json(alarm);
     }
     case "POST": {
@@ -20,11 +21,17 @@ cell.request(async (req: Request) => {
           status: 400,
         });
       }
-      await cell.setAlarm(Date.now() + alarmSchedule);
-      return Response.json({ success: true });
+      const id = await cell.setAlarm(Date.now() + alarmSchedule);
+      return new Response(id);
     }
     case "DELETE": {
-      const deleted = await cell.deleteAlarm();
+      const id = url.searchParams.get("id");
+      if (id === null) {
+        return Response.json({ error: "id is required" }, {
+          status: 400,
+        });
+      }
+      const deleted = cell.deleteAlarm(id as types.ScheduledTaskId);
       return Response.json({ deleted });
     }
     default: {
