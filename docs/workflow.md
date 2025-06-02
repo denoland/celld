@@ -88,9 +88,9 @@ Triggers a workflow by event name. This is used for workflows defined with an
 `event` trigger.
 
 The second argument is the input data for the triggered workflow, which can be
-be referenced with `ctx.event.data` in the workflow handler. This value is
-cached in DB and reused if the workflow is retried. Its concrete type is
-inferred from what you provided in `cell.initWorkflow`:
+referenced with `ctx.event.data` in the workflow handler. This value is cached
+in DB and reused if the workflow is retried. Its concrete type is inferred from
+what you provided in `cell.initWorkflow`:
 
 ```ts
 type UserWorkflows = {
