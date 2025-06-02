@@ -24,7 +24,7 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
     >["handler"];
   } = {};
 
-  static runningWorkflows() {
+  static runningWorkflows(): number {
     return this.#runningWorkflows;
   }
 
