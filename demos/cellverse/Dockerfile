@@ -25,4 +25,4 @@ RUN chown -R celld:celld /data
 COPY entrypoint-ecs.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 USER celld
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh", "cells/main.ts", "dist/"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh", "--env-file=/app/.env", "cells/main.ts", "dist/"]
