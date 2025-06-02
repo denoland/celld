@@ -117,6 +117,61 @@ Phase 2 is now complete! GitHub OAuth authentication is fully working.
 
 ---
 
+**Phase 3 & 4 Progress Update (June 1, 2025)**
+
+Phases 3 and 4 are now complete! Full channel management and real-time chat functionality is working.
+
+**Implementation Notes:**
+
+**Phase 3 - Channel Management:**
+- Channel registry endpoints in `cells/main.ts`:
+  - `POST /create` - Creates new channels with slug-based IDs (e.g., `channel-foo`)
+  - `GET /list` - Returns all channels
+- Slug generation from channel names (e.g., "My Cool Channel" → `channel-my-cool-channel`)
+- Duplicate channel detection
+- Beautiful channel UI with:
+  - Channel list with creation dates
+  - Create new channel form
+  - Join/Leave buttons
+  - Glassmorphism design
+
+**Phase 4 - Real-time Chat:**
+- WebSocket implementation for real-time messaging
+- Chat features:
+  - JWT-based WebSocket authentication
+  - Message history loading on join
+  - Real-time message broadcasting
+  - Proper timestamp handling (UTC → local time)
+  - Message persistence in SQLite
+- Beautiful chat UI with:
+  - Distinct styling for own messages vs others
+  - Smooth message animations
+  - Connection status indicator
+  - Auto-scroll to latest messages
+  - Empty state with welcome message
+
+**UI/UX Improvements:**
+- Dark theme with purple gradient accents
+- Improved login page with centered card design
+- GitHub-styled login button with logo
+- Responsive layouts
+- Smooth transitions and animations
+- Professional glassmorphism effects
+
+**Key Technical Decisions:**
+- Changed from UUID-based channel IDs to human-readable slugs
+- SQLite BOOLEAN type replaced with INTEGER for compatibility
+- Timestamps stored in UTC, converted to local time in UI
+- WebSocket connections scoped per channel cell
+
+**Current Status:**
+- Full multi-user chat working in channels
+- Messages persist across sessions
+- Clean, Discord-like UI
+- Ready for Phase 5: Multi-user testing and LLM integration
+
+---
+
 **Phase 2: Authentication Cell & Frontend Login/Logout**
 
 - **Objective:** Implement the GitHub login flow and basic session management.
@@ -168,7 +223,7 @@ Phase 2 is now complete! GitHub OAuth authentication is fully working.
 
 ---
 
-**Phase 3: Basic Channel Management & UI**
+**Phase 3: Basic Channel Management & UI** ✅ COMPLETE
 
 - **Objective:** Allow users to see a list of channels and create new ones. The
   concept of a "channel" is still just metadata at this stage.
@@ -206,7 +261,34 @@ Phase 2 is now complete! GitHub OAuth authentication is fully working.
 
 ---
 
-**Phase 4: LLM Channel Cell & Basic Chat Interface**
+**Phase 4: LLM Channel Cell & Basic Chat Interface** ✅ COMPLETE (without LLM)
+
+---
+
+**Phase 4 Continuation: LLM Integration**
+
+Now that the basic chat infrastructure is working, we need to integrate an LLM to respond to user messages.
+
+**Tasks:**
+1. **Choose LLM Provider:**
+   - Option A: OpenAI API (requires API key)
+   - Option B: Anthropic Claude API (requires API key)
+   - Option C: Local model via Ollama
+   - Option D: Mock LLM for testing
+
+2. **Implement LLM Response Handler:**
+   - When a user sends a message, also send it to the LLM
+   - Store the LLM response in the database with `is_llm_response = 1`
+   - Broadcast the LLM response to all connected users
+   - Handle API errors gracefully
+
+3. **Add Conversation Context:**
+   - Send recent message history to LLM for context
+   - Optionally add channel-specific prompts/personalities
+
+4. **Environment Variables:**
+   - Add LLM API keys to Docker environment
+   - Update cells to read API configuration
 
 - **Objective:** Implement the core chat functionality. When a user clicks a
   channel, they enter a chat room powered by an LLM specific to that channel
@@ -217,7 +299,7 @@ Phase 2 is now complete! GitHub OAuth authentication is fully working.
      - This is the `main.ts` that will run when a cell like
        `/cell/llm-channel-xyz` is activated.
      - **Initialization:** When this cell type is first activated for a specific
-       ID (e.g., `/cell/llm-channel-abc`), its `main.ts` should:
+       ID (e.g., `/cell/channel-abc`), its `main.ts` should:
        - Create its SQLite schema if it doesn't exist (e.g., `messages` table:
          `id INTEGER PRIMARY KEY AUTOINCREMENT`, `github_id TEXT`,
          `username TEXT`, `timestamp TIMESTAMP`, `content TEXT`,

@@ -5,6 +5,7 @@ const GITHUB_CLIENT_ID = Deno.env.get("GITHUB_CLIENT_ID") ||
 const GITHUB_CLIENT_SECRET = Deno.env.get("GITHUB_CLIENT_SECRET") ||
   "ad8ddca4d41ccf13b205205d8e835e33c5a5b493";
 const JWT_SECRET = Deno.env.get("JWT_SECRET") || "dev-secret-key";
+const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
 
 // Initialize DB schema for auth cell
 if (cell.id === "auth") {
@@ -33,8 +34,8 @@ if (cell.id === "channel-registry") {
   `);
 }
 
-// Initialize DB schema for LLM channels
-if (cell.id.startsWith("llm-channel-")) {
+// Initialize DB schema for channels
+if (cell.id.startsWith("channel-")) {
   cell.db.exec(`
     CREATE TABLE IF NOT EXISTS messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -219,7 +220,28 @@ cell.request(async (req: Request): Promise<Response> => {
         return new Response("Missing channel name", { status: 400 });
       }
 
-      const channelId = `llm-channel-${crypto.randomUUID()}`;
+      // Create a slug from the channel name
+      const slug = body.name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .substring(0, 50);
+
+      if (!slug || slug.length < 2) {
+        return new Response("Invalid channel name", { status: 400 });
+      }
+
+      const channelId = `channel-${slug}`;
+
+      // Check if channel already exists
+      const existing = cell.db.prepare(
+        `SELECT id FROM channels WHERE id = ?`,
+      ).get(channelId);
+
+      if (existing) {
+        return new Response("Channel already exists", { status: 409 });
+      }
+
       cell.db.prepare(
         `INSERT INTO channels (id, name, creator_github_id) VALUES (?, ?, ?)`,
       ).run(channelId, body.name, user.github_id);
@@ -252,8 +274,8 @@ cell.request(async (req: Request): Promise<Response> => {
   return new Response("Not found", { status: 404 });
 });
 
-// WebSocket handling for LLM channels
-if (cell.id.startsWith("llm-channel-")) {
+// WebSocket handling for channels
+if (cell.id.startsWith("channel-")) {
   const authenticatedSockets = new Map<string, any>();
 
   cell.connect((socket: WebSocket, id: string) => {
@@ -326,7 +348,79 @@ if (cell.id.startsWith("llm-channel-")) {
         message: result,
       }));
 
-      // TODO: Send to LLM and broadcast response
+      // Send to LLM and broadcast response
+      if (OPENAI_API_KEY) {
+        try {
+          // Get recent message history for context
+          const recentMessages = cell.db.prepare(
+            `SELECT username, content, is_llm_response 
+             FROM messages 
+             ORDER BY timestamp DESC 
+             LIMIT 10`,
+          ).all().reverse();
+
+          // Build conversation history
+          const messages = recentMessages.map((msg) => ({
+            role: msg.is_llm_response ? "assistant" : "user",
+            content: msg.is_llm_response
+              ? msg.content
+              : `${msg.username}: ${msg.content}`,
+          }));
+
+          // Add the current message
+          messages.push({
+            role: "user",
+            content: `${user.username}: ${data.content}`,
+          });
+
+          // Call OpenAI API
+          const response = await fetch(
+            "https://api.openai.com/v1/chat/completions",
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${OPENAI_API_KEY}`,
+              },
+              body: JSON.stringify({
+                model: "gpt-3.5-turbo",
+                messages: [
+                  {
+                    role: "system",
+                    content: `You are a helpful assistant in the "${
+                      cell.id.replace("channel-", "")
+                    }" channel. Be conversational and friendly. Keep responses concise.`,
+                  },
+                  ...messages,
+                ],
+                temperature: 0.8,
+                max_tokens: 150,
+              }),
+            },
+          );
+
+          if (response.ok) {
+            const aiData = await response.json();
+            const aiContent = aiData.choices[0].message.content;
+
+            // Store AI response
+            const aiResult = cell.db.prepare(
+              `INSERT INTO messages (github_id, username, content, is_llm_response)
+               VALUES (?, ?, ?, ?) RETURNING *`,
+            ).get("ai", "AI Assistant", aiContent, 1);
+
+            // Broadcast AI response
+            cell.broadcast(JSON.stringify({
+              type: "message",
+              message: aiResult,
+            }));
+          } else {
+            console.error("OpenAI API error:", await response.text());
+          }
+        } catch (error) {
+          console.error("Error calling OpenAI:", error);
+        }
+      }
     }
   });
 }
