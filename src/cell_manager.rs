@@ -540,7 +540,7 @@ impl CellManager {
     );
 
     // Spawn the Deno process
-    let child_guard = spawn_deno_process(
+    let mut child_guard = spawn_deno_process(
       host,
       cell_id,
       &tenant_dir,
@@ -559,23 +559,6 @@ impl CellManager {
     // Convert to tokio::process::Child using the PID
     let pid = child_guard.pid().unwrap() as u32;
 
-    // Create a new CellEntry with proper values
-    let entry = CellEntry {
-      inner: CellEntryInner::Normal {
-        pid,
-        socket_path: serve_socket_path.clone(),
-        last_used: Instant::now(),
-        incoming_connections: 0,
-        parent_exit_guard: child_guard,
-        _socket_tempdir: socket_tempdir,
-      },
-      replica: replica.clone(),
-    };
-
-    lock_handle.set_resource(entry).await?;
-
-    self.cells.insert(cell_key.clone(), lock_handle);
-
     // --- Wait for the socket to become available (crucial for cold start) ---
     let socket_ = serve_socket_path.clone();
     let wait_start = Instant::now();
@@ -587,6 +570,26 @@ impl CellManager {
 
     // Wait for the socket to be available and connect to it
     let stream = loop {
+      // Check if Deno early exited before the timeout
+      if let Some(status) = child_guard.try_wait().unwrap_or(None) {
+        error!(
+          pid = pid,
+          socket = %socket_.display(),
+          tenant = %host,
+          cell_id = %cell_id,
+          "Deno process exited early {}. Use CELL_DENO_OUTPUT=1 to see output",
+          status
+        );
+
+        lock_handle.release().await;
+
+        // The tempdir will be dropped at the end of this scope, cleaning up the socket file
+        return Err(
+          anyhow::anyhow!("Deno process exited before socket became available")
+            .into(),
+        );
+      }
+
       if wait_start.elapsed() > wait_timeout {
         error!(
           pid = pid,
@@ -672,6 +675,23 @@ impl CellManager {
         }
       }
     };
+
+    // Create a new CellEntry with proper values
+    let entry = CellEntry {
+      inner: CellEntryInner::Normal {
+        pid,
+        socket_path: serve_socket_path.clone(),
+        last_used: Instant::now(),
+        incoming_connections: 0,
+        parent_exit_guard: child_guard,
+        _socket_tempdir: socket_tempdir,
+      },
+      replica: replica.clone(),
+    };
+
+    lock_handle.set_resource(entry).await?;
+
+    self.cells.insert(cell_key.clone(), lock_handle);
 
     Ok((serve_socket_path, stream, cell_key))
   }
