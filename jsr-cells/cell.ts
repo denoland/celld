@@ -240,6 +240,7 @@ export class Cell implements DbAccessor, TaskScheduler {
 
   private setupServer(): void {
     this.server = Deno.serve(async (req) => {
+      console.error({ url: req.url, method: req.method });
       // Handle WebSocket connections
       if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
         const { response, socket } = Deno.upgradeWebSocket(req);
@@ -309,7 +310,11 @@ export class Cell implements DbAccessor, TaskScheduler {
 
       // Handle HTTP requests
       if (this.onRequestCallback) {
-        const result = this.onRequestCallback(req);
+        const modifiedReq = new Request(
+          req.url.replace(/^http\+unix:/, "http:"),
+          req,
+        );
+        const result = this.onRequestCallback(modifiedReq);
         if (result instanceof Promise) {
           return await result;
         }
