@@ -236,8 +236,10 @@ impl ChildOnParentExit {
         WaitStatus::StillAlive => {
           Ok(None) // Not exited yet
         }
-        WaitStatus::Signaled(_, _, _) => {
-          todo!()
+        WaitStatus::Signaled(_, sig, _) => {
+          // In POSIX exit status is 128 + N, where N is the numeric value of
+          // the uncaught signal
+          Ok(Some(ExitStatus::from_raw(128 + sig as i32)))
         }
         WaitStatus::Exited(pid, exit_code) => {
           // Watcher (or child on Linux) has terminated. Store status.
