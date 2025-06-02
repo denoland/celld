@@ -101,14 +101,23 @@ jobs:
     - name: Build
       run: cargo build --verbose
 
-    - name: Run tests
+    - name: Run cargo test
       run: cargo test --verbose
+
+    - name: Run deno test
+      run: deno test
+      working-directory: ./jsr-cells
 
   lint:
     name: Linting and Formatting
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+
+    - name: Install Deno
+      uses: denoland/setup-deno@v2
+      with:
+        deno-version: v2.x
 
     - name: Install Rust toolchain (for linting)
       uses: dtolnay/rust-toolchain@stable
@@ -126,8 +135,20 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-cargo-lint-
 
-    - name: Check formatting
+    - name: Check Rust formatting
       run: cargo fmt --all -- --check
 
     - name: Run clippy
       run: cargo clippy --all-targets --all-features -- -D warnings
+
+    - name: Check jsr-cells formatting
+      run: deno fmt --check
+      working-directory: ./jsr-cells
+
+    - name: Typecheck jsr-cells
+      run: deno check
+      working-directory: ./jsr-cells
+
+    - name: Run deno lint for jsr-cells
+      run: deno lint
+      working-directory: ./jsr-cells
