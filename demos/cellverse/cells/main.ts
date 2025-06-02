@@ -287,7 +287,9 @@ cell.request(async (req: Request): Promise<Response> => {
       }
 
       if (channel.creator_github_id !== user.github_id) {
-        return new Response("Only the channel owner can delete it", { status: 403 });
+        return new Response("Only the channel owner can delete it", {
+          status: 403,
+        });
       }
 
       // Delete the channel

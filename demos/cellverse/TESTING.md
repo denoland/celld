@@ -3,6 +3,7 @@
 ## Multi-User Testing
 
 ### Setup
+
 1. Start the cells backend (if not already running):
    ```bash
    cd demos/cellverse
@@ -17,6 +18,7 @@
 ### Test Steps
 
 #### 1. Multi-User Chat Test
+
 1. Open CellVerse in two different browser windows:
    - Window 1: Regular browser window at http://localhost:5173
    - Window 2: Incognito/Private window at http://localhost:5173
@@ -25,7 +27,7 @@
 
 3. In both windows:
    - Create or join the same channel (e.g., "test-chat")
-   
+
 4. Test real-time messaging:
    - Send a message from Window 1
    - Verify it appears instantly in Window 2
@@ -40,6 +42,7 @@
    - AI responses appear for all users
 
 #### 2. Persistence Test
+
 1. Have a conversation in a channel with multiple messages
 
 2. Note the channel name and messages

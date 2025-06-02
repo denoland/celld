@@ -12,6 +12,56 @@ export function App() {
     { id: string; name: string } | null
   >(null);
 
+  // Parse channel from URL on mount
+  useEffect(() => {
+    const path = window.location.pathname;
+    if (path.startsWith("/c/")) {
+      const channelSlug = decodeURIComponent(path.substring(3));
+      if (channelSlug) {
+        // We'll need to fetch channel info or store it differently
+        // For now, use the slug as the name (can be improved)
+        setSelectedChannel({
+          id: `channel-${channelSlug}`,
+          name: channelSlug,
+        });
+      }
+    }
+  }, []);
+
+  // Handle channel selection with URL update
+  const handleSelectChannel = (
+    channel: { id: string; name: string } | null,
+  ) => {
+    setSelectedChannel(channel);
+    if (channel) {
+      const channelSlug = channel.id.replace("channel-", "");
+      window.history.pushState({}, "", `/c/${channelSlug}`);
+    } else {
+      window.history.pushState({}, "", "/");
+    }
+  };
+
+  // Handle browser back/forward buttons
+  useEffect(() => {
+    const handlePopState = () => {
+      const path = window.location.pathname;
+      if (path.startsWith("/c/")) {
+        const channelSlug = decodeURIComponent(path.substring(3));
+        if (channelSlug) {
+          setSelectedChannel({
+            id: `channel-${channelSlug}`,
+            name: channelSlug,
+          });
+        }
+      } else {
+        setSelectedChannel(null);
+      }
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
   useEffect(() => {
     // Check if this is the auth success route
     if (window.location.pathname === "/auth-success") {
@@ -84,13 +134,13 @@ export function App() {
                 <Chat
                   channelId={selectedChannel.id}
                   channelName={selectedChannel.name}
-                  onClose={() => setSelectedChannel(null)}
+                  onClose={() => handleSelectChannel(null)}
                 />
               )
               : (
                 <Channels
                   selectedChannel={selectedChannel}
-                  onSelectChannel={setSelectedChannel}
+                  onSelectChannel={handleSelectChannel}
                 />
               )}
           </main>

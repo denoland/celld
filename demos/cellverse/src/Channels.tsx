@@ -16,7 +16,7 @@ export function Channels({ selectedChannel, onSelectChannel }: ChannelsProps) {
   const [newChannelName, setNewChannelName] = useState("");
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
-  
+
   const currentUser = authService.getUser();
 
   useEffect(() => {
@@ -144,7 +144,8 @@ export function Channels({ selectedChannel, onSelectChannel }: ChannelsProps) {
                   {currentUser?.github_id === channel.creator_github_id && (
                     <button
                       className="delete-channel-btn"
-                      onClick={() => handleDeleteChannel(channel.id)}
+                      onClick={() =>
+                        handleDeleteChannel(channel.id)}
                       disabled={deleting === channel.id}
                       title="Delete channel"
                     >
