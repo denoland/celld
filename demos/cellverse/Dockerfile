@@ -5,8 +5,8 @@
 # Accept base image tag as build argument
 ARG CELL_BASE_IMAGE_TAG=latest
 # Use your existing celld image as the base
-#FROM ghcr.io/denoland/cells:${CELL_BASE_IMAGE_TAG}
-FROM cells
+FROM ghcr.io/denoland/cells:${CELL_BASE_IMAGE_TAG}
+#FROM cells
 
 USER root
 RUN apt-get update && \
@@ -26,4 +26,4 @@ RUN chown -R celld:celld /data
 COPY entrypoint-ecs.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 USER celld
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh", "--static-fallback=spa", "--env-file=/app/.env", "cells/main.ts", "dist/"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh", "--static-fallback=spa", "--env-file=/app/.prod.vars", "cells/main.ts", "dist/" ]

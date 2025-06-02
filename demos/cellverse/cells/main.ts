@@ -26,10 +26,15 @@ const BotActionSchema = z.discriminatedUnion("action", [
 
 type BotAction = z.infer<typeof BotActionSchema>;
 
+const FRONTEND_URL = Deno.env.get("FRONTEND_URL");
 const GITHUB_CLIENT_ID = Deno.env.get("GITHUB_CLIENT_ID");
 const GITHUB_CLIENT_SECRET = Deno.env.get("GITHUB_CLIENT_SECRET");
 const JWT_SECRET = Deno.env.get("JWT_SECRET");
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+
+if (!FRONTEND_URL || FRONTEND_URL.at(-1) === "/") {
+  throw new Error(`bad FRONTEND_URL env var: '${FRONTEND_URL}'`);
+}
 
 // Initialize DB schema for auth cell
 if (cell.id === "auth") {
@@ -133,7 +138,7 @@ cell.request(async (req: Request): Promise<Response> => {
   if (cell.id === "auth") {
     // GitHub login endpoint
     if (path === "/github/login") {
-      const redirectUri = `http://localhost:8000/cell/auth/github/callback`;
+      const redirectUri = `${FRONTEND_URL}/cell/auth/github/callback`;
       const githubAuthUrl = `https://github.com/login/oauth/authorize?` +
         `client_id=${GITHUB_CLIENT_ID}&` +
         `redirect_uri=${encodeURIComponent(redirectUri)}&` +
@@ -208,8 +213,7 @@ cell.request(async (req: Request): Promise<Response> => {
         });
 
         // Redirect to frontend with JWT
-        const frontendUrl = "http://localhost:8000";
-        return Response.redirect(`${frontendUrl}/auth-success#token=${jwt}`);
+        return Response.redirect(`${FRONTEND_URL}/auth-success#token=${jwt}`);
       } catch (error) {
         console.error("OAuth error:", error);
         return new Response("Authentication failed", { status: 500 });
@@ -333,7 +337,7 @@ cell.request(async (req: Request): Promise<Response> => {
 
       // Set personality in the channel cell
       try {
-        await fetch(`http://localhost:8000/cell/${channelId}/set-personality`, {
+        await fetch(`${FRONTEND_URL}/cell/${channelId}/set-personality`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -449,7 +453,7 @@ cell.request(async (req: Request): Promise<Response> => {
       // Get channel info from registry to check ownership
       try {
         const registryResponse = await fetch(
-          `http://localhost:8000/cell/channel-registry/get/${cell.id}`,
+          `${FRONTEND_URL}/cell/channel-registry/get/${cell.id}`,
           {
             headers: {
               Authorization: `Bearer ${token}`,
@@ -502,7 +506,7 @@ cell.request(async (req: Request): Promise<Response> => {
       // Get channel info from registry to check ownership
       try {
         const registryResponse = await fetch(
-          `http://localhost:8000/cell/channel-registry/get/${cell.id}`,
+          `${FRONTEND_URL}/cell/channel-registry/get/${cell.id}`,
           {
             headers: {
               Authorization: `Bearer ${token}`,
