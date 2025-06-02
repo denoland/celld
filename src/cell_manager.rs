@@ -547,6 +547,7 @@ impl CellManager {
       &serve_socket_path,
       &self.control_socket_path,
       &main_script,
+      &node_state.config,
     )?;
 
     debug!(
@@ -871,6 +872,7 @@ fn spawn_deno_process(
   // The socket path the Deno process will connect to
   control_socket_path: &Path,
   main_script: &PathBuf,
+  config: &crate::config::Config,
 ) -> Result<ChildOnParentExit> {
   let ctl_socket_canonicalized = std::fs::canonicalize(control_socket_path)?;
 
@@ -928,9 +930,34 @@ fn spawn_deno_process(
     "Preparing deno command"
   );
 
+  cmd.arg("run").arg("--no-prompt");
+
+  // Add --env-file argument if configured for single-tenant mode
+  if let Some(ref single_tenant) = config.single_tenant {
+    if let Some(ref env_file) = single_tenant.env_file {
+      assert!(env_file.is_absolute(), "env_file path must be absolute");
+      cmd.arg(format!("--env-file={}", env_file.display()));
+
+      // Parse the env file to add variables to --allow-env
+      match fs::read_to_string(env_file) {
+        Ok(env_contents) => {
+          let parsed_env_vars = parse_env_vars(&env_contents);
+          for (key, _) in parsed_env_vars {
+            env_vars.push(key);
+          }
+        }
+        Err(e) => {
+          warn!(
+            "Error reading environment file {}: {}",
+            env_file.display(),
+            e
+          );
+        }
+      }
+    }
+  }
+
   cmd
-    .arg("run")
-    .arg("--no-prompt")
     .arg(format!(
       "--allow-read={},{},{}",
       tenant_dir.display(),

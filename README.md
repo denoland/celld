@@ -114,6 +114,23 @@ cell.message((event: MessageEvent, socket: WebSocket, id: string) => {
 Key API: `cell.id`, `cell.db`, `cell.request`, `cell.connect`, `cell.message`,
 `cell.broadcast`.
 
+## Single-Tenant Mode
+
+For simplified deployments, you can run `celld` in single-tenant mode by
+specifying a source file:
+
+```bash
+celld src/main.ts                  # Single-tenant mode (default tenant only)
+celld src/main.ts static/          # Single-tenant with static files
+celld src/main.ts --env-file .env  # Single-tenant with environment file
+```
+
+In single-tenant mode:
+
+- All requests are handled by the default tenant
+- The `--env-file` flag loads environment variables from a file into the Deno
+  process
+
 ## Configuration
 
 For Persistence & Discovery, setup S3:

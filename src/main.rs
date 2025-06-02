@@ -39,6 +39,7 @@ const DEFAULT_REAPER_INTERVAL: Duration = Duration::from_secs(10);
 struct Args {
   src_file: Option<PathBuf>,
   static_dir: Option<PathBuf>,
+  env_file: Option<PathBuf>,
 }
 
 fn create_command() -> Command {
@@ -114,7 +115,8 @@ LIMITATIONS:
 USAGE EXAMPLES:
   celld                              # Multi-tenant mode (serve from data/ directory)
   celld src/main.ts                  # Single-tenant mode (default tenant only)
-  celld src/main.ts static/          # Single-tenant with static files")
+  celld src/main.ts static/          # Single-tenant with static files
+  celld src/main.ts --env-file .env # Single-tenant with environment file")
     .arg(
       Arg::new("src_file")
         .help("source file for default tenant (enables single-tenant mode)")
@@ -126,6 +128,13 @@ USAGE EXAMPLES:
         .help("static files directory for default tenant")
         .value_name("STATIC_DIR")
         .index(2)
+    )
+    .arg(
+      Arg::new("env_file")
+        .long("env-file")
+        .help("Load environment variables from this file for single-tenant mode")
+        .value_name("PATH")
+        .value_parser(clap::value_parser!(PathBuf))
     )
 }
 
@@ -257,6 +266,7 @@ fn main() {
       // Convert to absolute path to avoid issues with working directory
       std::fs::canonicalize(&path).unwrap_or(path)
     }),
+    env_file: matches.get_one::<PathBuf>("env_file").cloned(),
   };
 
   // Parse configuration from environment variables
@@ -283,9 +293,29 @@ fn main() {
       }
     }
 
+    // Resolve .env file path if explicitly provided
+    let env_file = if let Some(env_file_path) = args.env_file {
+      // User provided explicit --env-file path
+      if !env_file_path.exists() {
+        error!(
+          "Environment file does not exist: {}",
+          env_file_path.display()
+        );
+        std::process::exit(1);
+      }
+      // Canonicalize to get absolute path
+      let env_file_abs =
+        std::fs::canonicalize(&env_file_path).unwrap_or(env_file_path);
+      info!("Using environment file: {}", env_file_abs.display());
+      Some(env_file_abs)
+    } else {
+      None
+    };
+
     config.single_tenant = Some(config::SingleTenantConfig {
       src_file,
       static_dir: args.static_dir,
+      env_file,
     });
 
     info!("Starting server in single-tenant mode");
