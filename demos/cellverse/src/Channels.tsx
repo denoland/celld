@@ -1,5 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { type Channel, channelService } from "./channelService";
+import { formatDate } from "./utils";
+import { authService } from "./auth";
 
 interface ChannelsProps {
   selectedChannel: { id: string; name: string } | null;
@@ -13,6 +15,9 @@ export function Channels({ selectedChannel, onSelectChannel }: ChannelsProps) {
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [newChannelName, setNewChannelName] = useState("");
   const [creating, setCreating] = useState(false);
+  const [deleting, setDeleting] = useState<string | null>(null);
+  
+  const currentUser = authService.getUser();
 
   useEffect(() => {
     loadChannels();
@@ -47,6 +52,27 @@ export function Channels({ selectedChannel, onSelectChannel }: ChannelsProps) {
       console.error(err);
     } finally {
       setCreating(false);
+    }
+  };
+
+  const handleDeleteChannel = async (channelId: string) => {
+    if (!confirm("Are you sure you want to delete this channel?")) {
+      return;
+    }
+
+    try {
+      setDeleting(channelId);
+      await channelService.deleteChannel(channelId);
+      await loadChannels();
+      // If the deleted channel was selected, deselect it
+      if (selectedChannel?.id === channelId) {
+        onSelectChannel(null);
+      }
+    } catch (err: any) {
+      setError(err.message || "Failed to delete channel");
+      console.error(err);
+    } finally {
+      setDeleting(null);
     }
   };
 
@@ -104,16 +130,28 @@ export function Channels({ selectedChannel, onSelectChannel }: ChannelsProps) {
                 <div className="channel-info">
                   <h3>{channel.name}</h3>
                   <p>
-                    Created {new Date(channel.created_at).toLocaleDateString()}
+                    Created {formatDate(channel.created_at)}
                   </p>
                 </div>
-                <button
-                  className="join-channel-btn"
-                  onClick={() =>
-                    onSelectChannel({ id: channel.id, name: channel.name })}
-                >
-                  {selectedChannel?.id === channel.id ? "Leave" : "Join"}
-                </button>
+                <div className="channel-actions">
+                  <button
+                    className="join-channel-btn"
+                    onClick={() =>
+                      onSelectChannel({ id: channel.id, name: channel.name })}
+                  >
+                    {selectedChannel?.id === channel.id ? "Leave" : "Join"}
+                  </button>
+                  {currentUser?.github_id === channel.creator_github_id && (
+                    <button
+                      className="delete-channel-btn"
+                      onClick={() => handleDeleteChannel(channel.id)}
+                      disabled={deleting === channel.id}
+                      title="Delete channel"
+                    >
+                      {deleting === channel.id ? "..." : "🗑️"}
+                    </button>
+                  )}
+                </div>
               </div>
             ))
           )}

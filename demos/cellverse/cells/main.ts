@@ -269,6 +269,36 @@ cell.request(async (req: Request): Promise<Response> => {
         headers: { "Content-Type": "application/json" },
       });
     }
+
+    // Delete channel
+    if (path === "/delete" && req.method === "DELETE") {
+      const body = await req.json();
+      if (!body.channelId) {
+        return new Response("Missing channel ID", { status: 400 });
+      }
+
+      // Check if channel exists and user is the owner
+      const channel = cell.db.prepare(
+        `SELECT creator_github_id FROM channels WHERE id = ?`,
+      ).get(body.channelId);
+
+      if (!channel) {
+        return new Response("Channel not found", { status: 404 });
+      }
+
+      if (channel.creator_github_id !== user.github_id) {
+        return new Response("Only the channel owner can delete it", { status: 403 });
+      }
+
+      // Delete the channel
+      cell.db.prepare(
+        `DELETE FROM channels WHERE id = ?`,
+      ).run(body.channelId);
+
+      return new Response(JSON.stringify({ success: true }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
   }
 
   return new Response("Not found", { status: 404 });

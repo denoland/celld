@@ -342,6 +342,57 @@ Now that the basic chat infrastructure is working, we need to integrate an LLM t
 
 ---
 
+**Phase 5: Multi-User & Persistence Demonstration** ✅ COMPLETE
+
+---
+
+**Phase 5 Completion (June 1, 2025)**
+
+All core functionality is now complete and tested!
+
+**Testing Results:**
+- ✅ Multi-user real-time chat works perfectly
+- ✅ Messages persist across container restarts
+- ✅ Usernames display correctly next to messages
+- ✅ AI assistant (GPT-3.5) responds in all channels
+- ✅ Channel-specific conversation history maintained
+
+**Key Features Demonstrated:**
+1. **Real-time Multi-User Chat:**
+   - Multiple users can join the same channel
+   - Messages broadcast instantly to all connected users
+   - Each user's messages styled distinctly (right-aligned)
+   - Connection status indicators
+
+2. **Persistence:**
+   - All messages stored in SQLite per channel
+   - Channel list persists across restarts
+   - User sessions persist via JWT in localStorage
+   - Message history loads on channel join
+
+3. **AI Integration:**
+   - OpenAI GPT-3.5 responds to all messages
+   - Context-aware responses using last 10 messages
+   - Channel-specific system prompts
+   - Graceful fallback if API unavailable
+
+**Testing Guide:**
+See `demos/cellverse/TESTING.md` for comprehensive testing procedures.
+
+**Architecture Highlights:**
+- Each channel is an isolated Deno Cell (`channel-{slug}`)
+- Channel cells maintain their own SQLite database
+- WebSocket connections scoped per cell
+- JWT authentication across HTTP and WebSocket
+- Clean separation of concerns between cells
+
+This demo successfully showcases Deno Cells' ability to:
+- Manage isolated, stateful components
+- Handle real-time WebSocket connections
+- Persist data per cell
+- Scale horizontally (each channel is independent)
+- Integrate with external APIs (OpenAI)
+
 **Phase 5: Multi-User & Persistence Demonstration**
 
 - **Objective:** Clearly demonstrate that multiple users can interact in the
@@ -371,3 +422,48 @@ Now that the basic chat infrastructure is working, we need to integrate an LLM t
   - **User Sign-off:** This is the core "Aha!" moment for Deno Cells. Does the
     demo effectively convey the power of isolated, stateful cells for this kind
     of application?
+
+---
+
+## CellVerse Demo Complete! 🎉
+
+**What We Built:**
+A fully functional Discord-like chat application that demonstrates the power of Deno Cells:
+
+- **GitHub OAuth Authentication**: Secure login with GitHub accounts
+- **Channel Management**: Create and join chat channels with slug-based URLs
+- **Real-time Multi-User Chat**: WebSocket-based messaging with instant updates
+- **AI Assistant Integration**: GPT-3.5 responds in every channel with context
+- **Beautiful UI**: Dark theme with glassmorphism, smooth animations, and responsive design
+- **Full Persistence**: All data persists across container restarts
+
+**Technical Achievements:**
+- Each channel runs as an isolated Deno Cell with its own SQLite database
+- Clean separation between auth, channel registry, and channel chat cells
+- JWT-based authentication for both HTTP and WebSocket connections
+- Proper error handling and connection status indicators
+- Human-readable channel slugs (e.g., `channel-general` instead of UUIDs)
+
+**Next Steps & Enhancements:**
+1. Add channel deletion and management features
+2. Implement user presence indicators
+3. Add file upload/sharing capabilities
+4. Create channel-specific AI personalities
+5. Add message search functionality
+6. Implement @mentions and notifications
+7. Deploy to production with proper domain and HTTPS
+
+**Running the Demo:**
+```bash
+# Backend (requires OPENAI_API_KEY in .env)
+cd demos/cellverse
+docker run -e RUST_LOG=info -e CELL_DENO_OUTPUT=1 -e OPENAI_API_KEY=$OPENAI_API_KEY -p 8000:8000 -v $PWD:/app cells:latest cells/main.ts
+
+# Frontend
+npm install
+npm run dev
+
+# Visit http://localhost:5173
+```
+
+This demo proves that Deno Cells is perfect for building stateful, real-time applications with isolated components that can scale independently!

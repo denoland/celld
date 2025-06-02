@@ -277,6 +277,12 @@
   font-size: 0.9rem;
 }
 
+/* Channel actions */
+.channel-actions {
+  display: flex;
+  gap: 8px;
+}
+
 /* Join channel button */
 .join-channel-btn {
   background: rgba(102, 126, 234, 0.2);
@@ -292,6 +298,31 @@
 .join-channel-btn:hover {
   background: #667eea;
   color: white;
+}
+
+/* Delete channel button */
+.delete-channel-btn {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.delete-channel-btn:hover {
+  background: rgba(239, 68, 68, 0.2);
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
+.delete-channel-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* No channels state */

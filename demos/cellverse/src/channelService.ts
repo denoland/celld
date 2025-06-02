@@ -44,6 +44,25 @@ class ChannelService {
 
     return response.json();
   }
+
+  async deleteChannel(channelId: string): Promise<void> {
+    const token = localStorage.getItem("auth_token");
+    if (!token) throw new Error("No auth token");
+
+    const response = await fetch(`${this.baseUrl}/delete`, {
+      method: "DELETE",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`,
+      },
+      body: JSON.stringify({ channelId }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(error || `Failed to delete channel: ${response.statusText}`);
+    }
+  }
 }
 
 export const channelService = new ChannelService();
