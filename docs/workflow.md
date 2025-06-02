@@ -7,7 +7,7 @@ functions triggered by events or schedules.
 Import:
 
 ```ts
-import { cell, types } from "jsr:@deno/cells";
+import { cell } from "jsr:@deno/cells";
 ```
 
 ## Initialization
@@ -19,7 +19,7 @@ example:
 ```ts
 type UserWorkflows = {
   "user.signup": { userId: string };
-  "newsletter.subscribe": { email: string } & Record<string, types.JSONValue>;
+  "newsletter.subscribe": { email: string; [key: string]: JSONValue };
 };
 
 const workflow = cell.initWorkflow<UserWorkflows>();
@@ -77,7 +77,7 @@ The `WorkflowConfig` object supports the following fields:
 type WorkflowConfig =
   | { event: string; handle: HandlerFn; retries?: number; concurrency?: number }
   | { cron: string; handle: HandlerFn; retries?: number }
-  | { every: string; h🚧andle: HandlerFn; retries?: number };
+  | { every: string; handle: HandlerFn; retries?: number };
 ```
 
 ## Dispatching Events
@@ -87,10 +87,10 @@ type WorkflowConfig =
 Triggers a workflow by event name. This is used for workflows defined with an
 `event` trigger.
 
-The second argument is is the input data for the triggered workflow, which can
-be be referenced with `ctx.event.data` in the workflow handler. This value is
-cached in DB and reused if the workflow is retried. Its concrete type is
-inferred from what you provided in `cell.initWorkflow`:
+The second argument is the input data for the triggered workflow, which can be
+referenced with `ctx.event.data` in the workflow handler. This value is cached
+in DB and reused if the workflow is retried. Its concrete type is inferred from
+what you provided in `cell.initWorkflow`:
 
 ```ts
 type UserWorkflows = {
