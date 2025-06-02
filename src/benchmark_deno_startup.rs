@@ -31,6 +31,7 @@ pub async fn run(iterations: usize) -> Result<()> {
         system_main_cell_spawn_retries: 10,
         system_main_cell_retry_delay: Duration::from_millis(100),
         single_tenant: None,
+        static_fallback: crate::config::StaticFallbackStrategy::default(),
       }
     }
   };

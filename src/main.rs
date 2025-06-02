@@ -136,6 +136,16 @@ USAGE EXAMPLES:
         .value_name("PATH")
         .value_parser(clap::value_parser!(PathBuf))
     )
+    .arg(
+      Arg::new("static_fallback")
+        .long("static-fallback")
+        .value_name("STRATEGY")
+        .help(r#"Static file fallback strategy for missing files:
+  strict              Return 404 (default)
+  spa[:<FILE>]        Serve <FILE> for SPA routes (default: index.html)
+  custom404[:<FILE>]  Serve custom 404 page (default: 404.html)"#)
+        .required(false)
+    )
 }
 
 /// Starts the server with the given configuration
@@ -277,6 +287,12 @@ fn main() {
       std::process::exit(1);
     }
   };
+
+  // Parse static fallback strategy if provided
+  if let Some(strategy_str) = matches.get_one::<String>("static_fallback") {
+    config.static_fallback =
+      config::StaticFallbackStrategy::from_str(strategy_str);
+  }
 
   // Configure single-tenant mode if CLI arguments are provided
   if let Some(src_file) = args.src_file {

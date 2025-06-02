@@ -9,6 +9,56 @@ use std::str::FromStr as _;
 use std::time::Duration;
 use tracing::info;
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum StaticFallbackStrategy {
+  #[default]
+  Strict,
+  Spa {
+    root_file: PathBuf,
+  },
+  Custom404 {
+    page_file: PathBuf,
+  },
+}
+
+impl StaticFallbackStrategy {
+  pub fn from_str(input: &str) -> Self {
+    if input == "strict" {
+      return StaticFallbackStrategy::Strict;
+    }
+
+    if let Some(file) = input.strip_prefix("spa:") {
+      return StaticFallbackStrategy::Spa {
+        root_file: PathBuf::from(file),
+      };
+    }
+
+    if input == "spa" {
+      return StaticFallbackStrategy::Spa {
+        root_file: PathBuf::from("index.html"),
+      };
+    }
+
+    if let Some(file) = input.strip_prefix("custom404:") {
+      return StaticFallbackStrategy::Custom404 {
+        page_file: PathBuf::from(file),
+      };
+    }
+
+    if input == "custom404" {
+      return StaticFallbackStrategy::Custom404 {
+        page_file: PathBuf::from("404.html"),
+      };
+    }
+
+    tracing::error!(
+      "Invalid static fallback strategy: '{}'. Using default 'strict'.",
+      input
+    );
+    StaticFallbackStrategy::Strict
+  }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
   /// Directory to store data in
@@ -50,6 +100,8 @@ pub struct Config {
   pub system_main_cell_retry_delay: Duration,
   /// Single tenant mode configuration
   pub single_tenant: Option<SingleTenantConfig>,
+  /// Static file fallback strategy
+  pub static_fallback: StaticFallbackStrategy,
 }
 
 #[derive(Debug, Clone)]
@@ -238,6 +290,7 @@ impl Config {
       system_main_cell_spawn_retries,
       system_main_cell_retry_delay,
       single_tenant: None,
+      static_fallback: StaticFallbackStrategy::default(),
     })
   }
 

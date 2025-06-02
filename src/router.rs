@@ -11,6 +11,78 @@ use crate::cell_manager::{CellKey, CellManagerError};
 use crate::control_socket_listener::locally_handle_internal_alarms;
 use crate::node_state::NodeState;
 
+#[derive(Debug, PartialEq)]
+pub enum StaticFileDecision {
+  ServeFile { path: PathBuf, status: StatusCode },
+  ProceedToCellLogic,
+  HandleAsGeneric404,
+}
+
+pub fn determine_static_file_action(
+  request_method: &http::Method,
+  request_path_str: &str,
+  tenant_static_dir: &std::path::Path,
+  strategy: &crate::config::StaticFallbackStrategy,
+) -> StaticFileDecision {
+  // Step 1: Check if it's a /cell/* path. If so, delegate.
+  if request_path_str.starts_with("/cell/") {
+    return StaticFileDecision::ProceedToCellLogic;
+  }
+
+  // Step 2: Check if method is GET or HEAD
+  if *request_method != http::Method::GET
+    && *request_method != http::Method::HEAD
+  {
+    return StaticFileDecision::HandleAsGeneric404;
+  }
+
+  // Step 3: Determine the actual file path to check on disk
+  let mut effective_path = request_path_str.trim_start_matches('/').to_string();
+  if effective_path.is_empty() || effective_path.ends_with('/') {
+    effective_path.push_str("index.html");
+  }
+  let full_target_path = tenant_static_dir.join(effective_path);
+
+  // Step 4: Check if the target file exists
+  if full_target_path.is_file() {
+    return StaticFileDecision::ServeFile {
+      path: full_target_path,
+      status: StatusCode::OK,
+    };
+  }
+
+  // Step 5: File not found, apply fallback strategy
+  match strategy {
+    crate::config::StaticFallbackStrategy::Strict => {
+      StaticFileDecision::HandleAsGeneric404
+    }
+    crate::config::StaticFallbackStrategy::Spa { root_file } => {
+      let spa_file = tenant_static_dir.join(root_file);
+      if spa_file.is_file() {
+        StaticFileDecision::ServeFile {
+          path: spa_file,
+          status: StatusCode::OK,
+        }
+      } else {
+        // SPA root itself not found - critical fallback
+        StaticFileDecision::HandleAsGeneric404
+      }
+    }
+    crate::config::StaticFallbackStrategy::Custom404 { page_file } => {
+      let custom_404_file = tenant_static_dir.join(page_file);
+      if custom_404_file.is_file() {
+        StaticFileDecision::ServeFile {
+          path: custom_404_file,
+          status: StatusCode::NOT_FOUND,
+        }
+      } else {
+        // Custom 404 page itself not found
+        StaticFileDecision::HandleAsGeneric404
+      }
+    }
+  }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
   #[allow(dead_code)]
@@ -317,6 +389,67 @@ async fn write_response_close_conn(
   Ok(())
 }
 
+/// Helper function to serve a static file
+async fn serve_static_file(
+  session: &mut Session,
+  file_path: &std::path::Path,
+  status: StatusCode,
+  is_head_request: bool,
+) -> pingora::Result<()> {
+  // Try to read the file
+  let file = match std::fs::read(file_path) {
+    Ok(file) => file,
+    Err(e) => {
+      error!("Failed to read file {}: {}", file_path.display(), e);
+      return Err(pingora::Error::explain(
+        ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
+        "Failed to read file",
+      ));
+    }
+  };
+
+  // Determine content type based on file extension
+  let content_type = match file_path.extension().and_then(|e| e.to_str()) {
+    Some("html") | Some("htm") => "text/html",
+    Some("css") => "text/css",
+    Some("js") => "application/javascript",
+    Some("json") => "application/json",
+    Some("png") => "image/png",
+    Some("jpg") | Some("jpeg") => "image/jpeg",
+    Some("gif") => "image/gif",
+    Some("svg") => "image/svg+xml",
+    Some("webp") => "image/webp",
+    Some("ico") => "image/x-icon",
+    Some("woff") => "font/woff",
+    Some("woff2") => "font/woff2",
+    Some("ttf") => "font/ttf",
+    Some("txt") => "text/plain",
+    Some("pdf") => "application/pdf",
+    Some("xml") => "application/xml",
+    _ => "application/octet-stream",
+  };
+
+  let content_length = file.len();
+
+  // Build and send response
+  let mut resp = pingora::http::ResponseHeader::build(status, Some(2))?;
+  resp
+    .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())?;
+  resp.insert_header(http::header::CONTENT_TYPE, content_type)?;
+
+  let end_of_stream = is_head_request;
+  session.set_keepalive(None);
+  session
+    .write_response_header(Box::new(resp), end_of_stream)
+    .await?;
+
+  if !end_of_stream {
+    session.write_response_body(Some(file.into()), true).await?;
+  }
+
+  Ok(())
+}
+
 #[async_trait::async_trait]
 impl ProxyHttp for Proxy {
   type CTX = Ctx;
@@ -460,24 +593,7 @@ impl ProxyHttp for Proxy {
       }
     }
 
-    // Only handle GET and HEAD requests
-    if req_header.method != http::Method::GET
-      && req_header.method != http::Method::HEAD
-    {
-      return Ok(false);
-    }
-
-    // Process the path and handle static files for non-cell paths
-    let rel_path = path.trim_start_matches('/');
-
-    // Create a String to store our modified path
-    let rel_path_ = if rel_path.is_empty() || rel_path.ends_with('/') {
-      format!("{}index.html", rel_path)
-    } else {
-      rel_path.to_string()
-    };
-
-    // Construct the file path
+    // Determine static directory
     let static_dir = if let Some(ref single_tenant) =
       self.node_state.config.single_tenant
     {
@@ -490,64 +606,38 @@ impl ProxyHttp for Proxy {
       let tenant_dir = self.node_state.cell_manager.data_dir.join(&ctx.tenant);
       tenant_dir.join("static")
     };
-    let file_path = static_dir.join(&rel_path_);
 
-    // Try to read the file
-    let file = match std::fs::read(&file_path) {
-      Ok(file) => file,
-      Err(_) => {
-        debug!("File not found: {}", file_path.display());
-        return Err(pingora::Error::explain(
-          ErrorType::HTTPStatus(StatusCode::NOT_FOUND.into()),
-          "Not found",
-        ));
+    // Use determine_static_file_action to decide what to do
+    let decision = determine_static_file_action(
+      &req_header.method,
+      path,
+      &static_dir,
+      &self.node_state.config.static_fallback,
+    );
+
+    match decision {
+      StaticFileDecision::ServeFile {
+        path: file_path,
+        status,
+      } => {
+        serve_static_file(
+          session,
+          &file_path,
+          status,
+          req_header.method == http::Method::HEAD,
+        )
+        .await?;
+        Ok(true)
       }
-    };
-
-    // Determine content type based on file extension
-    let content_type = match rel_path_.rsplit('.').next() {
-      Some("html") | Some("htm") => "text/html",
-      Some("css") => "text/css",
-      Some("js") => "application/javascript",
-      Some("json") => "application/json",
-      Some("png") => "image/png",
-      Some("jpg") | Some("jpeg") => "image/jpeg",
-      Some("gif") => "image/gif",
-      Some("svg") => "image/svg+xml",
-      Some("webp") => "image/webp",
-      Some("ico") => "image/x-icon",
-      Some("woff") => "font/woff",
-      Some("woff2") => "font/woff2",
-      Some("ttf") => "font/ttf",
-      Some("txt") => "text/plain",
-      Some("pdf") => "application/pdf",
-      Some("xml") => "application/xml",
-      _ => "application/octet-stream",
-    };
-
-    let content_length = file.len();
-
-    // Build and send response
-    let mut resp =
-      pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
-    resp
-      .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
-      .unwrap();
-    resp
-      .insert_header(http::header::CONTENT_TYPE, content_type)
-      .unwrap();
-
-    let end_of_stream = req_header.method == http::Method::HEAD;
-    session.set_keepalive(None);
-    session
-      .write_response_header(Box::new(resp), end_of_stream)
-      .await?;
-
-    if !end_of_stream {
-      session.write_response_body(Some(file.into()), true).await?;
+      StaticFileDecision::ProceedToCellLogic => {
+        // This shouldn't happen as we already checked for /cell/* paths above
+        Ok(false)
+      }
+      StaticFileDecision::HandleAsGeneric404 => Err(pingora::Error::explain(
+        ErrorType::HTTPStatus(StatusCode::NOT_FOUND.into()),
+        "Not found",
+      )),
     }
-
-    Ok(true)
   }
 
   // This method is called for each HTTP request to determine the upstream server
@@ -895,5 +985,258 @@ mod tests {
         prop_assert!(!path.starts_with("/cell/"));
       }
     }
+  }
+
+  #[test]
+  fn test_strict_mode_file_not_found() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let strategy = crate::config::StaticFallbackStrategy::Strict;
+    let decision = determine_static_file_action(
+      &http::Method::GET,
+      "/nonexistent.html",
+      temp_dir.path(),
+      &strategy,
+    );
+    assert_eq!(decision, StaticFileDecision::HandleAsGeneric404);
+  }
+
+  #[test]
+  fn test_strict_mode_file_exists() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let file_path = temp_dir.path().join("existing.html");
+    std::fs::write(&file_path, "test content").unwrap();
+
+    let strategy = crate::config::StaticFallbackStrategy::Strict;
+    let decision = determine_static_file_action(
+      &http::Method::GET,
+      "/existing.html",
+      temp_dir.path(),
+      &strategy,
+    );
+    assert_eq!(
+      decision,
+      StaticFileDecision::ServeFile {
+        path: file_path,
+        status: StatusCode::OK,
+      }
+    );
+  }
+
+  #[test]
+  fn test_spa_mode_serves_default_index() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let index_path = temp_dir.path().join("index.html");
+    std::fs::write(&index_path, "SPA Default Index").unwrap();
+
+    let strategy = crate::config::StaticFallbackStrategy::Spa {
+      root_file: PathBuf::from("index.html"),
+    };
+    let decision = determine_static_file_action(
+      &http::Method::GET,
+      "/some/spa/route",
+      temp_dir.path(),
+      &strategy,
+    );
+    assert_eq!(
+      decision,
+      StaticFileDecision::ServeFile {
+        path: index_path,
+        status: StatusCode::OK,
+      }
+    );
+  }
+
+  #[test]
+  fn test_spa_mode_with_custom_root_file() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let app_path = temp_dir.path().join("app.html");
+    std::fs::write(&app_path, "SPA App").unwrap();
+
+    let strategy = crate::config::StaticFallbackStrategy::Spa {
+      root_file: PathBuf::from("app.html"),
+    };
+    let decision = determine_static_file_action(
+      &http::Method::GET,
+      "/missing/route",
+      temp_dir.path(),
+      &strategy,
+    );
+    assert_eq!(
+      decision,
+      StaticFileDecision::ServeFile {
+        path: app_path,
+        status: StatusCode::OK,
+      }
+    );
+  }
+
+  #[test]
+  fn test_spa_mode_when_root_file_missing() {
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let strategy = crate::config::StaticFallbackStrategy::Spa {
+      root_file: PathBuf::from("nonexistent_root.html"),
+    };
+    let decision = determine_static_file_action(
+      &http::Method::GET,
+      "/some/route",
+      temp_dir.path(),
+      &strategy,
+    );
+    assert_eq!(decision, StaticFileDecision::HandleAsGeneric404);
+  }
+
+  #[test]
+  fn test_custom404_mode_serves_default_404() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let not_found_path = temp_dir.path().join("404.html");
+    std::fs::write(&not_found_path, "Custom 404").unwrap();
+
+    let strategy = crate::config::StaticFallbackStrategy::Custom404 {
+      page_file: PathBuf::from("404.html"),
+    };
+    let decision = determine_static_file_action(
+      &http::Method::GET,
+      "/missing/page",
+      temp_dir.path(),
+      &strategy,
+    );
+    assert_eq!(
+      decision,
+      StaticFileDecision::ServeFile {
+        path: not_found_path,
+        status: StatusCode::NOT_FOUND,
+      }
+    );
+  }
+
+  #[test]
+  fn test_custom404_mode_with_specified_page() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let error_path = temp_dir.path().join("custom_error.html");
+    std::fs::write(&error_path, "Custom Error").unwrap();
+
+    let strategy = crate::config::StaticFallbackStrategy::Custom404 {
+      page_file: PathBuf::from("custom_error.html"),
+    };
+    let decision = determine_static_file_action(
+      &http::Method::GET,
+      "/not/found",
+      temp_dir.path(),
+      &strategy,
+    );
+    assert_eq!(
+      decision,
+      StaticFileDecision::ServeFile {
+        path: error_path,
+        status: StatusCode::NOT_FOUND,
+      }
+    );
+  }
+
+  #[test]
+  fn test_custom404_mode_when_404_file_missing() {
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let strategy = crate::config::StaticFallbackStrategy::Custom404 {
+      page_file: PathBuf::from("nonexistent_404.html"),
+    };
+    let decision = determine_static_file_action(
+      &http::Method::GET,
+      "/missing",
+      temp_dir.path(),
+      &strategy,
+    );
+    assert_eq!(decision, StaticFileDecision::HandleAsGeneric404);
+  }
+
+  #[test]
+  fn test_cell_paths_proceed_to_cell_logic() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let strategy = crate::config::StaticFallbackStrategy::Strict;
+
+    let decision = determine_static_file_action(
+      &http::Method::GET,
+      "/cell/foo",
+      temp_dir.path(),
+      &strategy,
+    );
+    assert_eq!(decision, StaticFileDecision::ProceedToCellLogic);
+  }
+
+  #[test]
+  fn test_non_get_head_requests() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let strategy = crate::config::StaticFallbackStrategy::Strict;
+
+    let decision = determine_static_file_action(
+      &http::Method::POST,
+      "/some/path",
+      temp_dir.path(),
+      &strategy,
+    );
+    assert_eq!(decision, StaticFileDecision::HandleAsGeneric404);
+  }
+
+  #[test]
+  fn test_root_path_serves_index_html() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let index_path = temp_dir.path().join("index.html");
+    std::fs::write(&index_path, "Home page").unwrap();
+
+    let strategy = crate::config::StaticFallbackStrategy::Strict;
+
+    // Test "/" path
+    let decision = determine_static_file_action(
+      &http::Method::GET,
+      "/",
+      temp_dir.path(),
+      &strategy,
+    );
+    assert_eq!(
+      decision,
+      StaticFileDecision::ServeFile {
+        path: index_path.clone(),
+        status: StatusCode::OK,
+      }
+    );
+
+    // Test empty path
+    let decision = determine_static_file_action(
+      &http::Method::GET,
+      "",
+      temp_dir.path(),
+      &strategy,
+    );
+    assert_eq!(
+      decision,
+      StaticFileDecision::ServeFile {
+        path: index_path,
+        status: StatusCode::OK,
+      }
+    );
+  }
+
+  #[test]
+  fn test_directory_path_serves_index_html() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp_dir.path().join("subdir")).unwrap();
+    let index_path = temp_dir.path().join("subdir/index.html");
+    std::fs::write(&index_path, "Subdir index").unwrap();
+
+    let strategy = crate::config::StaticFallbackStrategy::Strict;
+    let decision = determine_static_file_action(
+      &http::Method::GET,
+      "/subdir/",
+      temp_dir.path(),
+      &strategy,
+    );
+    assert_eq!(
+      decision,
+      StaticFileDecision::ServeFile {
+        path: index_path,
+        status: StatusCode::OK,
+      }
+    );
   }
 }
