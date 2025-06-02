@@ -26,11 +26,9 @@ const BotActionSchema = z.discriminatedUnion("action", [
 
 type BotAction = z.infer<typeof BotActionSchema>;
 
-const GITHUB_CLIENT_ID = Deno.env.get("GITHUB_CLIENT_ID") ||
-  "Ov23liRJiAlpktDPnJx1";
-const GITHUB_CLIENT_SECRET = Deno.env.get("GITHUB_CLIENT_SECRET") ||
-  "ad8ddca4d41ccf13b205205d8e835e33c5a5b493";
-const JWT_SECRET = Deno.env.get("JWT_SECRET") || "dev-secret-key";
+const GITHUB_CLIENT_ID = Deno.env.get("GITHUB_CLIENT_ID");
+const GITHUB_CLIENT_SECRET = Deno.env.get("GITHUB_CLIENT_SECRET");
+const JWT_SECRET = Deno.env.get("JWT_SECRET");
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
 
 // Initialize DB schema for auth cell
@@ -129,13 +127,15 @@ function extractBearerToken(req: Request): string | null {
 
 cell.request(async (req: Request): Promise<Response> => {
   const url = new URL(req.url);
+  console.log("incoming request url", url);
   const path = url.pathname.replace(`/cell/${cell.id}`, "");
+  console.log("incoming request path", path);
 
   // Auth cell endpoints
   if (cell.id === "auth") {
     // GitHub login endpoint
     if (path === "/github/login") {
-      const redirectUri = `http://localhost:5173/cell/auth/github/callback`;
+      const redirectUri = `http://localhost:8000/cell/auth/github/callback`;
       const githubAuthUrl = `https://github.com/login/oauth/authorize?` +
         `client_id=${GITHUB_CLIENT_ID}&` +
         `redirect_uri=${encodeURIComponent(redirectUri)}&` +
@@ -210,10 +210,8 @@ cell.request(async (req: Request): Promise<Response> => {
         });
 
         // Redirect to frontend with JWT
-        const frontendUrl = "http://localhost:5173";
-        return Response.redirect(
-          `${frontendUrl}/auth-success#token=${jwt}`,
-        );
+        const frontendUrl = "http://localhost:8000";
+        return Response.redirect(`${frontendUrl}/auth-success#token=${jwt}`);
       } catch (error) {
         console.error("OAuth error:", error);
         return new Response("Authentication failed", { status: 500 });

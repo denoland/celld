@@ -60,7 +60,8 @@ export function Chat(
 
     // Connect to WebSocket
     const connectWebSocket = () => {
-      const wsUrl = `ws://localhost:8000/cell/${channelId}`;
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${location.host}/cell/${channelId}`;
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 

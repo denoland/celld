@@ -35,7 +35,7 @@ export function Memory({ channelId, channelName, onClose }: MemoryProps) {
       }
 
       const response = await fetch(
-        `http://localhost:8000/cell/${channelId}/memories`,
+        `/cell/${channelId}/memories`,
         {
           headers: {
             "Authorization": `Bearer ${token}`,
@@ -74,7 +74,7 @@ export function Memory({ channelId, channelName, onClose }: MemoryProps) {
       setDeleting(memoryId);
       const token = localStorage.getItem("auth_token");
       const response = await fetch(
-        `http://localhost:8000/cell/${channelId}/memories/${memoryId}`,
+        `/cell/${channelId}/memories/${memoryId}`,
         {
           method: "DELETE",
           headers: {

@@ -18,7 +18,7 @@ RUN apt-get update && \
 COPY . /app
 #COPY dist/ /data/default/static
 #COPY cells/ /data/default/src
-COPY .prod.vars /app/.env
+#COPY .prod.vars /app/.env
 WORKDIR /app
 RUN deno install && deno run build
 RUN chown -R celld:celld /data
