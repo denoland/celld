@@ -160,7 +160,6 @@ impl ChildOnParentExit {
                     Ok(Some(status)) => {
                       // Child has terminated
                       let exit_code = status.code().unwrap_or(1);
-                      // TODO: Pass exit status to watcher's parent via new pipe
                       std::process::exit(exit_code);
                     }
                     Ok(None) => {
@@ -170,8 +169,14 @@ impl ChildOnParentExit {
                     Err(_) => {
                       // Error checking child status, kill and exit
                       let _ = kill(real_child_pid, Signal::SIGTERM);
-                      let _ = real_child.wait();
-                      std::process::exit(1);
+                      let error_code = match real_child.wait() {
+                        Ok(exit_status) => exit_status.code().unwrap_or(1),
+                        Err(_) => {
+                          // Failed to wait on child, exit with error code
+                          1
+                        }
+                      };
+                      std::process::exit(error_code);
                     }
                   }
                 } else {
