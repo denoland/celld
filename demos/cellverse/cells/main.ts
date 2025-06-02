@@ -29,6 +29,7 @@ if (cell.id === "channel-registry") {
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       creator_github_id TEXT NOT NULL,
+      personality TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -44,6 +45,13 @@ if (cell.id.startsWith("channel-")) {
       timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       content TEXT NOT NULL,
       is_llm_response INTEGER DEFAULT 0
+    )
+  `);
+
+  cell.db.exec(`
+    CREATE TABLE IF NOT EXISTS channel_config (
+      key TEXT PRIMARY KEY,
+      value TEXT
     )
   `);
 }
@@ -242,15 +250,73 @@ cell.request(async (req: Request): Promise<Response> => {
         return new Response("Channel already exists", { status: 409 });
       }
 
+      // Generate personality using OpenAI
+      let personality = `A helpful assistant in the ${body.name} channel.`;
+
+      if (OPENAI_API_KEY) {
+        try {
+          const personalityResponse = await fetch(
+            "https://api.openai.com/v1/chat/completions",
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${OPENAI_API_KEY}`,
+              },
+              body: JSON.stringify({
+                model: "gpt-3.5-turbo",
+                messages: [
+                  {
+                    role: "system",
+                    content: "You are a creative character designer.",
+                  },
+                  {
+                    role: "user",
+                    content:
+                      `Using the descriptor '${body.name}', create a distinct character. \
+                  Include their D&D alignment (lawful good, chaotic evil, etc.), personality traits, speaking style, and any quirks. \
+                  Make it creative and memorable. Keep it under 150 words.`,
+                  },
+                ],
+                temperature: 0.9,
+                max_tokens: 200,
+              }),
+            },
+          );
+
+          if (personalityResponse.ok) {
+            const personalityData = await personalityResponse.json();
+            personality = personalityData.choices[0].message.content;
+          }
+        } catch (error) {
+          console.error("Error generating personality:", error);
+          // Fall back to default personality
+        }
+      }
+
       cell.db.prepare(
-        `INSERT INTO channels (id, name, creator_github_id) VALUES (?, ?, ?)`,
-      ).run(channelId, body.name, user.github_id);
+        `INSERT INTO channels (id, name, creator_github_id, personality) VALUES (?, ?, ?, ?)`,
+      ).run(channelId, body.name, user.github_id, personality);
+
+      // Set personality in the channel cell
+      try {
+        await fetch(`http://localhost:8000/cell/${channelId}/set-personality`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ personality }),
+        });
+      } catch (error) {
+        console.error("Error setting channel personality:", error);
+      }
 
       return new Response(
         JSON.stringify({
           id: channelId,
           name: body.name,
           creator_github_id: user.github_id,
+          personality: personality,
         }),
         {
           headers: { "Content-Type": "application/json" },
@@ -261,11 +327,28 @@ cell.request(async (req: Request): Promise<Response> => {
     // List channels
     if (path === "/list" && req.method === "GET") {
       const channels = cell.db.prepare(
-        `SELECT id, name, creator_github_id, created_at 
+        `SELECT id, name, creator_github_id, personality, created_at 
          FROM channels ORDER BY created_at DESC`,
       ).all();
 
       return new Response(JSON.stringify(channels), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    // Get single channel
+    if (path.startsWith("/get/") && req.method === "GET") {
+      const channelId = path.substring(5);
+      const channel = cell.db.prepare(
+        `SELECT id, name, creator_github_id, personality, created_at 
+         FROM channels WHERE id = ?`,
+      ).get(channelId);
+
+      if (!channel) {
+        return new Response("Channel not found", { status: 404 });
+      }
+
+      return new Response(JSON.stringify(channel), {
         headers: { "Content-Type": "application/json" },
       });
     }
@@ -300,6 +383,22 @@ cell.request(async (req: Request): Promise<Response> => {
       return new Response(JSON.stringify({ success: true }), {
         headers: { "Content-Type": "application/json" },
       });
+    }
+  }
+
+  // Channel-specific endpoints
+  if (cell.id.startsWith("channel-")) {
+    // Set personality endpoint (called by channel registry after creation)
+    if (path === "/set-personality" && req.method === "POST") {
+      const body = await req.json();
+      if (body.personality) {
+        cell.db.prepare(
+          `INSERT OR REPLACE INTO channel_config (key, value) VALUES ('personality', ?)`,
+        ).run(body.personality);
+        return new Response(JSON.stringify({ success: true }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
     }
   }
 
@@ -405,6 +504,20 @@ if (cell.id.startsWith("channel-")) {
             content: `${user.username}: ${data.content}`,
           });
 
+          // Get channel personality from local config
+          let systemPrompt = `You are a bot in the "${
+            cell.id.replace("channel-", "")
+          }" channel.`;
+
+          const personalityConfig = cell.db.prepare(
+            `SELECT value FROM channel_config WHERE key = 'personality'`,
+          ).get();
+
+          if (personalityConfig && personalityConfig.value) {
+            systemPrompt = personalityConfig.value +
+              " Remember to keep responses concise and conversational.";
+          }
+
           // Call OpenAI API
           const response = await fetch(
             "https://api.openai.com/v1/chat/completions",
@@ -419,9 +532,7 @@ if (cell.id.startsWith("channel-")) {
                 messages: [
                   {
                     role: "system",
-                    content: `You are a helpful assistant in the "${
-                      cell.id.replace("channel-", "")
-                    }" channel. Be conversational and friendly. Keep responses concise.`,
+                    content: systemPrompt,
                   },
                   ...messages,
                 ],
@@ -439,7 +550,7 @@ if (cell.id.startsWith("channel-")) {
             const aiResult = cell.db.prepare(
               `INSERT INTO messages (github_id, username, content, is_llm_response)
                VALUES (?, ?, ?, ?) RETURNING *`,
-            ).get("ai", "AI Assistant", aiContent, 1);
+            ).get("ai", "bot", aiContent, 1);
 
             // Broadcast AI response
             cell.broadcast(JSON.stringify({

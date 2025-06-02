@@ -2,6 +2,7 @@ export interface Channel {
   id: string;
   name: string;
   creator_github_id: string;
+  personality?: string;
   created_at: string;
 }
 

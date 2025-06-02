@@ -16,6 +16,9 @@ export function Channels({ selectedChannel, onSelectChannel }: ChannelsProps) {
   const [newChannelName, setNewChannelName] = useState("");
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [selectedChannelInfo, setSelectedChannelInfo] = useState<
+    Channel | null
+  >(null);
 
   const currentUser = authService.getUser();
 
@@ -129,11 +132,28 @@ export function Channels({ selectedChannel, onSelectChannel }: ChannelsProps) {
                 <div className="channel-icon">#</div>
                 <div className="channel-info">
                   <h3>{channel.name}</h3>
-                  <p>
+                  <p className="channel-date">
                     Created {formatDate(channel.created_at)}
                   </p>
+                  {channel.personality && (
+                    <p
+                      className="channel-personality"
+                      title={channel.personality}
+                    >
+                      {channel.personality.substring(0, 100)}...
+                    </p>
+                  )}
                 </div>
                 <div className="channel-actions">
+                  {channel.personality && (
+                    <button
+                      className="info-channel-btn"
+                      onClick={() => setSelectedChannelInfo(channel)}
+                      title="View channel info"
+                    >
+                      ℹ️
+                    </button>
+                  )}
                   <button
                     className="join-channel-btn"
                     onClick={() =>
@@ -157,6 +177,36 @@ export function Channels({ selectedChannel, onSelectChannel }: ChannelsProps) {
             ))
           )}
       </div>
+
+      {/* Channel Info Modal */}
+      {selectedChannelInfo && (
+        <div
+          className="modal-overlay"
+          onClick={() => setSelectedChannelInfo(null)}
+        >
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>#{selectedChannelInfo.name}</h2>
+              <button
+                className="modal-close-btn"
+                onClick={() => setSelectedChannelInfo(null)}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="modal-body">
+              <h3>AI Personality</h3>
+              <p className="personality-full">
+                {selectedChannelInfo.personality}
+              </p>
+              <div className="modal-meta">
+                <p>Created: {formatDate(selectedChannelInfo.created_at)}</p>
+                <p>ID: {selectedChannelInfo.id}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

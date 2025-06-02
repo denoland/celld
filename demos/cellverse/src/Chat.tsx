@@ -143,9 +143,7 @@ export function Chat({ channelId, channelName, onClose }: ChatProps) {
               >
                 <div className="message-header">
                   <span className="message-author">
-                    {message.is_llm_response
-                      ? "🤖 AI Assistant"
-                      : message.username}
+                    {message.is_llm_response ? "bot" : message.username}
                   </span>
                   <span className="message-time">
                     {new Date(message.timestamp + "Z").toLocaleTimeString([], {
