@@ -6,7 +6,8 @@
     "npm:npm-run-all@^4.1.5": "4.1.5",
     "npm:preact@^10.26.5": "10.26.8",
     "npm:typescript@~5.8.3": "5.8.3",
-    "npm:vite@^6.3.5": "6.3.5_picomatch@4.0.2"
+    "npm:vite@^6.3.5": "6.3.5_picomatch@4.0.2",
+    "npm:zod@^3.22.4": "3.25.47"
   },
   "jsr": {
     "@ry/cells@0.2.0": {
@@ -1701,6 +1702,9 @@
     },
     "yallist@3.1.1": {
       "integrity": "sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g=="
+    },
+    "zod@3.25.47": {
+      "integrity": "sha512-+f8+agSYoT9niC0VUL60IuXnr81FJeJ27Lf5YPrmcxTWmygcpGBeEuAAovDDEjkyQ36KyqNswwbhISZ1Z7yY+A=="
     }
   },
   "workspace": {

@@ -1,4 +1,5 @@
 # Logs
+.prod.vars
 .env
 data/
 logs

@@ -1,5 +1,4 @@
 import { useEffect, useState } from "preact/hooks";
-import { authService } from "./auth";
 
 interface Memory {
   id: number;
