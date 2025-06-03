@@ -112,10 +112,20 @@ export class Cell implements DbAccessor, TaskScheduler {
   }
 
   request(cb: (req: Request) => Promise<Response> | Response | void): void {
+    if (this.onRequestCallback) {
+      throw new Error(
+        `Handler for request already registered for cell ${this.id}`,
+      );
+    }
     this.onRequestCallback = cb;
   }
 
   alarm(cb: () => Promise<void> | void): void {
+    if (this.onAlarmCallback) {
+      throw new Error(
+        `Handler for alarm already registered for cell ${this.id}`,
+      );
+    }
     this.onAlarmCallback = cb;
   }
 
@@ -210,6 +220,11 @@ export class Cell implements DbAccessor, TaskScheduler {
   }
 
   connect(cb: (socket: WebSocket, id: string) => Promise<void> | void): void {
+    if (this.onConnectCallback) {
+      throw new Error(
+        `Handler for connect already registered for cell ${this.id}`,
+      );
+    }
     this.onConnectCallback = cb;
   }
 
@@ -220,14 +235,29 @@ export class Cell implements DbAccessor, TaskScheduler {
       id: string,
     ) => Promise<void> | void,
   ): void {
+    if (this.onMessageCallback) {
+      throw new Error(
+        `Handler for message already registered for cell ${this.id}`,
+      );
+    }
     this.onMessageCallback = cb;
   }
 
   close(cb: (socket: WebSocket, id: string) => Promise<void> | void): void {
+    if (this.onCloseCallback) {
+      throw new Error(
+        `Handler for close already registered for cell ${this.id}`,
+      );
+    }
     this.onCloseCallback = cb;
   }
 
   error(cb: (error: Error | ErrorEvent | Event) => Promise<void> | void): void {
+    if (this.onErrorCallback) {
+      throw new Error(
+        `Handler for error already registered for cell ${this.id}`,
+      );
+    }
     this.onErrorCallback = cb;
   }
 
