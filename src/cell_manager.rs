@@ -698,15 +698,22 @@ impl CellManager {
   }
 
   pub async fn terminate_all(&self) {
+    let num_cells = self.cells.len();
+
+    debug!("Terminating {num_cells} cells");
+
+    // TODO(magurotuna): Can we do this concurrently?
     for handle in self.cells.iter().map(|entry| entry.value().clone()) {
-      // TODO(magurotuna): Can we do this concurrently?
-      if !handle.release().await {
-        error!(
-          descriptor = ?handle.descriptor(),
-          "Error terminating the cell"
-        );
+      debug!(descriptor = ?handle.descriptor(), "Cell termination starts");
+
+      if handle.release().await {
+        debug!(descriptor = ?handle.descriptor(), "Cell terminated");
+      } else {
+        debug!(descriptor = ?handle.descriptor(), "Cell was already terminated");
       }
     }
+
+    debug!("{num_cells} cells terminated");
   }
 
   async fn setup_sqlite_replica(

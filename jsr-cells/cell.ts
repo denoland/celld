@@ -328,7 +328,9 @@ export class Cell implements DbAccessor, TaskScheduler {
 
     // Handle SIGTERM for graceful shutdown
     Deno.addSignalListener("SIGTERM", () => {
-      console.log("SIGTERM received, shutting down gracefully...");
+      console.log(
+        `SIGTERM received, shutting down ${this.tenant}/${this.id} gracefully...`,
+      );
       this.shutdown();
     });
   }
@@ -374,7 +376,9 @@ export class Cell implements DbAccessor, TaskScheduler {
       this.dbInstance = null;
     }
 
-    console.log("Shutdown complete");
+    console.log(
+      `Shutdown complete for ${this.tenant}/${this.id}`,
+    );
     Deno.exit(0);
   }
 

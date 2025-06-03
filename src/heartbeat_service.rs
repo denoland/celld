@@ -87,5 +87,7 @@ impl BackgroundService for HeartbeatService {
         }
       }
     }
+
+    info!("Heartbeat service stopped");
   }
 }

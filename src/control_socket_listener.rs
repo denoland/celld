@@ -46,7 +46,7 @@ impl BackgroundService for ControlSocketListener {
         biased;
 
         _ = shutdown.changed() => {
-          info!("Control socket listener shutting down");
+          info!("Control socket listener received shutdown signal");
           break;
         }
 
