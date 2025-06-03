@@ -2,12 +2,11 @@
   "version": "5",
   "specifiers": {
     "jsr:@ry/cells@*": "0.2.0",
-    "npm:@preact/preset-vite@^2.10.1": "2.10.1_@babel+core@7.27.4_vite@6.3.5__picomatch@4.0.2_preact@10.26.8_@types+node@22.15.29",
-    "npm:@types/node@^22.15.29": "22.15.29",
+    "npm:@preact/preset-vite@^2.10.1": "2.10.1_@babel+core@7.27.4_vite@6.3.5__picomatch@4.0.2_preact@10.26.8",
     "npm:npm-run-all@^4.1.5": "4.1.5",
     "npm:preact@^10.26.5": "10.26.8",
     "npm:typescript@~5.8.3": "5.8.3",
-    "npm:vite@^6.3.5": "6.3.5_picomatch@4.0.2_@types+node@22.15.29",
+    "npm:vite@^6.3.5": "6.3.5_picomatch@4.0.2",
     "npm:zod@^3.22.4": "3.25.47"
   },
   "jsr": {
@@ -329,28 +328,13 @@
         "@babel/core",
         "@babel/plugin-transform-react-jsx",
         "@babel/plugin-transform-react-jsx-development",
-        "@prefresh/vite@2.4.7_preact@10.26.8_vite@6.3.5__picomatch@4.0.2",
+        "@prefresh/vite",
         "@rollup/pluginutils",
         "babel-plugin-transform-hook-names",
         "debug",
         "kolorist",
-        "vite@6.3.5_picomatch@4.0.2",
-        "vite-prerender-plugin@0.5.10_vite@6.3.5__picomatch@4.0.2"
-      ]
-    },
-    "@preact/preset-vite@2.10.1_@babel+core@7.27.4_vite@6.3.5__picomatch@4.0.2_preact@10.26.8_@types+node@22.15.29": {
-      "integrity": "sha512-59lyGBXNfZIr5OOuBUB4/IB8AqF/ULbvYnyItgK/2BJnsGJqaeaJobRVtMp1129obHQuj8oZ/dVxB9inmH8Xig==",
-      "dependencies": [
-        "@babel/core",
-        "@babel/plugin-transform-react-jsx",
-        "@babel/plugin-transform-react-jsx-development",
-        "@prefresh/vite@2.4.7_preact@10.26.8_vite@6.3.5__picomatch@4.0.2_@types+node@22.15.29",
-        "@rollup/pluginutils",
-        "babel-plugin-transform-hook-names",
-        "debug",
-        "kolorist",
-        "vite@6.3.5_picomatch@4.0.2_@types+node@22.15.29",
-        "vite-prerender-plugin@0.5.10_vite@6.3.5__picomatch@4.0.2_@types+node@22.15.29"
+        "vite",
+        "vite-prerender-plugin"
       ]
     },
     "@prefresh/babel-plugin@0.5.1": {
@@ -374,19 +358,7 @@
         "@prefresh/utils",
         "@rollup/pluginutils",
         "preact",
-        "vite@6.3.5_picomatch@4.0.2"
-      ]
-    },
-    "@prefresh/vite@2.4.7_preact@10.26.8_vite@6.3.5__picomatch@4.0.2_@types+node@22.15.29": {
-      "integrity": "sha512-zmCEDWSFHl5A7PciXa/fe+OUjoGi4iiCQclpWfpIg7LjxwWrtlUT4DfxDBcQwHfTyipS/XDm8x7WYrkiTW0q+w==",
-      "dependencies": [
-        "@babel/core",
-        "@prefresh/babel-plugin",
-        "@prefresh/core",
-        "@prefresh/utils",
-        "@rollup/pluginutils",
-        "preact",
-        "vite@6.3.5_picomatch@4.0.2_@types+node@22.15.29"
+        "vite"
       ]
     },
     "@rollup/pluginutils@4.2.1": {
@@ -498,12 +470,6 @@
     },
     "@types/estree@1.0.7": {
       "integrity": "sha512-w28IoSUCJpidD/TGviZwwMJckNESJZXFu7NBZ5YJ4mEUnNraUn9Pm8HSZm/jDF1pDWYKspWE7oVphigUPRakIQ=="
-    },
-    "@types/node@22.15.29": {
-      "integrity": "sha512-LNdjOkUDlU1RZb8e1kOIUpN1qQUlzGkEtbVNo53vbrwDg5om6oduhm4SiUaPW5ASTXhAiP0jInWG8Qx9fVlOeQ==",
-      "dependencies": [
-        "undici-types"
-      ]
     },
     "ansi-styles@3.2.1": {
       "integrity": "sha512-VT0ZI6kZRdTh8YyJw3SMbYm/u+NqfsAxEpWO0Pf9sq8/e94WxxOpPKx9FR1FlyCtOVDNOQ+8ntlqFxiRc+r5qA==",
@@ -1635,9 +1601,6 @@
         "which-boxed-primitive"
       ]
     },
-    "undici-types@6.21.0": {
-      "integrity": "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ=="
-    },
     "update-browserslist-db@1.1.3_browserslist@4.25.0": {
       "integrity": "sha512-UxhIZQ+QInVdunkDAaiazvvT/+fXL5Osr0JZlJulepYu6Jd7qJtDZjlur0emRlT71EN3ScPoE7gvsuIKKNavKw==",
       "dependencies": [
@@ -1663,19 +1626,7 @@
         "simple-code-frame",
         "source-map",
         "stack-trace",
-        "vite@6.3.5_picomatch@4.0.2"
-      ]
-    },
-    "vite-prerender-plugin@0.5.10_vite@6.3.5__picomatch@4.0.2_@types+node@22.15.29": {
-      "integrity": "sha512-m4i0G5oc3LPLA02uW2XsFZmYNxZdyryz5Ksi78O9puj/ao5c8dBUW06caGwoM1TmYknTBBUyKhtqajUpoP+z8Q==",
-      "dependencies": [
-        "kolorist",
-        "magic-string",
-        "node-html-parser",
-        "simple-code-frame",
-        "source-map",
-        "stack-trace",
-        "vite@6.3.5_picomatch@4.0.2_@types+node@22.15.29"
+        "vite"
       ]
     },
     "vite@6.3.5_picomatch@4.0.2": {
@@ -1690,25 +1641,6 @@
       ],
       "optionalDependencies": [
         "fsevents"
-      ],
-      "bin": true
-    },
-    "vite@6.3.5_picomatch@4.0.2_@types+node@22.15.29": {
-      "integrity": "sha512-cZn6NDFE7wdTpINgs++ZJ4N49W2vRp8LCKrn3Ob1kYNtOo21vfDoaV5GzBfLU4MovSAB8uNRm4jgzVQZ+mBzPQ==",
-      "dependencies": [
-        "@types/node",
-        "esbuild",
-        "fdir",
-        "picomatch@4.0.2",
-        "postcss",
-        "rollup",
-        "tinyglobby"
-      ],
-      "optionalDependencies": [
-        "fsevents"
-      ],
-      "optionalPeers": [
-        "@types/node"
       ],
       "bin": true
     },
@@ -1779,7 +1711,6 @@
     "packageJson": {
       "dependencies": [
         "npm:@preact/preset-vite@^2.10.1",
-        "npm:@types/node@^22.15.29",
         "npm:npm-run-all@^4.1.5",
         "npm:preact@^10.26.5",
         "npm:typescript@~5.8.3",
