@@ -18,6 +18,11 @@ const BotActionSchema = z.discriminatedUnion("action", [
     filter: z.string().optional(),
     response: z.string().optional(),
   }),
+  z.object({
+    action: z.literal("set_alarm"),
+    message: z.string(),
+    delaySeconds: z.number(),
+  }),
 ]);
 
 type BotAction = z.infer<typeof BotActionSchema>;
@@ -89,6 +94,18 @@ if (cell.id.startsWith("channel-")) {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
+  `);
+
+  // Create queued_messages table for delayed responses
+  cell.db.exec(`
+    CREATE TABLE IF NOT EXISTS queued_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      message TEXT NOT NULL,
+      scheduled_time_unix_ms INTEGER NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_queued_messages_scheduled_time_unix_ms ON queued_messages (scheduled_time_unix_ms);
   `);
 }
 
@@ -674,6 +691,9 @@ if (cell.id.startsWith("channel-")) {
 3. To read memories:
 {"action": "read_memories", "filter": "optional_search_term", "response": "optional message to user"}
 
+4. To set an alarm (when a user asks for a delayed response):
+{"action": "set_alarm", "message": "your response here", "delaySeconds": <the number of seconds to delay the response>}
+
 You should store memories about users, topics, or anything worth remembering.
 Respond naturally while occasionally storing or retrieving memories.`;
 
@@ -790,6 +810,22 @@ Respond naturally while occasionally storing or retrieving memories.`;
                 }));
                 break;
               }
+
+              case "set_alarm": {
+                const scheduledTimeUnixMs = Date.now() +
+                  validatedAction.delaySeconds * 1000;
+
+                // Store the message in the database
+                cell.db.prepare(
+                  `INSERT INTO queued_messages (message, scheduled_time_unix_ms)
+                   VALUES (?, ?)`,
+                ).run(validatedAction.message, scheduledTimeUnixMs);
+
+                // Set an alarm
+                await cell.setAlarm(scheduledTimeUnixMs);
+
+                break;
+              }
             }
           } else {
             console.error("OpenAI API error:", await response.text());
@@ -798,6 +834,26 @@ Respond naturally while occasionally storing or retrieving memories.`;
           console.error("Error calling OpenAI:", error);
         }
       }
+    }
+  });
+
+  cell.alarm(() => {
+    const messages = cell.db.prepare(
+      `DELETE FROM queued_messages WHERE scheduled_time_unix_ms <= ? RETURNING *`,
+    ).all(Date.now()) as {
+      message: string;
+    }[];
+
+    for (const { message } of messages) {
+      const aiResult = cell.db.prepare(
+        `INSERT INTO messages (github_id, username, content, is_llm_response)
+         VALUES (?, ?, ?, ?) RETURNING *`,
+      ).get("ai", "bot", message, 1);
+
+      cell.broadcast(JSON.stringify({
+        type: "message",
+        message: aiResult,
+      }));
     }
   });
 }
