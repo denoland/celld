@@ -275,51 +275,54 @@ if (cell.id.startsWith("channel-")) {
         message: result,
       }));
 
-      // Send to LLM and broadcast response
-      if (OPENAI_API_KEY) {
-        try {
-          // Get 1 hour of message history for context
-          const oneHourAgo = new Date(
-            Date.now() - 60 * 60 * 1000,
-          ).toISOString();
-          const recentMessages = cell.db.prepare(
-            `SELECT username, content, is_llm_response, timestamp
+      try {
+        // Get 1 hour of message history for context
+        const oneHourAgo = new Date(
+          Date.now() - 60 * 60 * 1000,
+        ).toISOString();
+        const recentMessages = cell.db.prepare(
+          `SELECT username, content, is_llm_response, timestamp
              FROM messages 
              WHERE timestamp >= ?
              ORDER BY timestamp DESC 
              LIMIT 100`,
-          ).all(oneHourAgo).reverse();
+        ).all(oneHourAgo).reverse() as {
+          username: string;
+          content: string;
+          is_llm_response: 0 | 1;
+          timestamp: string;
+        }[];
 
-          // Build conversation history
-          const messages = recentMessages.map((msg) => ({
-            role: msg.is_llm_response ? "assistant" : "user",
-            content: msg.is_llm_response
-              ? msg.content
-              : `${msg.username}: ${msg.content}`,
-          }));
+        // Build conversation history
+        const messages = recentMessages.map((msg) => ({
+          role: msg.is_llm_response ? "assistant" : "user",
+          content: msg.is_llm_response
+            ? msg.content
+            : `${msg.username}: ${msg.content}`,
+        }));
 
-          // Add the current message
-          messages.push({
-            role: "user",
-            content: `${user.username}: ${data.content}`,
-          });
+        // Add the current message
+        messages.push({
+          role: "user",
+          content: `${user.username}: ${data.content}`,
+        });
 
-          // Get channel personality from local config
-          let systemPrompt = `You are a bot in the "${
-            cell.id.replace("channel-", "")
-          }" channel.`;
+        // Get channel personality from local config
+        let systemPrompt = `You are a bot in the "${
+          cell.id.replace("channel-", "")
+        }" channel.`;
 
-          const personalityConfig = cell.db.prepare(
-            `SELECT value FROM channel_config WHERE key = 'personality'`,
-          ).get();
+        const personalityConfig = cell.db.prepare(
+          `SELECT value FROM channel_config WHERE key = 'personality'`,
+        ).get();
 
-          if (personalityConfig && personalityConfig.value) {
-            systemPrompt = personalityConfig.value;
-          }
+        if (personalityConfig && personalityConfig.value) {
+          systemPrompt = personalityConfig.value as string;
+        }
 
-          // Add structured response instructions
-          systemPrompt +=
-            `\n\nYou must respond with a JSON object matching one of these schemas:
+        // Add structured response instructions
+        systemPrompt +=
+          `\n\nYou must respond with a JSON object matching one of these schemas:
 
 1. To respond to a message:
 {"action": "respond", "message": "your response here"}
@@ -336,142 +339,141 @@ if (cell.id.startsWith("channel-")) {
 You should store memories about users, topics, or anything worth remembering.
 Respond naturally while occasionally storing or retrieving memories.`;
 
-          // Call OpenAI API with structured output
-          const response = await fetch(
-            "https://api.openai.com/v1/chat/completions",
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${OPENAI_API_KEY}`,
-              },
-              body: JSON.stringify({
-                model: "gpt-4o-mini",
-                messages: [
-                  {
-                    role: "system",
-                    content: systemPrompt,
-                  },
-                  ...messages,
-                ],
-                temperature: 0.8,
-                max_tokens: 300,
-                response_format: { type: "json_object" },
-              }),
+        // Call OpenAI API with structured output
+        const response = await fetch(
+          "https://api.openai.com/v1/chat/completions",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${OPENAI_API_KEY}`,
             },
-          );
+            body: JSON.stringify({
+              model: "gpt-4o-mini",
+              messages: [
+                {
+                  role: "system",
+                  content: systemPrompt,
+                },
+                ...messages,
+              ],
+              temperature: 0.8,
+              max_tokens: 300,
+              response_format: { type: "json_object" },
+            }),
+          },
+        );
 
-          if (response.ok) {
-            const aiData = await response.json();
-            const aiResponse = aiData.choices[0].message.content;
+        if (response.ok) {
+          const aiData = await response.json();
+          const aiResponse = aiData.choices[0].message.content;
 
-            // Parse and validate the structured response
-            const parsedResponse = JSON.parse(aiResponse);
-            const validatedAction = BotActionSchema.parse(parsedResponse);
+          // Parse and validate the structured response
+          const parsedResponse = JSON.parse(aiResponse);
+          const validatedAction = BotActionSchema.parse(parsedResponse);
 
-            // Handle different bot actions
-            switch (validatedAction.action) {
-              case "respond": {
-                // Store and broadcast the response
+          // Handle different bot actions
+          switch (validatedAction.action) {
+            case "respond": {
+              // Store and broadcast the response
+              const aiResult = cell.db.prepare(
+                `INSERT INTO messages (github_id, username, content, is_llm_response)
+                   VALUES (?, ?, ?, ?) RETURNING *`,
+              ).get("ai", "bot", validatedAction.message, 1);
+
+              cell.broadcast(JSON.stringify({
+                type: "message",
+                message: aiResult,
+              }));
+              break;
+            }
+
+            case "store_memory": {
+              // Store the memory
+              cell.db.prepare(
+                `INSERT OR REPLACE INTO memories (key, value, updated_at)
+                   VALUES (?, ?, CURRENT_TIMESTAMP)`,
+              ).run(validatedAction.key, validatedAction.value);
+
+              // Send optional response
+              if (validatedAction.response) {
                 const aiResult = cell.db.prepare(
                   `INSERT INTO messages (github_id, username, content, is_llm_response)
-                   VALUES (?, ?, ?, ?) RETURNING *`,
-                ).get("ai", "bot", validatedAction.message, 1);
+                     VALUES (?, ?, ?, ?) RETURNING *`,
+                ).get("ai", "bot", validatedAction.response, 1);
 
                 cell.broadcast(JSON.stringify({
                   type: "message",
                   message: aiResult,
                 }));
-                break;
               }
+              break;
+            }
 
-              case "store_memory": {
-                // Store the memory
-                cell.db.prepare(
-                  `INSERT OR REPLACE INTO memories (key, value, updated_at)
-                   VALUES (?, ?, CURRENT_TIMESTAMP)`,
-                ).run(validatedAction.key, validatedAction.value);
-
-                // Send optional response
-                if (validatedAction.response) {
-                  const aiResult = cell.db.prepare(
-                    `INSERT INTO messages (github_id, username, content, is_llm_response)
-                     VALUES (?, ?, ?, ?) RETURNING *`,
-                  ).get("ai", "bot", validatedAction.response, 1);
-
-                  cell.broadcast(JSON.stringify({
-                    type: "message",
-                    message: aiResult,
-                  }));
-                }
-                break;
-              }
-
-              case "read_memories": {
-                // Read memories with optional filter
-                const memories = validatedAction.filter
-                  ? cell.db.prepare(
-                    `SELECT key, value FROM memories 
+            case "read_memories": {
+              // Read memories with optional filter
+              const memories = validatedAction.filter
+                ? cell.db.prepare(
+                  `SELECT key, value FROM memories 
                        WHERE key LIKE ? OR value LIKE ?
                        ORDER BY updated_at DESC`,
-                  ).all(
-                    `%${validatedAction.filter}%`,
-                    `%${validatedAction.filter}%`,
-                  )
-                  : cell.db.prepare(
-                    `SELECT key, value FROM memories 
+                ).all(
+                  `%${validatedAction.filter}%`,
+                  `%${validatedAction.filter}%`,
+                )
+                : cell.db.prepare(
+                  `SELECT key, value FROM memories 
                        ORDER BY updated_at DESC LIMIT 10`,
-                  ).all();
+                ).all();
 
-                // Format memories response
-                let memoryResponse = "📚 My memories:\n";
-                if (memories.length === 0) {
-                  memoryResponse = "I don't have any memories yet.";
-                } else {
-                  memories.forEach((mem: any) => {
-                    memoryResponse += `\n• ${mem.key}: ${mem.value}`;
-                  });
-                }
+              // Format memories response
+              let memoryResponse = "📚 My memories:\n";
+              if (memories.length === 0) {
+                memoryResponse = "I don't have any memories yet.";
+              } else {
+                memories.forEach((mem: any) => {
+                  memoryResponse += `\n• ${mem.key}: ${mem.value}`;
+                });
+              }
 
-                if (validatedAction.response) {
-                  memoryResponse = validatedAction.response + "\n\n" +
-                    memoryResponse;
-                }
+              if (validatedAction.response) {
+                memoryResponse = validatedAction.response + "\n\n" +
+                  memoryResponse;
+              }
 
-                const aiResult = cell.db.prepare(
-                  `INSERT INTO messages (github_id, username, content, is_llm_response)
+              const aiResult = cell.db.prepare(
+                `INSERT INTO messages (github_id, username, content, is_llm_response)
                    VALUES (?, ?, ?, ?) RETURNING *`,
-                ).get("ai", "bot", memoryResponse, 1);
+              ).get("ai", "bot", memoryResponse, 1);
 
-                cell.broadcast(JSON.stringify({
-                  type: "message",
-                  message: aiResult,
-                }));
-                break;
-              }
-
-              case "set_alarm": {
-                const scheduledTimeUnixMs = Date.now() +
-                  validatedAction.delaySeconds * 1000;
-
-                // Store the message in the database
-                cell.db.prepare(
-                  `INSERT INTO queued_messages (message, scheduled_time_unix_ms)
-                   VALUES (?, ?)`,
-                ).run(validatedAction.message, scheduledTimeUnixMs);
-
-                // Set an alarm
-                await cell.setAlarm(scheduledTimeUnixMs);
-
-                break;
-              }
+              cell.broadcast(JSON.stringify({
+                type: "message",
+                message: aiResult,
+              }));
+              break;
             }
-          } else {
-            console.error("OpenAI API error:", await response.text());
+
+            case "set_alarm": {
+              const scheduledTimeUnixMs = Date.now() +
+                validatedAction.delaySeconds * 1000;
+
+              // Store the message in the database
+              cell.db.prepare(
+                `INSERT INTO queued_messages (message, scheduled_time_unix_ms)
+                   VALUES (?, ?)`,
+              ).run(validatedAction.message, scheduledTimeUnixMs);
+
+              // Set an alarm
+              await cell.setAlarm(scheduledTimeUnixMs);
+
+              break;
+            }
           }
-        } catch (error) {
-          console.error("Error calling OpenAI:", error);
+        } else {
+          console.error("OpenAI API error:", await response.text());
         }
+      } catch (error) {
+        console.error("Error calling OpenAI:", error);
       }
     }
   });
