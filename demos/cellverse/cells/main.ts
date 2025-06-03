@@ -18,10 +18,6 @@ const BotActionSchema = z.discriminatedUnion("action", [
     filter: z.string().optional(),
     response: z.string().optional(),
   }),
-  z.object({
-    action: z.literal("no_response"),
-    reason: z.string().optional(),
-  }),
 ]);
 
 type BotAction = z.infer<typeof BotActionSchema>;
@@ -678,9 +674,6 @@ if (cell.id.startsWith("channel-")) {
 3. To read memories:
 {"action": "read_memories", "filter": "optional_search_term", "response": "optional message to user"}
 
-4. To not respond:
-{"action": "no_response", "reason": "optional reason"}
-
 You should store memories about users, topics, or anything worth remembering.
 Respond naturally while occasionally storing or retrieving memories.`;
 
@@ -795,15 +788,6 @@ Respond naturally while occasionally storing or retrieving memories.`;
                   type: "message",
                   message: aiResult,
                 }));
-                break;
-              }
-
-              case "no_response": {
-                // Bot chose not to respond - do nothing
-                console.log(
-                  "Bot chose not to respond:",
-                  validatedAction.reason,
-                );
                 break;
               }
             }
