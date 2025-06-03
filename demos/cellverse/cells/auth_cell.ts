@@ -9,7 +9,6 @@ if (!FRONTEND_URL || FRONTEND_URL.at(-1) === "/") {
   throw new Error(`bad FRONTEND_URL env var: '${FRONTEND_URL}'`);
 }
 
-// Initialize DB schema for auth cell
 if (cell.id === "auth") {
   cell.db.exec(`
     CREATE TABLE IF NOT EXISTS users (

@@ -8,7 +8,6 @@ if (!FRONTEND_URL || FRONTEND_URL.at(-1) === "/") {
   throw new Error(`bad FRONTEND_URL env var: '${FRONTEND_URL}'`);
 }
 
-// Initialize DB schema for channel registry
 if (cell.id === "channel-registry") {
   cell.db.exec(`
     CREATE TABLE IF NOT EXISTS channels (

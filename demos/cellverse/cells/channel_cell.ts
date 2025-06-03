@@ -31,7 +31,6 @@ const BotActionSchema = z.discriminatedUnion("action", [
 
 type BotAction = z.infer<typeof BotActionSchema>;
 
-// Only initialize if this is a channel cell
 if (cell.id.startsWith("channel-")) {
   // Initialize DB schema for channels
   cell.db.exec(`
