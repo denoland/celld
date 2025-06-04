@@ -14,15 +14,15 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::time::Duration;
 use tempfile::TempDir;
 use test_utils::MinioTestServer;
 use uuid::Uuid;
 
-lazy_static::lazy_static! {
-  static ref USED_PORTS: Mutex<HashSet<u16>> = Mutex::new(HashSet::new());
-}
+static USED_PORTS: LazyLock<Mutex<HashSet<u16>>> =
+  LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// Time to wait for servers to be ready after they are started.
 /// This is important to give time for S3 registration and peer discovery.
