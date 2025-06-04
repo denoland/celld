@@ -12,13 +12,13 @@ import { ulid } from "jsr:@std/ulid@^1.0.0/ulid";
 
 // Create a Cell class to track sockets and provide broadcast functionality
 export class Cell implements DbAccessor, TaskScheduler {
+  tenant: string;
+  id: string;
   ctlClient: Deno.HttpClient;
   sockets: Map<string, WebSocket>;
-  tenant: string = Deno.env.get("X-Tenant")!;
-  id: string = Deno.env.get("X-Cell-Id")!;
-  private dbPath = `./sqlite/${this.id}.db`;
-  private ctlSockPath = Deno.env.get("CELL_CONTROL_SOCKET")!;
+
   private server: Deno.HttpServer | null = null;
+  private dbPath: string;
   private dbInstance: DatabaseSync | null = null;
   private workflow: Workflow<Record<string, JSONValue>> | null = null;
   private onRequestCallback:
@@ -44,11 +44,31 @@ export class Cell implements DbAccessor, TaskScheduler {
     | (() => Promise<void> | void)
     | null = null;
 
-  constructor() {
+  static #defaultTenant: string;
+  static #defaultId: string;
+  static #defaultDbPath: string;
+  static #defaultCtlSockPath: string;
+  static {
+    this.#defaultTenant = Deno.env.get("X-Tenant")!;
+    this.#defaultId = Deno.env.get("X-Cell-Id")!;
+    this.#defaultDbPath = `./sqlite/${this.#defaultId}.db`;
+    this.#defaultCtlSockPath = Deno.env.get("CELL_CONTROL_SOCKET")!;
+  }
+
+  constructor(args?: {
+    tenant?: string;
+    id?: string;
+    dbPath?: string;
+    ctlSockPath?: string;
+  }) {
+    this.tenant = args?.tenant ?? Cell.#defaultTenant;
+    this.id = args?.id ?? Cell.#defaultId;
+    this.dbPath = args?.dbPath ?? Cell.#defaultDbPath;
+    const ctlSockPath = args?.ctlSockPath ?? Cell.#defaultCtlSockPath;
     this.ctlClient = Deno.createHttpClient({
       proxy: {
         transport: "unix",
-        path: this.ctlSockPath,
+        path: ctlSockPath,
       },
     });
     this.sockets = new Map<string, WebSocket>();
