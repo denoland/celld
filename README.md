@@ -4,137 +4,228 @@
 
 ## Simple, Stateful, Scalable Compute Units
 
-Deno Cells are self-hostable compute units for modern apps. They bundle:
+**Cells** is a self-hosted server for building stateful, distributed
+applications. It provides a model where each uniquely identified entity (a
+"cell") runs as a single JavaScript isolate with its own private, synchronous
+SQLite database. The system guarantees that for any given cell ID, there is at
+most one active instance running across the entire cluster and handles routing
+requests to it. S3 (or an S3-compatible service) is its sole external
+dependency, used for durable storage of these SQLite databases (via Litestream
+replication) and for cluster coordination.
 
-- **Deno** (isolated compute)
-- **SQLite** (private state)
-- **Litestream** to **S3** (persistence, replication)
-- **HTTP** and **WebSocket** (connectivity)
+This project is currently **experimental** and under active development.
+Breaking changes are expected.
 
-Build stateful services. Focus on logic. S3 is the main dependency.
+**Available at: `ghcr.io/denoland/cells`**
 
-## Why Deno Cells?
+## Key Highlights
 
-`celld` runs durable "cells" that manage state. It handles discovery,
-replication, and failover.
+- **Self-Hosted**: Run Cells on your own infrastructure using Docker. You own
+  your data and the operational environment.
+- **Scalable**: Multiple Cells server instances can be linked via S3 to form a
+  robust cluster. This allows you to scale your application capacity
+  horizontally as your needs grow, with new nodes automatically joining and
+  sharing the workload.
+- **Exactly One Instance**: Each "cell" (identified by a unique ID) has its own
+  isolate and a private SQLite database. The system ensures only one active
+  instance of a cell per ID across the entire cluster.
+- **SQLite and S3**: Uses S3 for durable storage of SQLite databases and for
+  essential cluster coordination tasks like service discovery and locking,
+  keeping external dependencies minimal and robust.
+- **Automatic Routing**: Intelligently routes incoming HTTP and WebSocket
+  requests to the correct cell instance, activating it if necessary.
+- **Deno**: Leverages the Deno runtime for secure and efficient
+  JavaScript/TypeScript execution.
+- **Durable Execution**: The `jsr:@ry/cells` SDK includes a workflow API,
+  enabling you to define long-running, fault-tolerant processes that can survive
+  restarts and continue execution, ideal for complex, multi-step operations.
+  (Learn more: [jsr.io/@ry/cells](https://jsr.io/@ry/cells))
 
-- Easy Persistence: SQLite per Cell, backed by S3.
-- Simple Code: JavaScript/TypeScript, implicit API (`cell.db`,
-  `cell.broadcast`).
-- Interactive: Built-in HTTP & WebSockets.
-- Scalable: Add `celld` nodes.
+## Getting Started
 
-## Ideal For
+The best way to understand how to operate Cells is to use its built-in help
+command.
 
-- Real-time collaboration
-- Game backends
-- IoT hubs
-- AI agent memory/compute
-
-## Quick Start (Single Node Docker)
-
-Get an overview of the CLI options:
+First, ensure you have Docker installed. Then, pull the latest image:
 
 ```bash
-docker run ghcr.io/denoland/cells:latest --help
+docker pull ghcr.io/denoland/cells:latest
 ```
+
+To see the available commands, configuration options, and a detailed operational
+overview:
 
 ```bash
-# Make a data directory
-mkdir ./cell-data
-docker run -p 8000:8000 -v "./cell-data:/data/default/src" \
-  ghcr.io/denoland/cells:latest
+docker run --rm ghcr.io/denoland/cells --help
 ```
 
-Create `./cell-data/<hostname>/src/main.ts` for your Cell logic.
+This command is your primary reference for running and managing Cells instances.
 
-For requests without a Host header or with unrecognized hostnames, the system
-falls back to a "default" tenant located at `./cell-data/default/src/main.ts`.
+## Cell API & Example
 
-## Accessing Cells
+Within your JavaScript/TypeScript code, you interact with the Cells system using
+the `@ry/cells` module (soon it will graduate to `@deno/cells`).
 
-- `http://<tenant-hostname>:<port>/cell/<cell-id>` (HTTP)
-- `ws://<tenant-hostname>:<port>/cell/<cell-id>` (WebSocket)
-- `http://localhost:8000/cell/<cell-id>` (no Host header - uses default tenant)
+**Example: Incrementing Counter**
 
-Routing is based on the request Host header and cell ID:
-
-```
-http://myapp.localhost:3000/cell/chat1
-       └─────┬───────┘           └─┬─┘
-       tenant domain           cell ID
-```
-
-Each cell runs in an isolated subprocess with its own state and lifecycle. Cells
-with active WebSocket connections or outbound TCP connections remain alive,
-automatically terminating when idle.
-
-## Data layout
-
-The data directory contains one folder per tenant domain:
-
-```
-<data-dir>/
-└── myapp.localhost/
-    ├── static/          # Served at /
-    │   └── index.html, client.js, etc.
-    ├── src/
-    │   └── main.ts      # logic for all cells
-    ├── sqlite/          # sqlite per room
-    │   └── A.db
-    │   └── B.db
-```
-
-## Writing Cell Code
-
-Example `main.ts`:
+This simple cell maintains a counter in its SQLite database and increments it on
+each HTTP request.
 
 ```typescript
 import { cell } from "jsr:@ry/cells";
 
-// Runs once per cell start. Init DB schema.
-cell.db.exec(`CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v ANY)`);
+// Initialize the database schema if it doesn't exist
+cell.db.exec(`CREATE TABLE IF NOT EXISTS c (id TEXT PRIMARY KEY, v INTEGER)`);
+// Insert the counter row if it doesn't exist
+cell.db.exec(`INSERT OR IGNORE INTO c (id, v) VALUES ('hits', 0)`);
 
-// Handle HTTP
-cell.request((req: Request): Response => {
-  // Use cell.db to read/write state
-  return new Response(`Cell ${cell.id} says hi\n`);
-});
-
-// Handle WebSockets
-cell.connect((socket: WebSocket, id: string) => {
-  socket.send(JSON.stringify({ message: `Welcome to Cell ${cell.id}` }));
-});
-
-cell.message((event: MessageEvent, socket: WebSocket, id: string) => {
-  // cell.broadcast(event.data);
+cell.request((req) => {
+  // Increment the counter
+  cell.db.prepare(`UPDATE c SET v = v + 1 WHERE id = 'hits'`).run();
+  // Read the new value
+  const result = cell.db.prepare(`SELECT v FROM c WHERE id = 'hits'`).get();
+  // Respond with the count and the cell's ID
+  return new Response(`${result.v} (cell ID: ${cell.id})\n`);
 });
 ```
 
-Key API: `cell.id`, `cell.db`, `cell.request`, `cell.connect`, `cell.message`,
-`cell.broadcast`.
-
-## Single-Tenant Mode
-
-For simplified deployments, you can run `celld` in single-tenant mode by
-specifying a source file:
+This `main.ts` would be the entry point for your cell's logic. You can then run
+this like so:
 
 ```bash
-celld src/main.ts                  # Single-tenant mode (default tenant only)
-celld src/main.ts static/          # Single-tenant with static files
-celld src/main.ts --env-file .env  # Single-tenant with environment file
+docker run -p 8000:8000 -v $PWD:/app ghcr.io/denoland/cells ./main.ts
 ```
 
-In single-tenant mode:
+## Core Concepts
 
-- All requests are handled by the default tenant
-- The `--env-file` flag loads environment variables from a file into the Deno
-  process
+### Cells (Actor-like Instances)
+
+A "cell" is an instance of your application logic associated with a unique ID
+(e.g., `chat1`, `user123`, `agent-xyz`). It consists of:
+
+- A Deno JavaScript/TypeScript isolate executing your code.
+- A private SQLite database, providing durable, synchronous storage for that
+  specific cell, with its state replicated to S3.
+- User-provided code (like the example above) that defines its behavior for
+  handling HTTP requests, WebSocket connections, messages, and workflows.
+
+Cells are addressable via their ID. The system ensures that only one instance of
+a cell for a particular ID is active at any given time across the entire
+cluster. If a cell is idle (no active WebSocket or outbound TCP connections, and
+no running workflows), it will automatically terminate to conserve resources.
+
+### Clustering and S3
+
+Cells achieves scalability and resilience using an S3 bucket (or S3-compatible
+service) as its sole external dependency. When you configure multiple Cells
+server nodes to point to the same S3 bucket and region:
+
+- They automatically discover each other and form a robust cluster using
+  consistent hashing to distribute cells.
+- Individual cells (the actor instances with their JS isolate and SQLite DB) are
+  distributed across these server nodes.
+- The SQLite database for each cell is durably persisted to and replicated from
+  S3 using Litestream.
+- The system handles routing requests to the server node currently hosting the
+  target cell, activating it if necessary.
+
+This architecture simplifies deployment and scaling, allowing you to focus on
+your applications.
+
+## Routing
+
+Cells routes requests based on the tenant host and cell ID:
+
+- `http://<tenant_host>/cell/<cell_id>` -> Activates the specified Cell and
+  routes the HTTP request to it.
+- `ws://<tenant_host>/cell/<cell_id>` -> Activates the specified Cell and
+  establishes a WebSocket connection.
+- `http://<tenant_host>/<path>` -> Serves static files from the tenant's
+  `static/` directory.
+
+**Example:** `http://myapp.localhost:3000/cell/chat1`. `myapp.localhost` is the
+tenant domain, while `chat1` is the Cell ID.
+
+## Data Layout
+
+Cells expects a specific directory structure for each tenant (typically derived
+from the hostname):
+
+```
+<data-dir>/
+└── myapp.localhost/       # Tenant directory (e.g., based on hostname)
+    ├── static/            # Static files served at the root of the tenant domain
+    │   └── index.html
+    │   └── client.js
+    │   └── ...
+    ├── src/
+    │   └── main.ts        # Entrypoint for the Cell's JavaScript/TypeScript logic
+    └── sqlite/            # SQLite databases, one per cell ID (managed by Cells, backed by S3)
+        └── <cell_id_A>.db
+        └── <cell_id_B>.db
+        └── ...
+```
+
+In single-tenant mode, `[SRC_FILE]` and `[STATIC_DIR]` arguments to the
+`ghcr.io/denoland/cells` Docker command define these for a default tenant.
+
+## How It Works
+
+1. **Request Arrival**: An HTTP or WebSocket request arrives at any server node
+   in the Cells cluster. The request typically includes information that
+   identifies a target tenant and cell (e.g., in the hostname and path).
+2. **Cell Activation & Routing**: The receiving node determines which node in
+   the cluster is (or should be) hosting the target cell using consistent
+   hashing.
+   - If the cell is already active on a node, the request is proxied to that
+     node.
+   - If the cell is not active, one node is elected to activate it. This
+     involves:
+     - Fetching the cell's code for the tenant (e.g., `src/main.ts`) if not
+       already cached.
+     - Restoring its SQLite database from S3 (via Litestream).
+     - Starting a new Deno isolate with the code and database.
+3. **Code Execution**: The Deno isolate for the cell processes the request using
+   the handlers defined in your code (e.g., `cell.request()`, `cell.connect()`,
+   or workflow steps). It can read from and write to its private SQLite database
+   synchronously.
+4. **Persistence**: Changes to the SQLite database are written locally and then
+   asynchronously replicated to S3 by Litestream, ensuring durability. Workflow
+   state is also persisted, allowing for durable execution.
+5. **Response**: The cell sends a response back to the client (for direct
+   requests) or continues its workflow.
+
+## Use Cases
+
+- **AI Agents:** Each AI agent can be modeled as a cell, maintaining its own
+  state (memory, conversation history, goals) in its private SQLite database and
+  executing its logic within its dedicated Deno isolate. The workflow API can
+  manage long-running agent tasks.
+- **Real-time Multiplayer Applications:** Leverage WebSockets for interactive
+  experiences like chat rooms, live dashboards, and multiplayer games.
+- **Durable Workflows & Long-Running Processes:** Implement complex, multi-step
+  business logic, background tasks, or sagas that need to run reliably over
+  extended periods, survive failures, and maintain state. The `jsr:@ry/cells`
+  workflow API is designed for this. (Learn more:
+  [jsr.io/@ry/cells](https://jsr.io/@ry/cells))
+- **Stateful Services:** Ideal for applications requiring durable storage per
+  entity (e.g., user accounts, game sessions, collaborative documents, shopping
+  carts). Each entity can be a cell.
 
 ## Configuration
 
-For Persistence & Discovery, setup S3:
+Cells is configured primarily through command-line arguments or environment
+variables. Key configuration options include:
 
+- `ADVERTISE_ADDR`
+- `INTERNAL_ADDR`
+- `CELL_LOCK_GUARD_TTL_SECS`
+- `CELL_ALARM_SCHEDULER_INTERVAL_SECS`
+- `CELL_STALENESS_THRESHOLD_SECS`
+- `CELL_GRACE_PERIOD_SECONDS`
+- `CELL_HEARTBEAT_INTERVAL_SECS`
+- `CELL_HASHRING_SEED`
+- `CELL_DENO_OUTPUT`
 - `CELL_S3_ENDPOINT`
 - `CELL_S3_BUCKET`
 - `CELL_S3_ACCESS_KEY_ID`
@@ -142,42 +233,23 @@ For Persistence & Discovery, setup S3:
 - `CELL_S3_REGION`
 - `CELL_S3_PREFIX`
 
-Also use
+Run `docker run --rm ghcr.io/denoland/cells --help` for a full list of options
+and detailed explanations.
 
-- `ADVERTISE_ADDR` to set the node's public address.
+## Limitations
 
-## Roadmap
+- **Durability:** SQLite writes are synchronous locally. S3 replication is
+  asynchronous; very recent writes (seconds) may be lost on catastrophic node
+  failure before replication completes. Workflow state is designed for higher
+  durability.
+- **Cell DB Size:** Best suited for small to medium-sized SQLite databases
+  (e.g., \<500MB) to ensure fast hydration times when a cell activates on a new
+  node.
+- **Scaling of Individual Cells:** An individual Cell (a Deno isolate) does not
+  automatically scale its own resources. The system scales by adding more cell
+  server nodes to the cluster, allowing more Cells to run concurrently.
 
-Done / Mostly Done:
+## Development Status
 
-- Core functionality (Compute, State, HTTP/WS)
-- Litestream/S3 Persistence
-- Dynamic Node Discovery (via S3)
-- Cell Resilience & Takeover
-- Internal Control Plane
-
-In-Progress / Next:
-
-- Alarms API (Scheduling)
-- Cron
-- Workflow API (Like inngest)
-- Developer Experience
-- Advanced Demos
-
-## Local Development
-
-### Prerequisites
-
-- Deno v2.3+ (to use `DENO_SERVE_ADDRESS` env var)
-- sqlite3: `brew install sqlite3`
-- [litestream](https://litestream.io/install/)
-- MinIO for testing: `brew install minio`
-- MinIO client for testing: `brew install minio/stable/mc`
-- Configure `*.localhost` to be resolved to the local loopback address (if not
-  configured by default)
-
-### Commands
-
-- Build: `cargo build`
-- Run: `cargo run`
-- Test All: `cargo test`
+Cells is currently **experimental**. While the core functionality is in place,
+expect APIs and internal mechanisms to change. We are actively seeking feedback.
