@@ -1,4 +1,4 @@
-import { cell } from "jsr:@ry/cells";
+import { cell } from "@ry/cells";
 import { z } from "npm:zod";
 
 // Define Zod schema for bot structured responses
