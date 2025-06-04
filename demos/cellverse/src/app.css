@@ -575,6 +575,15 @@
   border-color: rgba(168, 85, 247, 0.3);
 }
 
+.message.system-message {
+  align-self: center;
+  background: rgba(255, 193, 7, 0.1);
+  border-color: rgba(255, 193, 7, 0.3);
+  max-width: 80%;
+  text-align: center;
+  font-style: italic;
+}
+
 .message-header {
   display: flex;
   justify-content: space-between;

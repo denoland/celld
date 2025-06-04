@@ -74,7 +74,8 @@ if (cell.id.startsWith("channel-")) {
       username TEXT NOT NULL,
       timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       content TEXT NOT NULL,
-      is_llm_response INTEGER DEFAULT 0
+      is_llm_response INTEGER DEFAULT 0,
+      is_system_message INTEGER DEFAULT 0
     )
   `);
 
@@ -823,6 +824,19 @@ Respond naturally while occasionally storing or retrieving memories.`;
 
                 // Set an alarm
                 await cell.setAlarm(scheduledTimeUnixMs);
+
+                // Send system message about the scheduled message
+                const systemMessage =
+                  `📅 Message scheduled for delivery in ${validatedAction.delaySeconds} seconds`;
+                const systemResult = cell.db.prepare(
+                  `INSERT INTO messages (github_id, username, content, is_llm_response, is_system_message)
+                   VALUES (?, ?, ?, ?, ?) RETURNING *`,
+                ).get("system", "system", systemMessage, 0, 1);
+
+                cell.broadcast(JSON.stringify({
+                  type: "message",
+                  message: systemResult,
+                }));
 
                 break;
               }
