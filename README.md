@@ -22,8 +22,8 @@ Breaking changes are expected.
 
 - Self-Hosted: Run Cells on your own infrastructure using Docker. You own your
   data and the operational environment.
-- Scalable: Multiple Cells server instances can be linked via S3 to
-  form a robust cluster. This allows you to scale your application capacity
+- Scalable: Multiple Cells server instances can be linked via S3 to form a
+  robust cluster. This allows you to scale your application capacity
   horizontally as your needs grow, with new nodes automatically joining and
   sharing the workload.
 - Simple: Each "cell" (identified by a unique ID) has its own isolate and a
@@ -93,6 +93,13 @@ cell.request((req) => {
 });
 ```
 
+This `main.ts` would be the entry point for your cell's logic. You can then run
+this like so:
+
+```bash
+docker run -p 8000:8000 -v $PWD:/app ghcr.io/denoland/cells ./main.ts
+```
+
 ## Core Concepts
 
 ### Cells (Actor-like Instances)
@@ -140,7 +147,7 @@ Cells routes requests based on the tenant host and cell ID:
 - `http://<tenant_host>/<path>` -> Serves static files from the tenant's
   `static/` directory.
 
-**Example:** `http://myapp.localhost:3000/cell/chat1`.  `myapp.localhost` is the
+**Example:** `http://myapp.localhost:3000/cell/chat1`. `myapp.localhost` is the
 tenant domain, while `chat1` is the Cell ID.
 
 ## Data Layout
