@@ -10,15 +10,8 @@ on:
 
 jobs:
   build_and_push_main_celld:
-    name: Build and Push
-    strategy:
-      matrix:
-        include:
-          - runner: ubicloud-standard-16-arm
-            platform: linux/arm64
-          - runner: ubuntu-latest
-            platform: linux/amd64
-    runs-on: ${{ matrix.runner }}
+    name: Build Main
+    runs-on: ubicloud-standard-16
     permissions:
       contents: read
       packages: write
@@ -28,6 +21,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -45,7 +41,7 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          platforms: ${{ matrix.platform }}
+          platforms: linux/arm64,linux/amd64
           tags: |
             ghcr.io/denoland/cells:latest
             ghcr.io/denoland/cells:${{ github.sha }}
