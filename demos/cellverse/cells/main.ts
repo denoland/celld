@@ -23,6 +23,9 @@ const BotActionSchema = z.discriminatedUnion("action", [
     message: z.string(),
     delaySeconds: z.number(),
   }),
+  z.object({
+    action: z.literal("start_reasoning"),
+  }),
 ]);
 
 type BotAction = z.infer<typeof BotActionSchema>;
@@ -695,6 +698,9 @@ if (cell.id.startsWith("channel-")) {
 4. To set an alarm (when a user asks for a delayed response):
 {"action": "set_alarm", "message": "your response here", "delaySeconds": <the number of seconds to delay the response>}
 
+5. To start reasoning (when a user asks you to think deeply about something, or you think you need to think deeply to give a good response):
+{"action": "start_reasoning"}
+
 You should store memories about users, topics, or anything worth remembering.
 Respond naturally while occasionally storing or retrieving memories.`;
 
@@ -839,6 +845,18 @@ Respond naturally while occasionally storing or retrieving memories.`;
                 }));
 
                 break;
+              }
+
+              case "start_reasoning": {
+                // Start reasoning
+                // TODO: Implement reasoning
+                break;
+              }
+
+              default: {
+                throw new Error(
+                  `Unknown action: ${validatedAction satisfies never}`,
+                );
               }
             }
           } else {
