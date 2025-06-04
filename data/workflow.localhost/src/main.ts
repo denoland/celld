@@ -1,4 +1,4 @@
-import { cell, types } from "../../../jsr-cells/mod.ts";
+import { cell, types } from "../../../sdk/mod.ts";
 import { delay } from "jsr:@std/async@1.0.13/delay";
 import { randomIntegerBetween } from "jsr:@std/random@0.1.1";
 
