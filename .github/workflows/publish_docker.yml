@@ -8,7 +8,14 @@ on:
 jobs:
   build_and_push_main_celld:
     name: Build and Push Main Celld Image
-    runs-on: ubicloud-standard-16-arm
+    strategy:
+      matrix:
+        include:
+          - runner: ubicloud-standard-16-arm
+            platform: linux/arm64
+          - runner: ubuntu-latest
+            platform: linux/amd64
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
@@ -35,7 +42,7 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          platforms: linux/arm64
+          platforms: ${{ matrix.platform }}
           tags: |
             ghcr.io/denoland/cells:latest
             ghcr.io/denoland/cells:${{ github.sha }}
@@ -44,7 +51,14 @@ jobs:
 
   build_and_push_ecs_celld:
     name: Build and Push ECS Celld Image
-    runs-on: ubicloud-standard-16-arm
+    strategy:
+      matrix:
+        include:
+          - runner: ubicloud-standard-16-arm
+            platform: linux/arm64
+          - runner: ubuntu-latest
+            platform: linux/amd64
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
@@ -69,7 +83,7 @@ jobs:
           context: .
           file: ./Dockerfile.ecs
           push: true
-          platforms: linux/arm64
+          platforms: ${{ matrix.platform }}
           tags: |
             ghcr.io/denoland/cells:ecs-latest
             ghcr.io/denoland/cells:ecs-${{ needs.build_and_push_main_celld.outputs.commit_sha }}
