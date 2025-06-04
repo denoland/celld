@@ -95,28 +95,20 @@ impl TestEnv {
     // Search for available port pairs and test them with the hash ring
     // Use mid-range port numbers to avoid common dev ports (8000, 3000, etc.)
     // and ephemeral port range (32768-65535)
-    let mut base_port = 20000;
+    let base_port_range = 20000..30000;
 
-    while base_port < 30000 {
-      for spacing in [200, 300, 400, 500, 1000] {
-        let port1 = base_port;
-        let port2 = base_port + spacing;
+    for base_port in base_port_range.step_by(50) {
+      let ports = Self::allocate_ports(base_port, 2, 2);
+      assert_eq!(ports.len(), 2);
+      let port1 = ports[0];
+      let port2 = ports[1];
 
-        // Check if all 4 ports are available (port1, port1+1, port2, port2+1)
-        if Self::is_port_available(port1)
-          && Self::is_port_available(port1 + 1)
-          && Self::is_port_available(port2)
-          && Self::is_port_available(port2 + 1)
-        {
-          // Test if this port combination causes relocation using actual hash ring
-          if Self::test_relocation_with_hash_ring(
-            port1, port2, seed, tenant, cell_id,
-          ) {
-            return Some((port1, port2));
-          }
-        }
+      // Test if this port combination causes relocation using actual hash ring
+      if Self::test_relocation_with_hash_ring(
+        port1, port2, seed, tenant, cell_id,
+      ) {
+        return Some((port1, port2));
       }
-      base_port += 100;
     }
 
     None
