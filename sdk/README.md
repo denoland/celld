@@ -1,8 +1,8 @@
 # Deno Cells SDK
 
-This directory contains the TypeScript SDK for developing applications that run
-on [Deno Cells](https://ghcr.io/denoland/cells). Deno Cells provides a model
-where each uniquely identified entity (a "cell") runs as a single
+This module contains the TypeScript SDK for developing applications that run on
+[Deno Cells](https://ghcr.io/denoland/cells). Deno Cells provides a model where
+each uniquely identified entity (a "cell") runs as a single
 JavaScript/TypeScript isolate with its own private, synchronous SQLite database,
 durably persisted to S3.
 

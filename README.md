@@ -7,9 +7,9 @@
 **Cells** is a self-hosted server for building stateful, distributed
 applications. It provides a model where each uniquely identified entity (a
 "cell") runs as a single JavaScript isolate with its own private, synchronous
-SQLite database. The system guarantees that for any given cell ID, there is
-exactly one active instance running across the entire cluster and handles
-routing requests to it. S3 (or an S3-compatible service) is its sole external
+SQLite database. The system guarantees that for any given cell ID, there is at
+most one active instance running across the entire cluster and handles routing
+requests to it. S3 (or an S3-compatible service) is its sole external
 dependency, used for durable storage of these SQLite databases (via Litestream
 replication) and for cluster coordination.
 
@@ -20,30 +20,26 @@ Breaking changes are expected.
 
 ## Key Highlights
 
-- Self-Hosted: Run Cells on your own infrastructure using Docker. You own your
-  data and the operational environment.
-- Scalable: Multiple Cells server instances can be linked via S3 to form a
+- **Self-Hosted**: Run Cells on your own infrastructure using Docker. You own
+  your data and the operational environment.
+- **Scalable**: Multiple Cells server instances can be linked via S3 to form a
   robust cluster. This allows you to scale your application capacity
   horizontally as your needs grow, with new nodes automatically joining and
   sharing the workload.
-- Simple: Each "cell" (identified by a unique ID) has its own isolate and a
-  private SQLite database. The system ensures only one active instance of a cell
-  per ID across the entire cluster.
-- Uses S3 for durable storage of SQLite databases and for essential cluster
-  coordination tasks like service discovery and locking, keeping external
-  dependencies minimal and robust.
-- Automatic HTTP/WebSocket Routing: Intelligently routes incoming HTTP and
-  WebSocket requests to the correct cell instance, activating it if necessary.
-- Built-in SQLite per Cell: Each cell comes with its own private SQLite
-  database, offering fast, synchronous, and convenient persistence for its
-  application state, durably backed up to S3.
-- Modern JavaScript Runtime: Leverages the Deno runtime for secure and efficient
+- **Exactly One Instance**: Each "cell" (identified by a unique ID) has its own
+  isolate and a private SQLite database. The system ensures only one active
+  instance of a cell per ID across the entire cluster.
+- **SQLite and S3**: Uses S3 for durable storage of SQLite databases and for
+  essential cluster coordination tasks like service discovery and locking,
+  keeping external dependencies minimal and robust.
+- **Automatic Routing**: Intelligently routes incoming HTTP and WebSocket
+  requests to the correct cell instance, activating it if necessary.
+- **Deno**: Leverages the Deno runtime for secure and efficient
   JavaScript/TypeScript execution.
-- Durable Execution with Workflows: The `jsr:@ry/cells` SDK includes a powerful
-  workflow API, enabling you to define long-running, fault-tolerant processes
-  that can survive restarts and continue execution, ideal for complex,
-  multi-step operations. (Learn more:
-  [jsr.io/@ry/cells](https://jsr.io/@ry/cells))
+- **Durable Execution**: The `jsr:@ry/cells` SDK includes a workflow API,
+  enabling you to define long-running, fault-tolerant processes that can survive
+  restarts and continue execution, ideal for complex, multi-step operations.
+  (Learn more: [jsr.io/@ry/cells](https://jsr.io/@ry/cells))
 
 ## Getting Started
 
@@ -170,8 +166,8 @@ from the hostname):
         └── ...
 ```
 
-In single-tenant mode, `[SRC_FILE]` and `[STATIC_DIR]` arguments to the `celld`
-command define these for a default tenant.
+In single-tenant mode, `[SRC_FILE]` and `[STATIC_DIR]` arguments to the
+`ghcr.io/denoland/cells` Docker command define these for a default tenant.
 
 ## How It Works
 
@@ -201,43 +197,41 @@ command define these for a default tenant.
 
 ## Use Cases
 
-- **Stateful Services:** Ideal for applications requiring durable storage per
-  entity (e.g., user accounts, game sessions, collaborative documents, shopping
-  carts). Each entity can be a cell.
-- **Real-time Applications:** Leverage WebSockets for interactive experiences
-  like chat rooms, live dashboards, and multiplayer games.
 - **AI Agents:** Each AI agent can be modeled as a cell, maintaining its own
   state (memory, conversation history, goals) in its private SQLite database and
   executing its logic within its dedicated Deno isolate. The workflow API can
   manage long-running agent tasks.
+- **Real-time Multiplayer Applications:** Leverage WebSockets for interactive
+  experiences like chat rooms, live dashboards, and multiplayer games.
 - **Durable Workflows & Long-Running Processes:** Implement complex, multi-step
   business logic, background tasks, or sagas that need to run reliably over
   extended periods, survive failures, and maintain state. The `jsr:@ry/cells`
   workflow API is designed for this. (Learn more:
   [jsr.io/@ry/cells](https://jsr.io/@ry/cells))
-- **Actor-like Systems:** Provides a programming model with single-threaded
-  execution per entity, simplifying state management and concurrency concerns.
-- **Scalable Microservices:** Build individual stateful components (cells) that
-  can be scaled independently by distributing them across a growing cluster of
-  `celld` nodes.
+- **Stateful Services:** Ideal for applications requiring durable storage per
+  entity (e.g., user accounts, game sessions, collaborative documents, shopping
+  carts). Each entity can be a cell.
 
 ## Configuration
 
 Cells is configured primarily through command-line arguments or environment
-variables. Key configuration options typically include:
+variables. Key configuration options include:
 
-- **S3 Details (Environment Variables):**
-  - `CELL_S3_ENDPOINT`
-  - `CELL_S3_BUCKET`
-  - `CELL_S3_ACCESS_KEY_ID`
-  - `CELL_S3_SECRET_ACCESS_KEY`
-  - `CELL_S3_REGION`
-  - `CELL_S3_PREFIX` (optional prefix within the bucket)
-- `ADVERTISE_ADDR`: The address this node should advertise to other nodes in the
-  cluster.
-- Network ports for HTTP and internal cluster communication.
-- Paths to your Deno application code (e.g., `src/main.ts`) and static files
-  when running in single-tenant mode.
+- `ADVERTISE_ADDR`
+- `INTERNAL_ADDR`
+- `CELL_LOCK_GUARD_TTL_SECS`
+- `CELL_ALARM_SCHEDULER_INTERVAL_SECS`
+- `CELL_STALENESS_THRESHOLD_SECS`
+- `CELL_GRACE_PERIOD_SECONDS`
+- `CELL_HEARTBEAT_INTERVAL_SECS`
+- `CELL_HASHRING_SEED`
+- `CELL_DENO_OUTPUT`
+- `CELL_S3_ENDPOINT`
+- `CELL_S3_BUCKET`
+- `CELL_S3_ACCESS_KEY_ID`
+- `CELL_S3_SECRET_ACCESS_KEY`
+- `CELL_S3_REGION`
+- `CELL_S3_PREFIX`
 
 Run `docker run --rm ghcr.io/denoland/cells --help` for a full list of options
 and detailed explanations.
@@ -248,15 +242,12 @@ and detailed explanations.
   asynchronous; very recent writes (seconds) may be lost on catastrophic node
   failure before replication completes. Workflow state is designed for higher
   durability.
-- **Consistency:** Strong consistency for operations within an active Cell (due
-  to single ownership). The state in S3 is eventually consistent with the last
-  successful replication.
 - **Cell DB Size:** Best suited for small to medium-sized SQLite databases
   (e.g., \<500MB) to ensure fast hydration times when a cell activates on a new
   node.
 - **Scaling of Individual Cells:** An individual Cell (a Deno isolate) does not
-  automatically scale its own resources. The system scales by adding more
-  `celld` server nodes to the cluster, allowing more Cells to run concurrently.
+  automatically scale its own resources. The system scales by adding more cell
+  server nodes to the cluster, allowing more Cells to run concurrently.
 
 ## Development Status
 
