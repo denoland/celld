@@ -604,7 +604,7 @@ if (cell.id.startsWith("channel-")) {
   workflow.define({
     name: "reasoning",
     handler: async ({ event, step }) => {
-      const systemPrompt = step.run("construct-system-prompt", () => {
+      const systemPrompt = await step.run("construct-system-prompt", () => {
         let p = `You are a bot in the "${
           cell.id.replace("channel-", "")
         }" channel.`;
@@ -638,81 +638,97 @@ You must respond with a JSON object matching one of these schemas:
       }[] = [];
 
       for (let i = 0; i < event.data.allowedSteps; i++) {
-        const isConcluded = await step.run(`reasoning-step-${i}`, async () => {
-          const isLastStep = i === event.data.allowedSteps - 1;
-          const userMessage = isLastStep
-            ? "What is the final answer?"
-            : `What is the next step? You have ${
-              event.data.allowedSteps - i
-            } steps left.`;
+        const result = await step.run(
+          `reasoning-step-${i}`,
+          async () => {
+            const isLastStep = i === event.data.allowedSteps - 1;
+            const userMessage = isLastStep
+              ? `What is the final answer? Make sure to respond with a JSON object matching: {"action": "conclusion", "message": "your conclusion here"}`
+              : `What is the next step? You have ${
+                event.data.allowedSteps - i
+              } steps left. Make sure to respond with a JSON object matching: {"action": "step", "message": "your thinking here"}`;
 
-          const response = await fetch(
-            "https://api.openai.com/v1/chat/completions",
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${OPENAI_API_KEY}`,
+            const response = await fetch(
+              "https://api.openai.com/v1/chat/completions",
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "Authorization": `Bearer ${OPENAI_API_KEY}`,
+                },
+                body: JSON.stringify({
+                  model: "gpt-4o-mini",
+                  messages: [
+                    { role: "system", content: systemPrompt },
+                    ...event.data.messages,
+                    ...reasoningMessages,
+                    {
+                      role: "user",
+                      content: userMessage,
+                    },
+                  ],
+                }),
               },
-              body: JSON.stringify({
-                model: "gpt-4o-mini",
-                messages: [
-                  { role: "system", content: systemPrompt },
-                  ...event.data.messages,
-                  ...reasoningMessages,
-                  {
-                    role: "user",
-                    content: userMessage,
-                  },
-                ],
-              }),
-            },
-          );
+            );
 
-          if (!response.ok) {
-            throw new Error(`OpenAI API error: ${await response.text()}`);
-          }
+            if (!response.ok) {
+              throw new Error(`OpenAI API error: ${await response.text()}`);
+            }
 
-          const aiData = await response.json();
-          const aiResponse = aiData.choices[0].message.content;
+            const aiData = await response.json();
+            const aiResponse = aiData.choices[0].message.content;
 
-          const parsedResponse = JSON.parse(aiResponse);
-          const validatedAction = ReasoningActionSchema.parse(parsedResponse);
+            const parsedResponse = JSON.parse(aiResponse);
+            const validatedAction = ReasoningActionSchema.parse(parsedResponse);
 
-          // Store and broadcast the response
-          const aiResult = cell.db.prepare(
-            `INSERT INTO messages (github_id, username, content, is_llm_response)
+            // Store and broadcast the response
+            const aiResult = cell.db.prepare(
+              `INSERT INTO messages (github_id, username, content, is_llm_response)
                    VALUES (?, ?, ?, ?) RETURNING *`,
-          ).get("ai", "bot", validatedAction.message, 1);
+            ).get("ai", "bot", validatedAction.message, 1);
 
-          cell.broadcast(JSON.stringify({
-            type: "message",
-            message: aiResult,
-          }));
+            cell.broadcast(JSON.stringify({
+              type: "message",
+              message: aiResult,
+            }));
 
-          switch (validatedAction.action) {
-            case "conclusion": {
-              return true;
+            switch (validatedAction.action) {
+              case "conclusion": {
+                return {
+                  isConcluded: true,
+                  messageToAdd: null,
+                };
+              }
+              case "step": {
+                reasoningMessages.push({
+                  role: "assistant",
+                  content: validatedAction.message,
+                });
+
+                return {
+                  isConcluded: false,
+                  messageToAdd: validatedAction.message,
+                };
+              }
+              default: {
+                // TODO: This should be unretriable error, because it's just an implementation error
+                throw new Error(
+                  `Unknown action: ${validatedAction satisfies never}`,
+                );
+              }
             }
-            case "step": {
-              reasoningMessages.push({
-                role: "assistant",
-                content: validatedAction.message,
-              });
+          },
+        );
 
-              return false;
-            }
-            default: {
-              // TODO: This should be unretriable error, because it's just an implementation error
-              throw new Error(
-                `Unknown action: ${validatedAction satisfies never}`,
-              );
-            }
-          }
-        });
-
-        if (isConcluded) {
+        if (result.isConcluded) {
           break;
+        }
+
+        if (result.messageToAdd) {
+          reasoningMessages.push({
+            role: "assistant",
+            content: result.messageToAdd,
+          });
         }
       }
     },
@@ -788,22 +804,28 @@ You must respond with a JSON object matching one of these schemas:
             Date.now() - 60 * 60 * 1000,
           ).toISOString();
           const recentMessages = cell.db.prepare(
-            `SELECT username, content, is_llm_response, timestamp
+            `SELECT username, content, is_llm_response, is_system_message, timestamp
              FROM messages 
              WHERE timestamp >= ?
              ORDER BY timestamp DESC 
              LIMIT 100`,
-          ).all(oneHourAgo).reverse();
+          ).all(oneHourAgo).reverse() as {
+            username: string;
+            content: string;
+            is_llm_response: boolean;
+            is_system_message: boolean;
+            timestamp: string;
+          }[];
 
           // Build conversation history
-          const messages = recentMessages.filter((msg: any) =>
+          const messages = recentMessages.filter((msg) =>
             !msg.is_system_message
-          ).map((msg: any) => ({
+          ).map((msg) => ({
             role: msg.is_llm_response ? "assistant" : "user",
             content: msg.is_llm_response
               ? msg.content
               : `${msg.username}: ${msg.content}`,
-          }));
+          } as const));
 
           // Add the current message
           messages.push({
@@ -990,8 +1012,23 @@ Respond naturally while occasionally storing or retrieving memories.`;
               }
 
               case "start_reasoning": {
+                // Send system message to let the user know we're thinking
+                const systemMessage = `🤔 Bot is thinking...`;
+                const systemResult = cell.db.prepare(
+                  `INSERT INTO messages (github_id, username, content, is_llm_response, is_system_message)
+                   VALUES (?, ?, ?, ?, ?) RETURNING *`,
+                ).get("system", "system", systemMessage, 0, 1);
+
+                cell.broadcast(JSON.stringify({
+                  type: "message",
+                  message: systemResult,
+                }));
+
                 // Start reasoning
-                // TODO: Implement reasoning
+                workflow.dispatch("reasoning", {
+                  messages,
+                  allowedSteps: 5,
+                });
                 break;
               }
 
