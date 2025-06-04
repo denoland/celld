@@ -76,9 +76,6 @@ if (cell.id.startsWith("channel-")) {
 
   // Request handlers
   cell.request(async (req: Request): Promise<Response> => {
-    console.log(
-      `Generic channel cell. Received request for channel ${cell.id}: ${req.method} ${req.url}`,
-    );
     const url = new URL(req.url);
     const path = url.pathname.replace(`/cell/${cell.id}`, "");
 
