@@ -109,7 +109,7 @@ jobs:
         # For proper typing of node:sqlite
         deno cache npm:@types/node
         deno test
-      working-directory: ./jsr-cells
+      working-directory: ./sdk
 
   lint:
     name: Linting and Formatting
@@ -144,17 +144,17 @@ jobs:
     - name: Run clippy
       run: cargo clippy --all-targets --all-features -- -D warnings
 
-    - name: Check jsr-cells formatting
+    - name: Check sdk formatting
       run: deno fmt --check
-      working-directory: ./jsr-cells
+      working-directory: ./sdk
 
-    - name: Typecheck jsr-cells
+    - name: Typecheck sdk
       run: |
         # For proper typing of node:sqlite
         deno cache npm:@types/node
         deno check
-      working-directory: ./jsr-cells
+      working-directory: ./sdk
 
-    - name: Run deno lint for jsr-cells
+    - name: Run deno lint for sdk
       run: deno lint
-      working-directory: ./jsr-cells
+      working-directory: ./sdk

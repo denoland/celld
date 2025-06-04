@@ -254,7 +254,7 @@ impl TestEnv {
     let internal_addr = format!("127.0.0.1:{}", port + 1);
 
     // Prepare a properly structured temporary directory
-    // This creates a temp dir with both jsr-cells/ and data/ to maintain relative imports
+    // This creates a temp dir with both sdk/ and data/ to maintain relative imports
     let (temp_dir, data_dir_path) = prepare_test_directory()
       .expect("Failed to prepare temp directory with proper structure");
 
@@ -354,11 +354,11 @@ impl Drop for TestEnv {
 }
 
 /// Prepares a temporary directory with the correct project structure
-/// to ensure relative imports like "../../../jsr-cells/mod.ts" work correctly
+/// to ensure relative imports like "../../../sdk/mod.ts" work correctly
 ///
 /// The structure created is:
 /// temp_dir/
-/// ├── jsr-cells/  (copied from CARGO_MANIFEST_DIR/jsr-cells)
+/// ├── sdk/  (copied from CARGO_MANIFEST_DIR/sdk)
 /// └── data/       (copied from CARGO_MANIFEST_DIR/data, skipping sqlite directories)
 ///
 /// Returns the temp directory and the path to the data directory within it
@@ -373,30 +373,27 @@ fn prepare_test_directory() -> io::Result<(TempDir, PathBuf)> {
 
   // Create paths for source and destination directories
   let src_data_path = project_root.join("data");
-  let src_jsr_cells_path = project_root.join("jsr-cells");
+  let src_sdk_path = project_root.join("sdk");
 
   let dst_data_path = temp_dir.path().join("data");
-  let dst_jsr_cells_path = temp_dir.path().join("jsr-cells");
+  let dst_jsr_cells_path = temp_dir.path().join("sdk");
 
   // Verify source directories exist
   if !src_data_path.exists() {
     panic!("Source data directory not found at {:?}", src_data_path);
   }
 
-  if !src_jsr_cells_path.exists() {
-    panic!(
-      "Source jsr-cells directory not found at {:?}",
-      src_jsr_cells_path
-    );
+  if !src_sdk_path.exists() {
+    panic!("Source sdk directory not found at {:?}", src_sdk_path);
   }
 
   // Create data directory in temp dir
   fs::create_dir_all(&dst_data_path)?;
 
-  // Copy jsr-cells directory (needed for relative imports)
-  // Note jsr-cells does not contain sqlite directories, but we can reuse the
+  // Copy sdk directory (needed for relative imports)
+  // Note sdk does not contain sqlite directories, but we can reuse the
   // same function.
-  copy_directory_without_sqlite(&src_jsr_cells_path, &dst_jsr_cells_path)?;
+  copy_directory_without_sqlite(&src_sdk_path, &dst_jsr_cells_path)?;
 
   // Copy data directory, skipping sqlite directories
   copy_directory_without_sqlite(&src_data_path, &dst_data_path)?;

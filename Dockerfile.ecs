@@ -19,9 +19,9 @@ RUN apt-get update && \
 
 
 COPY ./data /data
-COPY ./jsr-cells /jsr-cells
+COPY ./sdk /sdk
 # Remove any sqlite directories inside the copied data directory.
-RUN rm -rf /data/*/sqlite/ && chown -R celld:celld /data /jsr-cells
+RUN rm -rf /data/*/sqlite/ && chown -R celld:celld /data /sdk
 
 COPY entrypoint-ecs.sh /usr/local/bin/entrypoint.sh
 
