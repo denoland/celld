@@ -17,17 +17,17 @@ async fn test_system_main_cell_relocation() {
       .expect("Could not find available ports that trigger relocation");
 
   let initial_ports = vec![initial_port];
-  let second_ports = [second_port];
+  let second_ports = vec![second_port];
 
   // Start with a single node cluster using a seeded hasher
   let mut test_env = TestEnv::new_with_ports_and_envs(
-    &initial_ports,
+    initial_ports,
     // Set the environment variable for deterministic hashing
     &[("CELL_HASHRING_SEED", CELL_HASHRING_SEED)],
   );
 
-  let initial_port = test_env.public_ports[0];
-  let initial_internal_port = test_env.internal_ports[0];
+  let initial_port = test_env.ports[0].public();
+  let initial_internal_port = test_env.ports[0].internal();
 
   // Wait for initial setup to complete
   tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
@@ -74,10 +74,8 @@ async fn test_system_main_cell_relocation() {
   tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
   // Add a second node that should trigger relocation due to deterministic hashing
-  let second_port = second_ports[0];
-  let second_internal_port = second_port + 1;
-  test_env.spawn_cell_instance(second_port);
-  TestEnv::wait_for_server_ready(second_port);
+  let second_internal_port = second_ports[0].internal();
+  test_env.spawn_cell_instance(second_ports);
 
   // Wait for cluster membership to stabilize
   tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;

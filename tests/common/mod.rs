@@ -24,6 +24,30 @@ use uuid::Uuid;
 static USED_PORTS: LazyLock<Mutex<HashSet<u16>>> =
   LazyLock::new(|| Mutex::new(HashSet::new()));
 
+#[derive(Debug)]
+pub struct PortLease {
+  public: u16,
+  internal: u16,
+}
+
+impl PortLease {
+  pub fn public(&self) -> u16 {
+    self.public
+  }
+
+  pub fn internal(&self) -> u16 {
+    self.internal
+  }
+}
+
+impl Drop for PortLease {
+  fn drop(&mut self) {
+    let mut lock = USED_PORTS.lock().unwrap();
+    lock.remove(&self.public);
+    lock.remove(&self.internal);
+  }
+}
+
 /// Time to wait for servers to be ready after they are started.
 /// This is important to give time for S3 registration and peer discovery.
 const SERVER_STARTUP_WAIT_SECS: u64 = 2;
@@ -36,16 +60,11 @@ const CELL_HEARTBEAT_INTERVAL_SECS: u64 = 1;
 pub struct TestEnv {
   /// Celld servers
   servers: Vec<CapturedSubprocess>,
-  /// Celld server ports (external ports)
-  ports: Vec<u16>,
+  /// Celld server ports (public and internal)
+  pub ports: Vec<PortLease>,
   pub minio_server: MinioTestServer,
   pub test_id: String,
   pub bucket_name: String,
-  /// Make public_ports public for tests that need to access them
-  /// TODO(magurotuna): this is identical to `ports` . Maybe remove one of them?
-  pub public_ports: Vec<u16>,
-  /// Celld server ports (internal ports)
-  pub internal_ports: Vec<u16>,
   /// Temporary directories for each server instance's data
   pub server_dirs: Vec<TempDir>,
   /// Environment variables to set for each server instance. Overrides the
@@ -55,7 +74,11 @@ pub struct TestEnv {
 
 impl TestEnv {
   // Reserve a block of consecutive free ports
-  pub fn allocate_ports(base: u16, count: usize, spacing: u16) -> Vec<u16> {
+  pub fn allocate_ports(
+    base: u16,
+    count: usize,
+    spacing: u16,
+  ) -> Vec<PortLease> {
     let mut lock = USED_PORTS.lock().unwrap();
     let mut allocated = Vec::with_capacity(count);
     let mut next_port = base;
@@ -66,19 +89,16 @@ impl TestEnv {
         // Reserve both the public port and its internal port
         lock.insert(next_port);
         lock.insert(next_port + 1);
-        allocated.push(next_port);
+        allocated.push(PortLease {
+          public: next_port,
+          internal: next_port + 1,
+        });
       }
       // Move to next port candidate with spacing to avoid conflicts
       next_port += spacing;
     }
 
     allocated
-  }
-
-  // Check if a port is actually available by attempting to bind to it
-  #[allow(dead_code)]
-  fn is_port_available(port: u16) -> bool {
-    std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok()
   }
 
   /// Find two available ports that will trigger cell relocation for any tenant/cell
@@ -91,21 +111,24 @@ impl TestEnv {
     seed: u64,
     tenant: &str,
     cell_id: &str,
-  ) -> Option<(u16, u16)> {
+  ) -> Option<(PortLease, PortLease)> {
     // Search for available port pairs and test them with the hash ring
     // Use mid-range port numbers to avoid common dev ports (8000, 3000, etc.)
     // and ephemeral port range (32768-65535)
     let base_port_range = 20000..30000;
 
     for base_port in base_port_range.step_by(50) {
-      let ports = Self::allocate_ports(base_port, 2, 2);
-      assert_eq!(ports.len(), 2);
-      let port1 = ports[0];
-      let port2 = ports[1];
+      let (port1, port2) = {
+        let mut ports = Self::allocate_ports(base_port, 2, 2);
+        assert_eq!(ports.len(), 2);
+        let port1 = ports.swap_remove(0);
+        let port2 = ports.swap_remove(0);
+        (port1, port2)
+      };
 
       // Test if this port combination causes relocation using actual hash ring
       if Self::test_relocation_with_hash_ring(
-        port1, port2, seed, tenant, cell_id,
+        &port1, &port2, seed, tenant, cell_id,
       ) {
         return Some((port1, port2));
       }
@@ -117,14 +140,16 @@ impl TestEnv {
   /// Test whether adding a second node with port2 causes the specified cell
   /// to relocate from port1 to port2, using the actual hash ring algorithm
   fn test_relocation_with_hash_ring(
-    port1: u16,
-    port2: u16,
+    port1: &PortLease,
+    port2: &PortLease,
     seed: u64,
     tenant: &str,
     cell_id: &str,
   ) -> bool {
-    let addr1: SocketAddr = format!("127.0.0.1:{}", port1).parse().unwrap();
-    let addr2: SocketAddr = format!("127.0.0.1:{}", port2).parse().unwrap();
+    let addr1: SocketAddr =
+      format!("127.0.0.1:{}", port1.public()).parse().unwrap();
+    let addr2: SocketAddr =
+      format!("127.0.0.1:{}", port2.public()).parse().unwrap();
 
     let mut ring1 = create_consistent_hash(Some(seed));
     ring1.add(addr1);
@@ -152,41 +177,30 @@ impl TestEnv {
   pub fn new(count: usize) -> Self {
     // Start with port 7500 and use spacing of 2 to avoid conflicts with internal ports
     let ports = Self::allocate_ports(7500, count, 2);
-    Self::new_with_ports(&ports)
+    Self::new_with_ports(ports)
   }
 
-  pub fn new_with_ports(ports: &[u16]) -> Self {
+  pub fn new_with_ports(ports: Vec<PortLease>) -> Self {
     Self::new_with_ports_and_envs(ports, &[])
   }
 
-  pub fn new_with_ports_and_envs(ports: &[u16], envs: &[(&str, &str)]) -> Self {
-    // Ensure all the provided ports and their internal ports are marked as used
-    let mut lock = USED_PORTS.lock().unwrap();
-    for &port in ports {
-      lock.insert(port);
-      lock.insert(port + 1);
-    }
-    drop(lock);
-
-    // Calculate internal ports
-    let public_ports = ports.to_vec();
-    let internal_ports: Vec<u16> = ports.iter().map(|&p| p + 1).collect();
+  pub fn new_with_ports_and_envs(
+    ports: Vec<PortLease>,
+    envs: &[(&str, &str)],
+  ) -> Self {
     // Start MinIO server for testing with a dynamically assigned port
     let bucket_name = "test-mesh-bucket".to_string();
     let minio_server = MinioTestServer::start();
     minio_server.create_bucket(&bucket_name).unwrap();
 
-    let servers = Vec::new();
     let test_id = Uuid::new_v4().simple().to_string();
 
     let mut test_env = TestEnv {
-      servers,
-      ports: ports.to_vec(),
+      servers: Vec::new(),
+      ports: Vec::new(),
       minio_server,
       bucket_name,
       test_id: test_id.to_string(),
-      public_ports: public_ports.clone(),
-      internal_ports: internal_ports.clone(),
       server_dirs: Vec::new(),
       envs: envs
         .iter()
@@ -194,13 +208,11 @@ impl TestEnv {
         .collect(),
     };
 
-    for &port in ports.iter() {
-      test_env.spawn_cell_instance(port);
-    }
+    test_env.spawn_cell_instance(ports);
 
     // Wait for servers to be ready by probing TCP connections
     println!("Waiting for servers to initialize...");
-    for &port in ports {
+    for port in &test_env.ports {
       Self::wait_for_server_ready(port);
     }
 
@@ -241,72 +253,73 @@ impl TestEnv {
     server.child_mut().wait().unwrap();
   }
 
-  pub fn spawn_cell_instance(&mut self, port: u16) {
-    let advertise_addr = format!("127.0.0.1:{}", port);
-    let internal_addr = format!("127.0.0.1:{}", port + 1);
+  pub fn spawn_cell_instance(&mut self, ports: Vec<PortLease>) {
+    for port in ports {
+      let advertise_addr = format!("127.0.0.1:{}", port.public());
+      let internal_addr = format!("127.0.0.1:{}", port.internal());
 
-    // Prepare a properly structured temporary directory
-    // This creates a temp dir with both jsr-cells/ and data/ to maintain relative imports
-    let (temp_dir, data_dir_path) = prepare_test_directory()
-      .expect("Failed to prepare temp directory with proper structure");
+      // Prepare a properly structured temporary directory
+      // This creates a temp dir with both jsr-cells/ and data/ to maintain relative imports
+      let (temp_dir, data_dir_path) = prepare_test_directory()
+        .expect("Failed to prepare temp directory with proper structure");
 
-    let server_cmd = Command::new(env!("CARGO_BIN_EXE_celld"));
-    let server_cmd_setup = |cmd: &mut Command| {
-      cmd
-        .env("RUST_LOG", "info")
-        .env("ADVERTISE_ADDR", &advertise_addr)
-        .env("INTERNAL_LISTEN_ADDR", &internal_addr)
-        .current_dir(temp_dir.path())
-        .env("DATA", &data_dir_path)
-        .env(
-          "CELL_HEARTBEAT_INTERVAL",
-          CELL_HEARTBEAT_INTERVAL_SECS.to_string(),
-        )
-        .env("CELL_GRACE_PERIOD_SECONDS", "5")
-        // Use a shorter staleness threshold for tests to detect failures faster
-        .env("CELL_STALENESS_THRESHOLD_SECS", "6")
-        .env("CELL_LOCK_GUARD_TTL_SECS", "6")
-        // Configure alarm scheduler to check alarms every second
-        .env("CELL_ALARM_SCHEDULER_INTERVAL_SECS", "1")
-        .env(
-          "CELL_S3_ENDPOINT",
-          format!("http://127.0.0.1:{}", self.minio_server.port),
-        )
-        .env("CELL_S3_BUCKET", &self.bucket_name)
-        .env("CELL_S3_REGION", "us-east-1")
-        .env("CELL_S3_PREFIX", format!("celld-test-{}", self.test_id))
-        .env("CELL_S3_ACCESS_KEY_ID", &self.minio_server.access_key_id)
-        .env(
-          "CELL_S3_SECRET_ACCESS_KEY",
-          &self.minio_server.secret_access_key,
-        )
-        .envs(&self.envs);
-    };
-    let server = CapturedSubprocess::new(
-      format!("celld({port})"),
-      server_cmd,
-      server_cmd_setup,
-    );
+      let server_cmd = Command::new(env!("CARGO_BIN_EXE_celld"));
+      let server_cmd_setup = |cmd: &mut Command| {
+        cmd
+          .env("RUST_LOG", "info")
+          .env("ADVERTISE_ADDR", &advertise_addr)
+          .env("INTERNAL_LISTEN_ADDR", &internal_addr)
+          .current_dir(temp_dir.path())
+          .env("DATA", &data_dir_path)
+          .env(
+            "CELL_HEARTBEAT_INTERVAL",
+            CELL_HEARTBEAT_INTERVAL_SECS.to_string(),
+          )
+          .env("CELL_GRACE_PERIOD_SECONDS", "5")
+          // Use a shorter staleness threshold for tests to detect failures faster
+          .env("CELL_STALENESS_THRESHOLD_SECS", "6")
+          .env("CELL_LOCK_GUARD_TTL_SECS", "6")
+          // Configure alarm scheduler to check alarms every second
+          .env("CELL_ALARM_SCHEDULER_INTERVAL_SECS", "1")
+          .env(
+            "CELL_S3_ENDPOINT",
+            format!("http://127.0.0.1:{}", self.minio_server.port),
+          )
+          .env("CELL_S3_BUCKET", &self.bucket_name)
+          .env("CELL_S3_REGION", "us-east-1")
+          .env("CELL_S3_PREFIX", format!("celld-test-{}", self.test_id))
+          .env("CELL_S3_ACCESS_KEY_ID", &self.minio_server.access_key_id)
+          .env(
+            "CELL_S3_SECRET_ACCESS_KEY",
+            &self.minio_server.secret_access_key,
+          )
+          .envs(&self.envs);
+      };
+      let server = CapturedSubprocess::new(
+        format!("celld({})", port.public()),
+        server_cmd,
+        server_cmd_setup,
+      );
 
-    self.servers.push(server);
-    self.ports.push(port);
-    self.server_dirs.push(temp_dir); // Store the TempDir
+      println!(
+        "Started server on port {} with ADVERTISE_ADDR={}, S3 mesh, DATA_DIR={:?}",
+        port.public(), advertise_addr, data_dir_path
+      );
 
-    println!(
-      "Started server on port {} with ADVERTISE_ADDR={}, S3 mesh, DATA_DIR={:?}",
-      port, advertise_addr, data_dir_path
-    );
+      Self::wait_for_server_ready(&port);
+
+      self.servers.push(server);
+      self.ports.push(port);
+      self.server_dirs.push(temp_dir); // Store the TempDir
+    }
   }
 
   // Wait for a server to be ready by probing its TCP port
-  pub fn wait_for_server_ready(port: u16) {
+  fn wait_for_server_ready(port: &PortLease) {
     const MAX_ATTEMPTS: usize = 10;
     const RETRY_DELAY_MS: u64 = 200;
 
-    // Check both the data port and the internal port (port + 1)
-    let ports = [port, port + 1];
-
-    for &p in &ports {
+    for p in [port.public(), port.internal()] {
       for attempt in 1..=MAX_ATTEMPTS {
         match std::net::TcpStream::connect(format!("127.0.0.1:{}", p)) {
           Ok(_) => {
@@ -338,9 +351,9 @@ impl Drop for TestEnv {
 
     // Release all ports
     let mut lock = USED_PORTS.lock().unwrap();
-    for &port in &self.ports {
-      lock.remove(&port);
-      lock.remove(&(port + 1));
+    for port in &self.ports {
+      lock.remove(&port.public());
+      lock.remove(&port.internal());
     }
   }
 }
@@ -435,15 +448,15 @@ pub fn test_port_allocation() {
 
   // Check the spacing is correct (each port should be 2 more than the previous)
   for i in 1..ports.len() {
-    assert_eq!(ports[i], ports[i - 1] + 2);
+    assert_eq!(ports[i].public(), ports[i - 1].public() + 2);
   }
 
   // Try to allocate the same ports again - should get different ones
   let ports2 = TestEnv::allocate_ports(8000, 3, 2);
 
   // Check none of the ports in ports2 are in ports
-  for &p in &ports2 {
-    assert!(!ports.contains(&p));
+  for p2 in &ports2 {
+    assert!(ports.iter().all(|p| p.public() != p2.public()));
   }
 
   // Manually mark one port as used
@@ -456,7 +469,7 @@ pub fn test_port_allocation() {
   // Try to allocate starting from 8098 - should skip 8100
   let ports3 = TestEnv::allocate_ports(8098, 3, 2);
   assert_eq!(ports3.len(), 3);
-  assert!(!ports3.contains(&8100));
+  assert!(ports3.iter().all(|p| p.public() != 8100));
 }
 
 /// Example of using the automatic port allocation in TestEnv
@@ -466,44 +479,47 @@ pub fn test_auto_port_allocation() {
   let env1 = TestEnv::new(3);
   let env2 = TestEnv::new(3);
 
-  println!("Env1 public ports: {:?}", env1.public_ports);
-  println!("Env1 internal ports: {:?}", env1.internal_ports);
-  println!("Env2 public ports: {:?}", env2.public_ports);
-  println!("Env2 internal ports: {:?}", env2.internal_ports);
+  println!("Env1 ports: {:?}", env1.ports);
+  println!("Env2 ports: {:?}", env2.ports);
 
-  // Check that none of the ports in env1 are in env2
-  for &p1 in &env1.public_ports {
-    for &p2 in &env2.public_ports {
-      assert_ne!(p1, p2, "Port {} was reused between environments", p1);
-    }
-  }
-
-  // Check that public and internal ports don't conflict
-  for &pub1 in &env1.public_ports {
-    for &int2 in &env2.internal_ports {
+  // Check that no ports conflict
+  for p1 in &env1.ports {
+    for p2 in &env2.ports {
       assert_ne!(
-        pub1, int2,
-        "Public port {} conflicts with internal port",
-        pub1
+        p1.public(),
+        p2.public(),
+        "Port {} was reused between environments",
+        p1.public()
       );
-    }
-  }
 
-  for &int1 in &env1.internal_ports {
-    for &pub2 in &env2.public_ports {
       assert_ne!(
-        int1, pub2,
-        "Internal port {} conflicts with public port",
-        int1
+        p1.public(),
+        p2.internal(),
+        "Port {} was reused between environments",
+        p1.public()
+      );
+
+      assert_ne!(
+        p1.internal(),
+        p2.public(),
+        "Port {} was reused between environments",
+        p1.public()
+      );
+
+      assert_ne!(
+        p1.internal(),
+        p2.internal(),
+        "Port {} was reused between environments",
+        p1.internal()
       );
     }
   }
 
   // Check that each public port's corresponding internal port is correct (public+1)
-  for i in 0..env1.public_ports.len() {
+  for port in env1.ports.iter().chain(env2.ports.iter()) {
     assert_eq!(
-      env1.internal_ports[i],
-      env1.public_ports[i] + 1,
+      port.public() + 1,
+      port.internal(),
       "Internal port should be public port + 1"
     );
   }

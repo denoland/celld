@@ -5,7 +5,7 @@ use common::TestEnv;
 #[test_log::test(tokio::test)]
 async fn test_alarm_crud_in_single_node_cluster() {
   let test_env = TestEnv::new(1);
-  let port = test_env.public_ports[0];
+  let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
   let url = format!("http://localhost:{}/cell/{}", port, cell_id);
@@ -103,7 +103,7 @@ async fn test_alarm_crud_in_single_node_cluster() {
 #[tokio::test]
 async fn test_alarm_dispatch_in_single_node_cluster() {
   let test_env = TestEnv::new(1);
-  let port = test_env.public_ports[0];
+  let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
   let url = format!("http://localhost:{}/cell/{}", port, cell_id);
@@ -157,7 +157,7 @@ async fn test_alarm_dispatch_in_single_node_cluster() {
 #[tokio::test]
 async fn test_multiple_cells_alarm_dispatch_in_single_node_cluster() {
   let test_env = TestEnv::new(1);
-  let port = test_env.public_ports[0];
+  let port = test_env.ports[0].public();
 
   let cell1_id = uuid::Uuid::new_v4().simple().to_string();
   let cell1_url = format!("http://localhost:{}/cell/{}", port, cell1_id);
@@ -293,9 +293,10 @@ async fn test_system_main_cell_takeover() {
   let mut system_main_cell_index = None;
   let mut secondary_cell_external_ports = Vec::new();
 
-  for (index, internal_port) in test_env.internal_ports.iter().enumerate() {
+  for (index, port) in test_env.ports.iter().enumerate() {
     let owner_url = format!(
-      "http://localhost:{internal_port}/_internal/mesh/owner/_system/main"
+      "http://localhost:{}/_internal/mesh/owner/_system/main",
+      port.internal()
     );
     let owner_resp = client
       .get(&owner_url)
@@ -308,7 +309,7 @@ async fn test_system_main_cell_takeover() {
     if owner_resp["is_local"].as_bool().unwrap() {
       system_main_cell_index = Some(index);
     } else {
-      secondary_cell_external_ports.push(test_env.public_ports[index]);
+      secondary_cell_external_ports.push(port.public());
     }
   }
 
@@ -321,7 +322,8 @@ async fn test_system_main_cell_takeover() {
   {
     let test_cell_url = format!(
       "http://localhost:{}/cell/{}",
-      test_env.public_ports[system_main_cell_index], test_cell_id
+      test_env.ports[system_main_cell_index].public(),
+      test_cell_id
     );
 
     let res = client
@@ -340,7 +342,8 @@ async fn test_system_main_cell_takeover() {
   let alarm_id = {
     let test_cell_url = format!(
       "http://localhost:{}/cell/{}",
-      test_env.public_ports[system_main_cell_index], test_cell_id
+      test_env.ports[system_main_cell_index].public(),
+      test_cell_id
     );
 
     let res = client
@@ -401,9 +404,10 @@ async fn test_alarm_crud_operations_forwarded_to_system_main_cell_node() {
   let mut secondary_cell_ports = Vec::new();
 
   // Identify the node where the system main cell is running
-  for (index, internal_port) in test_env.internal_ports.iter().enumerate() {
+  for (index, port) in test_env.ports.iter().enumerate() {
     let owner_url = format!(
-      "http://localhost:{internal_port}/_internal/mesh/owner/_system/main"
+      "http://localhost:{}/_internal/mesh/owner/_system/main",
+      port.internal()
     );
     let owner_resp = client
       .get(&owner_url)
@@ -417,8 +421,8 @@ async fn test_alarm_crud_operations_forwarded_to_system_main_cell_node() {
       system_main_cell_index = Some(index);
     } else {
       secondary_cell_ports.push(Port {
-        internal: test_env.internal_ports[index],
-        external: test_env.public_ports[index],
+        internal: port.internal(),
+        external: port.public(),
       });
     }
   }
@@ -458,7 +462,8 @@ async fn test_alarm_crud_operations_forwarded_to_system_main_cell_node() {
   {
     let test_cell_url = format!(
       "http://localhost:{}/cell/{}",
-      test_env.public_ports[system_main_cell_index], test_cell_id
+      test_env.ports[system_main_cell_index].public(),
+      test_cell_id
     );
 
     let res = client
@@ -477,7 +482,8 @@ async fn test_alarm_crud_operations_forwarded_to_system_main_cell_node() {
   let alarm_id = {
     let test_cell_url = format!(
       "http://localhost:{}/cell/{}",
-      test_env.public_ports[system_main_cell_index], test_cell_id
+      test_env.ports[system_main_cell_index].public(),
+      test_cell_id
     );
 
     let res = client
@@ -568,9 +574,10 @@ async fn test_alarm_dispatch_to_remote_cell_owner() {
   let mut secondary_cell_ports = Vec::new();
 
   // Identify the node where the system main cell is running
-  for (index, internal_port) in test_env.internal_ports.iter().enumerate() {
+  for (index, port) in test_env.ports.iter().enumerate() {
     let owner_url = format!(
-      "http://localhost:{internal_port}/_internal/mesh/owner/_system/main"
+      "http://localhost:{}/_internal/mesh/owner/_system/main",
+      port.internal()
     );
     let owner_resp = client
       .get(&owner_url)
@@ -584,8 +591,8 @@ async fn test_alarm_dispatch_to_remote_cell_owner() {
       system_main_cell_index = Some(index);
     } else {
       secondary_cell_ports.push(Port {
-        internal: test_env.internal_ports[index],
-        external: test_env.public_ports[index],
+        internal: port.internal(),
+        external: port.public(),
       });
     }
   }
@@ -621,7 +628,8 @@ async fn test_alarm_dispatch_to_remote_cell_owner() {
 
   let cell_url = format!(
     "http://localhost:{}/cell/{}",
-    test_env.public_ports[system_main_cell_index], test_cell_id
+    test_env.ports[system_main_cell_index].public(),
+    test_cell_id
   );
   let alarm_count_url = format!("{cell_url}/getAlarmCount");
 
