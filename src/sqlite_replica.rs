@@ -200,15 +200,13 @@ impl SqliteReplica {
   /// Returns true if data was restored, false if no backup was found or the database already exists
   #[instrument(skip(self))]
   async fn run_restore(&self) -> Result<bool> {
-    // If the database already exists, nothing to restore
-    if self.db_path.exists() {
-      debug!(
+    if std::fs::remove_file(&self.db_path).is_ok() {
+      info!(
         tenant = %self.tenant,
         cell_id = %self.cell_id,
         db_path = %self.db_path.display(),
-        "Database already exists, skipping restore"
+        "Existing database file was deleted"
       );
-      return Ok(false);
     }
 
     // Ensure the database directory exists
@@ -322,17 +320,6 @@ impl SqliteReplica {
     &self,
     _lock_handle: &distributed_lock::LockHandle,
   ) {
-    // Check if database already exists locally
-    if self.db_path.exists() {
-      warn!(
-        tenant = %self.tenant,
-        cell_id = %self.cell_id,
-        db_path = %self.db_path.display(),
-        "Database already exists locally, no restore needed"
-      );
-      return;
-    }
-
     // We got the lock, proceed with restore
     info!(
       tenant = %self.tenant,
