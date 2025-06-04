@@ -76,6 +76,9 @@ if (cell.id.startsWith("channel-")) {
 
   // Request handlers
   cell.request(async (req: Request): Promise<Response> => {
+    console.log(
+      `Generic channel cell. Received request for channel ${cell.id}: ${req.method} ${req.url}`,
+    );
     const url = new URL(req.url);
     const path = url.pathname.replace(`/cell/${cell.id}`, "");
 
@@ -107,7 +110,7 @@ if (cell.id.startsWith("channel-")) {
       // Get channel info from registry to check ownership
       try {
         const registryResponse = await fetch(
-          `${FRONTEND_URL}/cell/channel-registry/get/${cell.id}`,
+          `${FRONTEND_URL}/cell/registry/get/${cell.id}`,
           {
             headers: {
               Authorization: `Bearer ${token}`,
@@ -160,7 +163,7 @@ if (cell.id.startsWith("channel-")) {
       // Get channel info from registry to check ownership
       try {
         const registryResponse = await fetch(
-          `${FRONTEND_URL}/cell/channel-registry/get/${cell.id}`,
+          `${FRONTEND_URL}/cell/registry/get/${cell.id}`,
           {
             headers: {
               Authorization: `Bearer ${token}`,

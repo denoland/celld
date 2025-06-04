@@ -23,6 +23,7 @@ if (cell.id === "auth") {
   `);
 
   cell.request(async (req: Request): Promise<Response> => {
+    console.log("Auth cell request:", req.method, req.url);
     const url = new URL(req.url);
     const path = url.pathname.replace(`/cell/${cell.id}`, "");
 

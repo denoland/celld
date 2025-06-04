@@ -55,16 +55,7 @@ export class Cell implements DbAccessor, TaskScheduler {
     this.#defaultCtlSockPath = Deno.env.get("CELL_CONTROL_SOCKET")!;
   }
 
-  constructor(args?: {
-    tenant?: string;
-    id?: string;
-    dbPath?: string;
-    ctlSockPath?: string;
-  }) {
-    this.tenant = args?.tenant ?? Cell.#defaultTenant;
-    this.id = args?.id ?? Cell.#defaultId;
-    this.dbPath = args?.dbPath ?? Cell.#defaultDbPath;
-    const ctlSockPath = args?.ctlSockPath ?? Cell.#defaultCtlSockPath;
+  constructor() {
     this.ctlClient = Deno.createHttpClient({
       proxy: {
         transport: "unix",

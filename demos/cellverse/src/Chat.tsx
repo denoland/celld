@@ -39,7 +39,7 @@ export function Chat(
         if (!token) return;
 
         const response = await fetch(
-          `/cell/channel-registry/get/${channelId}`,
+          `/cell/registry/get/${channelId}`,
           {
             headers: {
               Authorization: `Bearer ${token}`,
@@ -60,7 +60,7 @@ export function Chat(
 
     // Connect to WebSocket
     const connectWebSocket = () => {
-      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
       const wsUrl = `${protocol}//${location.host}/cell/${channelId}`;
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
