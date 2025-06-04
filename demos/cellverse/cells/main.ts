@@ -578,6 +578,146 @@ if (cell.id.startsWith("channel-")) {
     }));
   });
 
+  type CellverseWorkflow = {
+    "reasoning": {
+      messages: {
+        role: "user" | "assistant";
+        content: string;
+      }[];
+      allowedSteps: number;
+    };
+  };
+
+  const workflow = cell.initWorkflow<CellverseWorkflow>();
+
+  const ReasoningActionSchema = z.discriminatedUnion("action", [
+    z.object({
+      action: z.literal("conclusion"),
+      message: z.string(),
+    }),
+    z.object({
+      action: z.literal("step"),
+      message: z.string(),
+    }),
+  ]);
+
+  workflow.define({
+    name: "reasoning",
+    handler: async ({ event, step }) => {
+      const systemPrompt = step.run("construct-system-prompt", () => {
+        let p = `You are a bot in the "${
+          cell.id.replace("channel-", "")
+        }" channel.`;
+
+        const personalityConfig = cell.db.prepare(
+          `SELECT value FROM channel_config WHERE key = 'personality'`,
+        ).get();
+
+        if (personalityConfig && personalityConfig.value) {
+          p = personalityConfig.value;
+        }
+
+        p += `\n\nYou are solving a complex problem.
+You will solve it step-by-step, only giving one step at a time unless told otherwise.
+You will have ${event.data.allowedSteps} steps to solve the problem. You may not need to use all of them.
+You must respond with a JSON object matching one of these schemas:
+
+1. To respond with a conclusion:
+{"action": "conclusion", "message": "your conclusion here"}
+
+2. To respond with a step if you need to think more:
+{"action": "step", "message": "your thinking here"}
+`;
+
+        return p;
+      });
+
+      const reasoningMessages: {
+        role: "assistant";
+        content: string;
+      }[] = [];
+
+      for (let i = 0; i < event.data.allowedSteps; i++) {
+        const isConcluded = await step.run(`reasoning-step-${i}`, async () => {
+          const isLastStep = i === event.data.allowedSteps - 1;
+          const userMessage = isLastStep
+            ? "What is the final answer?"
+            : `What is the next step? You have ${
+              event.data.allowedSteps - i
+            } steps left.`;
+
+          const response = await fetch(
+            "https://api.openai.com/v1/chat/completions",
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${OPENAI_API_KEY}`,
+              },
+              body: JSON.stringify({
+                model: "gpt-4o-mini",
+                messages: [
+                  { role: "system", content: systemPrompt },
+                  ...event.data.messages,
+                  ...reasoningMessages,
+                  {
+                    role: "user",
+                    content: userMessage,
+                  },
+                ],
+              }),
+            },
+          );
+
+          if (!response.ok) {
+            throw new Error(`OpenAI API error: ${await response.text()}`);
+          }
+
+          const aiData = await response.json();
+          const aiResponse = aiData.choices[0].message.content;
+
+          const parsedResponse = JSON.parse(aiResponse);
+          const validatedAction = ReasoningActionSchema.parse(parsedResponse);
+
+          // Store and broadcast the response
+          const aiResult = cell.db.prepare(
+            `INSERT INTO messages (github_id, username, content, is_llm_response)
+                   VALUES (?, ?, ?, ?) RETURNING *`,
+          ).get("ai", "bot", validatedAction.message, 1);
+
+          cell.broadcast(JSON.stringify({
+            type: "message",
+            message: aiResult,
+          }));
+
+          switch (validatedAction.action) {
+            case "conclusion": {
+              return true;
+            }
+            case "step": {
+              reasoningMessages.push({
+                role: "assistant",
+                content: validatedAction.message,
+              });
+
+              return false;
+            }
+            default: {
+              // TODO: This should be unretriable error, because it's just an implementation error
+              throw new Error(
+                `Unknown action: ${validatedAction satisfies never}`,
+              );
+            }
+          }
+        });
+
+        if (isConcluded) {
+          break;
+        }
+      }
+    },
+  });
+
   cell.message(async (event: MessageEvent, socket: WebSocket, id: string) => {
     const data = JSON.parse(event.data);
 
@@ -656,7 +796,9 @@ if (cell.id.startsWith("channel-")) {
           ).all(oneHourAgo).reverse();
 
           // Build conversation history
-          const messages = recentMessages.map((msg) => ({
+          const messages = recentMessages.filter((msg: any) =>
+            !msg.is_system_message
+          ).map((msg: any) => ({
             role: msg.is_llm_response ? "assistant" : "user",
             content: msg.is_llm_response
               ? msg.content
