@@ -1,3 +1,5 @@
+# NOTE: Make sure to download `.prod.vars` from 1password and put it in this directory with a read permission for all users.
+#
 # docker build -t 588642314931.dkr.ecr.us-east-2.amazonaws.com/deno-cells:cellverse .
 # aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin 588642314931.dkr.ecr.us-east-2.amazonaws.com
 # docker push 588642314931.dkr.ecr.us-east-2.amazonaws.com/deno-cells:cellverse
