@@ -262,6 +262,10 @@ impl LockState {
           let deadline = timer.deadline();
           if deadline < now + Duration::from_secs(10) {
             // The current deadline is too close. Reset it to 30 seconds from now.
+            debug!(
+              ?descriptor,
+              "Extending lock deadline to 30 seconds from now to get enough time to gracefully terminate the protected resource"
+            );
             let new_ttl = Duration::from_secs(30);
             lock_manager.renew(&descriptor, new_ttl).await?;
             timer.as_mut().reset(now + new_ttl);
