@@ -9,6 +9,7 @@ interface Message {
   timestamp: string;
   content: string;
   is_llm_response: boolean;
+  is_system_message: boolean;
 }
 
 interface ChatProps {
@@ -180,14 +181,18 @@ export function Chat(
               <div
                 key={message.id}
                 className={`message ${
-                  message.is_llm_response ? "llm-message" : ""
-                } ${
+                  message.is_system_message ? "system-message" : ""
+                } ${message.is_llm_response ? "llm-message" : ""} ${
                   message.github_id === user?.github_id ? "own-message" : ""
                 }`}
               >
                 <div className="message-header">
                   <span className="message-author">
-                    {message.is_llm_response ? "bot" : message.username}
+                    {message.is_system_message
+                      ? "system"
+                      : message.is_llm_response
+                      ? "bot"
+                      : message.username}
                   </span>
                   <span className="message-time">
                     {new Date(message.timestamp + "Z").toLocaleTimeString([], {
