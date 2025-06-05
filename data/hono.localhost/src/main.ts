@@ -1,4 +1,4 @@
-import { cell } from "../../../jsr-cells/mod.ts";
+import { cell } from "../../../sdk/mod.ts";
 import { Hono } from "npm:hono@4.7.10";
 
 cell.db.exec(`

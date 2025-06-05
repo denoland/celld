@@ -1,4 +1,4 @@
-name: Build and Publish Docker Images to GHCR
+name: Docker
 
 on:
   push:
@@ -7,17 +7,20 @@ on:
 
 jobs:
   build_and_push_main_celld:
-    name: Build and Push Main Celld Image
-    runs-on: ubicloud-standard-16-arm
+    name: Build Main
+    runs-on: ubicloud-standard-16
     permissions:
       contents: read
       packages: write
     outputs:
-      commit_sha: ${{ github.sha }} # Output full commit SHA
+      commit_sha: ${{ github.sha }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -35,45 +38,9 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          platforms: linux/arm64
+          platforms: linux/arm64,linux/amd64
           tags: |
             ghcr.io/denoland/cells:latest
             ghcr.io/denoland/cells:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  build_and_push_ecs_celld:
-    name: Build and Push ECS Celld Image
-    runs-on: ubicloud-standard-16-arm
-    permissions:
-      contents: read
-      packages: write
-    needs: build_and_push_main_celld
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push ECS celld image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile.ecs
-          push: true
-          platforms: linux/arm64
-          tags: |
-            ghcr.io/denoland/cells:ecs-latest
-            ghcr.io/denoland/cells:ecs-${{ needs.build_and_push_main_celld.outputs.commit_sha }}
-          build-args: |
-            CELL_BASE_IMAGE_TAG=${{ needs.build_and_push_main_celld.outputs.commit_sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

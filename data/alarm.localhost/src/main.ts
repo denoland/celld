@@ -1,4 +1,4 @@
-import { cell, types } from "../../../jsr-cells/mod.ts";
+import { cell, types } from "../../../sdk/mod.ts";
 
 let alarmCount = 0;
 

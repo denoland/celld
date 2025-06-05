@@ -1,4 +1,4 @@
-import { cell } from "../../../jsr-cells/mod.ts";
+import { cell } from "../../../sdk/mod.ts";
 
 console.log(`[${cell.id}] Initializing LLM chat server...`);
 
