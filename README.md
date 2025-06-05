@@ -2,254 +2,128 @@
 
 <img src="docs/cells.svg" alt="Deno Cells Logo" width="200">
 
-## Simple, Stateful, Scalable Compute Units
+## Simple, Stateful, Scalable Compute
 
-**Cells** is a self-hosted server for building stateful, distributed
-applications. It provides a model where each uniquely identified entity (a
-"cell") runs as a single JavaScript isolate with its own private, synchronous
-SQLite database. The system guarantees that for any given cell ID, there is at
-most one active instance running across the entire cluster and handles routing
-requests to it. S3 (or an S3-compatible service) is its sole external
-dependency, used for durable storage of these SQLite databases (via Litestream
-replication) and for cluster coordination.
+**Deno Cells** is a self-hosted runtime for stateful, distributed
+JavaScript/TypeScript applications.
 
-This project is currently **experimental** and under active development.
-Breaking changes are expected.
+Each **cell** is a uniquely identified, single-threaded **Deno isolate** with
+its own private **SQLite database**. Cells activate on demand and **scale
+horizontally**-but for any given ID, the system guarantees **exactly one active
+instance** across the cluster.
 
-**Available at: `ghcr.io/denoland/cells`**
+Cells run reliably on your own infrastructure. The only external dependency is
+**S3 (or compatible)**-used for both storage and coordination.
 
-## Key Highlights
+ **Experimental** - APIs may change.
 
-- **Self-Hosted**: Run Cells on your own infrastructure using Docker. You own
-  your data and the operational environment.
-- **Scalable**: Multiple Cells server instances can be linked via S3 to form a
-  robust cluster. This allows you to scale your application capacity
-  horizontally as your needs grow, with new nodes automatically joining and
-  sharing the workload.
-- **Exactly One Instance**: Each "cell" (identified by a unique ID) has its own
-  isolate and a private SQLite database. The system ensures only one active
-  instance of a cell per ID across the entire cluster.
-- **SQLite and S3**: Uses S3 for durable storage of SQLite databases and for
-  essential cluster coordination tasks like service discovery and locking,
-  keeping external dependencies minimal and robust.
-- **Automatic Routing**: Intelligently routes incoming HTTP and WebSocket
-  requests to the correct cell instance, activating it if necessary.
-- **Deno**: Leverages the Deno runtime for secure and efficient
-  JavaScript/TypeScript execution.
-- **Durable Execution**: The `jsr:@ry/cells` SDK includes a workflow API,
-  enabling you to define long-running, fault-tolerant processes that can survive
-  restarts and continue execution, ideal for complex, multi-step operations.
-  (Learn more: [jsr.io/@ry/cells](https://jsr.io/@ry/cells))
+**Docker image:** `ghcr.io/denoland/cells` 
 
-## Getting Started
+**SDK:** [`jsr:@ry/cells`](https://jsr.io/@ry/cells)
 
-The best way to understand how to operate Cells is to use its built-in help
-command.
+## Highlights
 
-First, ensure you have Docker installed. Then, pull the latest image:
+- **Per-ID single-instance isolation** across the cluster
+- **Durable state**: SQLite DB per cell, replicated to S3
+- **Workflow API** for fault-tolerant, long-lived tasks with built-in retries
+- **System Cell**: A built-in scheduler that triggers alarms on a schedule
+- **Cold starts \~100ms** for small cells
+- **Runs anywhere** with only S3 as external dependency
+
+## Quick Start
 
 ```bash
-docker pull ghcr.io/denoland/cells:latest
+docker pull ghcr.io/denoland/cells
+docker run ghcr.io/denoland/cells --help
 ```
 
-To see the available commands, configuration options, and a detailed operational
-overview:
+## Hello World
 
-```bash
-docker run --rm ghcr.io/denoland/cells --help
-```
-
-This command is your primary reference for running and managing Cells instances.
-
-## Cell API & Example
-
-Within your JavaScript/TypeScript code, you interact with the Cells system using
-the `@ry/cells` module (soon it will graduate to `@deno/cells`).
-
-**Example: Incrementing Counter**
-
-This simple cell maintains a counter in its SQLite database and increments it on
-each HTTP request.
-
-```typescript
+```ts
 import { cell } from "jsr:@ry/cells";
 
-// Initialize the database schema if it doesn't exist
 cell.db.exec(`CREATE TABLE IF NOT EXISTS c (id TEXT PRIMARY KEY, v INTEGER)`);
-// Insert the counter row if it doesn't exist
 cell.db.exec(`INSERT OR IGNORE INTO c (id, v) VALUES ('hits', 0)`);
 
-cell.request((req) => {
-  // Increment the counter
-  cell.db.prepare(`UPDATE c SET v = v + 1 WHERE id = 'hits'`).run();
-  // Read the new value
-  const result = cell.db.prepare(`SELECT v FROM c WHERE id = 'hits'`).get();
-  // Respond with the count and the cell's ID
-  return new Response(`${result.v} (cell ID: ${cell.id})\n`);
+cell.request(() => {
+  cell.db.exec(`UPDATE c SET v = v + 1 WHERE id = 'hits'`);
+  const { v } = cell.db.prepare(`SELECT v FROM c WHERE id = 'hits'`).get();
+  return new Response(`${v} (cell ID: ${cell.id})\n`);
 });
 ```
 
-This `main.ts` would be the entry point for your cell's logic. You can then run
-this like so:
+Run it:
 
 ```bash
 docker run -p 8000:8000 -v $PWD:/app ghcr.io/denoland/cells ./main.ts
 ```
 
-## Core Concepts
+## Workflow Example
 
-### Cells (Actor-like Instances)
+```ts
+import { cell } from "jsr:@ry/cells";
+import { delay } from "jsr:@std/async";
 
-A "cell" is an instance of your application logic associated with a unique ID
-(e.g., `chat1`, `user123`, `agent-xyz`). It consists of:
+type MyWorkflow = {
+  "two-steps": {
+    value: number;
+  };
+};
 
-- A Deno JavaScript/TypeScript isolate executing your code.
-- A private SQLite database, providing durable, synchronous storage for that
-  specific cell, with its state replicated to S3.
-- User-provided code (like the example above) that defines its behavior for
-  handling HTTP requests, WebSocket connections, messages, and workflows.
+const workflow = cell.initWorkflow<MyWorkflow>();
 
-Cells are addressable via their ID. The system ensures that only one instance of
-a cell for a particular ID is active at any given time across the entire
-cluster. If a cell is idle (no active WebSocket or outbound TCP connections, and
-no running workflows), it will automatically terminate to conserve resources.
+workflow.define({
+  name: "two-steps",
+  handler: async (ctx) => {
+    const step1Result = await ctx.step.run("multiply by 2", async () => {
+      await delay(10);
+      return ctx.event.data.value * 2;
+    });
 
-### Clustering and S3
+    await ctx.step.run("add 1", async () => {
+      await delay(10);
+      return step1Result + 1;
+    });
+  },
+});
 
-Cells achieves scalability and resilience using an S3 bucket (or S3-compatible
-service) as its sole external dependency. When you configure multiple Cells
-server nodes to point to the same S3 bucket and region:
+workflow.dispatch("two-steps", { value: 42 });
+```
 
-- They automatically discover each other and form a robust cluster using
-  consistent hashing to distribute cells.
-- Individual cells (the actor instances with their JS isolate and SQLite DB) are
-  distributed across these server nodes.
-- The SQLite database for each cell is durably persisted to and replicated from
-  S3 using Litestream.
-- The system handles routing requests to the server node currently hosting the
-  target cell, activating it if necessary.
+Workflow steps are **durable**, **ordered**, and **automatically retried** (4
+times by default) if a crash occurs mid-run.
 
-This architecture simplifies deployment and scaling, allowing you to focus on
-your applications.
+## Concepts
+
+- **Cell** = Deno isolate + SQLite DB + your code.
+- **Cluster** = Multiple nodes coordinate via S3 and consistent hashing.
+- **Routing**: HTTP/WebSocket requests are routed to the node hosting the cell.
+  If a node fails, another safely takes over.
+- **System Cell**: A built-in scheduler that triggers alarms and workflow steps
+  on schedule.
+- **Single-tenancy or multi-tenancy**: Routing can be based on hostname, or
+  skipped entirely in simpler deployments.
 
 ## Routing
 
-Cells routes requests based on the tenant host and cell ID:
-
-- `http://<tenant_host>/cell/<cell_id>` -> Activates the specified Cell and
-  routes the HTTP request to it.
-- `ws://<tenant_host>/cell/<cell_id>` -> Activates the specified Cell and
-  establishes a WebSocket connection.
-- `http://<tenant_host>/<path>` -> Serves static files from the tenant's
-  `static/` directory.
-
-**Example:** `http://myapp.localhost:3000/cell/chat1`. `myapp.localhost` is the
-tenant domain, while `chat1` is the Cell ID.
-
-## Data Layout
-
-Cells expects a specific directory structure for each tenant (typically derived
-from the hostname):
-
-```
-<data-dir>/
-└── myapp.localhost/       # Tenant directory (e.g., based on hostname)
-    ├── static/            # Static files served at the root of the tenant domain
-    │   └── index.html
-    │   └── client.js
-    │   └── ...
-    ├── src/
-    │   └── main.ts        # Entrypoint for the Cell's JavaScript/TypeScript logic
-    └── sqlite/            # SQLite databases, one per cell ID (managed by Cells, backed by S3)
-        └── <cell_id_A>.db
-        └── <cell_id_B>.db
-        └── ...
-```
-
-In single-tenant mode, `[SRC_FILE]` and `[STATIC_DIR]` arguments to the
-`ghcr.io/denoland/cells` Docker command define these for a default tenant.
-
-## How It Works
-
-1. **Request Arrival**: An HTTP or WebSocket request arrives at any server node
-   in the Cells cluster. The request typically includes information that
-   identifies a target tenant and cell (e.g., in the hostname and path).
-2. **Cell Activation & Routing**: The receiving node determines which node in
-   the cluster is (or should be) hosting the target cell using consistent
-   hashing.
-   - If the cell is already active on a node, the request is proxied to that
-     node.
-   - If the cell is not active, one node is elected to activate it. This
-     involves:
-     - Fetching the cell's code for the tenant (e.g., `src/main.ts`) if not
-       already cached.
-     - Restoring its SQLite database from S3 (via Litestream).
-     - Starting a new Deno isolate with the code and database.
-3. **Code Execution**: The Deno isolate for the cell processes the request using
-   the handlers defined in your code (e.g., `cell.request()`, `cell.connect()`,
-   or workflow steps). It can read from and write to its private SQLite database
-   synchronously.
-4. **Persistence**: Changes to the SQLite database are written locally and then
-   asynchronously replicated to S3 by Litestream, ensuring durability. Workflow
-   state is also persisted, allowing for durable execution.
-5. **Response**: The cell sends a response back to the client (for direct
-   requests) or continues its workflow.
+- `GET /cell/<id>` → Routes to cell’s HTTP handler
+- `WS /cell/<id>` → Opens a WebSocket to the cell
+- `/` → Serves static files from tenant’s `static/` directory
 
 ## Use Cases
 
-- **AI Agents:** Each AI agent can be modeled as a cell, maintaining its own
-  state (memory, conversation history, goals) in its private SQLite database and
-  executing its logic within its dedicated Deno isolate. The workflow API can
-  manage long-running agent tasks.
-- **Real-time Multiplayer Applications:** Leverage WebSockets for interactive
-  experiences like chat rooms, live dashboards, and multiplayer games.
-- **Durable Workflows & Long-Running Processes:** Implement complex, multi-step
-  business logic, background tasks, or sagas that need to run reliably over
-  extended periods, survive failures, and maintain state. The `jsr:@ry/cells`
-  workflow API is designed for this. (Learn more:
-  [jsr.io/@ry/cells](https://jsr.io/@ry/cells))
-- **Stateful Services:** Ideal for applications requiring durable storage per
-  entity (e.g., user accounts, game sessions, collaborative documents, shopping
-  carts). Each entity can be a cell.
+- **AI agents**: Isolated memory + logic per agent, with long-running tasks
+- **Multiplayer games & chat**: Real-time sessions backed by persistent state
+- **Business workflows**: Durable background logic with retries and timers
+- **Per-user state**: Each user or object gets its own stateful cell
 
-## Configuration
+## Operational Notes
 
-Cells is configured primarily through command-line arguments or environment
-variables. Key configuration options include:
-
-- `ADVERTISE_ADDR`
-- `INTERNAL_ADDR`
-- `CELL_LOCK_GUARD_TTL_SECS`
-- `CELL_ALARM_SCHEDULER_INTERVAL_SECS`
-- `CELL_STALENESS_THRESHOLD_SECS`
-- `CELL_GRACE_PERIOD_SECONDS`
-- `CELL_HEARTBEAT_INTERVAL_SECS`
-- `CELL_HASHRING_SEED`
-- `CELL_DENO_OUTPUT`
-- `CELL_S3_ENDPOINT`
-- `CELL_S3_BUCKET`
-- `CELL_S3_ACCESS_KEY_ID`
-- `CELL_S3_SECRET_ACCESS_KEY`
-- `CELL_S3_REGION`
-- `CELL_S3_PREFIX`
-
-Run `docker run --rm ghcr.io/denoland/cells --help` for a full list of options
-and detailed explanations.
-
-## Limitations
-
-- **Durability:** SQLite writes are synchronous locally. S3 replication is
-  asynchronous; very recent writes (seconds) may be lost on catastrophic node
-  failure before replication completes. Workflow state is designed for higher
-  durability.
-- **Cell DB Size:** Best suited for small to medium-sized SQLite databases
-  (e.g., \<500MB) to ensure fast hydration times when a cell activates on a new
-  node.
-- **Scaling of Individual Cells:** An individual Cell (a Deno isolate) does not
-  automatically scale its own resources. The system scales by adding more cell
-  server nodes to the cluster, allowing more Cells to run concurrently.
-
-## Development Status
-
-Cells is currently **experimental**. While the core functionality is in place,
-expect APIs and internal mechanisms to change. We are actively seeking feedback.
+- **Replication delay**: SQLite writes are sync locally; replication to S3 is
+  async (a few seconds).
+- **DB size**: Best under ~500MB per cell to ensure fast activation.
+- **No vertical autoscaling**: Scale by adding nodes to the cluster and sharding
+  work over many cells, but there's a limit to how much a single cell can
+  handle.
+- **Request loss on crash**: In-flight requests are not preserved; workflows
+  resume from last successful step.

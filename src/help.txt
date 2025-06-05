@@ -1,0 +1,125 @@
+Deno Cells: Simple, Stateful, Scalable Compute
+
+Runs JavaScript/TypeScript code in lightweight, stateful Deno isolates called
+"cells".  Each cell is identified by a unique ID and backed by a private SQLite
+database.
+
+Only one instance of a cell is active at any time across the cluster.  Durable
+state and coordination are powered by S3. No other services required.
+
+OPERATION
+
+  - Each /cell/<id> is a separate Deno isolate + SQLite DB
+  - Cells activate on demand and shut down when idle
+  - Multiple servers form a cluster using S3-based service discovery
+  - HTTP and WebSocket requests are routed automatically to the right cell
+  - Cells with open WebSockets or TCP connections remain alive
+
+ROUTING
+
+  http://<tenant_host>/cell/<cell_id>   → Activate and route request to cell
+  ws://<tenant_host>/cell/<cell_id>     → Establish WebSocket with cell
+  http://<tenant_host>/<path>           → Serve static files (index.html)
+
+  Example:
+    http://myapp.localhost:3000/cell/chat123
+           └─── tenant ──┘           └ cell┘
+
+CODE STRUCTURE
+
+  In your main.ts:
+
+    import { cell } from "jsr:@ry/cells";
+
+    cell.request((req) => {
+      cell.db.exec("CREATE TABLE IF NOT EXISTS hits (n INTEGER)");
+      cell.db.exec("INSERT OR IGNORE INTO hits VALUES (0)");
+      cell.db.exec("UPDATE hits SET n = n + 1");
+      const { n } = cell.db.prepare("SELECT n FROM hits").get();
+      return new Response(`Hits: ${n} (cell ID: ${cell.id})`);
+    });
+
+  Each cell has access to:
+    - cell.id: The unique ID for this isolate
+    - cell.db: SQLite database scoped to this cell
+    - cell.request(), cell.connect(), cell.message(): HTTP/WebSocket handlers
+    - cell.broadcast(): Send to all WebSocket connections
+    - See https://jsr.io/@ry/cells for more APIs.
+
+CONFIGURATION
+
+  S3 is configured via standard AWS env vars or overridable with:
+    CELL_S3_ENDPOINT
+    CELL_S3_BUCKET
+    CELL_S3_ACCESS_KEY_ID
+    CELL_S3_SECRET_ACCESS_KEY
+    CELL_S3_REGION
+    CELL_S3_PREFIX
+
+  Behavior tuning:
+    DATA                               # Data directory (default: ./data)
+    CELL_GRACE_PERIOD_SECONDS          # Delay on SIGTERM (default: 300)
+    CELL_HEARTBEAT_INTERVAL            # S3 heartbeat interval (default: 30)
+    CELL_STALENESS_THRESHOLD_SECS      # Max allowed time without heartbeat
+    CELL_LOCK_GUARD_TTL_SECS           # Lock expiration time
+    CELL_ALARM_SCHEDULER_INTERVAL_SECS # Frequency of polling by system cell
+    CELL_HASHRING_SEED                 # Optional hash ring stability seed
+    CELL_DENO_OUTPUT                   # If set, forwards Deno stdout/stderr
+
+DATA DIRECTORY
+
+  Cells stores code, static files, and SQLite databases in a root directory,
+  configured via the DATA environment variable (default: ./data).
+
+  In multi-tenant mode:
+    Each tenant is a subdirectory named after the request hostname.
+
+      data/
+      ├── default/              # Default/fallback tenant
+      ├── hello.localhost/      # Tenant for hello.localhost
+      └── myapp.example.com/    # Tenant for myapp.example.com
+
+    Each tenant may contain:
+      - static/   → Files served at /
+      - src/      → main.ts (cell logic)
+      - sqlite/   → One DB per cell ID (auto-managed, Litestream-backed)
+
+  In single-tenant mode:
+    Only the `default/` tenant is used.
+    The source file and static directory may be passed explicitly via CLI args,
+    and need not live in `data/default/src`.
+
+  Example layout:
+
+    data/
+    ├── default/
+    │   ├── static/
+    │   ├── src/
+    │   └── sqlite/
+    └── example.com/
+        ├── static/
+        ├── src/
+        └── sqlite/
+
+LIMITATIONS
+
+  - Writes are durable locally, but S3 replication is asynchronous (few seconds)
+  - Very recent writes may be lost if a node crashes before syncing
+  - DBs should stay under ~500MB per cell for fast cold starts
+  - Cells are single-threaded Deno isolates; system scales by adding more nodes
+  - In-flight HTTP requests are lost on crash; workflows automatically retry
+
+USAGE EXAMPLES
+
+  Run a multi-tenant cluster from a data directory:
+
+    docker run -p 8000:8000 -v $PWD/data:/data ghcr.io/denoland/cells
+
+  Run a single-tenant cell with static files:
+
+    docker run -p 8000:8000 -v $PWD:/app ghcr.io/denoland/cells ./src/main.ts ./static
+
+  Load configuration from an environment file:
+
+    docker run --env-file .env -p 8000:8000 -v $PWD:/app ghcr.io/denoland/cells ./src/main.ts
+

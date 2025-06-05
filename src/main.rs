@@ -46,105 +46,39 @@ fn create_command() -> Command {
   Command::new("celld")
     .version("0.1.0")
     .about("Deno Cells - Simple, Stateful, Scalable Compute Units")
-    .long_about("
-celld runs \"Cells\": Deno isolates for your JS/TS code, each with a private,
-synchronous SQLite database. S3 is its sole dependency, used for durable
-state persistence (via Litestream replication), service discovery, and locking,
-enabling a resilient cluster of celld nodes.
-
-OPERATION:
-  Each unique '/cell/<cell_id>' gets a dedicated Deno isolate. Clustered
-  celld nodes use consistent hashing to distribute Cells. Cells with active
-  WebSocket connections or outbound TCP connections remain alive, and
-  automatically terminate after becoming idle.
-
-ROUTING:
-  http://<tenant_host>/cell/<cell_id>  ->  Activates Cell
-  ws://<tenant_host>/cell/<cell_id>    ->  Activates Cell
-  http://<tenant_host>/<path>          ->  Serves static file
-
-  Example: http://myapp.localhost:3000/cell/chat1
-                  └─────┬───────┘           └─┬─┘
-                  tenant domain           cell ID
-
-DATA LAYOUT:
-  <data-dir>/
-  └── myapp.localhost/
-      ├── static/          # Served at /
-      │   └── index.html, client.js, etc.
-      ├── src/
-      │   └── main.ts      # Cell logic for this tenant
-      ├── sqlite/          # SQLite per cell
-      │   └── A.db, B.db
-
-CELL API (starting at main.ts):
-  import { cell } from \"jsr:@ry/cells\";
-
-  cell.id                           // Current Cell's unique ID
-  cell.db.exec(sql)                 // Executes SQL
-  cell.db.prepare(sql)              // Returns Statement; run(), get(), all()
-  cell.request((req) => Response)   // Handles HTTP requests
-  cell.connect((socket, id) => {})  // Handles new WebSocket connections
-  cell.message((event, socket, id) => {}) // Handles WebSocket messages
-  cell.broadcast(data, opts)        // Sends to all WebSockets in this Cell
-
-EXAMPLE: Incrementing Counter (main.ts):
-  import { cell } from \"jsr:@ry/cells\";
-  cell.db.exec(`CREATE TABLE IF NOT EXISTS c (id TEXT PRIMARY KEY, v INTEGER)`);
-  cell.db.exec(`INSERT OR IGNORE INTO c (id, v) VALUES ('hits', 0)`);
-  cell.request((req) => {
-    cell.db.prepare(`UPDATE c SET v = v + 1 WHERE id = 'hits'`).run();
-    const r = cell.db.prepare(`SELECT v FROM c WHERE id = 'hits'`).get();
-    return new Response(`${r.v} (${cell.id})\\n`);
-  });
-
-CONFIGURATION (Environment Variables):
-  CELL_S3_ENDPOINT, CELL_S3_BUCKET, CELL_S3_ACCESS_KEY_ID,
-  CELL_S3_SECRET_ACCESS_KEY, CELL_S3_REGION, CELL_S3_PREFIX
-  ADVERTISE_ADDR
-
-LIMITATIONS:
-  - Durability: SQLite writes are sync locally. S3 replication is async;
-    very recent writes (secs) may be lost on catastrophic node failure.
-  - Consistency: Strong for active Cell operations (single owner). S3 state
-    is eventually consistent with the last successful replication.
-  - Cell DB Size: Best for small DBs (<500MB) for fast S3 hydration.
-  - Scaling: Individual Cells are single Deno isolates (no auto-scale).
-    System scales by adding celld nodes.
-
-USAGE EXAMPLES:
-  celld                              # Multi-tenant mode (serve from data/ directory)
-  celld src/main.ts                  # Single-tenant mode (default tenant only)
-  celld src/main.ts static/          # Single-tenant with static files
-  celld src/main.ts --env-file .env # Single-tenant with environment file")
+    .long_about(include_str!("help.txt"))
     .arg(
       Arg::new("src_file")
         .help("source file for default tenant (enables single-tenant mode)")
         .value_name("SRC_FILE")
-        .index(1)
+        .index(1),
     )
     .arg(
       Arg::new("static_dir")
         .help("static files directory for default tenant")
         .value_name("STATIC_DIR")
-        .index(2)
+        .index(2),
     )
     .arg(
       Arg::new("env_file")
         .long("env-file")
-        .help("Load environment variables from this file for single-tenant mode")
+        .help(
+          "Load environment variables from this file for single-tenant mode",
+        )
         .value_name("PATH")
-        .value_parser(clap::value_parser!(PathBuf))
+        .value_parser(clap::value_parser!(PathBuf)),
     )
     .arg(
       Arg::new("static_fallback")
         .long("static-fallback")
         .value_name("STRATEGY")
-        .help(r#"Static file fallback strategy for missing files:
+        .help(
+          r#"Static file fallback strategy for missing files:
   strict              Return 404 (default)
   spa[:<FILE>]        Serve <FILE> for SPA routes (default: index.html)
-  custom404[:<FILE>]  Serve custom 404 page (default: 404.html)"#)
-        .required(false)
+  custom404[:<FILE>]  Serve custom 404 page (default: 404.html)"#,
+        )
+        .required(false),
     )
 }
 
