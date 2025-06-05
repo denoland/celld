@@ -7,7 +7,7 @@ use tracing::{debug, info};
 #[test_log::test(tokio::test)]
 async fn test_reliable_workflow_in_single_node_cluster() {
   let test_env = TestEnv::new(1);
-  let port = test_env.public_ports[0];
+  let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
   let url = format!("http://localhost:{}/cell/{}", port, cell_id);
@@ -82,7 +82,7 @@ async fn test_reliable_workflow_in_single_node_cluster() {
 #[test_log::test(tokio::test)]
 async fn test_flaky_workflow_in_single_node_cluster() {
   let test_env = TestEnv::new(1);
-  let port = test_env.public_ports[0];
+  let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
   let url = format!("http://localhost:{}/cell/{}", port, cell_id);
@@ -176,9 +176,9 @@ async fn test_workflow_automatic_resume_after_node_failure() {
   let mut primary_owner_index = usize::MAX;
   let mut secondary_owners = Vec::new();
 
-  for i in 0..test_env.public_ports.len() {
-    let public_port = test_env.public_ports[i];
-    let internal_port = test_env.internal_ports[i];
+  for (i, port) in test_env.ports.iter().enumerate() {
+    let public_port = port.public();
+    let internal_port = port.internal();
     let owner_url = format!(
       "http://localhost:{}/_internal/mesh/owner/workflow.localhost/{}",
       internal_port, cell_id

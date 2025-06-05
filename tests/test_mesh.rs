@@ -25,8 +25,8 @@ async fn test_mesh_cell_connection() {
   let mut connections = Vec::new();
   let mut usernames = Vec::new();
 
-  for &port in &test_env.public_ports {
-    let (conn, username) = connect_to_cell(port, cell_id).await;
+  for port in &test_env.ports {
+    let (conn, username) = connect_to_cell(port.public(), cell_id).await;
     connections.push(conn);
     usernames.push(username);
   }
@@ -74,11 +74,11 @@ async fn test_mesh_message_broadcast() {
 
   // Connect two clients to the cell through different servers
   let (mut client1, username1) =
-    connect_to_cell(test_env.public_ports[0], cell_id).await;
+    connect_to_cell(test_env.ports[0].public(), cell_id).await;
 
   // The second client connection will now wait until it gets proper welcome messages
   let (mut client2, _) =
-    connect_to_cell(test_env.public_ports[1], cell_id).await;
+    connect_to_cell(test_env.ports[1].public(), cell_id).await;
 
   // Client 1 should receive system message about client 2 joining
   let system_data = read_message_of_type(&mut client1, "system", 5000).await;
@@ -116,14 +116,13 @@ async fn test_mesh_message_broadcast() {
 /// Tests dynamic node membership in the mesh
 #[tokio::test]
 async fn test_mesh_dynamic_membership() {
-  // Start 3 server instances with different ports
-  // Using ports far enough apart to avoid conflicts with internal ports (port+1)
-  let ports = [7041, 7043, 7045];
-  let mut test_env = TestEnv::new_with_ports(&ports);
+  let mut test_env = TestEnv::new(3);
 
   // 1. Query the first node's internal mesh/peers endpoint to check if all nodes are visible
-  let peers_url =
-    format!("http://localhost:{}/_internal/mesh/peers", ports[0] + 1);
+  let peers_url = format!(
+    "http://localhost:{}/_internal/mesh/peers",
+    test_env.ports[0].internal()
+  );
   let peers_response = reqwest::get(&peers_url).await.unwrap();
   let peers_text = peers_response.text().await.unwrap();
   let peers_value: serde_json::Value =
@@ -158,9 +157,9 @@ async fn test_mesh_dynamic_membership() {
 
   // Start a new node
   println!("Starting a new node...");
-  let new_port = 7044;
+  let new_port = TestEnv::allocate_ports(7044, 1, 2);
+  assert_eq!(new_port.len(), 1);
   test_env.spawn_cell_instance(new_port);
-  TestEnv::wait_for_server_ready(new_port);
 
   // Wait for peer exchange
   println!("Waiting for peer exchange...");
@@ -203,9 +202,9 @@ async fn test_mesh_cell_isolation() {
 
   // Connect to two different cells through different servers
   let (mut client1, username1) =
-    connect_to_cell(test_env.public_ports[0], "cell-a").await;
+    connect_to_cell(test_env.ports[0].public(), "cell-a").await;
   let (mut client2, username2) =
-    connect_to_cell(test_env.public_ports[1], "cell-b").await;
+    connect_to_cell(test_env.ports[1].public(), "cell-b").await;
 
   // Send a message in cell-a
   let message_cell1 = "This message should only be in cell-a";
@@ -264,9 +263,9 @@ async fn test_node_failure_takeover() {
   let mut primary_owner_port = 0;
   let mut secondary_owners = Vec::new();
 
-  for i in 0..test_env.public_ports.len() {
-    let public_port = test_env.public_ports[i];
-    let internal_port = test_env.internal_ports[i];
+  for port in &test_env.ports {
+    let public_port = port.public();
+    let internal_port = port.internal();
     let owner_url = format!(
       "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
       internal_port, test_cell_id
@@ -300,11 +299,11 @@ async fn test_node_failure_takeover() {
   println!("Primary owner is on port: {}", primary_owner_port);
   println!("Secondary owners are on ports: {:?}", secondary_owners);
 
-  // Find the index of the primary owner in the test_env.public_ports array
+  // Find the index of the primary owner in the test_env.ports array
   let primary_index = test_env
-    .public_ports
+    .ports
     .iter()
-    .position(|&p| p == primary_owner_port)
+    .position(|p| p.public() == primary_owner_port)
     .unwrap();
 
   // Send request to the primary node to create data in the cell
@@ -372,9 +371,9 @@ async fn test_node_failure_takeover() {
   for &public_port in &secondary_owners {
     // Find the matching internal port for this public port
     let i = test_env
-      .public_ports
+      .ports
       .iter()
-      .position(|&p| p == public_port)
+      .position(|p| p.public() == public_port)
       .unwrap_or_else(|| {
         // This could happen if ports changed - find the index in the secondary_owners array instead
         secondary_owners
@@ -382,7 +381,7 @@ async fn test_node_failure_takeover() {
           .position(|&p| p == public_port)
           .unwrap()
       });
-    let internal_port = test_env.internal_ports[i];
+    let internal_port = test_env.ports[i].internal();
 
     let owner_url = format!(
       "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
@@ -428,9 +427,9 @@ async fn test_concurrent_takeover_locking() {
   let mut primary_owner_port = 0;
   let mut secondary_owners = Vec::new();
 
-  for i in 0..test_env.public_ports.len() {
-    let public_port = test_env.public_ports[i];
-    let internal_port = test_env.internal_ports[i];
+  for port in &test_env.ports {
+    let public_port = port.public();
+    let internal_port = port.internal();
     let owner_url = format!(
       "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
       internal_port, test_cell_id
@@ -484,9 +483,9 @@ async fn test_concurrent_takeover_locking() {
     primary_owner_port
   );
   let primary_index = test_env
-    .public_ports
+    .ports
     .iter()
-    .position(|&p| p == primary_owner_port)
+    .position(|p| p.public() == primary_owner_port)
     .unwrap();
   test_env.graceful_shutdown_cell_instance(primary_index);
 
@@ -555,9 +554,9 @@ async fn test_concurrent_takeover_locking() {
   for &public_port in &secondary_owners {
     // Find the matching internal port
     let i = test_env
-      .public_ports
+      .ports
       .iter()
-      .position(|&p| p == public_port)
+      .position(|p| p.public() == public_port)
       .unwrap_or_else(|| {
         // This could happen if ports changed - fall back to a reasonable default
         println!(
@@ -566,7 +565,7 @@ async fn test_concurrent_takeover_locking() {
         );
         0
       });
-    let internal_port = test_env.internal_ports[i];
+    let internal_port = test_env.ports[i].internal();
 
     let owner_url = format!(
       "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
@@ -608,9 +607,9 @@ async fn test_proxy_forwarding_retry() {
 
   // Find which node is the primary owner for this cell
   let mut owner_info = Vec::new();
-  for i in 0..test_env.public_ports.len() {
-    let public_port = test_env.public_ports[i];
-    let internal_port = test_env.internal_ports[i];
+  for port in &test_env.ports {
+    let public_port = port.public();
+    let internal_port = port.internal();
     let owner_url = format!(
       "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
       internal_port, test_cell_id
@@ -662,9 +661,9 @@ async fn test_proxy_forwarding_retry() {
   // Kill the primary node
   println!("Killing primary node on port {}...", primary_owner_port);
   let primary_index = test_env
-    .public_ports
+    .ports
     .iter()
-    .position(|&p| p == primary_owner_port)
+    .position(|p| p.public() == primary_owner_port)
     .unwrap();
   test_env.kill_cell_instance(primary_index);
 
@@ -758,7 +757,7 @@ async fn test_restore_coordination() {
 
   // Create a single-node environment
   let mut test_env = TestEnv::new(1);
-  let port_a = test_env.public_ports[0];
+  let port_a = test_env.ports[0].public();
 
   // Send request to Node A to create data in the cell
   let url_a =
@@ -793,31 +792,45 @@ async fn test_restore_coordination() {
   // Rest of the test remains unchanged
   // Spawn two more nodes with auto-allocated ports
   println!("Starting Node B and Node C with auto-allocated ports");
-  let port_b = TestEnv::allocate_ports(7600, 1, 2)[0];
-  let port_c = TestEnv::allocate_ports(7610, 1, 2)[0];
 
-  println!("Starting Node B on port {}", port_b);
-  test_env.spawn_cell_instance(port_b);
-  println!("Starting Node C on port {}", port_c);
-  test_env.spawn_cell_instance(port_c);
+  let (port_b, port_c) = {
+    let mut ports = TestEnv::allocate_ports(7600, 2, 2);
+    assert_eq!(ports.len(), 2);
+    let port_b = ports.swap_remove(0);
+    let port_c = ports.swap_remove(0);
+    (port_b, port_c)
+  };
 
-  // Wait for both nodes to be ready
-  TestEnv::wait_for_server_ready(port_b);
-  TestEnv::wait_for_server_ready(port_c);
-  // Give time for the started nodes to settle on the latest view of the cluster
-  sleep(Duration::from_secs(8)).await;
-
-  // Determine which node is responsible for the cell by querying both
+  let url_b = format!(
+    "http://basic-db.localhost:{}/cell/{}",
+    port_b.public(),
+    test_cell_id
+  );
+  let url_c = format!(
+    "http://basic-db.localhost:{}/cell/{}",
+    port_c.public(),
+    test_cell_id
+  );
   let owner_url_b = format!(
     "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
-    port_b + 1,
+    port_b.internal(),
     test_cell_id
   );
   let owner_url_c = format!(
     "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
-    port_c + 1,
+    port_c.internal(),
     test_cell_id
   );
+
+  println!("Starting Node B on port {}", port_b.public());
+  test_env.spawn_cell_instance(vec![port_b]);
+  println!("Starting Node C on port {}", port_c.public());
+  test_env.spawn_cell_instance(vec![port_c]);
+
+  // Give time for the started nodes to settle on the latest view of the cluster
+  sleep(Duration::from_secs(8)).await;
+
+  // Determine which node is responsible for the cell by querying both
 
   let owner_resp_b = reqwest::get(&owner_url_b)
     .await
@@ -842,12 +855,6 @@ async fn test_restore_coordination() {
     is_b_owner != is_c_owner,
     "Only one node should be the owner of the cell"
   );
-
-  // Create URLs for both nodes
-  let url_b =
-    format!("http://basic-db.localhost:{}/cell/{}", port_b, test_cell_id);
-  let url_c =
-    format!("http://basic-db.localhost:{}/cell/{}", port_c, test_cell_id);
 
   // First, try the node that should be the owner (more likely to succeed first)
   let (first_url, second_url) = if is_b_owner {
@@ -875,7 +882,7 @@ async fn test_restore_coordination() {
 async fn test_restore_single() {
   // Create a single-node environment
   let mut test_env = TestEnv::new(1);
-  let port = test_env.public_ports[0];
+  let port = test_env.ports[0].public();
 
   let test_cell_id = "test-restore";
 
@@ -892,14 +899,15 @@ async fn test_restore_single() {
   println!("Shutting down celld instance...");
   test_env.graceful_shutdown_cell_instance(0);
 
-  let new_port = TestEnv::allocate_ports(7620, 1, 2)[0];
-  test_env.spawn_cell_instance(new_port);
-  TestEnv::wait_for_server_ready(new_port);
-
+  let new_port = TestEnv::allocate_ports(7620, 1, 2);
+  assert_eq!(new_port.len(), 1);
   let new_url = format!(
     "http://basic-db.localhost:{}/cell/{}",
-    new_port, test_cell_id
+    new_port[0].public(),
+    test_cell_id
   );
+  test_env.spawn_cell_instance(new_port);
+
   let response2 = client.get(&new_url).send().await.unwrap();
   assert_eq!(response2.status(), 200);
   let content2 = response2.text().await.unwrap();
