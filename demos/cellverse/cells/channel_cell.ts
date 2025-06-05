@@ -115,7 +115,7 @@ if (cell.id.startsWith("channel-")) {
         ).get();
 
         if (personalityConfig && personalityConfig.value) {
-          p = personalityConfig.value;
+          p = personalityConfig.value as string;
         }
 
         p += `\n\nYou are solving a complex problem.
@@ -289,8 +289,8 @@ You must respond with a JSON object matching one of these schemas:
 
         // Get memories
         const memories = cell.db.prepare(
-          `SELECT id, key, value, created_at, updated_at 
-           FROM memories 
+          `SELECT id, key, value, created_at, updated_at
+           FROM memories
            ORDER BY updated_at DESC`,
         ).all();
 
@@ -391,7 +391,7 @@ You must respond with a JSON object matching one of these schemas:
 
       // Send recent message history
       const messages = cell.db.prepare(
-        `SELECT * FROM messages ORDER BY timestamp DESC LIMIT 50`,
+        `SELECT * FROM messages ORDER BY id DESC LIMIT 50`,
       ).all().reverse();
 
       socket.send(JSON.stringify({
@@ -447,9 +447,9 @@ You must respond with a JSON object matching one of these schemas:
         ).toISOString();
         const recentMessages = cell.db.prepare(
           `SELECT username, content, is_llm_response, is_system_message, timestamp
-             FROM messages 
+             FROM messages
              WHERE timestamp >= ?
-             ORDER BY timestamp DESC 
+             ORDER BY id DESC
              LIMIT 100`,
         ).all(oneHourAgo).reverse() as {
           username: string;
@@ -584,7 +584,7 @@ Respond naturally while occasionally storing or retrieving memories.`;
               // Read memories with optional filter
               const memories = validatedAction.filter
                 ? cell.db.prepare(
-                  `SELECT key, value FROM memories 
+                  `SELECT key, value FROM memories
                        WHERE key LIKE ? OR value LIKE ?
                        ORDER BY updated_at DESC`,
                 ).all(
@@ -592,7 +592,7 @@ Respond naturally while occasionally storing or retrieving memories.`;
                   `%${validatedAction.filter}%`,
                 )
                 : cell.db.prepare(
-                  `SELECT key, value FROM memories 
+                  `SELECT key, value FROM memories
                        ORDER BY updated_at DESC LIMIT 10`,
                 ).all();
 

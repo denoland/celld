@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { authService } from "./auth";
-import { type Channel } from "./channelService";
+import { authService } from "./auth.ts";
+import { type Channel } from "./channelService.ts";
 
 interface Message {
   id: number;
@@ -90,7 +90,10 @@ export function Chat(
             break;
 
           case "message":
-            setMessages((prev) => [...prev, data.message]);
+            setMessages((prev) => {
+              const newMessages = [...prev, data.message];
+              return newMessages.sort((a, b) => a.id - b.id);
+            });
             break;
 
           case "error":
