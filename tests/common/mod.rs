@@ -293,6 +293,7 @@ impl TestEnv {
             "CELL_S3_SECRET_ACCESS_KEY",
             &self.minio_server.secret_access_key,
           )
+          .env("CELL_DENO_OUTPUT", "1")
           .envs(&self.envs);
       };
       let server = CapturedSubprocess::new(
