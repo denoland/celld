@@ -7,7 +7,7 @@ export interface Channel {
 }
 
 class ChannelService {
-  private baseUrl = "/cell/channel-registry";
+  private baseUrl = "/cell/registry";
 
   async createChannel(name: string): Promise<Channel> {
     const token = localStorage.getItem("auth_token");

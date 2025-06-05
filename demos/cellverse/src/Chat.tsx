@@ -40,7 +40,7 @@ export function Chat(
         if (!token) return;
 
         const response = await fetch(
-          `/cell/channel-registry/get/${channelId}`,
+          `/cell/registry/get/${channelId}`,
           {
             headers: {
               Authorization: `Bearer ${token}`,
@@ -182,15 +182,17 @@ export function Chat(
                 key={message.id}
                 className={`message ${
                   message.is_system_message ? "system-message" : ""
-                } ${
-                  message.is_llm_response ? "llm-message" : ""
-                } ${
+                } ${message.is_llm_response ? "llm-message" : ""} ${
                   message.github_id === user?.github_id ? "own-message" : ""
                 }`}
               >
                 <div className="message-header">
                   <span className="message-author">
-                    {message.is_system_message ? "system" : message.is_llm_response ? "bot" : message.username}
+                    {message.is_system_message
+                      ? "system"
+                      : message.is_llm_response
+                      ? "bot"
+                      : message.username}
                   </span>
                   <span className="message-time">
                     {new Date(message.timestamp + "Z").toLocaleTimeString([], {
