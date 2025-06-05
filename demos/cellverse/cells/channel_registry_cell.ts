@@ -1,4 +1,4 @@
-import { cell } from "jsr:@ry/cells";
+import { cell } from "@ry/cells";
 import { extractBearerToken, verifyJWT } from "./utils.ts";
 
 const FRONTEND_URL = Deno.env.get("FRONTEND_URL");
