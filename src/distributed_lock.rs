@@ -281,7 +281,7 @@ impl LockState {
         .is_err()
         {
           // TODO(magurotuna): we should forcibly kill it here to ensure that
-          // the cell stays alive after the lock is released.
+          // the cell will not stay alive after the lock is released.
           error!(
             ?descriptor,
             "Timed out while terminating protected resource gracefully"
