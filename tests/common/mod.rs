@@ -70,6 +70,10 @@ pub struct TestEnv {
   /// Environment variables to set for each server instance. Overrides the
   /// default ones if name collides.
   envs: HashMap<String, String>,
+  /// The buffer for stdout and stderr logs of cells that were gracefully
+  /// shutdown.
+  /// The key is the cell name, and the value is a pair of stdout and stderr.
+  shutdown_node_logs: HashMap<String, (String, String)>,
 }
 
 impl TestEnv {
@@ -206,6 +210,7 @@ impl TestEnv {
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect(),
+      shutdown_node_logs: HashMap::new(),
     };
 
     test_env.spawn_cell_instance(ports);
@@ -245,12 +250,15 @@ impl TestEnv {
   #[allow(dead_code)]
   pub fn graceful_shutdown_cell_instance(&mut self, index: usize) {
     let mut server = self.servers.remove(index);
-    let _ = self.ports.remove(index);
+    let port = self.ports.remove(index);
     let _tmp_dir = self.server_dirs.remove(index); // Remove and drop TempDir
 
     let pid = Pid::from_raw(server.child().id() as i32);
     kill(pid, Signal::SIGTERM).unwrap();
     server.child_mut().wait().unwrap();
+    let node_name = format!("celld({})", port.public());
+    let (stdout, stderr) = server.dump();
+    self.shutdown_node_logs.insert(node_name, (stdout, stderr));
   }
 
   pub fn spawn_cell_instance(&mut self, ports: Vec<PortLease>) {
@@ -350,11 +358,11 @@ impl Drop for TestEnv {
       self.kill_cell_instance(0);
     }
 
-    // Release all ports
-    let mut lock = USED_PORTS.lock().unwrap();
-    for port in &self.ports {
-      lock.remove(&port.public());
-      lock.remove(&port.internal());
+    if std::thread::panicking() {
+      for (node_name, (stdout, stderr)) in self.shutdown_node_logs.iter() {
+        println!("---- terminated node {} stdout ----\n{}", node_name, stdout);
+        eprintln!("---- terminated node {} stderr ----\n{}", node_name, stderr);
+      }
     }
   }
 }
