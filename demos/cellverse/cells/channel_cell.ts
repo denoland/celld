@@ -39,12 +39,11 @@ if (cell.id.startsWith("channel-")) {
   cell.db.exec(`
     CREATE TABLE IF NOT EXISTS messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      github_id TEXT NOT NULL,
+      github_id TEXT,
       username TEXT NOT NULL,
       timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       content TEXT NOT NULL,
-      is_llm_response INTEGER DEFAULT 0,
-      is_system_message INTEGER DEFAULT 0
+      message_type TEXT NOT NULL DEFAULT 'user' CHECK (message_type IN ('user', 'bot', 'system'))
     )
   `);
 
@@ -182,9 +181,9 @@ You must respond with a JSON object matching one of these schemas:
 
             // Store and broadcast the response
             const aiResult = cell.db.prepare(
-              `INSERT INTO messages (github_id, username, content, is_llm_response)
+              `INSERT INTO messages (github_id, username, content, message_type)
                    VALUES (?, ?, ?, ?) RETURNING *`,
-            ).get("ai", "bot", validatedAction.message, 1);
+            ).get(null, "bot", validatedAction.message, "bot");
 
             cell.broadcast(JSON.stringify({
               type: "message",
@@ -423,15 +422,14 @@ You must respond with a JSON object matching one of these schemas:
     if (data.type === "message") {
       // Store message
       const stmt = cell.db.prepare(
-        `INSERT INTO messages (github_id, username, content, is_llm_response, is_system_message)
-         VALUES (?, ?, ?, ?, ?) RETURNING *`,
+        `INSERT INTO messages (github_id, username, content, message_type)
+         VALUES (?, ?, ?, ?) RETURNING *`,
       );
       const result = stmt.get(
         user.github_id,
         user.username,
         data.content,
-        0,
-        0,
+        "user",
       );
 
       // Broadcast to all connected users
@@ -446,7 +444,7 @@ You must respond with a JSON object matching one of these schemas:
           Date.now() - 60 * 60 * 1000,
         ).toISOString();
         const recentMessages = cell.db.prepare(
-          `SELECT username, content, is_llm_response, is_system_message, timestamp
+          `SELECT username, content, message_type, timestamp
              FROM messages
              WHERE timestamp >= ?
              ORDER BY id DESC
@@ -454,16 +452,17 @@ You must respond with a JSON object matching one of these schemas:
         ).all(oneHourAgo).reverse() as {
           username: string;
           content: string;
-          is_llm_response: 0 | 1;
-          is_system_message: 0 | 1;
+          message_type: "user" | "bot" | "system";
           timestamp: string;
         }[];
 
         // Build conversation history
-        const messages = recentMessages.filter((msg) => !msg.is_system_message)
+        const messages = recentMessages.filter((msg) =>
+          msg.message_type !== "system"
+        )
           .map((msg) => ({
-            role: msg.is_llm_response ? "assistant" : "user",
-            content: msg.is_llm_response
+            role: msg.message_type === "bot" ? "assistant" : "user",
+            content: msg.message_type === "bot"
               ? msg.content
               : `${msg.username}: ${msg.content}`,
           } as const));
@@ -547,9 +546,9 @@ Respond naturally while occasionally storing or retrieving memories.`;
             case "respond": {
               // Store and broadcast the response
               const aiResult = cell.db.prepare(
-                `INSERT INTO messages (github_id, username, content, is_llm_response)
+                `INSERT INTO messages (github_id, username, content, message_type)
                    VALUES (?, ?, ?, ?) RETURNING *`,
-              ).get("ai", "bot", validatedAction.message, 1);
+              ).get(null, "bot", validatedAction.message, "bot");
 
               cell.broadcast(JSON.stringify({
                 type: "message",
@@ -568,9 +567,9 @@ Respond naturally while occasionally storing or retrieving memories.`;
               // Send optional response
               if (validatedAction.response) {
                 const aiResult = cell.db.prepare(
-                  `INSERT INTO messages (github_id, username, content, is_llm_response)
+                  `INSERT INTO messages (github_id, username, content, message_type)
                      VALUES (?, ?, ?, ?) RETURNING *`,
-                ).get("ai", "bot", validatedAction.response, 1);
+                ).get(null, "bot", validatedAction.response, "bot");
 
                 cell.broadcast(JSON.stringify({
                   type: "message",
@@ -612,9 +611,9 @@ Respond naturally while occasionally storing or retrieving memories.`;
               }
 
               const aiResult = cell.db.prepare(
-                `INSERT INTO messages (github_id, username, content, is_llm_response)
+                `INSERT INTO messages (github_id, username, content, message_type)
                    VALUES (?, ?, ?, ?) RETURNING *`,
-              ).get("ai", "bot", memoryResponse, 1);
+              ).get(null, "bot", memoryResponse, "bot");
 
               cell.broadcast(JSON.stringify({
                 type: "message",
@@ -640,9 +639,9 @@ Respond naturally while occasionally storing or retrieving memories.`;
               const systemMessage =
                 `📅 Message scheduled for delivery in ${validatedAction.delaySeconds} seconds`;
               const systemResult = cell.db.prepare(
-                `INSERT INTO messages (github_id, username, content, is_llm_response, is_system_message)
-                   VALUES (?, ?, ?, ?, ?) RETURNING *`,
-              ).get("system", "system", systemMessage, 0, 1);
+                `INSERT INTO messages (github_id, username, content, message_type)
+                   VALUES (?, ?, ?, ?) RETURNING *`,
+              ).get(null, "system", systemMessage, "system");
 
               cell.broadcast(JSON.stringify({
                 type: "message",
@@ -656,9 +655,9 @@ Respond naturally while occasionally storing or retrieving memories.`;
               // Send system message to let the user know we're thinking
               const systemMessage = `🤔 Bot is thinking...`;
               const systemResult = cell.db.prepare(
-                `INSERT INTO messages (github_id, username, content, is_llm_response, is_system_message)
-                 VALUES (?, ?, ?, ?, ?) RETURNING *`,
-              ).get("system", "system", systemMessage, 0, 1);
+                `INSERT INTO messages (github_id, username, content, message_type)
+                 VALUES (?, ?, ?, ?) RETURNING *`,
+              ).get(null, "system", systemMessage, "system");
 
               cell.broadcast(JSON.stringify({
                 type: "message",
@@ -701,9 +700,9 @@ Respond naturally while occasionally storing or retrieving memories.`;
 
     for (const { message } of messages) {
       const aiResult = cell.db.prepare(
-        `INSERT INTO messages (github_id, username, content, is_llm_response)
+        `INSERT INTO messages (github_id, username, content, message_type)
          VALUES (?, ?, ?, ?) RETURNING *`,
-      ).get("ai", "bot", message, 1);
+      ).get(null, "bot", message, "bot");
 
       cell.broadcast(JSON.stringify({
         type: "message",

@@ -4,12 +4,11 @@ import { type Channel } from "./channelService.ts";
 
 interface Message {
   id: number;
-  github_id: string;
+  github_id: string | null;
   username: string;
   timestamp: string;
   content: string;
-  is_llm_response: boolean;
-  is_system_message: boolean;
+  message_type: "user" | "bot" | "system";
 }
 
 interface ChatProps {
@@ -184,16 +183,16 @@ export function Chat(
               <div
                 key={message.id}
                 className={`message ${
-                  message.is_system_message ? "system-message" : ""
-                } ${message.is_llm_response ? "llm-message" : ""} ${
+                  message.message_type === "system" ? "system-message" : ""
+                } ${message.message_type === "bot" ? "llm-message" : ""} ${
                   message.github_id === user?.github_id ? "own-message" : ""
                 }`}
               >
                 <div className="message-header">
                   <span className="message-author">
-                    {message.is_system_message
+                    {message.message_type === "system"
                       ? "system"
-                      : message.is_llm_response
+                      : message.message_type === "bot"
                       ? "bot"
                       : message.username}
                   </span>
