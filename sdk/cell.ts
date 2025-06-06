@@ -9,7 +9,7 @@ import {
 } from "./types.ts";
 import { Workflow } from "./workflow.ts";
 import { ulid } from "jsr:@std/ulid@^1.0.0/ulid";
-import { logger } from "./logger.ts";
+import { logger, setup as setupLogger } from "./logger.ts";
 
 // Create a Cell class to track sockets and provide broadcast functionality
 export class Cell implements DbAccessor, TaskScheduler {
@@ -64,6 +64,7 @@ export class Cell implements DbAccessor, TaskScheduler {
   }) {
     this.tenant = args?.tenant ?? Cell.#defaultTenant;
     this.id = args?.id ?? Cell.#defaultId;
+    setupLogger(this.tenant, this.id, "DEBUG");
     this.dbPath = args?.dbPath ?? Cell.#defaultDbPath;
     const ctlSockPath = args?.ctlSockPath ?? Cell.#defaultCtlSockPath;
     this.ctlClient = Deno.createHttpClient({
