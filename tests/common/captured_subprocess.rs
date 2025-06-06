@@ -74,6 +74,13 @@ impl CapturedSubprocess {
   pub fn child_mut(&mut self) -> &mut Child {
     &mut self.child
   }
+
+  pub fn dump(self) -> (String, String) {
+    (
+      self.captured_stdout.lock().unwrap().clone(),
+      self.captured_stderr.lock().unwrap().clone(),
+    )
+  }
 }
 
 impl Drop for CapturedSubprocess {

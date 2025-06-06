@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
 use tokio::time::sleep;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 use uuid::Uuid;
 
 use crate::active_connections;
@@ -640,7 +640,7 @@ impl CellManager {
           if e.kind() == std::io::ErrorKind::ConnectionRefused
             || e.kind() == std::io::ErrorKind::NotFound =>
         {
-          debug!(
+          trace!(
             pid = pid,
             socket = %socket_.display(),
             tenant = %host,

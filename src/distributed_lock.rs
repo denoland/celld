@@ -262,6 +262,10 @@ impl LockState {
           let deadline = timer.deadline();
           if deadline < now + Duration::from_secs(10) {
             // The current deadline is too close. Reset it to 30 seconds from now.
+            debug!(
+              ?descriptor,
+              "Extending lock deadline to 30 seconds from now to get enough time to gracefully terminate the protected resource"
+            );
             let new_ttl = Duration::from_secs(30);
             lock_manager.renew(&descriptor, new_ttl).await?;
             timer.as_mut().reset(now + new_ttl);
@@ -281,7 +285,7 @@ impl LockState {
         .is_err()
         {
           // TODO(magurotuna): we should forcibly kill it here to ensure that
-          // the cell stays alive after the lock is released.
+          // the cell will not stay alive after the lock is released.
           error!(
             ?descriptor,
             "Timed out while terminating protected resource gracefully"
