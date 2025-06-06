@@ -10,6 +10,7 @@ import {
   type WorkflowRunProgress,
   type WorkflowStep,
 } from "./types.ts";
+import { logger } from "./logger.ts";
 
 export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
   static #runningWorkflows = 0;
@@ -162,7 +163,7 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
         attempt: 1,
       });
     } catch (e) {
-      console.error(e);
+      logger().error(e);
       // Schedule a retry in 1 second.
       this.#scheduleRetry(runId, Date.now() + 1000);
       return;

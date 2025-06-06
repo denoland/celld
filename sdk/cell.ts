@@ -9,6 +9,7 @@ import {
 } from "./types.ts";
 import { Workflow } from "./workflow.ts";
 import { ulid } from "jsr:@std/ulid@^1.0.0/ulid";
+import { logger } from "./logger.ts";
 
 // Create a Cell class to track sockets and provide broadcast functionality
 export class Cell implements DbAccessor, TaskScheduler {
@@ -270,7 +271,7 @@ export class Cell implements DbAccessor, TaskScheduler {
 
   private setupServer(): void {
     this.server = Deno.serve(async (req) => {
-      console.error({ url: req.url, method: req.method });
+      logger().debug({ url: req.url, method: req.method });
       // Handle WebSocket connections
       if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
         const { response, socket } = Deno.upgradeWebSocket(req);
@@ -358,7 +359,7 @@ export class Cell implements DbAccessor, TaskScheduler {
 
     // Handle SIGTERM for graceful shutdown
     Deno.addSignalListener("SIGTERM", () => {
-      console.log(
+      logger().info(
         `SIGTERM received, shutting down ${this.tenant}/${this.id} gracefully...`,
       );
       this.shutdown();
@@ -405,8 +406,7 @@ export class Cell implements DbAccessor, TaskScheduler {
       this.dbInstance.close();
       this.dbInstance = null;
     }
-
-    console.log(
+    logger().info(
       `Shutdown complete for ${this.tenant}/${this.id}`,
     );
     Deno.exit(0);
