@@ -135,10 +135,11 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
 
   resumeAllPendingWorkflowRuns() {
     const pendingRunIds = this.#dbAccessor.db.prepare(
-      `SELECT id FROM workflow_runs WHERE completed_at IS NULL`,
+      `SELECT id, workflow_name FROM workflow_runs WHERE completed_at IS NULL`,
     ).all();
 
-    for (const { id } of pendingRunIds) {
+    for (const { id, workflow_name } of pendingRunIds) {
+      logger().debug(`Retrying workflow run ${id} (${workflow_name})`);
       this.retry(id as WorkflowRunId);
     }
   }
@@ -163,13 +164,21 @@ export class Workflow<WorkflowInputs extends Record<string, JSONValue>> {
         attempt: 1,
       });
     } catch (e) {
-      logger().error(e);
+      logger().error(
+        `Workflow run ${runId} (${workflowName.toString()}) failed: ${
+          Deno.inspect(e)
+        }`,
+      );
       // Schedule a retry in 1 second.
       this.#scheduleRetry(runId, Date.now() + 1000);
       return;
     } finally {
       Workflow.#runningWorkflows--;
     }
+
+    logger().debug(
+      `Workflow run ${runId} (${workflowName.toString()}) completed`,
+    );
 
     // Mark the workflow run as completed.
     this.#dbAccessor.db.prepare(
