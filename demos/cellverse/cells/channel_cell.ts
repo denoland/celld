@@ -79,6 +79,17 @@ if (cell.id.startsWith("channel-")) {
   `);
 
   // Defining workflow
+  const ReasoningActionSchema = z.discriminatedUnion("action", [
+    z.object({
+      action: z.literal("conclusion"),
+      message: z.string(),
+    }),
+    z.object({
+      action: z.literal("step"),
+      message: z.string(),
+    }),
+  ]);
+
   const reasoningWorkflow = define({
     event: "reasoning",
     handler: async (input: {
@@ -215,17 +226,6 @@ You must respond with a JSON object matching one of these schemas:
       }
     },
   });
-
-  const ReasoningActionSchema = z.discriminatedUnion("action", [
-    z.object({
-      action: z.literal("conclusion"),
-      message: z.string(),
-    }),
-    z.object({
-      action: z.literal("step"),
-      message: z.string(),
-    }),
-  ]);
 
   // Request handlers
   cell.request(async (req: Request): Promise<Response> => {
