@@ -164,7 +164,7 @@ async fn test_flaky_workflow_in_single_node_cluster() {
   assert_eq!(last_step_output, generated_random_number * 2);
 }
 
-#[test_log::test(tokio::test)]
+#[flaky_test::flaky_test(tokio)]
 async fn test_workflow_automatic_resume_after_node_failure() {
   let mut test_env = TestEnv::new(3);
 
