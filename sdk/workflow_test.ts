@@ -120,17 +120,17 @@ Deno.test("workflow type safety", () => {
 
   withRuntime(rt, () => {
     // Test that workflows are properly typed
-    const _userSignup = define({
+    const _userSignup = define<{ userId: string; email: string }>({
       event: "user.signup",
-      handler: async (input: { userId: string; email: string }) => {
+      handler: async ({ input }) => {
         await delay(1);
         return { success: true, welcomeMessage: `Welcome ${input.userId}!` };
       },
     });
 
-    const _userLogin = define({
+    const _userLogin = define<{ userId: string }>({
       event: "user.login",
-      handler: async (_input: { userId: string }) => {
+      handler: async ({ input }) => {
         await delay(1);
         return { loggedIn: true, sessionId: "session_123" };
       },
@@ -148,7 +148,7 @@ Deno.test("dispatch undefined workflow throws error", () => {
     } as WorkflowDef<EventWorkflowConfig>;
 
     try {
-      dispatch(undefinedWorkflow, null);
+      dispatch(undefinedWorkflow);
       throw new Error("Expected error was not thrown");
     } catch (error) {
       assertEquals((error as Error).message, "Workflow nonexistent not found");
@@ -160,9 +160,9 @@ Deno.test("define workflow with no steps and dispatch it", async () => {
   const { runtime } = createTestRuntime();
 
   await withRuntimeAsync(runtime, async () => {
-    const noStepWorkflow = define({
+    const noStepWorkflow = define<{ value: number }>({
       event: "no-step",
-      handler: async (input: { value: number }) => {
+      handler: async ({ input }) => {
         await delay(1);
         return { processed: input.value * 2 };
       },
@@ -181,9 +181,9 @@ Deno.test("define workflow with one step and dispatch it", async () => {
   const { runtime } = createTestRuntime();
 
   await withRuntimeAsync(runtime, async () => {
-    const oneStepWorkflow = define({
+    const oneStepWorkflow = define<{ value: number }>({
       event: "one-step",
-      handler: async (input: { value: number }, { step }) => {
+      handler: async ({ input, step }) => {
         const result = await step.run(
           "sleep 10ms and then multiply by 2",
           async () => {
@@ -213,19 +213,19 @@ Deno.test("step.invoke enables workflow composition", async () => {
   const { runtime, dbAccessor } = createTestRuntime();
 
   await withRuntimeAsync(runtime, async () => {
-    const multiply = define({
+    const multiply = define<{ a: number; b: number }>({
       event: "multiply",
-      handler: async ({ a, b }: { a: number; b: number }) => {
+      handler: async ({ input }) => {
         await delay(1);
-        return a * b;
+        return input.a * input.b;
       },
     });
 
-    const calculate = define({
+    const calculate = define<{ x: number }>({
       event: "calculate",
-      handler: async ({ x }: { x: number }, { step }) => {
-        const doubled = await step.invoke(multiply, { a: x, b: 2 });
-        const tripled = await step.invoke(multiply, { a: x, b: 3 });
+      handler: async ({ input, step }) => {
+        const doubled = await step.invoke(multiply, { a: input.x, b: 2 });
+        const tripled = await step.invoke(multiply, { a: input.x, b: 3 });
         return { doubled, tripled };
       },
     });
@@ -279,17 +279,17 @@ Deno.test("step.invoke recovers from crash", async () => {
     `).run(parentId, childId);
 
     // Define workflows
-    const child = define({
+    const child = define<{ a: number; b: number }>({
       event: "child",
-      handler: async ({ a, b }: { a: number; b: number }) => {
+      handler: async ({ input }) => {
         await delay(1);
-        return a * b;
+        return input.a * input.b;
       },
     });
-    const _parent = define({
+    const _parent = define<{ x: number }>({
       event: "parent",
-      handler: async ({ x }: { x: number }, { step }) => {
-        const result = await step.invoke(child, { a: x, b: 2 });
+      handler: async ({ input, step }) => {
+        const result = await step.invoke(child, { a: input.x, b: 2 });
         return { result };
       },
     });
@@ -314,18 +314,18 @@ Deno.test("multiple step.invoke calls work sequentially", async () => {
   const { runtime } = createTestRuntime();
 
   await withRuntimeAsync(runtime, async () => {
-    const add = define({
+    const add = define<{ a: number; b: number }>({
       event: "add",
-      handler: async ({ a, b }: { a: number; b: number }) => {
+      handler: async ({ input }) => {
         await delay(1);
-        return a + b;
+        return input.a + input.b;
       },
     });
 
-    const chain = define({
+    const chain = define<{ x: number }>({
       event: "chain",
-      handler: async ({ x }: { x: number }, { step }) => {
-        const r1 = await step.invoke(add, { a: x, b: 1 });
+      handler: async ({ input, step }) => {
+        const r1 = await step.invoke(add, { a: input.x, b: 1 });
         const r2 = await step.invoke(add, { a: r1, b: 2 });
         const r3 = await step.invoke(add, { a: r2, b: 3 });
         return r3; // Should be x + 6
@@ -351,18 +351,18 @@ Deno.test("parent down child completed recovery", async () => {
 
   await withRuntimeAsync(runtime, async () => {
     // Test the scenario where parent workflow was down when child completed
-    const child = define({
+    const child = define<{ x: number }>({
       event: "child",
-      handler: async ({ x }: { x: number }) => {
+      handler: async ({ input }) => {
         await delay(1);
-        return x * 10;
+        return input.x * 10;
       },
     });
 
-    const parent = define({
+    const parent = define<{ value: number }>({
       event: "parent",
-      handler: async ({ value }: { value: number }, { step }) => {
-        const result = await step.invoke(child, { x: value });
+      handler: async ({ input, step }) => {
+        const result = await step.invoke(child, { x: input.value });
         return { processed: result };
       },
     });
@@ -419,7 +419,7 @@ Deno.test("void returning workflows work correctly", async () => {
     // Define a workflow that returns void (no explicit return)
     const voidWorkflow = define({
       event: "void-workflow",
-      handler: async (_input: null) => {
+      handler: async ({ step }) => {
         await delay(1);
         // Explicitly return nothing (void)
       },
@@ -428,14 +428,14 @@ Deno.test("void returning workflows work correctly", async () => {
     // Define a parent workflow that invokes the void workflow
     const parent = define({
       event: "parent",
-      handler: async (_input: null, { step }) => {
-        const result = await step.invoke(voidWorkflow, null);
+      handler: async ({ step }) => {
+        const result = await step.invoke(voidWorkflow);
         // result should be undefined
         return { completed: true, voidResult: result === undefined };
       },
     });
 
-    const runId = dispatch(parent, null);
+    const runId = dispatch(parent);
     const progress = await waitForCompletion(runtime, runId);
 
     // Verify the workflow completed successfully
@@ -457,9 +457,9 @@ Deno.test("getRunProgress public API works correctly", async () => {
   const { runtime } = createTestRuntime();
 
   await withRuntimeAsync(runtime, async () => {
-    const testWorkflow = define({
+    const testWorkflow = define<{ value: number }>({
       event: "test-progress",
-      handler: async (input: { value: number }, { step }) => {
+      handler: async ({ input, step }) => {
         const doubled = await step.run("double", () => input.value * 2);
         return { result: doubled };
       },
@@ -491,17 +491,17 @@ Deno.test("listRuns public API works correctly", async () => {
   const { runtime } = createTestRuntime();
 
   await withRuntimeAsync(runtime, async () => {
-    const workflow1 = define({
+    const workflow1 = define<{ x: number }>({
       event: "workflow-1",
-      handler: async (input: { x: number }) => {
+      handler: async ({ input }) => {
         await delay(1);
         return { result: input.x * 2 };
       },
     });
 
-    const workflow2 = define({
+    const workflow2 = define<{ y: number }>({
       event: "workflow-2",
-      handler: async (input: { y: number }) => {
+      handler: async ({ input }) => {
         await delay(1);
         return { result: input.y * 3 };
       },

@@ -22,12 +22,11 @@ cell.db.exec(`
   )
 `);
 
-const reliableWorkflow = define({
+const reliableWorkflow = define<
+  { username: string; email: string; phoneNumber: string }
+>({
   event: "reliable",
-  handler: async (
-    input: { username: string; email: string; phoneNumber: string },
-    { step },
-  ) => {
+  handler: async ({ input, step }) => {
     await step.run("send-email", async () => {
       // Simulate a delay of sending email
       await delay(500);
@@ -56,7 +55,7 @@ const reliableWorkflow = define({
 // This aims to verify the result memoization in retried workflow runs.
 const flakyWorkflow = define({
   event: "flaky",
-  handler: async (_input: null, { step }) => {
+  handler: async ({ step }) => {
     const randomNumber = await step.run(
       "generate-random-number",
       async () => {
@@ -123,7 +122,7 @@ cell.request(async (req: Request) => {
   }
 
   if (lastPathSegment === "flaky" && req.method === "POST") {
-    const runId = dispatch(flakyWorkflow, null);
+    const runId = dispatch(flakyWorkflow);
     return new Response(runId);
   }
 

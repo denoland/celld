@@ -90,15 +90,15 @@ if (cell.id.startsWith("channel-")) {
     }),
   ]);
 
-  const reasoningWorkflow = define({
+  const reasoningWorkflow = define<{
+    messages: {
+      role: "user" | "assistant";
+      content: string;
+    }[];
+    allowedSteps: number;
+  }>({
     event: "reasoning",
-    handler: async (input: {
-      messages: {
-        role: "user" | "assistant";
-        content: string;
-      }[];
-      allowedSteps: number;
-    }, { step }) => {
+    handler: async ({ input, step }) => {
       const systemPrompt = await step.run("construct-system-prompt", () => {
         let p = `You are a bot in the "${
           cell.id.replace("channel-", "")

@@ -68,7 +68,10 @@ export class WorkflowRuntime {
   // Store workflow definitions by name
   #workflows = new Map<
     string,
-    (input: JSONValue, ctx: WorkflowCtx) => Promise<JSONValue>
+    (
+      input: JSONValue,
+      ctx: { step: WorkflowStep; attempt: number },
+    ) => Promise<JSONValue>
   >();
 
   static runningWorkflows(): number {
@@ -77,7 +80,10 @@ export class WorkflowRuntime {
 
   register<Input extends JSONValue, Output extends JSONValue>(
     name: string,
-    handler: (input: Input, ctx: WorkflowCtx) => Promise<Output>,
+    handler: (
+      input: Input,
+      ctx: { step: WorkflowStep; attempt: number },
+    ) => Promise<Output>,
   ): void {
     this.#dbAccessor.db.prepare(
       `INSERT OR IGNORE INTO workflows (name) VALUES (?)`,
@@ -86,7 +92,7 @@ export class WorkflowRuntime {
       name,
       handler as unknown as (
         input: JSONValue,
-        ctx: WorkflowCtx,
+        ctx: { step: WorkflowStep; attempt: number },
       ) => Promise<JSONValue>,
     );
   }
@@ -223,7 +229,10 @@ export class WorkflowRuntime {
   }
 
   async #dispatchInner(
-    handler: (input: JSONValue, ctx: WorkflowCtx) => Promise<JSONValue>,
+    handler: (
+      input: JSONValue,
+      ctx: { step: WorkflowStep; attempt: number },
+    ) => Promise<JSONValue>,
     runId: WorkflowRunId,
     _workflowName: string,
     inputData: JSONValue,
@@ -468,9 +477,11 @@ class WorkflowStepImpl implements WorkflowStep {
 
   async invoke<W extends WorkflowDef<WorkflowConfig>>(
     workflow: W,
-    input: WorkflowInput<W>,
+    ...args: WorkflowInput<W> extends never ? [] : [WorkflowInput<W>]
   ): Promise<WorkflowOutput<W>> {
     this.#currentIndex++;
+
+    const input = args.length > 0 ? args[0] : null;
 
     const memoized = this.#dbAccessor.db.prepare(
       `SELECT output_data FROM workflow_steps WHERE workflow_run_id = ? AND step_index = ?`,
@@ -537,28 +548,35 @@ class WorkflowStepImpl implements WorkflowStep {
   // TODO: add more methods like sleep, sleepUntil, etc.
 }
 
-// deno-lint-ignore no-explicit-any
-export function define<Input = any, Output = any>(
+export function define<Input = void, Output = any>(
   config: EventWorkflowConfig<Input, Output>,
-): WorkflowDef<EventWorkflowConfig<Input, Output>> {
+): WorkflowDef<WorkflowConfig<Input, Output>> {
   const runtime = getRuntime();
-  runtime.register(
-    config.event,
-    config.handler as unknown as (
-      input: JSONValue,
-      ctx: WorkflowCtx,
-    ) => Promise<JSONValue>,
-  );
+
+  // Wrapper to convert from new API to internal format
+  const wrappedHandler = async (
+    input: JSONValue,
+    ctx: { step: WorkflowStep; attempt: number },
+  ) => {
+    if (input === null || input === undefined) {
+      return await config.handler(ctx as WorkflowCtx<Input>);
+    } else {
+      return await config.handler(
+        { ...ctx, input: input as Input } as unknown as WorkflowCtx<Input>,
+      );
+    }
+  };
+
+  runtime.register(config.event, wrappedHandler as any);
   return { config, name: config.event };
 }
 
-export function dispatch<
-  W extends WorkflowDef<WorkflowConfig>,
->(
+export function dispatch<W extends WorkflowDef<WorkflowConfig<any, any>>>(
   workflow: W,
-  input: WorkflowInput<W>,
+  ...args: WorkflowInput<W> extends never ? [] : [WorkflowInput<W>]
 ): WorkflowRunId {
   const runtime = getRuntime();
+  const input = args.length > 0 ? args[0] : null;
   const runId = runtime.dispatchByName(workflow.name, input as JSONValue);
   if (!runId) {
     throw new Error(`Workflow ${workflow.name} not found`);

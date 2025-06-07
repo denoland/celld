@@ -72,34 +72,35 @@ export interface WorkflowStep {
     fn: () => StepOutput | Promise<StepOutput>,
   ): Promise<StepOutput>;
 
-  invoke<W extends WorkflowDef<WorkflowConfig>>(
+  invoke<W extends WorkflowDef<WorkflowConfig<any, any>>>(
     workflow: W,
-    input: WorkflowInput<W>,
+    ...args: WorkflowInput<W> extends never ? [] : [WorkflowInput<W>]
   ): Promise<WorkflowOutput<W>>;
 }
 
 // deno-lint-ignore no-explicit-any
-export interface EventWorkflowConfig<Input = any, Output = any> {
+export interface EventWorkflowConfig<Input = void, Output = any> {
   event: string;
-  handler: (input: Input, ctx: WorkflowCtx) => Promise<Output>;
+  handler: (ctx: WorkflowCtx<Input>) => Promise<Output>;
   retries?: number;
   concurrency?: number;
 }
 
 // deno-lint-ignore no-explicit-any
-export type WorkflowConfig<Input = any, Output = any> = EventWorkflowConfig<
+export type WorkflowConfig<Input = void, Output = any> = EventWorkflowConfig<
   Input,
   Output
 >;
 
-export interface WorkflowDef<Config extends WorkflowConfig> {
+export interface WorkflowDef<Config extends WorkflowConfig<any, any>> {
   readonly config: Config;
   readonly name: string;
 }
 
 export type WorkflowInput<W> = W extends WorkflowDef<infer C>
   // deno-lint-ignore no-explicit-any
-  ? C extends EventWorkflowConfig<infer I, any> ? I : never
+  ? C extends EventWorkflowConfig<infer I, any> ? I extends void ? never : I
+  : never
   : never;
 
 export type WorkflowOutput<W> = W extends WorkflowDef<infer C>
@@ -107,10 +108,10 @@ export type WorkflowOutput<W> = W extends WorkflowDef<infer C>
   ? C extends EventWorkflowConfig<any, infer O> ? O : never
   : never;
 
-export interface WorkflowCtx {
+export type WorkflowCtx<TInput = void> = {
   step: WorkflowStep;
   attempt: number;
-}
+} & (TInput extends void ? {} : { input: TInput });
 
 export class WorkflowSuspendedError extends Error {
   constructor(message: string) {
