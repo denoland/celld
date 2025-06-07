@@ -475,7 +475,8 @@ class WorkflowStepImpl implements WorkflowStep {
     return result;
   }
 
-  async invoke<W extends WorkflowDef<WorkflowConfig>>(
+  // deno-lint-ignore no-explicit-any
+  async invoke<W extends WorkflowDef<WorkflowConfig<any, any>>>(
     workflow: W,
     ...args: WorkflowInput<W> extends never ? [] : [WorkflowInput<W>]
   ): Promise<WorkflowOutput<W>> {
@@ -548,6 +549,7 @@ class WorkflowStepImpl implements WorkflowStep {
   // TODO: add more methods like sleep, sleepUntil, etc.
 }
 
+// deno-lint-ignore no-explicit-any
 export function define<Input = void, Output = any>(
   config: EventWorkflowConfig<Input, Output>,
 ): WorkflowDef<WorkflowConfig<Input, Output>> {
@@ -567,10 +569,12 @@ export function define<Input = void, Output = any>(
     }
   };
 
+  // deno-lint-ignore no-explicit-any
   runtime.register(config.event, wrappedHandler as any);
   return { config, name: config.event };
 }
 
+// deno-lint-ignore no-explicit-any
 export function dispatch<W extends WorkflowDef<WorkflowConfig<any, any>>>(
   workflow: W,
   ...args: WorkflowInput<W> extends never ? [] : [WorkflowInput<W>]

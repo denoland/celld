@@ -130,7 +130,7 @@ Deno.test("workflow type safety", () => {
 
     const _userLogin = define<{ userId: string }>({
       event: "user.login",
-      handler: async ({ input }) => {
+      handler: async (_) => {
         await delay(1);
         return { loggedIn: true, sessionId: "session_123" };
       },
@@ -419,7 +419,7 @@ Deno.test("void returning workflows work correctly", async () => {
     // Define a workflow that returns void (no explicit return)
     const voidWorkflow = define({
       event: "void-workflow",
-      handler: async ({ step }) => {
+      handler: async (_) => {
         await delay(1);
         // Explicitly return nothing (void)
       },

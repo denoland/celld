@@ -72,6 +72,7 @@ export interface WorkflowStep {
     fn: () => StepOutput | Promise<StepOutput>,
   ): Promise<StepOutput>;
 
+  // deno-lint-ignore no-explicit-any
   invoke<W extends WorkflowDef<WorkflowConfig<any, any>>>(
     workflow: W,
     ...args: WorkflowInput<W> extends never ? [] : [WorkflowInput<W>]
@@ -92,6 +93,7 @@ export type WorkflowConfig<Input = void, Output = any> = EventWorkflowConfig<
   Output
 >;
 
+// deno-lint-ignore no-explicit-any
 export interface WorkflowDef<Config extends WorkflowConfig<any, any>> {
   readonly config: Config;
   readonly name: string;
@@ -111,7 +113,7 @@ export type WorkflowOutput<W> = W extends WorkflowDef<infer C>
 export type WorkflowCtx<TInput = void> = {
   step: WorkflowStep;
   attempt: number;
-} & (TInput extends void ? {} : { input: TInput });
+} & (TInput extends void ? Record<PropertyKey, never> : { input: TInput });
 
 export class WorkflowSuspendedError extends Error {
   constructor(message: string) {
