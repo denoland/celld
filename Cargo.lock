@@ -818,6 +818,7 @@ dependencies = [
  "clap 4.5.38",
  "dashmap",
  "fake",
+ "flaky_test",
  "futures",
  "futures-util",
  "hashring",
@@ -1360,6 +1361,27 @@ checksum = "d013fc25338cc558c5c2cfbad646908fb23591e2404481826742b651c9af7160"
 dependencies = [
  "rand_core 0.6.4",
  "subtle",
+]
+
+[[package]]
+name = "flaky_test"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "046caa1f23d7f751fc4ead3d6669a77fa5fc6cf6074960ddeb6a0b0a5b83c8da"
+dependencies = [
+ "flaky_test_impl",
+ "futures-util",
+]
+
+[[package]]
+name = "flaky_test_impl"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85e35909c2f0552fdae5b40f1e95a7da12afb58c1f2f455a12c216c58d869abe"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]
