@@ -94,13 +94,13 @@ executes in the background. You can use the returned ID to query the progress.
 
 ## Querying Workflow Run Progress
 
-### `getRuntime().getRunProgress(runId: WorkflowRunId): WorkflowRunProgress | null`
+### `getRunProgress(runId: WorkflowRunId): WorkflowRunProgress | null`
 
 Returns the progress of a workflow run. If the run is not found, it returns
 `null`.
 
 ```ts
-import { getRuntime } from "jsr:@deno/cells/workflow";
+import { getRunProgress } from "jsr:@deno/cells";
 
 const runId = dispatch(userSignup, {
   userId: "abc123",
@@ -109,7 +109,7 @@ const runId = dispatch(userSignup, {
 
 // Some time later...
 
-const progress = getRuntime().getRunProgress(runId);
+const progress = getRunProgress(runId);
 console.log(progress);
 // {
 //   id: "01JWQF48VFXJ5Q0BCRM03HA2XQ",
@@ -126,6 +126,41 @@ console.log(progress);
 //   ]
 // }
 ```
+
+### `listRuns(options?: ListRunsOptions): WorkflowRunProgress[]`
+
+Returns a list of workflow runs with optional filtering. Useful for building
+workflow management dashboards.
+
+```ts
+import { listRuns } from "jsr:@deno/cells";
+
+// Get all workflow runs
+const allRuns = listRuns();
+
+// Filter by workflow name
+const signupRuns = listRuns({ workflowName: "user.signup" });
+
+// Filter by completion status
+const pendingRuns = listRuns({ status: "pending" });
+const completedRuns = listRuns({ status: "completed" });
+
+// Limit results
+const recentRuns = listRuns({ limit: 10 });
+
+// Combine filters
+const recentCompletedSignups = listRuns({
+  workflowName: "user.signup",
+  status: "completed",
+  limit: 5,
+});
+```
+
+**Options:**
+
+- `workflowName?: string` - Filter by specific workflow event name
+- `status?: "pending" | "completed"` - Filter by completion status
+- `limit?: number` - Maximum number of results to return
 
 ## Step Functions
 
