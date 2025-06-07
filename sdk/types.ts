@@ -64,25 +64,57 @@ export type JSONValue =
   | { [key: string]: JSONValue }
   | JSONValue[];
 
+export type Serializable = JSONValue | void;
+
 export interface WorkflowStep {
   run<StepOutput extends JSONValue>(
     name: string,
     fn: () => StepOutput | Promise<StepOutput>,
   ): Promise<StepOutput>;
+
+  invoke<W extends WorkflowDef<WorkflowConfig>>(
+    workflow: W,
+    input: WorkflowInput<W>,
+  ): Promise<WorkflowOutput<W>>;
 }
 
-export type WorkflowDefinition<
-  WorkflowInputs extends Record<string, JSONValue>,
-  WorkflowName extends keyof WorkflowInputs,
-> = {
-  name: WorkflowName;
-  handler: (ctx: {
-    event: {
-      id: WorkflowRunId;
-      name: WorkflowName;
-      data: WorkflowInputs[WorkflowName];
-    };
-    step: WorkflowStep;
-    attempt: number;
-  }) => Promise<void> | void;
-};
+// deno-lint-ignore no-explicit-any
+export interface EventWorkflowConfig<Input = any, Output = any> {
+  event: string;
+  handler: (input: Input, ctx: WorkflowCtx) => Promise<Output>;
+  retries?: number;
+  concurrency?: number;
+}
+
+// deno-lint-ignore no-explicit-any
+export type WorkflowConfig<Input = any, Output = any> = EventWorkflowConfig<
+  Input,
+  Output
+>;
+
+export interface WorkflowDef<Config extends WorkflowConfig> {
+  readonly config: Config;
+  readonly name: string;
+}
+
+export type WorkflowInput<W> = W extends WorkflowDef<infer C>
+  // deno-lint-ignore no-explicit-any
+  ? C extends EventWorkflowConfig<infer I, any> ? I : never
+  : never;
+
+export type WorkflowOutput<W> = W extends WorkflowDef<infer C>
+  // deno-lint-ignore no-explicit-any
+  ? C extends EventWorkflowConfig<any, infer O> ? O : never
+  : never;
+
+export interface WorkflowCtx {
+  step: WorkflowStep;
+  attempt: number;
+}
+
+export class WorkflowSuspendedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkflowSuspendedError";
+  }
+}
