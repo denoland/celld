@@ -327,6 +327,78 @@ export class WorkflowRuntime {
       }),
     };
   }
+
+  listRuns(options?: {
+    workflowName?: string;
+    status?: "pending" | "completed";
+    limit?: number;
+  }): WorkflowRunProgress[] {
+    let sql = `
+      SELECT
+        id,
+        workflow_name,
+        dispatched_at,
+        completed_at
+      FROM workflow_runs
+    `;
+
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
+
+    if (options?.workflowName) {
+      conditions.push("workflow_name = ?");
+      params.push(options.workflowName);
+    }
+
+    if (options?.status === "pending") {
+      conditions.push("completed_at IS NULL");
+    } else if (options?.status === "completed") {
+      conditions.push("completed_at IS NOT NULL");
+    }
+
+    if (conditions.length > 0) {
+      sql += ` WHERE ${conditions.join(" AND ")}`;
+    }
+
+    sql += " ORDER BY dispatched_at DESC";
+
+    if (options?.limit) {
+      sql += " LIMIT ?";
+      params.push(options.limit);
+    }
+
+    const runResults = this.#dbAccessor.db.prepare(sql).all(...params);
+
+    return runResults.map((runResult) => {
+      const stepsResult = this.#dbAccessor.db.prepare(`
+        SELECT
+          step_index,
+          name,
+          output_data,
+          completed_at
+        FROM workflow_steps
+        WHERE workflow_run_id = ?
+        ORDER BY step_index ASC
+      `).all(runResult.id);
+
+      return {
+        id: workflowRunId(runResult.id as string),
+        workflowName: runResult.workflow_name as string,
+        dispatchedAt: new Date(runResult.dispatched_at as string),
+        completedAt: runResult.completed_at
+          ? new Date(runResult.completed_at as string)
+          : null,
+        steps: stepsResult.map((row) => {
+          return {
+            stepIndex: row.step_index as number,
+            name: row.name as string,
+            outputData: fromJson(row.output_data as string) as JSONValue,
+            completedAt: new Date(row.completed_at as string),
+          };
+        }),
+      };
+    });
+  }
 }
 
 class WorkflowStepImpl implements WorkflowStep {
@@ -492,4 +564,18 @@ export function dispatch<
     throw new Error(`Workflow ${workflow.name} not found`);
   }
   return runId;
+}
+
+export function getRunProgress(
+  runId: WorkflowRunId,
+): WorkflowRunProgress | null {
+  return getRuntime().getRunProgress(runId);
+}
+
+export function listRuns(options?: {
+  workflowName?: string;
+  status?: "pending" | "completed";
+  limit?: number;
+}): WorkflowRunProgress[] {
+  return getRuntime().listRuns(options);
 }

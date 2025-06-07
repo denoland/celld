@@ -1,5 +1,12 @@
 import { DatabaseSync } from "node:sqlite";
-import { define, dispatch, setRuntime, WorkflowRuntime } from "./workflow.ts";
+import {
+  define,
+  dispatch,
+  getRunProgress,
+  listRuns,
+  setRuntime,
+  WorkflowRuntime,
+} from "./workflow.ts";
 import { toJson } from "./serde.ts";
 import {
   type DbAccessor,
@@ -443,5 +450,107 @@ Deno.test("void returning workflows work correctly", async () => {
     assertExists(dbRow);
     const actualOutput = JSON.parse(dbRow.output_data as string);
     assertEquals(actualOutput, { completed: true, voidResult: true });
+  });
+});
+
+Deno.test("getRunProgress public API works correctly", async () => {
+  const { runtime } = createTestRuntime();
+
+  await withRuntimeAsync(runtime, async () => {
+    const testWorkflow = define({
+      event: "test-progress",
+      handler: async (input: { value: number }, { step }) => {
+        const doubled = await step.run("double", () => input.value * 2);
+        return { result: doubled };
+      },
+    });
+
+    const runId = dispatch(testWorkflow, { value: 5 });
+
+    // Test that getRunProgress works the same as runtime.getRunProgress
+    const publicProgress = getRunProgress(runId);
+    const runtimeProgress = runtime.getRunProgress(runId);
+
+    // Both should return the same data
+    assertEquals(publicProgress?.id, runtimeProgress?.id);
+    assertEquals(publicProgress?.workflowName, runtimeProgress?.workflowName);
+
+    // Wait for completion and test again
+    await waitForCompletion(runtime, runId);
+
+    const finalProgress = getRunProgress(runId);
+    assertExists(finalProgress);
+    assertEquals(finalProgress.steps.length, 1);
+    assertEquals(finalProgress.steps[0].name, "double");
+    assertEquals(finalProgress.steps[0].outputData, 10);
+    assertExists(finalProgress.completedAt);
+  });
+});
+
+Deno.test("listRuns public API works correctly", async () => {
+  const { runtime } = createTestRuntime();
+
+  await withRuntimeAsync(runtime, async () => {
+    const workflow1 = define({
+      event: "workflow-1",
+      handler: async (input: { x: number }) => {
+        await delay(1);
+        return { result: input.x * 2 };
+      },
+    });
+
+    const workflow2 = define({
+      event: "workflow-2",
+      handler: async (input: { y: number }) => {
+        await delay(1);
+        return { result: input.y * 3 };
+      },
+    });
+
+    // Dispatch multiple workflows
+    const runId1 = dispatch(workflow1, { x: 10 });
+    const runId2 = dispatch(workflow2, { y: 20 });
+    const runId3 = dispatch(workflow1, { x: 30 });
+
+    // Wait for all to complete
+    await waitForCompletion(runtime, runId1);
+    await waitForCompletion(runtime, runId2);
+    await waitForCompletion(runtime, runId3);
+
+    // Test listRuns without filters
+    const allRuns = listRuns();
+    assertEquals(allRuns.length, 3);
+
+    // Test filtering by workflow name
+    const workflow1Runs = listRuns({ workflowName: "workflow-1" });
+    assertEquals(workflow1Runs.length, 2);
+    workflow1Runs.forEach((run) => {
+      assertEquals(run.workflowName, "workflow-1");
+    });
+
+    const workflow2Runs = listRuns({ workflowName: "workflow-2" });
+    assertEquals(workflow2Runs.length, 1);
+    assertEquals(workflow2Runs[0].workflowName, "workflow-2");
+
+    // Test filtering by status
+    const completedRuns = listRuns({ status: "completed" });
+    assertEquals(completedRuns.length, 3);
+    completedRuns.forEach((run) => {
+      assertExists(run.completedAt);
+    });
+
+    // Test limit
+    const limitedRuns = listRuns({ limit: 2 });
+    assertEquals(limitedRuns.length, 2);
+
+    // Test combined filters
+    const combinedRuns = listRuns({
+      workflowName: "workflow-1",
+      status: "completed",
+      limit: 1,
+    });
+    assertEquals(combinedRuns.length, 1);
+    assertEquals(combinedRuns[0].workflowName, "workflow-1");
+    assertExists(combinedRuns[0].completedAt);
   });
 });

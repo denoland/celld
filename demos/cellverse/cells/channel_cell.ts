@@ -1,4 +1,4 @@
-import { cell } from "@ry/cells";
+import { cell, define, dispatch } from "@ry/cells";
 import { z } from "npm:zod";
 import { extractBearerToken, verifyJWT } from "./utils.ts";
 
@@ -79,32 +79,15 @@ if (cell.id.startsWith("channel-")) {
   `);
 
   // Defining workflow
-  type CellverseWorkflow = {
-    "reasoning": {
+  const reasoningWorkflow = define({
+    event: "reasoning",
+    handler: async (input: {
       messages: {
         role: "user" | "assistant";
         content: string;
       }[];
       allowedSteps: number;
-    };
-  };
-
-  const workflow = cell.initWorkflow<CellverseWorkflow>();
-
-  const ReasoningActionSchema = z.discriminatedUnion("action", [
-    z.object({
-      action: z.literal("conclusion"),
-      message: z.string(),
-    }),
-    z.object({
-      action: z.literal("step"),
-      message: z.string(),
-    }),
-  ]);
-
-  workflow.define({
-    name: "reasoning",
-    handler: async ({ event, step }) => {
+    }, { step }) => {
       const systemPrompt = await step.run("construct-system-prompt", () => {
         let p = `You are a bot in the "${
           cell.id.replace("channel-", "")
@@ -120,7 +103,7 @@ if (cell.id.startsWith("channel-")) {
 
         p += `\n\nYou are solving a complex problem.
 You will solve it step-by-step, only giving one step at a time unless told otherwise.
-You will have ${event.data.allowedSteps} steps to solve the problem. You may not need to use all of them.
+You will have ${input.allowedSteps} steps to solve the problem. You may not need to use all of them.
 You must respond with a JSON object matching one of these schemas:
 1. To respond with a conclusion:
 {"action": "conclusion", "message": "your conclusion here"}
@@ -136,15 +119,15 @@ You must respond with a JSON object matching one of these schemas:
         content: string;
       }[] = [];
 
-      for (let i = 0; i < event.data.allowedSteps; i++) {
+      for (let i = 0; i < input.allowedSteps; i++) {
         const result = await step.run(
           `reasoning-step-${i}`,
           async () => {
-            const isLastStep = i === event.data.allowedSteps - 1;
+            const isLastStep = i === input.allowedSteps - 1;
             const userMessage = isLastStep
               ? `What is the final answer? Make sure to respond with a JSON object matching: {"action": "conclusion", "message": "your conclusion here"}`
               : `What is the next step? You have ${
-                event.data.allowedSteps - i
+                input.allowedSteps - i
               } steps left. Make sure to respond with a JSON object matching: {"action": "step", "message": "your thinking here"}`;
 
             const response = await fetch(
@@ -159,7 +142,7 @@ You must respond with a JSON object matching one of these schemas:
                   model: "gpt-4o-mini",
                   messages: [
                     { role: "system", content: systemPrompt },
-                    ...event.data.messages,
+                    ...input.messages,
                     ...reasoningMessages,
                     {
                       role: "user",
@@ -232,6 +215,17 @@ You must respond with a JSON object matching one of these schemas:
       }
     },
   });
+
+  const ReasoningActionSchema = z.discriminatedUnion("action", [
+    z.object({
+      action: z.literal("conclusion"),
+      message: z.string(),
+    }),
+    z.object({
+      action: z.literal("step"),
+      message: z.string(),
+    }),
+  ]);
 
   // Request handlers
   cell.request(async (req: Request): Promise<Response> => {
@@ -666,7 +660,7 @@ Respond naturally while occasionally storing or retrieving memories.`;
               }));
 
               // Start reasoning
-              workflow.dispatch("reasoning", {
+              dispatch(reasoningWorkflow, {
                 messages,
                 allowedSteps: 5,
               });

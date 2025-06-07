@@ -1,5 +1,11 @@
 export { Cell, cell } from "./cell.ts";
-export { define, dispatch, WorkflowRuntime } from "./workflow.ts";
+export {
+  define,
+  dispatch,
+  getRunProgress,
+  listRuns,
+  WorkflowRuntime,
+} from "./workflow.ts";
 export * as types from "./types.ts";
 export {
   type WorkflowConfig,

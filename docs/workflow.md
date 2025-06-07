@@ -7,122 +7,109 @@ functions triggered by events or schedules.
 Import:
 
 ```ts
-import { cell } from "jsr:@deno/cells";
+import { cell, define, dispatch } from "jsr:@deno/cells";
 ```
 
-## Initialization
+## Workflow Definitions
 
-First, initialize the workflow instance with the type definition that defines
-event names for event-triggered workflows and their input data types. For
-example:
+Workflows are defined using the `define` function, which creates a type-safe
+workflow definition. Each workflow has an event name and a handler function that
+processes the input data.
 
-```ts
-type UserWorkflows = {
-  "user.signup": { userId: string };
-  "newsletter.subscribe": { email: string; [key: string]: JSONValue };
-};
+### `define(config: EventWorkflowConfig)`
 
-const workflow = cell.initWorkflow<UserWorkflows>();
-```
-
-The type argument here is used to provide better intellisense and type checking.
-Currently there is no runtime validation.
-
-Note that `initWorkflow` can be called only once. If you call it more than once,
-it will throw an runtime error.
-
-## Defining workflows
-
-Next you need to define what each workflow does when it is triggered.
-
-### `workflow.define(config: WorkflowConfig)`
-
-This is the primary API for defining workflows. It supports configuration for
-the following trigger types:
-
-- event-triggered
-- cron-scheduled (🚧 unsupported yet)
-- interval-based (🚧 unsupported yet)
+This is the primary API for defining workflows. Currently, only event-triggered
+workflows are supported.
 
 ```ts
 // Event-triggered workflow
-workflow.define({
+const userSignup = define({
   event: "user.signup",
-  handle: async ({ event, step }) => {
-    const user = await step.run("fetch-user", () => getUser(event.userId));
+  handler: async (input: { userId: string }, { step }) => {
+    const user = await step.run("fetch-user", () => getUser(input.userId));
     await step.run("send-email", () => sendWelcomeEmail(user));
+    return { success: true, userId: input.userId };
   },
 });
 
-// Cron-scheduled workflow
-workflow.define({
-  cron: "0 8 * * *", // Runs daily at 8 AM
-  handle: async ({ step }) => {
-    await step.run("daily-report", () => generateDailyReport());
-  },
-});
-
-// Interval-based workflow
-workflow.define({
-  every: "1h", // Runs every hour
-  handle: async ({ step }) => {
-    await step.run("ping", () => heartbeat());
+// Workflow with typed input and output
+const processOrder = define({
+  event: "order.process",
+  handler: async (input: { orderId: string; amount: number }, { step }) => {
+    const payment = await step.run(
+      "process-payment",
+      () => chargeCard(input.amount),
+    );
+    const shipment = await step.run(
+      "ship-order",
+      () => shipOrder(input.orderId),
+    );
+    return { paymentId: payment.id, trackingNumber: shipment.tracking };
   },
 });
 ```
 
-The `WorkflowConfig` object supports the following fields:
+The `EventWorkflowConfig` object supports the following fields:
 
 ```ts
-type WorkflowConfig =
-  | { event: string; handle: HandlerFn; retries?: number; concurrency?: number }
-  | { cron: string; handle: HandlerFn; retries?: number }
-  | { every: string; handle: HandlerFn; retries?: number };
-```
-
-## Dispatching Events
-
-### `workflow.dispatch(name: string, data: JSONValue): WorkflowRunId`
-
-Triggers a workflow by event name. This is used for workflows defined with an
-`event` trigger.
-
-The second argument is the input data for the triggered workflow, which can be
-referenced with `ctx.event.data` in the workflow handler. This value is cached
-in DB and reused if the workflow is retried. Its concrete type is inferred from
-what you provided in `cell.initWorkflow`:
-
-```ts
-type UserWorkflows = {
-  "user.signup": { userId: string };
+type EventWorkflowConfig<Input = any, Output = any> = {
+  event: string;
+  handler: (input: Input, ctx: WorkflowCtx) => Promise<Output>;
+  retries?: number; // 🚧 Not implemented yet
+  concurrency?: number; // 🚧 Not implemented yet
 };
-
-const workflow = cell.initWorkflow<UserWorkflows>();
-
-// ✅ OK!
-const runId = workflow.dispatch("user.signup", { userId: "abc123" });
-
-// ❌ Doesn't pass type check because `userId` is not supplied
-workflow.dispatch("user.signup", { unknownProperty: 42 });
 ```
 
-`workflow.dispatch` returns the ID of the dispatched workflow run. The actual
-workflow run executes in the background. You can use the returned ID to query
-the progress.
+## Dispatching Workflows
+
+### `dispatch<W>(workflow: W, input: WorkflowInput<W>): WorkflowRunId`
+
+Triggers a workflow with type-safe input validation. The input type is
+automatically inferred from the workflow definition.
+
+```ts
+const userSignup = define({
+  event: "user.signup",
+  handler: async (input: { userId: string; email: string }) => {
+    // Handle signup logic
+    return { success: true };
+  },
+});
+
+// ✅ Type-safe dispatch
+const runId = dispatch(userSignup, {
+  userId: "abc123",
+  email: "user@example.com",
+});
+
+// ❌ TypeScript error - missing required fields
+// dispatch(userSignup, { userId: "abc123" }); // Error: missing 'email'
+
+// ❌ TypeScript error - wrong field type
+// dispatch(userSignup, { userId: 123, email: "user@example.com" }); // Error: userId should be string
+```
+
+`dispatch` returns the ID of the dispatched workflow run. The actual workflow
+executes in the background. You can use the returned ID to query the progress.
 
 ## Querying Workflow Run Progress
 
-### `workflow.getRunProgress(runId: WorkflowRunId): WorkflowRunProgress | null`
+### `getRuntime().getRunProgress(runId: WorkflowRunId): WorkflowRunProgress | null`
 
 Returns the progress of a workflow run. If the run is not found, it returns
 `null`.
 
 ```ts
-const runId = workflow.dispatch("user.signup", { userId: "abc123" });
+import { getRuntime } from "jsr:@deno/cells/workflow";
+
+const runId = dispatch(userSignup, {
+  userId: "abc123",
+  email: "user@example.com",
+});
 
 // Some time later...
 
-const progress = workflow.getRunProgress(runId);
+const progress = getRuntime().getRunProgress(runId);
 console.log(progress);
 // {
 //   id: "01JWQF48VFXJ5Q0BCRM03HA2XQ",
@@ -154,7 +141,36 @@ orchestrating durable, retryable execution.
     or cold start.
   - **Example:**
     ```ts
-    const user = await step.run("fetch-user", () => getUser(event.userId));
+    const user = await step.run("fetch-user", () => getUser(input.userId));
+    ```
+
+- **`await step.invoke<W>(workflow: W, input: WorkflowInput<W>): Promise<WorkflowOutput<W>>`**
+
+  - Invoke another workflow as a step, receiving the result of the invoked
+    workflow.
+  - This allows for composing workflows and reusing logic.
+  - The invocation is durable - if the parent workflow crashes, it will resume
+    and wait for the child workflow to complete.
+  - **Example:**
+    ```ts
+    const emailWorkflow = define({
+      event: "send.email",
+      handler: async (input: { email: string; subject: string }) => {
+        // Send email logic
+        return { messageId: "msg123" };
+      },
+    });
+
+    const signupWorkflow = define({
+      event: "user.signup",
+      handler: async (input: { userId: string; email: string }, { step }) => {
+        const result = await step.invoke(emailWorkflow, {
+          email: input.email,
+          subject: "Welcome!",
+        });
+        return { success: true, emailMessageId: result.messageId };
+      },
+    });
     ```
   - **Details:**
     - Steps must be named.
@@ -188,14 +204,6 @@ orchestrating durable, retryable execution.
   - Sleep until a given specific time.
   - Similar to `step.sleep`, this would be a durable operation.
 
-- **`step.invoke<T>(workflowId: string, input: unknown): Promise<T>`**
-
-  - 🚧 Not implemented yet.
-  - Invoke another Cells workflow (or potentially an Inngest function if
-    interoperability is considered) as a step, receiving the result of the
-    invoked function.
-  - This would allow for composing workflows and reusing logic.
-
 - **`step.waitForEvent<T>(eventName: string, options: { timeout: string; match?: Record<string, any> }): Promise<T | null>`**
 
   - 🚧 Not implemented yet.
@@ -222,12 +230,12 @@ orchestrating durable, retryable execution.
 <!-- end list -->
 
 ```ts
-workflow.define({
+const userSignup = define({
   event: "user.signup",
-  retries: 10,
-  handle: async ({ event, step, attempt }) => {
+  retries: 10, // 🚧 Not implemented yet
+  handler: async (input: { userId: string }, { step, attempt }) => {
     if (attempt > 5) console.warn("This is getting excessive");
-    await step.run("send-email", () => sendEmail(event.userId));
+    await step.run("send-email", () => sendEmail(input.userId));
   },
 });
 ```
@@ -248,15 +256,24 @@ if the reason of shutdown was eviction due to temporary resource shortage).
 ## Types
 
 ```ts
-type HandlerFn = (ctx: {
-  event?: { name: string; data: JSONValue }; // Present for 'event' triggered workflows
+type WorkflowCtx = {
   step: {
     run<T extends JSONValue>(name: string, fn: () => Promise<T>): Promise<T>;
-    sleep(duration: string): Promise<void>;
-    // Future step methods like sleepUntil, invoke, waitForEvent, sendEvent would be added here
+    invoke<W extends WorkflowDef<WorkflowConfig>>(
+      workflow: W,
+      input: WorkflowInput<W>,
+    ): Promise<WorkflowOutput<W>>;
+    // Future step methods like sleep, sleepUntil, waitForEvent, sendEvent
   };
   attempt: number; // Current attempt number for the workflow execution
-}) => Promise<void>;
+};
+
+type EventWorkflowConfig<Input = any, Output = any> = {
+  event: string;
+  handler: (input: Input, ctx: WorkflowCtx) => Promise<Output>;
+  retries?: number;
+  concurrency?: number;
+};
 ```
 
 ## Design Philosophy
@@ -284,17 +301,23 @@ This example demonstrates a workflow triggered by a "newsletter.subscribe"
 event, using the MVP step methods.
 
 ```ts
-workflow.define({
+const newsletterSubscribe = define({
   event: "newsletter.subscribe",
-  handle: async ({ event, step }) => {
-    // Assuming event.data contains subscriber information e.g., { email: "..." }
-    await step.run("store-subscriber", () => saveToDB(event.data));
-    await step.sleep("1h"); // Wait for an hour
+  handler: async (input: { email: string; name: string }, { step }) => {
+    await step.run("store-subscriber", () => saveToDB(input));
+    // await step.sleep("1h"); // 🚧 Not implemented yet - Wait for an hour
     await step.run(
       "send-followup",
-      () => sendEmail(event.data.email, "Welcome Follow-up!"),
+      () => sendEmail(input.email, "Welcome Follow-up!"),
     );
+    return { subscribed: true };
   },
+});
+
+// Dispatch the workflow
+const runId = dispatch(newsletterSubscribe, {
+  email: "user@example.com",
+  name: "John Doe",
 });
 ```
 
@@ -304,6 +327,9 @@ workflow.define({
 - [ ] Support interval-based workflows
 - [ ] Support `retries` in event-triggered workflows
 - [ ] Support `concurrency` in event-triggered workflows
+- [ ] Add `step.sleep()` and `step.sleepUntil()` for durable delays
+- [ ] Add `step.waitForEvent()` for event coordination
+- [ ] Add `step.sendEvent()` for reliable event dispatch from workflows
 - [ ] Rename `workflowName` to `eventName` in `WorkflowRunProgress` for
       consistency
 - [ ] Add logging (automatically records what's happening in a workflow run,
