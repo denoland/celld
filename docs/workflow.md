@@ -249,39 +249,22 @@ const runId = dispatch(userSignup, {
 });
 ```
 
-## API Reference
+## TODOs
 
-### Types
-
-```ts
-// Workflow context - conditionally includes input
-type WorkflowCtx<TInput = void> = {
-  step: WorkflowStep;
-  attempt: number;
-} & (TInput extends void ? {} : { input: TInput });
-
-// Configuration
-type EventWorkflowConfig<Input = void, Output = any> = {
-  event: string;
-  handler: (ctx: WorkflowCtx<Input>) => Promise<Output>;
-  retries?: number; // 🚧 Coming soon
-  concurrency?: number; // 🚧 Coming soon
-};
-```
-
-### Functions
-
-- `define(config)` - Define a workflow
-- `define<Input>(config)` - Define a workflow with typed input
-- `dispatch(workflow)` - Run a void workflow
-- `dispatch(workflow, input)` - Run a workflow with input
-- `getRunProgress(runId)` - Get workflow run status
-- `listRuns(options?)` - List workflow runs with filtering
-
-## Coming Soon
-
-- [ ] Cron-scheduled workflows
-- [ ] Configurable retries and concurrency limits
-- [ ] `step.sleep()` and `step.sleepUntil()` for durable delays
-- [ ] `step.waitForEvent()` for event coordination
-- [ ] `NonRetriableError` and `RetryAfterError` for retry control
+- [ ] Support cron-scheduled workflows
+- [ ] Support interval-based workflows
+- [ ] Support `retries` in event-triggered workflows
+- [ ] Support `concurrency` in event-triggered workflows
+- [ ] Rename `workflowName` to `eventName` in `WorkflowRunProgress` for
+      consistency
+- [ ] Add logging (automatically records what's happening in a workflow run,
+      such as step failure, suspension due to cell shutdown, resume, retry,
+      etc.)
+- [ ] Track the retry count for each workflow step, and stop the retry after
+      failing 5 times by default, or respecting the `retries` config in
+      `workflow.define`
+- [ ] Support `NonRetriableError`
+- [ ] Support `RetryAfterError`
+- [ ] Pass the correct value for `attempt` in workflow handler calls
+- [ ] Tell the Rust side that the cell is not idle when there are running
+      workflows to prevent idle shutdown
