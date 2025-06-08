@@ -33,6 +33,7 @@ export interface TaskScheduler {
 export type WorkflowRunProgress = {
   id: WorkflowRunId;
   workflowName: string;
+  outputData: JSONValue | null;
   dispatchedAt: Date;
   completedAt: Date | null;
   steps: {

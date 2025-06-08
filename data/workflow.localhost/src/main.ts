@@ -1,12 +1,5 @@
-import {
-  cell,
-  types,
-} from "../../../sdk/mod.ts";
-import {
-  define,
-  dispatch,
-  getRunProgress,
-} from "../../../sdk/workflow.ts";
+import { cell, types } from "../../../sdk/mod.ts";
+import { define, dispatch, getRunProgress } from "../../../sdk/workflow.ts";
 import { delay } from "jsr:@std/async@1.0.13/delay";
 import { randomIntegerBetween } from "jsr:@std/random@0.1.1";
 
@@ -83,6 +76,32 @@ const flakyWorkflow = define({
   },
 });
 
+const childWorkflow = define<{ x: number }>({
+  name: "child",
+  handler: async ({ input, step }) => {
+    return await step.run("add-5", async () => {
+      await delay(100);
+      return input.x + 5;
+    });
+  },
+});
+
+const parentWorkflow = define<{ value: number }>({
+  name: "parent",
+  handler: async ({ input, step }) => {
+    const result = await step.invoke(childWorkflow, { x: input.value });
+    return { finalResult: result };
+  },
+});
+
+const parentOfFlakyWorkflow = define({
+  name: "parent-of-flaky",
+  handler: async ({ step }) => {
+    const result = await step.invoke(flakyWorkflow);
+    return { finalResult: result };
+  },
+});
+
 cell.request(async (req: Request) => {
   const url = new URL(req.url);
 
@@ -125,6 +144,17 @@ cell.request(async (req: Request) => {
 
   if (lastPathSegment === "flaky" && req.method === "POST") {
     const runId = dispatch(flakyWorkflow);
+    return new Response(runId);
+  }
+
+  if (lastPathSegment === "parent" && req.method === "POST") {
+    const { value } = await req.json();
+    const runId = dispatch(parentWorkflow, { value });
+    return new Response(runId);
+  }
+
+  if (lastPathSegment === "parent-of-flaky" && req.method === "POST") {
+    const runId = dispatch(parentOfFlakyWorkflow);
     return new Response(runId);
   }
 
