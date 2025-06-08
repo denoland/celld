@@ -25,7 +25,7 @@ cell.db.exec(`
 const reliableWorkflow = define<
   { username: string; email: string; phoneNumber: string }
 >({
-  event: "reliable",
+  name: "reliable",
   handler: async ({ input, step }) => {
     await step.run("send-email", async () => {
       // Simulate a delay of sending email
@@ -54,7 +54,7 @@ const reliableWorkflow = define<
 // the last step multiplies the random number by 2.
 // This aims to verify the result memoization in retried workflow runs.
 const flakyWorkflow = define({
-  event: "flaky",
+  name: "flaky",
   handler: async ({ step }) => {
     const randomNumber = await step.run(
       "generate-random-number",
