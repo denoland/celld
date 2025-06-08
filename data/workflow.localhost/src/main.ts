@@ -1,10 +1,12 @@
 import {
   cell,
+  types,
+} from "../../../sdk/mod.ts";
+import {
   define,
   dispatch,
   getRunProgress,
-  types,
-} from "../../../sdk/mod.ts";
+} from "../../../sdk/workflow.ts";
 import { delay } from "jsr:@std/async@1.0.13/delay";
 import { randomIntegerBetween } from "jsr:@std/random@0.1.1";
 
