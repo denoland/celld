@@ -19,7 +19,8 @@
       "Bash(deno fmt:*)",
       "Bash(cargo clippy:*)",
       "Bash(deno test:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(deno lint:*)"
     ],
     "deny": []
   }

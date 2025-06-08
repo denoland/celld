@@ -18,7 +18,7 @@ Use the `define` function to create type-safe workflow definitions.
 
 ```ts
 const dailyCleanup = define({
-  event: "daily.cleanup",
+  name: "daily.cleanup",
   handler: async ({ step }) => {
     await step.run("delete-temp-files", () => deleteTempFiles());
     await step.run("optimize-database", () => optimizeDB());
@@ -36,7 +36,7 @@ const processOrder = define<{
   orderId: string;
   items: Array<{ productId: string; quantity: number }>;
 }>({
-  event: "order.process",
+  name: "order.process",
   handler: async ({ input, step }) => {
     const validation = await step.run(
       "validate-order",
@@ -94,7 +94,7 @@ Invoke another workflow as a step:
 
 ```ts
 const emailWorkflow = define<{ to: string; subject: string }>({
-  event: "send.email",
+  name: "send.email",
   handler: async ({ input }) => {
     // Send email logic
     return { messageId: "msg_123" };
@@ -102,7 +102,7 @@ const emailWorkflow = define<{ to: string; subject: string }>({
 });
 
 const mainWorkflow = define({
-  event: "user.onboard",
+  name: "user.onboard",
   handler: async ({ step }) => {
     // Invoke another workflow
     const result = await step.invoke(emailWorkflow, {
@@ -178,7 +178,7 @@ const sendEmail = define<{
   template: string;
   data: Record<string, any>;
 }>({
-  event: "email.send",
+  name: "email.send",
   handler: async ({ input, step }) => {
     const html = await step.run(
       "render-template",
@@ -199,7 +199,7 @@ const userSignup = define<{
   email: string;
   name: string;
 }>({
-  event: "user.signup",
+  name: "user.signup",
   handler: async ({ input, step }) => {
     // Create user
     const user = await step.run(

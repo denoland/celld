@@ -79,18 +79,12 @@ export interface WorkflowStep {
   ): Promise<WorkflowOutput<W>>;
 }
 
-export interface EventWorkflowConfig<Input = void, Output = unknown> {
-  event: string;
+export interface WorkflowConfig<Input = void, Output = unknown> {
+  name: string;
   handler: (ctx: WorkflowCtx<Input>) => Promise<Output>;
   retries?: number;
   concurrency?: number;
 }
-
-export type WorkflowConfig<Input = void, Output = unknown> =
-  EventWorkflowConfig<
-    Input,
-    Output
-  >;
 
 // deno-lint-ignore no-explicit-any
 export interface WorkflowDef<Config extends WorkflowConfig<any, any>> {
@@ -99,12 +93,12 @@ export interface WorkflowDef<Config extends WorkflowConfig<any, any>> {
 }
 
 export type WorkflowInput<W> = W extends WorkflowDef<infer C>
-  ? C extends EventWorkflowConfig<infer I, unknown> ? I extends void ? never : I
+  ? C extends WorkflowConfig<infer I, unknown> ? I extends void ? never : I
   : never
   : never;
 
 export type WorkflowOutput<W> = W extends WorkflowDef<infer C>
-  ? C extends EventWorkflowConfig<unknown, infer O> ? O : never
+  ? C extends WorkflowConfig<unknown, infer O> ? O : never
   : never;
 
 export type WorkflowCtx<Input = void> = {

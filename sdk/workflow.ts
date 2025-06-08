@@ -2,7 +2,6 @@ import { ulid } from "jsr:@std/ulid@1/ulid";
 import { assert } from "jsr:@std/assert@1/assert";
 import {
   type DbAccessor,
-  type EventWorkflowConfig,
   type JSONValue,
   type Serializable,
   type TaskScheduler,
@@ -529,7 +528,7 @@ class WorkflowStepImpl implements WorkflowStep {
 
 // deno-lint-ignore no-explicit-any
 export function define<Input = void, Output = any>(
-  config: EventWorkflowConfig<Input, Output>,
+  config: WorkflowConfig<Input, Output>,
 ): WorkflowDef<WorkflowConfig<Input, Output>> {
   const runtime = getRuntime();
 
@@ -549,8 +548,8 @@ export function define<Input = void, Output = any>(
   };
 
   // deno-lint-ignore no-explicit-any
-  runtime.register(config.event, wrappedHandler as any);
-  return { config, name: config.event };
+  runtime.register(config.name, wrappedHandler as any);
+  return { config, name: config.name };
 }
 
 // deno-lint-ignore no-explicit-any
