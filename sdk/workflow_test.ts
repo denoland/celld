@@ -265,8 +265,8 @@ Deno.test("step.invoke recovers from crash", async () => {
     `).run(childId);
 
     dbAccessor.db.prepare(`
-      INSERT INTO workflow_invocations (parent_run_id, step_index, child_run_id)
-      VALUES (?, 1, ?)
+      INSERT INTO workflow_steps (workflow_run_id, step_index, name, step_type, invoked_workflow_run_id)
+      VALUES (?, 1, 'invoke:child', 'invoke', ?)
     `).run(parentId, childId);
 
     // Define workflows
@@ -366,7 +366,9 @@ Deno.test("parent down child completed recovery", async () => {
 
     // 3. Simulate finding the child completed while parent was down
     const childRuns = dbAccessor.db.prepare(`
-      SELECT child_run_id FROM workflow_invocations WHERE parent_run_id = ?
+      SELECT invoked_workflow_run_id as child_run_id 
+      FROM workflow_steps 
+      WHERE workflow_run_id = ? AND step_type = 'invoke'
     `).all(parentRunId);
 
     assertEquals(childRuns.length, 1);

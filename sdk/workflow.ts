@@ -111,18 +111,11 @@ export class WorkflowRuntime {
         workflow_run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
         step_index INTEGER NOT NULL,
         name TEXT NOT NULL,
-        output_data TEXT NOT NULL,
+        output_data TEXT,
+        step_type TEXT NOT NULL DEFAULT 'run',
+        invoked_workflow_run_id TEXT REFERENCES workflow_runs(id) ON DELETE CASCADE,
         completed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc')),
         UNIQUE(workflow_run_id, step_index)
-      );
-    `);
-
-    this.#dbAccessor.db.exec(`
-      CREATE TABLE IF NOT EXISTS workflow_invocations (
-        parent_run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
-        step_index INTEGER NOT NULL,
-        child_run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
-        PRIMARY KEY (parent_run_id, step_index)
       );
     `);
   }
@@ -235,11 +228,13 @@ export class WorkflowRuntime {
 
       // Check for parent workflows that need retry (crash recovery)
       const waitingParents = this.#dbAccessor.db.prepare(`
-        SELECT DISTINCT parent_run_id FROM workflow_invocations WHERE child_run_id = ?
+        SELECT DISTINCT workflow_run_id
+        FROM workflow_steps
+        WHERE invoked_workflow_run_id = ? AND step_type = 'invoke' AND output_data IS NULL
       `).all(runId);
 
-      for (const { parent_run_id } of waitingParents) {
-        this.retry(parent_run_id as WorkflowRunId);
+      for (const { workflow_run_id } of waitingParents) {
+        this.retry(workflow_run_id as WorkflowRunId);
       }
     } catch (e) {
       console.error(e);
@@ -279,6 +274,8 @@ export class WorkflowRuntime {
         step_index,
         name,
         output_data,
+        step_type,
+        invoked_workflow_run_id,
         completed_at
       FROM workflow_steps
       WHERE workflow_run_id = ?
@@ -297,6 +294,8 @@ export class WorkflowRuntime {
           stepIndex: row.step_index as number,
           name: row.name as string,
           outputData: fromJson(row.output_data as string) as JSONValue,
+          stepType: row.step_type as string,
+          invokedWorkflowRunId: row.invoked_workflow_run_id as string | null,
           completedAt: new Date(row.completed_at as string),
         };
       }),
@@ -350,6 +349,8 @@ export class WorkflowRuntime {
           step_index,
           name,
           output_data,
+          step_type,
+          invoked_workflow_run_id,
           completed_at
         FROM workflow_steps
         WHERE workflow_run_id = ?
@@ -368,6 +369,8 @@ export class WorkflowRuntime {
             stepIndex: row.step_index as number,
             name: row.name as string,
             outputData: fromJson(row.output_data as string) as JSONValue,
+            stepType: row.step_type as string,
+            invokedWorkflowRunId: row.invoked_workflow_run_id as string | null,
             completedAt: new Date(row.completed_at as string),
           };
         }),
@@ -434,7 +437,7 @@ class WorkflowStepImpl implements WorkflowStep {
     const result = await fn();
 
     this.#dbAccessor.db.prepare(
-      `INSERT INTO workflow_steps (workflow_run_id, step_index, name, output_data) VALUES (?, ?, ?, ?)`,
+      `INSERT INTO workflow_steps (workflow_run_id, step_index, name, output_data, step_type) VALUES (?, ?, ?, ?, 'run')`,
     )
       .run(this.#runId, this.#currentIndex, name, toJson(result));
 
@@ -447,40 +450,41 @@ class WorkflowStepImpl implements WorkflowStep {
     input?: WorkflowInput<W> extends never ? undefined : WorkflowInput<W>,
   ): Promise<WorkflowOutput<W>> {
     this.#currentIndex++;
-
     const inputData = input ?? null;
 
-    const memoized = this.#dbAccessor.db.prepare(
-      `SELECT output_data FROM workflow_steps WHERE workflow_run_id = ? AND step_index = ?`,
-    ).get(this.#runId, this.#currentIndex);
-
-    if (memoized) {
-      return fromJson(memoized.output_data as string) as WorkflowOutput<W>;
-    }
-
-    const existing = this.#dbAccessor.db.prepare(`
-      SELECT r.completed_at, r.output_data, i.child_run_id
-      FROM workflow_invocations i
-      JOIN workflow_runs r ON i.child_run_id = r.id
-      WHERE i.parent_run_id = ? AND i.step_index = ?
+    // Check if we already have this invoke step with a result
+    const existingStep = this.#dbAccessor.db.prepare(`
+      SELECT output_data, invoked_workflow_run_id, step_type
+      FROM workflow_steps
+      WHERE workflow_run_id = ? AND step_index = ?
     `).get(this.#runId, this.#currentIndex);
 
-    if (existing) {
-      if (existing.completed_at) {
-        // Child finished while we were down - store and return
-        const output = fromJson(existing.output_data as string);
-        this.#storeStepResult(
-          `invoke:${workflow.name}`,
-          output as JSONValue,
-        );
+    // If we have a completed invoke step, return the cached result
+    if (existingStep?.output_data && existingStep.step_type === "invoke") {
+      return fromJson(existingStep.output_data as string) as WorkflowOutput<W>;
+    }
+
+    // If we have an invoke step but no result yet, check child status
+    if (
+      existingStep?.invoked_workflow_run_id &&
+      existingStep.step_type === "invoke"
+    ) {
+      const childRun = this.#dbAccessor.db.prepare(`
+        SELECT output_data, completed_at FROM workflow_runs WHERE id = ?
+      `).get(existingStep.invoked_workflow_run_id);
+
+      if (childRun?.completed_at) {
+        // Child completed while parent was down - update step and return
+        const output = fromJson(childRun.output_data as string);
+        this.#updateInvokeStepResult(output as JSONValue);
         return output as WorkflowOutput<W>;
       } else {
         // Child still running - wait for it using Promise
         return await new Promise<WorkflowOutput<W>>((resolve) => {
           this.#runtime.registerPendingInvocation(
-            existing.child_run_id as string,
+            existingStep.invoked_workflow_run_id as string,
             (output: JSONValue) => {
-              this.#storeStepResult(`invoke:${workflow.name}`, output);
+              this.#updateInvokeStepResult(output);
               resolve(output as WorkflowOutput<W>);
             },
           );
@@ -488,7 +492,7 @@ class WorkflowStepImpl implements WorkflowStep {
       }
     }
 
-    // 3. First invocation - dispatch child
+    // First invocation - dispatch child workflow
     const childRunId = this.#runtime.dispatchByName(
       workflow.name,
       inputData as JSONValue,
@@ -497,28 +501,59 @@ class WorkflowStepImpl implements WorkflowStep {
       throw new Error(`Workflow ${workflow.name} not found`);
     }
 
-    // Record parent-child relationship
-    this.#dbAccessor.db.prepare(`
-      INSERT INTO workflow_invocations (parent_run_id, step_index, child_run_id)
-      VALUES (?, ?, ?)
-    `).run(this.#runId, this.#currentIndex, childRunId);
+    // Store the invoke step (without result yet)
+    this.#storeInvokeStep(`invoke:${workflow.name}`, childRunId);
 
-    // 4. Wait for completion using promise (efficient path)
+    // Wait for child completion
     return await new Promise<WorkflowOutput<W>>((resolve) => {
       this.#runtime.registerPendingInvocation(
         childRunId,
         (output: JSONValue) => {
-          this.#storeStepResult(`invoke:${workflow.name}`, output);
+          this.#updateInvokeStepResult(output);
           resolve(output as WorkflowOutput<W>);
         },
       );
     });
   }
 
-  #storeStepResult(name: string, result: JSONValue): void {
+  #storeStepResult(
+    name: string,
+    result: JSONValue,
+    stepType: string = "run",
+    invokedRunId?: string,
+  ): void {
+    if (stepType === "invoke" && invokedRunId) {
+      this.#dbAccessor.db.prepare(
+        `INSERT INTO workflow_steps (workflow_run_id, step_index, name, output_data, step_type, invoked_workflow_run_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(
+        this.#runId,
+        this.#currentIndex,
+        name,
+        toJson(result),
+        stepType,
+        invokedRunId,
+      );
+    } else {
+      this.#dbAccessor.db.prepare(
+        `INSERT INTO workflow_steps (workflow_run_id, step_index, name, output_data, step_type)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run(this.#runId, this.#currentIndex, name, toJson(result), stepType);
+    }
+  }
+
+  #storeInvokeStep(name: string, invokedRunId: string): void {
     this.#dbAccessor.db.prepare(
-      `INSERT INTO workflow_steps (workflow_run_id, step_index, name, output_data) VALUES (?, ?, ?, ?)`,
-    ).run(this.#runId, this.#currentIndex, name, toJson(result));
+      `INSERT INTO workflow_steps (workflow_run_id, step_index, name, step_type, invoked_workflow_run_id)
+       VALUES (?, ?, ?, 'invoke', ?)`,
+    ).run(this.#runId, this.#currentIndex, name, invokedRunId);
+  }
+
+  #updateInvokeStepResult(result: JSONValue): void {
+    this.#dbAccessor.db.prepare(
+      `UPDATE workflow_steps SET output_data = ?, completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc')
+       WHERE workflow_run_id = ? AND step_index = ?`,
+    ).run(toJson(result), this.#runId, this.#currentIndex);
   }
 
   // TODO: add more methods like sleep, sleepUntil, etc.
