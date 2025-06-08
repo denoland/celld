@@ -17,7 +17,8 @@
       "Bash(cargo fmt:*)",
       "Bash(deno check:*)",
       "Bash(deno fmt:*)",
-      "Bash(cargo clippy:*)"
+      "Bash(cargo clippy:*)",
+      "Bash(deno test:*)"
     ],
     "deny": []
   }

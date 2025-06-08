@@ -254,15 +254,7 @@ Deno.test("step.invoke recovers from crash", async () => {
     const parentId = workflowRunId(ulid());
     const childId = workflowRunId(ulid());
 
-    // Insert test data - first register workflows
-    dbAccessor.db.prepare(`
-      INSERT OR IGNORE INTO workflows (name) VALUES ('parent')
-    `).run();
-
-    dbAccessor.db.prepare(`
-      INSERT OR IGNORE INTO workflows (name) VALUES ('child')
-    `).run();
-
+    // Insert test data
     dbAccessor.db.prepare(`
       INSERT INTO workflow_runs (id, workflow_name, input_data) 
       VALUES (?, 'parent', '{"x": 5}')
