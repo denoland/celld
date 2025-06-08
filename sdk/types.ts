@@ -107,10 +107,10 @@ export type WorkflowOutput<W> = W extends WorkflowDef<infer C>
   ? C extends EventWorkflowConfig<unknown, infer O> ? O : never
   : never;
 
-export type WorkflowCtx<TInput = void> = {
+export type WorkflowCtx<Input = void> = {
   step: WorkflowStep;
   attempt: number;
-} & (TInput extends void ? Record<PropertyKey, never> : { input: TInput });
+} & (Input extends void ? Record<PropertyKey, never> : { input: Input });
 
 export class WorkflowSuspendedError extends Error {
   constructor(message: string) {
