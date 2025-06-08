@@ -77,6 +77,9 @@ export class WorkflowRuntime {
     name: string,
     handler: (ctx: WorkflowCtx<Input>) => Promise<Output>,
   ): void {
+    this.#dbAccessor.db.prepare(
+      `INSERT OR IGNORE INTO workflows (name) VALUES (?)`,
+    ).run(name);
     this.#workflows.set(
       name,
       handler as unknown as (ctx: WorkflowCtx<JSONValue>) => Promise<JSONValue>,
@@ -96,9 +99,16 @@ export class WorkflowRuntime {
     this.#taskScheduler = taskScheduler;
 
     this.#dbAccessor.db.exec(`
+      CREATE TABLE IF NOT EXISTS workflows (
+        name TEXT PRIMARY KEY NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc'))
+      );
+    `);
+
+    this.#dbAccessor.db.exec(`
       CREATE TABLE IF NOT EXISTS workflow_runs (
         id TEXT PRIMARY KEY NOT NULL,
-        workflow_name TEXT NOT NULL,
+        workflow_name TEXT NOT NULL REFERENCES workflows(name) ON DELETE CASCADE,
         input_data TEXT NOT NULL,
         output_data TEXT,
         dispatched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc')),
