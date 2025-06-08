@@ -12,5 +12,4 @@ export {
   type WorkflowDef,
   type WorkflowInput,
   type WorkflowOutput,
-  WorkflowSuspendedError,
 } from "./types.ts";

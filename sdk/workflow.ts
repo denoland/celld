@@ -14,7 +14,6 @@ import {
   workflowRunId,
   type WorkflowRunProgress,
   type WorkflowStep,
-  WorkflowSuspendedError,
 } from "./types.ts";
 
 // Database row helper types (internal to workflow implementation)
@@ -216,7 +215,6 @@ export class WorkflowRuntime {
     step: WorkflowStepImpl,
   ) {
     WorkflowRuntime.#runningWorkflows++;
-    let suspended = false;
     let output: JSONValue | undefined = undefined;
 
     try {
@@ -244,21 +242,12 @@ export class WorkflowRuntime {
         this.retry(parent_run_id as WorkflowRunId);
       }
     } catch (e) {
-      if (e instanceof WorkflowSuspendedError) {
-        suspended = true;
-        return;
-      }
       console.error(e);
       // Schedule a retry in 1 second.
       this.#scheduleRetry(runId, Date.now() + 1000);
       return;
     } finally {
       WorkflowRuntime.#runningWorkflows--;
-      // Clean up pending invocations if we're suspending
-      if (suspended) {
-        // The Promise will never resolve, but that's OK
-        // On restart, we'll check the database
-      }
     }
   }
 
@@ -470,7 +459,7 @@ class WorkflowStepImpl implements WorkflowStep {
     }
 
     const existing = this.#dbAccessor.db.prepare(`
-      SELECT r.completed_at, r.output_data
+      SELECT r.completed_at, r.output_data, i.child_run_id
       FROM workflow_invocations i
       JOIN workflow_runs r ON i.child_run_id = r.id
       WHERE i.parent_run_id = ? AND i.step_index = ?
@@ -485,9 +474,18 @@ class WorkflowStepImpl implements WorkflowStep {
           output as JSONValue,
         );
         return output as WorkflowOutput<W>;
+      } else {
+        // Child still running - wait for it using Promise
+        return await new Promise<WorkflowOutput<W>>((resolve) => {
+          this.#runtime.registerPendingInvocation(
+            existing.child_run_id as string,
+            (output: JSONValue) => {
+              this.#storeStepResult(`invoke:${workflow.name}`, output);
+              resolve(output as WorkflowOutput<W>);
+            },
+          );
+        });
       }
-      // Child still running - suspend parent
-      throw new WorkflowSuspendedError("Child workflow pending");
     }
 
     // 3. First invocation - dispatch child

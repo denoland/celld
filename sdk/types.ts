@@ -105,10 +105,3 @@ export type WorkflowCtx<Input = void> = {
   step: WorkflowStep;
   attempt: number;
 } & (Input extends void ? Record<PropertyKey, never> : { input: Input });
-
-export class WorkflowSuspendedError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "WorkflowSuspendedError";
-  }
-}
