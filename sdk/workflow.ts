@@ -4,6 +4,7 @@ import {
   type DbAccessor,
   type EventWorkflowConfig,
   type JSONValue,
+  type Serializable,
   type TaskScheduler,
   type WorkflowConfig,
   type WorkflowCtx,
@@ -68,29 +69,20 @@ export class WorkflowRuntime {
   // Store workflow definitions by name
   #workflows = new Map<
     string,
-    (
-      input: JSONValue,
-      ctx: { step: WorkflowStep; attempt: number },
-    ) => Promise<JSONValue>
+    (ctx: WorkflowCtx<JSONValue>) => Promise<JSONValue>
   >();
 
   static runningWorkflows(): number {
     return this.#runningWorkflows;
   }
 
-  register<Input extends JSONValue, Output extends JSONValue>(
+  register<Input extends Serializable, Output extends Serializable>(
     name: string,
-    handler: (
-      input: Input,
-      ctx: { step: WorkflowStep; attempt: number },
-    ) => Promise<Output>,
+    handler: (ctx: WorkflowCtx<Input>) => Promise<Output>,
   ): void {
     this.#workflows.set(
       name,
-      handler as unknown as (
-        input: JSONValue,
-        ctx: { step: WorkflowStep; attempt: number },
-      ) => Promise<JSONValue>,
+      handler as unknown as (ctx: WorkflowCtx<JSONValue>) => Promise<JSONValue>,
     );
   }
 
@@ -219,10 +211,7 @@ export class WorkflowRuntime {
   }
 
   async #dispatchInner(
-    handler: (
-      input: JSONValue,
-      ctx: { step: WorkflowStep; attempt: number },
-    ) => Promise<JSONValue>,
+    handler: (ctx: WorkflowCtx<JSONValue>) => Promise<JSONValue>,
     runId: WorkflowRunId,
     _workflowName: string,
     inputData: JSONValue,
@@ -234,7 +223,7 @@ export class WorkflowRuntime {
 
     try {
       // Execute the workflow handler
-      output = await handler(inputData, { step, attempt: 1 });
+      output = await handler({ input: inputData, step, attempt: 1 });
 
       // Store output in database
       this.#dbAccessor.db.prepare(
@@ -547,14 +536,15 @@ export function define<Input = void, Output = any>(
 
   // Wrapper to convert from new API to internal format
   const wrappedHandler = async (
-    input: JSONValue,
-    ctx: { step: WorkflowStep; attempt: number },
+    ctx: WorkflowCtx<JSONValue>,
   ) => {
-    if (input === null || input === undefined) {
-      return await config.handler(ctx as WorkflowCtx<Input>);
+    if (ctx.input === null || ctx.input === undefined) {
+      return await config.handler(
+        { step: ctx.step, attempt: ctx.attempt } as WorkflowCtx<Input>,
+      );
     } else {
       return await config.handler(
-        { ...ctx, input: input as Input } as unknown as WorkflowCtx<Input>,
+        { ...ctx, input: ctx.input as Input } as unknown as WorkflowCtx<Input>,
       );
     }
   };
