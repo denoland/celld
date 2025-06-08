@@ -1,22 +1,8 @@
-# Cells Workflow API
+# Cells Workflow API (MVP)
 
-The Cells Workflow API provides **durable execution** for long-running, reliable
-background processes. Workflows are private to each Cell—they run in the Cell's
-single isolate and persist state in its SQLite database, ensuring complete
-isolation between Cells.
-
-## Key Concepts
-
-**Durable execution** means your workflows survive crashes, restarts, and
-failures:
-
-- **Step memoization**: Each step's result is persisted to the Cell's SQLite
-  database
-- **Automatic recovery**: Workflows resume from their last completed step after
-  crashes
-- **Workflow composition**: Workflows can invoke other workflows within the same
-  Cell
-- **Exactly-once semantics**: Steps are idempotent and results are cached
+This module defines a minimal workflow runtime for use with the Cells runtime
+(`jsr:@deno/cells`). Inspired by Inngest, it supports durable background
+functions triggered by events or schedules.
 
 Import:
 
