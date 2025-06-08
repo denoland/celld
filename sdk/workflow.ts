@@ -122,7 +122,7 @@ export class WorkflowRuntime {
         step_index INTEGER NOT NULL,
         name TEXT NOT NULL,
         output_data TEXT,
-        step_type TEXT NOT NULL DEFAULT 'run',
+        step_type TEXT NOT NULL,
         invoked_workflow_run_id TEXT REFERENCES workflow_runs(id) ON DELETE CASCADE,
         completed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc')),
         UNIQUE(workflow_run_id, step_index)
