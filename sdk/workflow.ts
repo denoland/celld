@@ -17,7 +17,6 @@ import {
   type WorkflowStep,
   WorkflowSuspendedError,
 } from "./types.ts";
-import { fromJson, toJson } from "./serde.ts";
 
 // Database row helper types (internal to workflow implementation)
 interface WorkflowRunRow {
@@ -580,4 +579,15 @@ export function listRuns(options?: {
   limit?: number;
 }): WorkflowRunProgress[] {
   return getRuntime().listRuns(options);
+}
+
+/** Safe JSON serialization that handles undefined values */
+function toJson(v: Serializable | undefined): string {
+  return v === undefined ? "null" : JSON.stringify(v);
+}
+
+/** Safe JSON deserialization that converts null back to undefined */
+function fromJson(json: string | null): Serializable {
+  const parsed = JSON.parse(json ?? "null");
+  return parsed === null ? undefined : parsed;
 }

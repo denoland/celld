@@ -7,7 +7,6 @@ import {
   setRuntime,
   WorkflowRuntime,
 } from "./workflow.ts";
-import { toJson } from "./serde.ts";
 import {
   type DbAccessor,
   type EventWorkflowConfig,
@@ -378,7 +377,7 @@ Deno.test("parent down child completed recovery", async () => {
       UPDATE workflow_runs 
       SET output_data = ?, completed_at = datetime('now')
       WHERE id = ?
-    `).run(toJson(50), childRunId); // 5 * 10 = 50
+    `).run(JSON.stringify(50), childRunId); // 5 * 10 = 50
 
     // 5. Retry parent - should pick up completed child result
     const retried = runtime.retry(parentRunId);
