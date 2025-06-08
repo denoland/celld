@@ -457,11 +457,11 @@ class WorkflowStepImpl implements WorkflowStep {
   // deno-lint-ignore no-explicit-any
   async invoke<W extends WorkflowDef<WorkflowConfig<any, any>>>(
     workflow: W,
-    ...args: WorkflowInput<W> extends never ? [] : [WorkflowInput<W>]
+    input?: WorkflowInput<W> extends never ? undefined : WorkflowInput<W>,
   ): Promise<WorkflowOutput<W>> {
     this.#currentIndex++;
 
-    const input = args.length > 0 ? args[0] : null;
+    const inputData = input ?? null;
 
     const memoized = this.#dbAccessor.db.prepare(
       `SELECT output_data FROM workflow_steps WHERE workflow_run_id = ? AND step_index = ?`,
@@ -495,7 +495,7 @@ class WorkflowStepImpl implements WorkflowStep {
     // 3. First invocation - dispatch child
     const childRunId = this.#runtime.dispatchByName(
       workflow.name,
-      input as JSONValue,
+      inputData as JSONValue,
     );
     if (!childRunId) {
       throw new Error(`Workflow ${workflow.name} not found`);
@@ -557,11 +557,11 @@ export function define<Input = void, Output = any>(
 // deno-lint-ignore no-explicit-any
 export function dispatch<W extends WorkflowDef<WorkflowConfig<any, any>>>(
   workflow: W,
-  ...args: WorkflowInput<W> extends never ? [] : [WorkflowInput<W>]
+  input?: WorkflowInput<W> extends never ? undefined : WorkflowInput<W>,
 ): WorkflowRunId {
   const runtime = getRuntime();
-  const input = args.length > 0 ? args[0] : null;
-  const runId = runtime.dispatchByName(workflow.name, input as JSONValue);
+  const inputData = input ?? null;
+  const runId = runtime.dispatchByName(workflow.name, inputData as JSONValue);
   if (!runId) {
     throw new Error(`Workflow ${workflow.name} not found`);
   }

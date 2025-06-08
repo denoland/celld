@@ -75,7 +75,7 @@ export interface WorkflowStep {
   // deno-lint-ignore no-explicit-any
   invoke<W extends WorkflowDef<WorkflowConfig<any, any>>>(
     workflow: W,
-    ...args: WorkflowInput<W> extends never ? [] : [WorkflowInput<W>]
+    input?: WorkflowInput<W> extends never ? undefined : WorkflowInput<W>,
   ): Promise<WorkflowOutput<W>>;
 }
 
