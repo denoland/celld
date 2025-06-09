@@ -2,7 +2,6 @@ mod common;
 
 use common::TestEnv;
 use serde_json::json;
-use std::time::Duration;
 use tracing::{debug, info};
 
 #[test_log::test(tokio::test)]
