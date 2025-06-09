@@ -18,7 +18,8 @@ cell.db.exec(`
 `);
 
 const reliableWorkflow = define<
-  { username: string; email: string; phoneNumber: string }
+  { username: string; email: string; phoneNumber: string },
+  null
 >({
   name: "reliable",
   handler: async ({ input, step }) => {
@@ -41,6 +42,8 @@ const reliableWorkflow = define<
       );
       return null;
     });
+
+    return null;
   },
 });
 
@@ -48,7 +51,7 @@ const reliableWorkflow = define<
 // until an entry with key "flaky" is present in `key_values` table. Finally,
 // the last step multiplies the random number by 2.
 // This aims to verify the result memoization in retried workflow runs.
-const flakyWorkflow = define({
+const flakyWorkflow = define<null, number>({
   name: "flaky",
   handler: async ({ step }) => {
     const randomNumber = await step.run(
@@ -70,13 +73,15 @@ const flakyWorkflow = define({
       return null;
     });
 
-    await step.run("multiply-random-number-by-2", async () => {
+    const finalResult = await step.run("multiply-random-number-by-2", () => {
       return randomNumber * 2;
     });
+
+    return finalResult;
   },
 });
 
-const childWorkflow = define<{ x: number }>({
+const childWorkflow = define<{ x: number }, number>({
   name: "child",
   handler: async ({ input, step }) => {
     return await step.run("add-5", async () => {
@@ -86,18 +91,10 @@ const childWorkflow = define<{ x: number }>({
   },
 });
 
-const parentWorkflow = define<{ value: number }>({
+const parentWorkflow = define<{ value: number }, { finalResult: number }>({
   name: "parent",
   handler: async ({ input, step }) => {
     const result = await step.invoke(childWorkflow, { x: input.value });
-    return { finalResult: result };
-  },
-});
-
-const parentOfFlakyWorkflow = define({
-  name: "parent-of-flaky",
-  handler: async ({ step }) => {
-    const result = await step.invoke(flakyWorkflow);
     return { finalResult: result };
   },
 });
@@ -150,11 +147,6 @@ cell.request(async (req: Request) => {
   if (lastPathSegment === "parent" && req.method === "POST") {
     const { value } = await req.json();
     const runId = dispatch(parentWorkflow, { value });
-    return new Response(runId);
-  }
-
-  if (lastPathSegment === "parent-of-flaky" && req.method === "POST") {
-    const runId = dispatch(parentOfFlakyWorkflow);
     return new Response(runId);
   }
 
