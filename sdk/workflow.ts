@@ -120,10 +120,16 @@ export class WorkflowRuntime {
         workflow_run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
         step_index INTEGER NOT NULL,
         name TEXT NOT NULL,
+        -- For 'invoke' steps, this is set when the child workflow completes.
+        -- For 'run' steps, this should always be present because a record is created only after the step has completed.
         output_data TEXT,
         step_type TEXT NOT NULL,
+        -- For 'invoke' steps, this is set when the child workflow is dispatched.
+        -- For 'run' steps, this is always null.
         invoked_workflow_run_id TEXT REFERENCES workflow_runs(id) ON DELETE CASCADE,
-        completed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc')),
+        -- For 'invoke' steps, this is set when the child workflow completes.
+        -- For 'run' steps, this should always be present because a record is created only after the step has completed.
+        completed_at TEXT,
         UNIQUE(workflow_run_id, step_index)
       );
     `);
