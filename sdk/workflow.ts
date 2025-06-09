@@ -617,7 +617,6 @@ class WorkflowStepImpl implements WorkflowStep {
   }
 
   async sleep(name: string, durationMs: number): Promise<void> {
-    console.log(`[SLEEP] Starting sleep step: ${name}, duration: ${durationMs}ms`);
     this.#currentIndex++;
     
     // Check if this sleep step already exists and is completed
@@ -626,20 +625,15 @@ class WorkflowStepImpl implements WorkflowStep {
       WHERE workflow_run_id = ? AND step_index = ?
     `).get(this.#runId, this.#currentIndex);
     
-    console.log(`[SLEEP] Existing step check: ${existingStep ? 'found' : 'not found'}, completed: ${existingStep?.completed_at || 'no'}`);
-    
     if (existingStep?.completed_at) {
       // Sleep already completed in a previous run
-      console.log(`[SLEEP] Sleep already completed, returning`);
       return;
     }
     
     const wakeUpTime = Date.now() + durationMs;
-    console.log(`[SLEEP] Wake up time calculated: ${wakeUpTime} (in ${durationMs}ms)`);
     
     if (!existingStep) {
-      console.log(`[SLEEP] Creating new sleep step in database`);
-      // First time executing this sleep - create the step WITHOUT completed_at
+      // First time executing this sleep - create the step
       this.#dbAccessor.db.prepare(`
         INSERT INTO workflow_steps (workflow_run_id, step_index, name, step_type, output_data)
         VALUES (?, ?, ?, 'sleep', ?)
@@ -650,7 +644,6 @@ class WorkflowStepImpl implements WorkflowStep {
         JSON.stringify({ wakeUpTime, durationMs })
       );
       
-      console.log(`[SLEEP] Scheduling wake-up alarm`);
       // Schedule the wake-up alarm
       this.#runtime.scheduleTask({
         kind: "wake-sleep-step",
@@ -658,10 +651,8 @@ class WorkflowStepImpl implements WorkflowStep {
         workflowRunId: this.#runId,
         stepIndex: this.#currentIndex,
       } as Task);
-      console.log(`[SLEEP] Wake-up alarm scheduled successfully`);
     }
     
-    console.log(`[SLEEP] Throwing WorkflowSuspendedError to suspend execution`);
     // Throw special error to suspend workflow execution
     throw new WorkflowSuspendedError('sleep', { untilTime: wakeUpTime });
   }

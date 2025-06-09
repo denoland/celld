@@ -369,21 +369,16 @@ async fn test_invoke_workflow() {
 
 #[test_log::test(tokio::test)]
 async fn test_sleep_workflow() {
-  println!("[TEST] Starting test_sleep_workflow");
   let test_env = TestEnv::new(1);
   let port = test_env.ports[0].public();
-  println!("[TEST] Test environment created, port: {}", port);
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
   let url = format!("http://localhost:{}/cell/{}", port, cell_id);
   let client = reqwest::Client::new();
-  println!("[TEST] Cell ID: {}, URL: {}", cell_id, url);
 
   let start_time = std::time::Instant::now();
 
-
   // Make a request to POST /sleep to dispatch the sleep workflow
-  println!("[TEST] Making POST request to /sleep");
   let run_id = {
     let res = client
       .post(format!("{}/sleep", url))
@@ -392,19 +387,14 @@ async fn test_sleep_workflow() {
       .send()
       .await
       .unwrap();
-    println!("[TEST] POST /sleep response status: {}", res.status());
     assert_eq!(res.status(), 200);
 
-    let run_id = res.text().await.unwrap();
-    println!("[TEST] Workflow run ID: {}", run_id);
-    run_id
+    res.text().await.unwrap()
   };
 
   // Get run progress until it's completed
-  println!("[TEST] Starting to poll for workflow completion");
   let mut completed = false;
-  for i in 0..10 {
-    println!("[TEST] Poll attempt {}/10", i + 1);
+  for _ in 0..10 {
     let res = client
       .get(format!("{}/run-progress", url))
       .header("host", "workflow.localhost")
@@ -412,19 +402,15 @@ async fn test_sleep_workflow() {
       .send()
       .await
       .unwrap();
-    println!("[TEST] GET /run-progress response status: {}", res.status());
     assert_eq!(res.status(), 200);
 
     let content = res.json::<serde_json::Value>().await.unwrap();
-    println!("[TEST] Workflow progress: {}", content);
     assert_eq!(content["workflowName"], "sleep-test");
     if !content["completedAt"].is_null() {
-      println!("[TEST] Workflow completed!");
       completed = true;
       assert_eq!(content["outputData"]["message"], "Slept for 1000ms");
       break;
     }
-    println!("[TEST] Workflow not yet completed, waiting 500ms");
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
   }
   assert!(completed);

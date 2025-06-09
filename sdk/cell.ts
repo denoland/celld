@@ -196,7 +196,6 @@ export class Cell implements DbAccessor, TaskScheduler {
           break;
         }
         case "wake-sleep-step": {
-          console.log(`[ALARM] Processing wake-sleep-step for workflow ${payload.workflowRunId}, step ${payload.stepIndex}`);
           // Mark the sleep step as completed
           this.db.prepare(`
             UPDATE workflow_steps 
@@ -204,13 +203,9 @@ export class Cell implements DbAccessor, TaskScheduler {
             WHERE workflow_run_id = ? AND step_index = ?
           `).run(payload.workflowRunId, payload.stepIndex);
 
-          console.log(`[ALARM] Sleep step marked as completed, retrying workflow directly`);
-          // Directly retry the workflow instead of scheduling through alarm system
+          // Retry the workflow directly
           if (this.workflow) {
-            const retrySuccess = this.workflow.retry(payload.workflowRunId);
-            console.log(`[ALARM] Direct workflow retry ${retrySuccess ? 'succeeded' : 'failed'}`);
-          } else {
-            console.error(`[ALARM] No workflow runtime available for retry`);
+            this.workflow.retry(payload.workflowRunId);
           }
           break;
         }
