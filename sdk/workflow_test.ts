@@ -373,6 +373,70 @@ Deno.test("step.invoke recovers from crash", async () => {
   });
 });
 
+Deno.test("step.invoke that was already executed is not executed again on retry", async () => {
+  const { runtime, dbAccessor } = createTestRuntime();
+
+  await withRuntimeAsync(runtime, async () => {
+    // Simulate a parent workflow that was suspended waiting for child
+    const parentId = workflowRunId(ulid());
+    const childId = workflowRunId(ulid());
+
+    // Insert test data - first register workflows
+    dbAccessor.db.prepare(`
+      INSERT OR IGNORE INTO workflows (name) VALUES ('parent')
+    `).run();
+
+    dbAccessor.db.prepare(`
+      INSERT OR IGNORE INTO workflows (name) VALUES ('child')
+    `).run();
+
+    dbAccessor.db.prepare(`
+      INSERT INTO workflow_runs (id, workflow_name, input_data) 
+      VALUES (?, 'parent', 'null')
+    `).run(parentId);
+
+    // Intentionally set the output data to an empty string (falsy value)
+    dbAccessor.db.prepare(`
+      INSERT INTO workflow_runs (id, workflow_name, input_data, output_data, completed_at)
+      VALUES (?, 'child', 'null', '""', datetime('now'))
+    `).run(childId);
+
+    dbAccessor.db.prepare(`
+      INSERT INTO workflow_steps (workflow_run_id, step_index, name, step_type, invoked_workflow_run_id, output_data, completed_at)
+      VALUES (?, 1, 'invoke:child', 'invoke', ?, '""', datetime('now'))
+    `).run(parentId, childId);
+
+    let childReexecuted = false;
+
+    // Define workflows
+    const child = define<null, string>({
+      name: "child",
+      handler: () => {
+        childReexecuted = true;
+        return "oops, re-executed!";
+      },
+    });
+    const _parent = define<null, string>({
+      name: "parent",
+      handler: async ({ step }) => {
+        const result = await step.invoke(child, null);
+        return result;
+      },
+    });
+
+    // Retry parent - should pick up the cached result of the child without re-executing it
+    const retried = runtime.retry(parentId);
+    assertEquals(retried, true);
+
+    const progress = await waitForCompletion(runtime, parentId);
+    assert(!childReexecuted);
+    assertEquals(progress.steps.length, 1);
+    assertEquals(progress.steps[0].name, "invoke:child");
+    assertEquals(progress.steps[0].outputData, "");
+    assertEquals(progress.outputData, "");
+  });
+});
+
 Deno.test("multiple step.invoke calls work sequentially", async () => {
   const { runtime } = createTestRuntime();
 

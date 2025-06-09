@@ -483,16 +483,18 @@ class WorkflowStepImpl implements WorkflowStep {
 
     // Check if we already have this invoke step with a result
     const existingStep = this.#dbAccessor.db.prepare(`
-      SELECT output_data, invoked_workflow_run_id, step_type
+      SELECT output_data, invoked_workflow_run_id, step_type, completed_at
       FROM workflow_steps
       WHERE workflow_run_id = ? AND step_index = ?
     `).get(this.#runId, this.#currentIndex);
 
     // If we have a completed invoke step, return the cached result
-    if (existingStep?.output_data && existingStep.step_type === "invoke") {
-      // TODO(magurotuna): does this work when the invoked step has completed
-      // with a `void` return type?
-      return fromJson(existingStep.output_data as string) as Output;
+    if (existingStep?.completed_at && existingStep.step_type === "invoke") {
+      assert(
+        typeof existingStep.output_data === "string",
+        "output_data should be a string if the invoke step is completed",
+      );
+      return fromJson(existingStep.output_data) as Output;
     }
 
     // If we have an invoke step but no result yet, check child status
