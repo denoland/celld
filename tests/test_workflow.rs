@@ -366,4 +366,3 @@ async fn test_invoke_workflow() {
   }
   assert!(completed, "Parent workflow did not complete");
 }
-
