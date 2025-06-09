@@ -1,13 +1,12 @@
 import { DatabaseSync } from "node:sqlite";
 import {
   type DbAccessor,
-  type JSONValue,
   type ScheduledTaskId,
   scheduledTaskId,
   type Task,
   type TaskScheduler,
 } from "./types.ts";
-import { Workflow } from "./workflow.ts";
+import { getRuntime, setRuntime, WorkflowRuntime } from "./workflow.ts";
 import { ulid } from "jsr:@std/ulid@^1.0.0/ulid";
 
 // Create a Cell class to track sockets and provide broadcast functionality
@@ -20,7 +19,7 @@ export class Cell implements DbAccessor, TaskScheduler {
   private server: Deno.HttpServer | null = null;
   private dbPath: string;
   private dbInstance: DatabaseSync | null = null;
-  private workflow: Workflow<Record<string, JSONValue>> | null = null;
+  private workflow: WorkflowRuntime | null = null;
   private onRequestCallback:
     | ((req: Request) => Promise<Response> | Response | void)
     | null = null;
@@ -74,6 +73,10 @@ export class Cell implements DbAccessor, TaskScheduler {
     this.sockets = new Map<string, WebSocket>();
     this.setupServer();
     this.setupTables();
+
+    // Auto-initialize workflow runtime
+    setRuntime(new WorkflowRuntime(this, this));
+    this.workflow = getRuntime();
   }
 
   broadcast(
@@ -86,21 +89,6 @@ export class Cell implements DbAccessor, TaskScheduler {
         conn.send(msg);
       }
     }
-  }
-
-  /**
-   * Initialize a workflow. This method can be called only once.
-   *
-   * @param T - The type of the workflow inputs.
-   * @returns The initialized workflow.
-   */
-  initWorkflow<T extends Record<string, JSONValue>>(): Workflow<T> {
-    if (this.workflow) {
-      throw new Error("Workflow already initialized");
-    }
-    const workflow = new Workflow<T>(this, this);
-    this.workflow = workflow as Workflow<Record<string, JSONValue>>;
-    return workflow;
   }
 
   getWebSocket(id: string): WebSocket | undefined {
@@ -393,7 +381,7 @@ export class Cell implements DbAccessor, TaskScheduler {
 
     // If there are ongoing workflow runs, schedule a task to resume them on
     // another node later.
-    if (Workflow.runningWorkflows() > 0) {
+    if (WorkflowRuntime.runningWorkflows() > 0) {
       await this.schedule({
         kind: "resume-all-pending-workflow-runs",
         scheduledTimeUnixMs: Date.now() + 10_000,

@@ -320,3 +320,49 @@ async fn test_workflow_automatic_resume_after_node_failure() {
   // number by 2
   assert_eq!(last_step_output, generated_random_number * 2);
 }
+
+#[test_log::test(tokio::test)]
+async fn test_invoke_workflow() {
+  let test_env = TestEnv::new(1);
+  let port = test_env.ports[0].public();
+
+  let cell_id = uuid::Uuid::new_v4().simple().to_string();
+  let url = format!("http://localhost:{}/cell/{}", port, cell_id);
+  let client = reqwest::Client::new();
+
+  // Scenario 1: Invoked workflow completes without shutdown
+  let run_id_parent = {
+    let res = client
+      .post(format!("{}/parent", url))
+      .header("host", "workflow.localhost")
+      .json(&json!({ "value": 10 }))
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+    res.text().await.unwrap()
+  };
+
+  let mut completed = false;
+  for _ in 0..20 {
+    let res = client
+      .get(format!("{}/run-progress", url))
+      .header("host", "workflow.localhost")
+      .query(&[("id", &run_id_parent)])
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+
+    let content = res.json::<serde_json::Value>().await.unwrap();
+    if !content["completedAt"].is_null() {
+      assert_eq!(content["steps"][0]["name"], "invoke:child");
+      assert_eq!(content["steps"][0]["outputData"], 15);
+      assert_eq!(content["outputData"]["finalResult"], 15);
+      completed = true;
+      break;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+  }
+  assert!(completed, "Parent workflow did not complete");
+}
