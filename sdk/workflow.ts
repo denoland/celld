@@ -4,6 +4,7 @@ import {
   type DbAccessor,
   type JSONValue,
   type TaskScheduler,
+  type Unvoidable,
   type Voidable,
   type WorkflowConfig,
   type WorkflowCtx,
@@ -176,9 +177,7 @@ export class WorkflowRuntime {
     }
 
     const workflowName = runResult.workflow_name as string;
-    const inputData = JSON.parse(
-      runResult.input_data as string,
-    ) as JSONValue;
+    const inputData = fromJson(runResult.input_data as string);
 
     const handler = this.#workflows.get(workflowName);
     if (!handler) {
@@ -414,10 +413,10 @@ class WorkflowStepImpl implements WorkflowStep {
     this.#runtime = runtime;
   }
 
-  async run<StepOutput extends JSONValue>(
+  async run<StepOutput extends Voidable<JSONValue>>(
     name: string,
     fn: () => StepOutput | Promise<StepOutput>,
-  ): Promise<StepOutput> {
+  ): Promise<Unvoidable<StepOutput>> {
     // TODO(magurotuna): We solely rely on the order of steps executed to
     // retrieve memoized results. This scheme would not work if the order is not
     // guaranteed, for instance:
@@ -443,7 +442,7 @@ class WorkflowStepImpl implements WorkflowStep {
       .get(this.#runId, this.#currentIndex);
     if (memoizedResult) {
       assert(typeof memoizedResult.output_data === "string");
-      return fromJson(memoizedResult.output_data) as StepOutput;
+      return fromJson(memoizedResult.output_data) as Unvoidable<StepOutput>;
     }
 
     // Otherwise, run the provided function and store the result in the DB.
@@ -457,7 +456,13 @@ class WorkflowStepImpl implements WorkflowStep {
     )
       .run(this.#runId, this.#currentIndex, name, toJson(result));
 
-    return result;
+    // step handler's return type may be `void`, which becomes `undefined` at runtime.
+    // In that case, we return `null` to the caller as a valid JSON value.
+    if (result === undefined) {
+      return null as Unvoidable<StepOutput>;
+    }
+
+    return result as Unvoidable<StepOutput>;
   }
 
   async invoke<

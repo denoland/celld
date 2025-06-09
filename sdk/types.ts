@@ -68,12 +68,13 @@ export type JSONValue =
   | JSONValue[];
 
 export type Voidable<T> = T | void;
+export type Unvoidable<T> = T extends void ? null : T;
 
 export interface WorkflowStep {
-  run<StepOutput extends JSONValue>(
+  run<StepOutput extends Voidable<JSONValue>>(
     name: string,
     fn: () => StepOutput | Promise<StepOutput>,
-  ): Promise<StepOutput>;
+  ): Promise<Unvoidable<StepOutput>>;
 
   invoke<
     Input extends JSONValue,
