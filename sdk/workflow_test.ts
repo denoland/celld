@@ -438,8 +438,10 @@ Deno.test("void returning workflows work correctly", async () => {
       name: "parent",
       handler: async ({ step }) => {
         const result = await step.invoke(voidWorkflow);
-        // result should be undefined
-        return { completed: true, voidResult: result === undefined };
+        // The return type of `void` is converted to `null` although the runtime
+        // representation of `void` is `undefined`. This is to store the step
+        // result as a valid JSON value.
+        return { completed: true, voidResult: result === null };
       },
     });
 
@@ -449,7 +451,7 @@ Deno.test("void returning workflows work correctly", async () => {
     // Verify the workflow completed successfully
     assertEquals(progress.steps.length, 1);
     assertEquals(progress.steps[0].name, "invoke:void-workflow");
-    assertEquals(progress.steps[0].outputData, undefined);
+    assertEquals(progress.steps[0].outputData, null);
 
     // Verify final parent output shows void was handled correctly
     const dbRow = dbAccessor.db.prepare(

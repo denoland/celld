@@ -64,7 +64,7 @@ export class WorkflowRuntime {
   // Store workflow definitions by name
   #workflows = new Map<
     string,
-    (ctx: WorkflowCtx<JSONValue>) => Promise<JSONValue>
+    (ctx: WorkflowCtx<JSONValue>) => Promise<Voidable<JSONValue>>
   >();
 
   static runningWorkflows(): number {
@@ -209,18 +209,16 @@ export class WorkflowRuntime {
   }
 
   async #dispatchInner(
-    handler: (ctx: WorkflowCtx<JSONValue>) => Promise<JSONValue>,
+    handler: (ctx: WorkflowCtx<JSONValue>) => Promise<Voidable<JSONValue>>,
     runId: WorkflowRunId,
     _workflowName: string,
     inputData: JSONValue,
     step: WorkflowStepImpl,
   ) {
     WorkflowRuntime.#runningWorkflows++;
-    let output: JSONValue | undefined = undefined;
-
     try {
       // Execute the workflow handler
-      output = await handler({ input: inputData, step, attempt: 1 });
+      const output = await handler({ input: inputData, step, attempt: 1 });
 
       // Store output in database
       this.#dbAccessor.db.prepare(
@@ -230,7 +228,13 @@ export class WorkflowRuntime {
       // Notify any waiting parent (in-memory)
       const resolver = this.#pendingInvocations.get(runId);
       if (resolver) {
-        resolver(output);
+        // handler's return type may be `void`, which becomes `undefined` at runtime.
+        // In that case, we pass `null` to the resolver as a valid JSON value.
+        if (output === undefined) {
+          resolver(null);
+        } else {
+          resolver(output);
+        }
         this.#pendingInvocations.delete(runId);
       }
 
@@ -294,9 +298,7 @@ export class WorkflowRuntime {
     return {
       id: workflowRunId(runResult.id as string),
       workflowName: runResult.workflow_name as string,
-      outputData: runResult.output_data
-        ? fromJson(runResult.output_data as string) as JSONValue
-        : null,
+      outputData: fromJson(runResult.output_data as string | null),
       dispatchedAt: new Date(runResult.dispatched_at as string),
       completedAt: runResult.completed_at
         ? new Date(runResult.completed_at as string)
@@ -305,7 +307,7 @@ export class WorkflowRuntime {
         return {
           stepIndex: row.step_index as number,
           name: row.name as string,
-          outputData: fromJson(row.output_data as string) as JSONValue,
+          outputData: fromJson(row.output_data as string | null),
           stepType: row.step_type as string,
           invokedWorkflowRunId: row.invoked_workflow_run_id as string | null,
           completedAt: new Date(row.completed_at as string),
@@ -373,9 +375,7 @@ export class WorkflowRuntime {
       return {
         id: workflowRunId(runResult.id as string),
         workflowName: runResult.workflow_name as string,
-        outputData: runResult.output_data
-          ? fromJson(runResult.output_data as string) as JSONValue
-          : null,
+        outputData: fromJson(runResult.output_data as string | null),
         dispatchedAt: new Date(runResult.dispatched_at as string),
         completedAt: runResult.completed_at
           ? new Date(runResult.completed_at as string)
@@ -384,7 +384,7 @@ export class WorkflowRuntime {
           return {
             stepIndex: row.step_index as number,
             name: row.name as string,
-            outputData: fromJson(row.output_data as string) as JSONValue,
+            outputData: fromJson(row.output_data as string | null),
             stepType: row.step_type as string,
             invokedWorkflowRunId: row.invoked_workflow_run_id as string | null,
             completedAt: new Date(row.completed_at as string),
@@ -479,6 +479,8 @@ class WorkflowStepImpl implements WorkflowStep {
 
     // If we have a completed invoke step, return the cached result
     if (existingStep?.output_data && existingStep.step_type === "invoke") {
+      // TODO(magurotuna): does this work when the invoked step has completed
+      // with a `void` return type?
       return fromJson(existingStep.output_data as string) as Output;
     }
 
@@ -493,8 +495,12 @@ class WorkflowStepImpl implements WorkflowStep {
 
       if (childRun?.completed_at) {
         // Child completed while parent was down - update step and return
-        const output = fromJson(childRun.output_data as string);
-        this.#updateInvokeStepResult(output as JSONValue);
+
+        // The child run record should have a non-null string value in
+        // output_data field at this point because it's completed.
+        assert(typeof childRun.output_data === "string");
+        const output = fromJson(childRun.output_data);
+        this.#updateInvokeStepResult(output);
         return output as Output;
       } else {
         // Child still running - wait for it using Promise
@@ -513,7 +519,7 @@ class WorkflowStepImpl implements WorkflowStep {
     // First invocation - dispatch child workflow
     const childRunId = this.#runtime.dispatchByName(
       workflow.name,
-      inputData as JSONValue,
+      inputData,
     );
     if (!childRunId) {
       throw new Error(`Workflow ${workflow.name} not found`);
@@ -556,7 +562,13 @@ class WorkflowStepImpl implements WorkflowStep {
       this.#dbAccessor.db.prepare(
         `INSERT INTO workflow_steps (workflow_run_id, step_index, name, output_data, step_type)
          VALUES (?, ?, ?, ?, ?)`,
-      ).run(this.#runId, this.#currentIndex, name, toJson(result), stepType);
+      ).run(
+        this.#runId,
+        this.#currentIndex,
+        name,
+        toJson(result),
+        stepType,
+      );
     }
   }
 
@@ -634,13 +646,16 @@ export function listRuns(options?: {
   return getRuntime().listRuns(options);
 }
 
-/** Safe JSON serialization that handles undefined values */
-function toJson(v: JSONValue | undefined): string {
+/** Safe JSON serialization that handles void (which is undefined at runtime) */
+function toJson(v: Voidable<JSONValue>): string {
   return v === undefined ? "null" : JSON.stringify(v);
 }
 
-/** Safe JSON deserialization that converts null back to undefined */
-function fromJson(json: string | null): JSONValue | undefined {
-  const parsed = JSON.parse(json ?? "null");
-  return parsed === null ? undefined : parsed;
+/** Safe JSON deserialization that handles null as well as string */
+function fromJson(json: string | null): JSONValue {
+  if (json === null) {
+    return null;
+  }
+
+  return JSON.parse(json);
 }
