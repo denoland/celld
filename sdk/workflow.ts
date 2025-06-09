@@ -296,7 +296,9 @@ export class WorkflowRuntime {
     return {
       id: workflowRunId(runResult.id as string),
       workflowName: runResult.workflow_name as string,
-      outputData: runResult.output_data ? fromJson(runResult.output_data as string) as JSONValue : null,
+      outputData: runResult.output_data
+        ? fromJson(runResult.output_data as string) as JSONValue
+        : null,
       dispatchedAt: new Date(runResult.dispatched_at as string),
       completedAt: runResult.completed_at
         ? new Date(runResult.completed_at as string)
@@ -373,7 +375,9 @@ export class WorkflowRuntime {
       return {
         id: workflowRunId(runResult.id as string),
         workflowName: runResult.workflow_name as string,
-        outputData: runResult.output_data ? fromJson(runResult.output_data as string) as JSONValue : null,
+        outputData: runResult.output_data
+          ? fromJson(runResult.output_data as string) as JSONValue
+          : null,
         dispatchedAt: new Date(runResult.dispatched_at as string),
         completedAt: runResult.completed_at
           ? new Date(runResult.completed_at as string)
