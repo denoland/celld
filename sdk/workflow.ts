@@ -3,6 +3,7 @@ import { assert } from "jsr:@std/assert@1/assert";
 import {
   type DbAccessor,
   type JSONValue,
+  type Task,
   type TaskScheduler,
   type Unvoidable,
   type Voidable,
@@ -14,6 +15,13 @@ import {
   type WorkflowRunProgress,
   type WorkflowStep,
 } from "./types.ts";
+
+class WorkflowSuspendedError extends Error {
+  constructor(public reason: string, public metadata?: any) {
+    super(`Workflow suspended: ${reason}`);
+    this.name = "WorkflowSuspendedError";
+  }
+}
 
 // Database row helper types (internal to workflow implementation)
 interface WorkflowRunRow {
@@ -139,17 +147,25 @@ export class WorkflowRuntime {
     workflowName: string,
     inputData: JSONValue,
   ): WorkflowRunId | null {
+    console.log(`[RUNTIME] dispatchByName called for: ${workflowName}`);
     const handler = this.#workflows.get(workflowName);
     if (!handler) {
+      console.log(`[RUNTIME] ERROR: Handler not found for workflow: ${workflowName}`);
+      console.log(`[RUNTIME] Available workflows:`, Array.from(this.#workflows.keys()));
       return null;
     }
 
+    console.log(`[RUNTIME] Handler found, creating run ID`);
     const runId = workflowRunId(ulid());
+    console.log(`[RUNTIME] Generated run ID: ${runId}`);
+    
     this.#dbAccessor.db.prepare(
       `INSERT INTO workflow_runs (id, workflow_name, input_data) VALUES (?, ?, ?)`,
     ).run(runId, workflowName, JSON.stringify(inputData));
+    console.log(`[RUNTIME] Workflow run inserted into database`);
 
     const step = new WorkflowStepImpl(runId, this.#dbAccessor, this);
+    console.log(`[RUNTIME] WorkflowStepImpl created, calling dispatchInner`);
 
     this.#dispatchInner(
       handler,
@@ -159,6 +175,7 @@ export class WorkflowRuntime {
       step,
     );
 
+    console.log(`[RUNTIME] dispatchInner called, returning run ID`);
     return runId;
   }
 
@@ -220,15 +237,19 @@ export class WorkflowRuntime {
     inputData: JSONValue,
     step: WorkflowStepImpl,
   ) {
+    console.log(`[WORKFLOW] dispatchInner started for runId: ${runId}`);
     WorkflowRuntime.#runningWorkflows++;
     try {
+      console.log(`[WORKFLOW] About to execute workflow handler`);
       // Execute the workflow handler
       const output = await handler({ input: inputData, step, attempt: 1 });
 
+      console.log(`[WORKFLOW] Workflow handler completed successfully, output:`, output);
       // Store output in database
       this.#dbAccessor.db.prepare(
         `UPDATE workflow_runs SET output_data = ?, completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc') WHERE id = ?`,
       ).run(toJson(output), runId);
+      console.log(`[WORKFLOW] Workflow output stored in database`);
 
       // Notify any waiting parent (in-memory)
       const resolver = this.#pendingInvocations.get(runId);
@@ -254,12 +275,19 @@ export class WorkflowRuntime {
         this.retry(workflow_run_id as WorkflowRunId);
       }
     } catch (e) {
-      console.error(e);
+      if (e instanceof WorkflowSuspendedError) {
+        // Don't mark as failed, just exit cleanly
+        // The workflow will be resumed when the alarm fires
+        console.log(`[WORKFLOW] Workflow suspended: ${e.reason}, metadata: ${JSON.stringify(e.metadata)}`);
+        return;
+      }
+      console.error(`[WORKFLOW] Error in workflow execution:`, e);
       // Schedule a retry in 1 second.
       this.#scheduleRetry(runId, Date.now() + 1000);
       return;
     } finally {
       WorkflowRuntime.#runningWorkflows--;
+      console.log(`[WORKFLOW] dispatchInner finished for runId: ${runId}`);
     }
   }
 
@@ -269,6 +297,10 @@ export class WorkflowRuntime {
       scheduledTimeUnixMs,
       workflowRunId: runId,
     });
+  }
+
+  scheduleTask(task: Task) {
+    return this.#taskScheduler.schedule(task);
   }
 
   getRunProgress(runId: WorkflowRunId): WorkflowRunProgress | null {
@@ -599,7 +631,55 @@ class WorkflowStepImpl implements WorkflowStep {
     ).run(toJson(result), this.#runId, this.#currentIndex);
   }
 
-  // TODO: add more methods like sleep, sleepUntil, etc.
+  async sleep(name: string, durationMs: number): Promise<void> {
+    console.log(`[SLEEP] Starting sleep step: ${name}, duration: ${durationMs}ms`);
+    this.#currentIndex++;
+    
+    // Check if this sleep step already exists and is completed
+    const existingStep = this.#dbAccessor.db.prepare(`
+      SELECT completed_at FROM workflow_steps 
+      WHERE workflow_run_id = ? AND step_index = ?
+    `).get(this.#runId, this.#currentIndex);
+    
+    console.log(`[SLEEP] Existing step check: ${existingStep ? 'found' : 'not found'}, completed: ${existingStep?.completed_at || 'no'}`);
+    
+    if (existingStep?.completed_at) {
+      // Sleep already completed in a previous run
+      console.log(`[SLEEP] Sleep already completed, returning`);
+      return;
+    }
+    
+    const wakeUpTime = Date.now() + durationMs;
+    console.log(`[SLEEP] Wake up time calculated: ${wakeUpTime} (in ${durationMs}ms)`);
+    
+    if (!existingStep) {
+      console.log(`[SLEEP] Creating new sleep step in database`);
+      // First time executing this sleep - create the step WITHOUT completed_at
+      this.#dbAccessor.db.prepare(`
+        INSERT INTO workflow_steps (workflow_run_id, step_index, name, step_type, output_data, completed_at)
+        VALUES (?, ?, ?, 'sleep', ?, NULL)
+      `).run(
+        this.#runId,
+        this.#currentIndex,
+        name,
+        JSON.stringify({ wakeUpTime, durationMs })
+      );
+      
+      console.log(`[SLEEP] Scheduling wake-up alarm`);
+      // Schedule the wake-up alarm
+      this.#runtime.scheduleTask({
+        kind: "wake-sleep-step",
+        scheduledTimeUnixMs: wakeUpTime,
+        workflowRunId: this.#runId,
+        stepIndex: this.#currentIndex,
+      } as Task);
+      console.log(`[SLEEP] Wake-up alarm scheduled successfully`);
+    }
+    
+    console.log(`[SLEEP] Throwing WorkflowSuspendedError to suspend execution`);
+    // Throw special error to suspend workflow execution
+    throw new WorkflowSuspendedError('sleep', { untilTime: wakeUpTime });
+  }
 }
 
 export function define<
@@ -636,12 +716,16 @@ export function dispatch<
   workflow: WorkflowDef<Input, Output>,
   input?: Input,
 ): WorkflowRunId {
+  console.log(`[DISPATCH] Dispatching workflow: ${workflow.name}, input:`, input);
   const runtime = getRuntime();
   const inputData = input ?? null;
+  console.log(`[DISPATCH] Runtime obtained, calling dispatchByName`);
   const runId = runtime.dispatchByName(workflow.name, inputData);
   if (!runId) {
+    console.log(`[DISPATCH] ERROR: Workflow ${workflow.name} not found`);
     throw new Error(`Workflow ${workflow.name} not found`);
   }
+  console.log(`[DISPATCH] Workflow dispatched successfully, runId: ${runId}`);
   return runId;
 }
 

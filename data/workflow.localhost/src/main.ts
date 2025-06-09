@@ -99,6 +99,29 @@ const parentWorkflow = define<{ value: number }, { finalResult: number }>({
   },
 });
 
+const sleepWorkflow = define<{ sleepDurationMs: number }, { message: string }>({
+  name: "sleep-test",
+  handler: async ({ input, step }) => {
+    await step.run("before-sleep", () => {
+      cell.db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
+        `Starting sleep for ${input.sleepDurationMs}ms`,
+      );
+      return null;
+    });
+
+    await step.sleep("wait", input.sleepDurationMs);
+
+    await step.run("after-sleep", () => {
+      cell.db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
+        `Sleep completed after ${input.sleepDurationMs}ms`,
+      );
+      return null;
+    });
+
+    return { message: `Slept for ${input.sleepDurationMs}ms` };
+  },
+});
+
 cell.request(async (req: Request) => {
   const url = new URL(req.url);
 
@@ -147,6 +170,12 @@ cell.request(async (req: Request) => {
   if (lastPathSegment === "parent" && req.method === "POST") {
     const { value } = await req.json();
     const runId = dispatch(parentWorkflow, { value });
+    return new Response(runId);
+  }
+
+  if (lastPathSegment === "sleep" && req.method === "POST") {
+    const { sleepDurationMs } = await req.json();
+    const runId = dispatch(sleepWorkflow, { sleepDurationMs });
     return new Response(runId);
   }
 
