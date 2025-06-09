@@ -204,14 +204,14 @@ export class Cell implements DbAccessor, TaskScheduler {
             WHERE workflow_run_id = ? AND step_index = ?
           `).run(payload.workflowRunId, payload.stepIndex);
 
-          console.log(`[ALARM] Sleep step marked as completed, scheduling workflow retry`);
-          // Schedule immediate retry of the workflow
-          await this.schedule({
-            kind: "retry-workflow-run",
-            scheduledTimeUnixMs: Date.now(),
-            workflowRunId: payload.workflowRunId,
-          });
-          console.log(`[ALARM] Workflow retry scheduled`);
+          console.log(`[ALARM] Sleep step marked as completed, retrying workflow directly`);
+          // Directly retry the workflow instead of scheduling through alarm system
+          if (this.workflow) {
+            const retrySuccess = this.workflow.retry(payload.workflowRunId);
+            console.log(`[ALARM] Direct workflow retry ${retrySuccess ? 'succeeded' : 'failed'}`);
+          } else {
+            console.error(`[ALARM] No workflow runtime available for retry`);
+          }
           break;
         }
         default: {

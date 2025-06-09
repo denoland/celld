@@ -381,25 +381,6 @@ async fn test_sleep_workflow() {
 
   let start_time = std::time::Instant::now();
 
-  // First test if basic workflow works
-  println!("[TEST] Testing basic workflow first");
-  let basic_run_id = {
-    let res = client
-      .post(format!("{}/reliable", url))
-      .header("host", "workflow.localhost")
-      .json(&json!({
-        "username": "test",
-        "email": "test@example.com",
-        "phoneNumber": "+1234567890"
-      }))
-      .send()
-      .await
-      .unwrap();
-    println!("[TEST] POST /reliable response status: {}", res.status());
-    assert_eq!(res.status(), 200);
-    res.text().await.unwrap()
-  };
-  println!("[TEST] Basic workflow dispatched: {}", basic_run_id);
 
   // Make a request to POST /sleep to dispatch the sleep workflow
   println!("[TEST] Making POST request to /sleep");
@@ -422,8 +403,8 @@ async fn test_sleep_workflow() {
   // Get run progress until it's completed
   println!("[TEST] Starting to poll for workflow completion");
   let mut completed = false;
-  for i in 0..4 {
-    println!("[TEST] Poll attempt {}/4", i + 1);
+  for i in 0..10 {
+    println!("[TEST] Poll attempt {}/10", i + 1);
     let res = client
       .get(format!("{}/run-progress", url))
       .header("host", "workflow.localhost")

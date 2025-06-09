@@ -656,8 +656,8 @@ class WorkflowStepImpl implements WorkflowStep {
       console.log(`[SLEEP] Creating new sleep step in database`);
       // First time executing this sleep - create the step WITHOUT completed_at
       this.#dbAccessor.db.prepare(`
-        INSERT INTO workflow_steps (workflow_run_id, step_index, name, step_type, output_data, completed_at)
-        VALUES (?, ?, ?, 'sleep', ?, NULL)
+        INSERT INTO workflow_steps (workflow_run_id, step_index, name, step_type, output_data)
+        VALUES (?, ?, ?, 'sleep', ?)
       `).run(
         this.#runId,
         this.#currentIndex,
