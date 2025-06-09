@@ -618,20 +618,20 @@ class WorkflowStepImpl implements WorkflowStep {
 
   async sleep(name: string, durationMs: number): Promise<void> {
     this.#currentIndex++;
-    
+
     // Check if this sleep step already exists and is completed
     const existingStep = this.#dbAccessor.db.prepare(`
       SELECT completed_at FROM workflow_steps 
       WHERE workflow_run_id = ? AND step_index = ?
     `).get(this.#runId, this.#currentIndex);
-    
+
     if (existingStep?.completed_at) {
       // Sleep already completed in a previous run
       return;
     }
-    
+
     const wakeUpTime = Date.now() + durationMs;
-    
+
     if (!existingStep) {
       // First time executing this sleep - create the step
       this.#dbAccessor.db.prepare(`
@@ -641,9 +641,9 @@ class WorkflowStepImpl implements WorkflowStep {
         this.#runId,
         this.#currentIndex,
         name,
-        JSON.stringify({ wakeUpTime, durationMs })
+        JSON.stringify({ wakeUpTime, durationMs }),
       );
-      
+
       // Schedule the wake-up alarm
       this.#runtime.scheduleTask({
         kind: "wake-sleep-step",
@@ -652,9 +652,9 @@ class WorkflowStepImpl implements WorkflowStep {
         stepIndex: this.#currentIndex,
       } as Task);
     }
-    
+
     // Throw special error to suspend workflow execution
-    throw new WorkflowSuspendedError('sleep', { untilTime: wakeUpTime });
+    throw new WorkflowSuspendedError("sleep", { untilTime: wakeUpTime });
   }
 }
 
