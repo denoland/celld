@@ -67,7 +67,7 @@ export type JSONValue =
   | { [key: string]: JSONValue }
   | JSONValue[];
 
-export type Serializable = JSONValue | void;
+export type Voidable<T> = T | void;
 
 export interface WorkflowStep {
   run<StepOutput extends JSONValue>(
@@ -75,34 +75,32 @@ export interface WorkflowStep {
     fn: () => StepOutput | Promise<StepOutput>,
   ): Promise<StepOutput>;
 
-  // deno-lint-ignore no-explicit-any
-  invoke<W extends WorkflowDef<WorkflowConfig<any, any>>>(
-    workflow: W,
-    input?: WorkflowInput<W> extends never ? undefined : WorkflowInput<W>,
-  ): Promise<WorkflowOutput<W>>;
+  invoke<
+    Input extends JSONValue,
+    Output extends Voidable<JSONValue>,
+  >(
+    workflow: WorkflowDef<Input, Output>,
+    input?: Input,
+  ): Promise<Output>;
 }
 
-export interface WorkflowConfig<Input = void, Output = unknown> {
+export interface WorkflowConfig<
+  Input extends JSONValue = null,
+  Output extends Voidable<JSONValue> = null,
+> {
   name: string;
   handler: (ctx: WorkflowCtx<Input>) => Promise<Output>;
   retries?: number;
   concurrency?: number;
 }
 
-// deno-lint-ignore no-explicit-any
-export interface WorkflowDef<Config extends WorkflowConfig<any, any>> {
-  readonly config: Config;
+export interface WorkflowDef<
+  Input extends JSONValue,
+  Output extends Voidable<JSONValue>,
+> {
+  readonly config: WorkflowConfig<Input, Output>;
   readonly name: string;
 }
-
-export type WorkflowInput<W> = W extends WorkflowDef<infer C>
-  ? C extends WorkflowConfig<infer I, unknown> ? I extends void ? never : I
-  : never
-  : never;
-
-export type WorkflowOutput<W> = W extends WorkflowDef<infer C>
-  ? C extends WorkflowConfig<unknown, infer O> ? O : never
-  : never;
 
 export type WorkflowCtx<Input = void> = {
   step: WorkflowStep;

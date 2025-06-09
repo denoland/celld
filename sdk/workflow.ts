@@ -3,13 +3,11 @@ import { assert } from "jsr:@std/assert@1/assert";
 import {
   type DbAccessor,
   type JSONValue,
-  type Serializable,
   type TaskScheduler,
+  type Voidable,
   type WorkflowConfig,
   type WorkflowCtx,
   type WorkflowDef,
-  type WorkflowInput,
-  type WorkflowOutput,
   type WorkflowRunId,
   workflowRunId,
   type WorkflowRunProgress,
@@ -73,7 +71,7 @@ export class WorkflowRuntime {
     return this.#runningWorkflows;
   }
 
-  register<Input extends Serializable, Output extends Serializable>(
+  register<Input extends JSONValue, Output extends Voidable<JSONValue>>(
     name: string,
     handler: (ctx: WorkflowCtx<Input>) => Promise<Output>,
   ): void {
@@ -462,11 +460,13 @@ class WorkflowStepImpl implements WorkflowStep {
     return result;
   }
 
-  // deno-lint-ignore no-explicit-any
-  async invoke<W extends WorkflowDef<WorkflowConfig<any, any>>>(
-    workflow: W,
-    input?: WorkflowInput<W> extends never ? undefined : WorkflowInput<W>,
-  ): Promise<WorkflowOutput<W>> {
+  async invoke<
+    Input extends JSONValue,
+    Output extends Voidable<JSONValue>,
+  >(
+    workflow: WorkflowDef<Input, Output>,
+    input?: Input,
+  ): Promise<Output> {
     this.#currentIndex++;
     const inputData = input ?? null;
 
@@ -479,7 +479,7 @@ class WorkflowStepImpl implements WorkflowStep {
 
     // If we have a completed invoke step, return the cached result
     if (existingStep?.output_data && existingStep.step_type === "invoke") {
-      return fromJson(existingStep.output_data as string) as WorkflowOutput<W>;
+      return fromJson(existingStep.output_data as string) as Output;
     }
 
     // If we have an invoke step but no result yet, check child status
@@ -495,15 +495,15 @@ class WorkflowStepImpl implements WorkflowStep {
         // Child completed while parent was down - update step and return
         const output = fromJson(childRun.output_data as string);
         this.#updateInvokeStepResult(output as JSONValue);
-        return output as WorkflowOutput<W>;
+        return output as Output;
       } else {
         // Child still running - wait for it using Promise
-        return await new Promise<WorkflowOutput<W>>((resolve) => {
+        return await new Promise<Output>((resolve) => {
           this.#runtime.registerPendingInvocation(
             existingStep.invoked_workflow_run_id as string,
             (output: JSONValue) => {
               this.#updateInvokeStepResult(output);
-              resolve(output as WorkflowOutput<W>);
+              resolve(output as Output);
             },
           );
         });
@@ -523,12 +523,12 @@ class WorkflowStepImpl implements WorkflowStep {
     this.#storeInvokeStep(`invoke:${workflow.name}`, childRunId);
 
     // Wait for child completion
-    return await new Promise<WorkflowOutput<W>>((resolve) => {
+    return await new Promise<Output>((resolve) => {
       this.#runtime.registerPendingInvocation(
         childRunId,
         (output: JSONValue) => {
           this.#updateInvokeStepResult(output);
-          resolve(output as WorkflowOutput<W>);
+          resolve(output as Output);
         },
       );
     });
@@ -578,11 +578,11 @@ class WorkflowStepImpl implements WorkflowStep {
 }
 
 export function define<
-  Input extends Serializable,
-  Output extends Serializable,
+  Input extends JSONValue,
+  Output extends Voidable<JSONValue>,
 >(
   config: WorkflowConfig<Input, Output>,
-): WorkflowDef<WorkflowConfig<Input, Output>> {
+): WorkflowDef<Input, Output> {
   const runtime = getRuntime();
 
   // Wrapper to convert from new API to internal format
@@ -604,14 +604,16 @@ export function define<
   return { config, name: config.name };
 }
 
-// deno-lint-ignore no-explicit-any
-export function dispatch<W extends WorkflowDef<WorkflowConfig<any, any>>>(
-  workflow: W,
-  input?: WorkflowInput<W> extends never ? undefined : WorkflowInput<W>,
+export function dispatch<
+  Input extends JSONValue,
+  Output extends Voidable<JSONValue>,
+>(
+  workflow: WorkflowDef<Input, Output>,
+  input?: Input,
 ): WorkflowRunId {
   const runtime = getRuntime();
   const inputData = input ?? null;
-  const runId = runtime.dispatchByName(workflow.name, inputData as JSONValue);
+  const runId = runtime.dispatchByName(workflow.name, inputData);
   if (!runId) {
     throw new Error(`Workflow ${workflow.name} not found`);
   }
@@ -633,12 +635,12 @@ export function listRuns(options?: {
 }
 
 /** Safe JSON serialization that handles undefined values */
-function toJson(v: Serializable | undefined): string {
+function toJson(v: JSONValue | undefined): string {
   return v === undefined ? "null" : JSON.stringify(v);
 }
 
 /** Safe JSON deserialization that converts null back to undefined */
-function fromJson(json: string | null): Serializable {
+function fromJson(json: string | null): JSONValue | undefined {
   const parsed = JSON.parse(json ?? "null");
   return parsed === null ? undefined : parsed;
 }

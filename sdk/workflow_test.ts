@@ -11,8 +11,6 @@ import {
   type DbAccessor,
   scheduledTaskId,
   type TaskScheduler,
-  type WorkflowConfig,
-  type WorkflowDef,
   type WorkflowRunId,
   workflowRunId,
   type WorkflowRunProgress,
@@ -150,7 +148,7 @@ Deno.test("dispatch undefined workflow throws error", () => {
     const undefinedWorkflow = {
       config: { name: "nonexistent", handler: async () => {} },
       name: "nonexistent",
-    } as WorkflowDef<WorkflowConfig>;
+    };
 
     try {
       dispatch(undefinedWorkflow);
