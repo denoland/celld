@@ -90,7 +90,7 @@ export interface WorkflowConfig<
   Output extends Voidable<JSONValue> = null,
 > {
   name: string;
-  handler: (ctx: WorkflowCtx<Input>) => Promise<Output>;
+  handler: (ctx: WorkflowCtx<Input>) => Promise<Output> | Output;
   retries?: number;
   concurrency?: number;
 }
