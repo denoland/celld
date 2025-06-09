@@ -51,7 +51,7 @@ const reliableWorkflow = define<
 // until an entry with key "flaky" is present in `key_values` table. Finally,
 // the last step multiplies the random number by 2.
 // This aims to verify the result memoization in retried workflow runs.
-const flakyWorkflow = define<null, number>({
+const flakyWorkflow = define<null, null>({
   name: "flaky",
   handler: async ({ step }) => {
     const randomNumber = await step.run(
@@ -73,11 +73,11 @@ const flakyWorkflow = define<null, number>({
       return null;
     });
 
-    const finalResult = await step.run("multiply-random-number-by-2", () => {
+    await step.run("multiply-random-number-by-2", () => {
       return randomNumber * 2;
     });
 
-    return finalResult;
+    return null;
   },
 });
 
