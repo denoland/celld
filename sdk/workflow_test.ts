@@ -15,7 +15,7 @@ import {
   workflowRunId,
   type WorkflowRunProgress,
 } from "./types.ts";
-import { assertEquals, assertExists } from "jsr:@std/assert@1";
+import { assert, assertEquals, assertExists } from "jsr:@std/assert@1";
 import { delay } from "jsr:@std/async@1/delay";
 import { ulid } from "jsr:@std/ulid@1/ulid";
 
@@ -209,6 +209,63 @@ Deno.test("define workflow with one step and dispatch it", async () => {
     assertEquals(progress2.steps.length, 1);
     assertEquals(progress2.steps[0].outputData, 84);
     assertExists(progress2.completedAt);
+  });
+});
+
+Deno.test("step.run that was already executed is not executed again on retry", async () => {
+  const { runtime, dbAccessor } = createTestRuntime();
+
+  await withRuntimeAsync(runtime, async () => {
+    // Simulate a workflow that was dispatched but not completed
+    const runId = workflowRunId(ulid());
+
+    // Insert test data - first register a workflow
+    dbAccessor.db.prepare(`
+      INSERT OR IGNORE INTO workflows (name) VALUES ('workflow')
+    `).run();
+
+    // Insert a workflow run record to simulate a dispatched workflow
+    dbAccessor.db.prepare(`
+      INSERT INTO workflow_runs (id, workflow_name, input_data)
+      VALUES (?, 'workflow', 'null')
+    `).run(runId);
+
+    // Insert a workflow step record to simulate a step that was executed
+    dbAccessor.db.prepare(`
+      INSERT INTO workflow_steps (workflow_run_id, step_index, name, output_data, step_type)
+      VALUES (?, 1, 'step1', '"first run"', 'run')
+    `).run(runId);
+
+    let step1Reexecuted = false;
+
+    // Define a workflow
+    const _workflow = define<null, string>({
+      name: "workflow",
+      handler: async ({ step }) => {
+        const result = await step.run("step1", () => {
+          step1Reexecuted = true;
+          return "second run";
+        });
+
+        await step.run("step2", async () => {
+          await delay(1);
+        });
+
+        return result;
+      },
+    });
+
+    // Retry the workflow
+    const retried = runtime.retry(runId);
+    assertEquals(retried, true);
+
+    const progress = await waitForCompletion(runtime, runId);
+    assert(!step1Reexecuted);
+    assertEquals(progress.steps.length, 2);
+    assertEquals(progress.steps[0].name, "step1");
+    assertEquals(progress.steps[0].outputData, "first run");
+    assertEquals(progress.steps[1].name, "step2");
+    assertEquals(progress.outputData, "first run");
   });
 });
 
