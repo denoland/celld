@@ -577,8 +577,10 @@ class WorkflowStepImpl implements WorkflowStep {
   // TODO: add more methods like sleep, sleepUntil, etc.
 }
 
-// deno-lint-ignore no-explicit-any
-export function define<Input = void, Output = any>(
+export function define<
+  Input extends Serializable,
+  Output extends Serializable,
+>(
   config: WorkflowConfig<Input, Output>,
 ): WorkflowDef<WorkflowConfig<Input, Output>> {
   const runtime = getRuntime();
@@ -598,8 +600,7 @@ export function define<Input = void, Output = any>(
     }
   };
 
-  // deno-lint-ignore no-explicit-any
-  runtime.register(config.name, wrappedHandler as any);
+  runtime.register(config.name, wrappedHandler);
   return { config, name: config.name };
 }
 
