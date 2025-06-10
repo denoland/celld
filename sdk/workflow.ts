@@ -3,6 +3,8 @@ import { assert } from "jsr:@std/assert@1/assert";
 import {
   type DbAccessor,
   type JSONValue,
+  type ScheduledTaskId,
+  type Task,
   type TaskScheduler,
   type Unvoidable,
   type Voidable,
@@ -14,6 +16,13 @@ import {
   type WorkflowRunProgress,
   type WorkflowStep,
 } from "./types.ts";
+
+class WorkflowSuspendedError extends Error {
+  constructor(public reason: string, public metadata?: unknown) {
+    super(`Workflow suspended: ${reason}`);
+    this.name = "WorkflowSuspendedError";
+  }
+}
 
 // Database row helper types (internal to workflow implementation)
 interface WorkflowRunRow {
@@ -254,6 +263,11 @@ export class WorkflowRuntime {
         this.retry(workflow_run_id as WorkflowRunId);
       }
     } catch (e) {
+      if (e instanceof WorkflowSuspendedError) {
+        // Don't mark as failed, just exit cleanly
+        // The workflow will be resumed when the alarm fires
+        return;
+      }
       console.error(e);
       // Schedule a retry in 1 second.
       this.#scheduleRetry(runId, Date.now() + 1000);
@@ -269,6 +283,10 @@ export class WorkflowRuntime {
       scheduledTimeUnixMs,
       workflowRunId: runId,
     });
+  }
+
+  scheduleTask(task: Task): Promise<ScheduledTaskId> | ScheduledTaskId {
+    return this.#taskScheduler.schedule(task);
   }
 
   getRunProgress(runId: WorkflowRunId): WorkflowRunProgress | null {
@@ -315,7 +333,9 @@ export class WorkflowRuntime {
           outputData: fromJson(row.output_data as string | null),
           stepType: row.step_type as string,
           invokedWorkflowRunId: row.invoked_workflow_run_id as string | null,
-          completedAt: new Date(row.completed_at as string),
+          completedAt: row.completed_at
+            ? new Date(row.completed_at as string)
+            : null,
         };
       }),
     };
@@ -392,7 +412,9 @@ export class WorkflowRuntime {
             outputData: fromJson(row.output_data as string | null),
             stepType: row.step_type as string,
             invokedWorkflowRunId: row.invoked_workflow_run_id as string | null,
-            completedAt: new Date(row.completed_at as string),
+            completedAt: row.completed_at
+              ? new Date(row.completed_at as string)
+              : null,
           };
         }),
       };
@@ -599,7 +621,51 @@ class WorkflowStepImpl implements WorkflowStep {
     ).run(toJson(result), this.#runId, this.#currentIndex);
   }
 
-  // TODO: add more methods like sleep, sleepUntil, etc.
+  // deno-lint-ignore require-await
+  async sleep(name: string, durationMs: number): Promise<void> {
+    if (durationMs <= 0) {
+      throw new Error(`Invalid sleep duration: ${durationMs}ms`);
+    }
+
+    this.#currentIndex++;
+
+    // Check if this sleep step already exists and is completed
+    const existingStep = this.#dbAccessor.db.prepare(`
+      SELECT completed_at FROM workflow_steps 
+      WHERE workflow_run_id = ? AND step_index = ?
+    `).get(this.#runId, this.#currentIndex);
+
+    if (existingStep?.completed_at) {
+      // Sleep already completed in a previous run
+      return;
+    }
+
+    const wakeUpTime = Date.now() + durationMs;
+
+    if (!existingStep) {
+      // First time executing this sleep - create the step
+      this.#dbAccessor.db.prepare(`
+        INSERT INTO workflow_steps (workflow_run_id, step_index, name, step_type, output_data)
+        VALUES (?, ?, ?, 'sleep', ?)
+      `).run(
+        this.#runId,
+        this.#currentIndex,
+        name,
+        JSON.stringify({ wakeUpTime, durationMs }),
+      );
+
+      // Schedule the wake-up alarm
+      this.#runtime.scheduleTask({
+        kind: "wake-sleep-step",
+        scheduledTimeUnixMs: wakeUpTime,
+        workflowRunId: this.#runId,
+        stepIndex: this.#currentIndex,
+      } as Task);
+    }
+
+    // Throw special error to suspend workflow execution
+    throw new WorkflowSuspendedError("sleep", { untilTime: wakeUpTime });
+  }
 }
 
 export function define<

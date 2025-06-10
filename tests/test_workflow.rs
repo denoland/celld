@@ -366,3 +366,83 @@ async fn test_invoke_workflow() {
   }
   assert!(completed, "Parent workflow did not complete");
 }
+
+#[test_log::test(tokio::test)]
+async fn test_sleep_workflow() {
+  let test_env = TestEnv::new(1);
+  let port = test_env.ports[0].public();
+
+  let cell_id = uuid::Uuid::new_v4().simple().to_string();
+  let url = format!("http://localhost:{}/cell/{}", port, cell_id);
+  let client = reqwest::Client::new();
+
+  let start_time = std::time::Instant::now();
+
+  // Make a request to POST /sleep to dispatch the sleep workflow
+  let run_id = {
+    let res = client
+      .post(format!("{}/sleep", url))
+      .header("host", "workflow.localhost")
+      .json(&json!({ "sleepDurationMs": 1000 }))
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+
+    res.text().await.unwrap()
+  };
+
+  // Get run progress until it's completed
+  let mut completed = false;
+  for _ in 0..10 {
+    let res = client
+      .get(format!("{}/run-progress", url))
+      .header("host", "workflow.localhost")
+      .query(&[("id", &run_id)])
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+
+    let content = res.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(content["workflowName"], "sleep-test");
+    if !content["completedAt"].is_null() {
+      completed = true;
+      assert_eq!(content["outputData"]["message"], "Slept for 1000ms");
+      break;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+  }
+  assert!(completed);
+
+  let elapsed = start_time.elapsed();
+  // Should take at least 1 second due to the sleep
+  assert!(
+    elapsed.as_millis() >= 800,
+    "Workflow completed too quickly: {}ms",
+    elapsed.as_millis()
+  );
+
+  // Get logs to verify the workflow steps
+  let res = client
+    .get(format!("{}/logs", url))
+    .header("host", "workflow.localhost")
+    .send()
+    .await
+    .unwrap();
+
+  #[derive(serde::Deserialize)]
+  struct Log {
+    #[allow(dead_code)]
+    id: u64,
+    text: String,
+    #[allow(dead_code)]
+    created_at: String,
+  }
+
+  let content = res.json::<Vec<Log>>().await.unwrap();
+  assert_eq!(content.len(), 2);
+  // Logs are returned in reverse chronological order
+  assert_eq!(content[0].text, "Sleep completed after 1000ms");
+  assert_eq!(content[1].text, "Starting sleep for 1000ms");
+}

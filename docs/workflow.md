@@ -115,6 +115,30 @@ const mainWorkflow = define({
 });
 ```
 
+### `step.sleep(name, durationMs)`
+
+Pause workflow execution for a specified duration:
+
+```ts
+const reminderWorkflow = define<{ message: string }, null>({
+  name: "send.reminder",
+  handler: async ({ input, step }) => {
+    await step.run("send-initial", () => sendEmail(input.message));
+
+    // Wait 24 hours before sending reminder
+    await step.sleep("wait-24h", 24 * 60 * 60 * 1000);
+
+    await step.run(
+      "send-reminder",
+      () => sendEmail(`Reminder: ${input.message}`),
+    );
+  },
+});
+```
+
+Note: During sleep, the cell may shut down to save resources. The workflow will
+resume when the sleep duration expires, even if running on a different node.
+
 ## Monitoring Workflows
 
 ### Get Run Progress

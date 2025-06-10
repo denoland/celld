@@ -11,7 +11,8 @@ export type Task = {
 export type TaskKind =
   | UserDefinedAlarm
   | RetryWorkflowRun
-  | ResumeAllPendingWorkflowRuns;
+  | ResumeAllPendingWorkflowRuns
+  | WakeSleepStep;
 
 export type UserDefinedAlarm = {
   kind: "user-defined-alarm";
@@ -24,6 +25,12 @@ export type RetryWorkflowRun = {
 
 export type ResumeAllPendingWorkflowRuns = {
   kind: "resume-all-pending-workflow-runs";
+};
+
+export type WakeSleepStep = {
+  kind: "wake-sleep-step";
+  workflowRunId: WorkflowRunId;
+  stepIndex: number;
 };
 
 export interface TaskScheduler {
@@ -42,7 +49,7 @@ export type WorkflowRunProgress = {
     outputData: JSONValue;
     stepType?: string;
     invokedWorkflowRunId?: string | null;
-    completedAt: Date;
+    completedAt: Date | null;
   }[];
 };
 
@@ -83,6 +90,8 @@ export interface WorkflowStep {
     workflow: WorkflowDef<Input, Output>,
     input?: Input,
   ): Promise<Output>;
+
+  sleep(name: string, durationMs: number): Promise<void>;
 }
 
 export interface WorkflowConfig<

@@ -195,6 +195,20 @@ export class Cell implements DbAccessor, TaskScheduler {
           }
           break;
         }
+        case "wake-sleep-step": {
+          // Mark the sleep step as completed
+          this.db.prepare(`
+            UPDATE workflow_steps 
+            SET completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc')
+            WHERE workflow_run_id = ? AND step_index = ?
+          `).run(payload.workflowRunId, payload.stepIndex);
+
+          // Retry the workflow directly
+          if (this.workflow) {
+            this.workflow.retry(payload.workflowRunId);
+          }
+          break;
+        }
         default: {
           throw new Error(`Unknown task kind: ${payload satisfies never}`);
         }
