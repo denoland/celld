@@ -252,6 +252,61 @@ console.log(`Workflow status:`, progress);
 Workflows automatically retry failed steps and resume from where they left off
 after crashes.
 
+#### Workflow Step Functions
+
+**`step.run(name, fn)`** - Execute code as a durable step:
+
+```typescript
+const result = await step.run("fetch-user", async () => {
+  const user = await fetch(`/api/users/${userId}`);
+  return user.json();
+});
+```
+
+**`step.invoke(workflow, input?)`** - Invoke another workflow as a step:
+
+```typescript
+const childWorkflow = cell.workflow.define<{ x: number }, number>({
+  name: "add.five",
+  handler: async ({ input }) => input.x + 5,
+});
+
+const parentWorkflow = cell.workflow.define<
+  { value: number },
+  { result: number }
+>({
+  name: "parent",
+  handler: async ({ input, step }) => {
+    const result = await step.invoke(childWorkflow, { x: input.value });
+    return { result };
+  },
+});
+```
+
+**`step.sleep(name, durationMs)`** - Pause workflow execution for a specified
+duration:
+
+```typescript
+const reminderWorkflow = cell.workflow.define<{ message: string }, null>({
+  name: "send.reminder",
+  handler: async ({ input, step }) => {
+    await step.run("send-initial", () => sendEmail(input.message));
+
+    // Wait 24 hours before sending reminder
+    await step.sleep("wait-24h", 24 * 60 * 60 * 1000);
+
+    await step.run(
+      "send-reminder",
+      () => sendEmail(`Reminder: ${input.message}`),
+    );
+    return null;
+  },
+});
+```
+
+Note: During sleep, the cell may shut down to save resources. The workflow will
+resume when the sleep duration expires.
+
 ## Common Patterns
 
 ### AI Agent with Memory
