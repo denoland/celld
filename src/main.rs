@@ -699,7 +699,7 @@ mod tests {
       let conn = Connection::open(db_path).unwrap();
       let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").unwrap();
       stmt
-        .query_map([], |row| Ok(row.get::<_, String>(0)?))
+        .query_map([], |row| row.get::<_, String>(0))
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap()
