@@ -63,7 +63,7 @@ const flakyWorkflow = define<null, null>({
       },
     );
 
-    await step.run("throws-until-flaky-key-is-set", () => {
+    await step.run("throws-until-flaky-key-is-set", async () => {
       const flakyToggle = cell.db.prepare(
         `SELECT value FROM key_values WHERE key = 'flaky'`,
       ).get();
