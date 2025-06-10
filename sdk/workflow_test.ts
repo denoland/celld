@@ -1,7 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import {
-  WorkflowRuntime,
-} from "./workflow.ts";
+import { WorkflowRuntime } from "./workflow.ts";
 import {
   type DbAccessor,
   scheduledTaskId,
@@ -53,10 +51,9 @@ function createTestCell(): Cell {
     tenant: "test",
     id: "test-cell",
     dbPath: ":memory:",
-    ctlSockPath: "/dev/null"
+    ctlSockPath: "/dev/null",
   });
 }
-
 
 // Helper to wait for workflow completion
 async function waitForCompletion(

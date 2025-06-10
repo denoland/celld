@@ -48,7 +48,6 @@ interface WorkflowInvocationRow {
   child_run_id: string;
 }
 
-
 export class WorkflowRuntime {
   static #runningWorkflows = 0;
 
@@ -434,7 +433,9 @@ export class WorkflowRuntime {
         );
       } else {
         return await config.handler(
-          { ...ctx, input: ctx.input as Input } as unknown as WorkflowCtx<Input>,
+          { ...ctx, input: ctx.input as Input } as unknown as WorkflowCtx<
+            Input
+          >,
         );
       }
     };
@@ -702,7 +703,6 @@ class WorkflowStepImpl implements WorkflowStep {
     throw new WorkflowSuspendedError("sleep", { untilTime: wakeUpTime });
   }
 }
-
 
 /** Safe JSON serialization that handles void (which is undefined at runtime) */
 function toJson(v: Voidable<JSONValue>): string {
