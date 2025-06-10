@@ -1,15 +1,36 @@
 # Deno Cells
 
 This is the TypeScript SDK for building stateful, distributed applications on
-[Deno Cells](https://ghcr.io/denoland/cells).
+[Cells](https://ghcr.io/denoland/cells).
 
-Deno Cells provides a runtime where each uniquely identified entity (a "cell")
-runs as a single JavaScript/TypeScript isolate with its own private SQLite
-database, durably persisted to S3. Perfect for building AI agents with
-persistent memory, multiplayer games with real-time state, or any application
-requiring isolated, stateful compute units.
+Cells provides a runtime for stateful, distributed JavaScript/TypeScript
+applications with just three components: **Deno** isolates for compute,
+**SQLite** for state, and **S3** for coordination. No other infrastructure
+required.
 
-This SDK is used within Deno Cells applications. To get started, run this
+Your application is composed of many independent "cells" - each addressable by
+ID through URLs like `http://your-server/cell/agent-123` or
+`http://your-server/cell/game-room-42`.
+
+Each cell is:
+
+- **Serverless** - cells activate when accessed, shut down when idle
+- **Globally unique** - only one instance of `/cell/abc` runs across your entire
+  cluster
+- **Stateful** - private SQLite database with built-in replication to S3
+
+The architecture scales horizontally: individual cells don't scale up (they're
+single-threaded), but you can run thousands of cells across your cluster.
+Perfect for AI agents that need persistent memory, multiplayer game rooms,
+durable workflow execution, or any system that maps naturally to independent
+state machines.
+
+**S3 is the only cloud dependency** - it handles state replication, distributed
+locking, and cluster coordination. Run anywhere S3 runs.
+
+## Getting Started
+
+To run Cells:
 
 ```bash
 docker run ghcr.io/denoland/cells --help
