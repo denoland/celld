@@ -772,13 +772,13 @@ Deno.test("step.sleep is idempotent on retry", async () => {
     // Insert workflow run
     dbAccessor.db.prepare(`
       INSERT INTO workflow_runs (id, workflow_name, input_data)
-      VALUES (?, 'sleep-retry-test', '{"durationMs": 200}')
+      VALUES (?, 'sleep-retry-test', '{"durationMs": 10000}')  -- 10 seconds!
     `).run(runId);
 
     // Insert completed sleep step (simulating alarm already fired)
     dbAccessor.db.prepare(`
       INSERT INTO workflow_steps (workflow_run_id, step_index, name, step_type, output_data, completed_at)
-      VALUES (?, 1, 'wait', 'sleep', '{"wakeUpTime": 1234567890, "durationMs": 200}', datetime('now'))
+      VALUES (?, 1, 'wait', 'sleep', '{"wakeUpTime": 1234567890, "durationMs": 10000}', datetime('now'))
     `).run(runId);
 
     define<{ durationMs: number }, string>({
@@ -790,11 +790,22 @@ Deno.test("step.sleep is idempotent on retry", async () => {
       },
     });
 
+    const startTime = Date.now();
+
     // Retry the workflow
     const retried = runtime.retry(runId);
     assertEquals(retried, true);
 
-    const progress = await waitForCompletion(runtime, runId);
+    // This should complete almost immediately since sleep is skipped
+    const progress = await waitForCompletion(runtime, runId); // 1 second timeout
+
+    const elapsed = Date.now() - startTime;
+    // Should complete in under 500ms if sleep was skipped
+    assert(
+      elapsed < 500,
+      `Workflow took ${elapsed}ms - sleep was not skipped!`,
+    );
+
     assertEquals(progress.steps.length, 1);
     assertEquals(progress.steps[0].name, "wait");
     assertEquals(progress.steps[0].stepType, "sleep");
