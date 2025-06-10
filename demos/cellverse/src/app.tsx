@@ -128,7 +128,11 @@ export function App() {
   return (
     <div className="app-container">
       <header className="header">
-        <h1>CellVerse</h1>
+        <h1>
+          <a href="/" style="color: inherit; text-decoration: none;">
+            Cellverse
+          </a>
+        </h1>
         <div>
           {user
             ? (
@@ -184,7 +188,7 @@ export function App() {
         : (
           <div className="login-container">
             <div className="login-card">
-              <h2>Welcome to CellVerse</h2>
+              <h2>Welcome to Cellverse</h2>
               <p>
                 A multi-user, channel-based LLM agent platform powered by Deno
                 Cells. Connect with AI agents in real-time channels.

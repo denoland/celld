@@ -9,6 +9,7 @@ interface Message {
   timestamp: string;
   content: string;
   message_type: "user" | "bot" | "system";
+  message_category?: string;
 }
 
 interface ChatProps {
@@ -30,6 +31,78 @@ export function Chat(
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const user = authService.getUser();
+
+  // State to track which messages have thinking expanded
+  const [expandedThinking, setExpandedThinking] = useState<Set<number>>(
+    new Set(),
+  );
+
+  // Helper function to detect thinking messages
+  const isThinkingMessage = (message: Message) => {
+    return message.message_category === "thinking";
+  };
+
+  // Helper function to detect tool usage system messages
+  const isToolMessage = (message: Message) => {
+    return message.message_category && [
+      "store_memory",
+      "read_memories",
+      "set_alarm",
+      "system_status",
+    ].includes(message.message_category);
+  };
+
+  // Helper function to get emoji for message category
+  const getCategoryEmoji = (category?: string) => {
+    switch (category) {
+      case "thinking":
+        return "💭";
+      case "store_memory":
+        return "💾";
+      case "read_memories":
+        return "🧠";
+      case "set_alarm":
+        return "📅";
+      case "system_status":
+        return "🤔";
+      default:
+        return "";
+    }
+  };
+
+  // Helper function to format message content with emoji
+  const formatMessageContent = (message: Message) => {
+    const emoji = getCategoryEmoji(message.message_category);
+    return emoji ? `${emoji} ${message.content}` : message.content;
+  };
+
+  // Find thinking and tool messages that immediately precede a bot message
+  const findThinkingForMessage = (message: Message, messageIndex: number) => {
+    if (message.message_type !== "bot") return null;
+
+    const precedingMessages = [];
+
+    // Look backwards from this message to find consecutive thinking/tool messages
+    for (let i = messageIndex - 1; i >= 0; i--) {
+      const prevMessage = messages[i];
+
+      // Stop if we hit a regular bot message (not thinking) or user message
+      if (
+        (prevMessage.message_type === "bot" &&
+          !isThinkingMessage(prevMessage)) ||
+        (prevMessage.message_type !== "system" &&
+          prevMessage.message_type !== "bot")
+      ) {
+        break;
+      }
+
+      // Collect thinking and tool messages
+      if (isThinkingMessage(prevMessage) || isToolMessage(prevMessage)) {
+        precedingMessages.unshift(prevMessage); // Add to beginning to maintain order
+      }
+    }
+    return precedingMessages.length > 0 ? precedingMessages : null;
+  };
 
   useEffect(() => {
     // Fetch channel info
@@ -163,9 +236,6 @@ export function Chat(
               🧠 Memories
             </button>
           )}
-          <button className="close-chat-btn" onClick={onClose}>
-            ✕
-          </button>
         </div>
       </div>
 
@@ -179,33 +249,87 @@ export function Chat(
             </div>
           )
           : (
-            messages.map((message) => (
-              <div
-                key={message.id}
-                className={`message ${
-                  message.message_type === "system" ? "system-message" : ""
-                } ${message.message_type === "bot" ? "llm-message" : ""} ${
-                  message.github_id === user?.github_id ? "own-message" : ""
-                }`}
-              >
-                <div className="message-header">
-                  <span className="message-author">
-                    {message.message_type === "system"
-                      ? "system"
-                      : message.message_type === "bot"
-                      ? "bot"
-                      : message.username}
-                  </span>
-                  <span className="message-time">
-                    {new Date(message.timestamp + "Z").toLocaleTimeString([], {
-                      hour: "numeric",
-                      minute: "2-digit",
-                    })}
-                  </span>
+            messages.map((message, index) => {
+              // Skip thinking messages and tool messages - they will be shown as part of bot messages
+              if (isThinkingMessage(message) || isToolMessage(message)) {
+                return null;
+              }
+
+              // Skip system status messages (like "Bot is thinking...") from main conversation
+              if (message.message_category === "system_status") {
+                return null;
+              }
+
+              const relatedMessages = findThinkingForMessage(message, index);
+              const hasThinking = !!relatedMessages;
+              const isThinkingExpanded = expandedThinking.has(message.id);
+
+              return (
+                <div key={message.id}>
+                  <div
+                    className={`message ${
+                      message.message_type === "system" ? "system-message" : ""
+                    } ${message.message_type === "bot" ? "llm-message" : ""} ${
+                      message.github_id === user?.github_id ? "own-message" : ""
+                    }`}
+                  >
+                    {message.message_type !== "system" && (
+                      <div className="message-header">
+                        <span className="message-author">
+                          {message.message_type === "bot"
+                            ? "bot"
+                            : message.username}
+                        </span>
+                        <span className="message-time">
+                          {new Date(message.timestamp + "Z").toLocaleTimeString(
+                            [],
+                            {
+                              hour: "numeric",
+                              minute: "2-digit",
+                            },
+                          )}
+                        </span>
+                      </div>
+                    )}
+                    {hasThinking && isThinkingExpanded && (
+                      <div className="thinking-content-expanded">
+                        {relatedMessages.map((relMsg) => (
+                          <div key={relMsg.id} className="thinking-item">
+                            {formatMessageContent(relMsg)}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="message-content-wrapper">
+                      <div className="message-content">
+                        {message.message_type === "system"
+                          ? formatMessageContent(message)
+                          : message.content}
+                      </div>
+                      {hasThinking && (
+                        <button
+                          className="thinking-toggle-btn"
+                          onClick={() => {
+                            const newExpanded = new Set(expandedThinking);
+                            if (isThinkingExpanded) {
+                              newExpanded.delete(message.id);
+                            } else {
+                              newExpanded.add(message.id);
+                            }
+                            setExpandedThinking(newExpanded);
+                          }}
+                          title={isThinkingExpanded
+                            ? "Hide thinking"
+                            : "Show thinking"}
+                        >
+                          {isThinkingExpanded ? "⌃" : "⌄"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 </div>
-                <div className="message-content">{message.content}</div>
-              </div>
-            ))
+              );
+            }).filter(Boolean)
           )}
         <div ref={messagesEndRef} />
       </div>

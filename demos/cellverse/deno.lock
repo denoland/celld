@@ -2,7 +2,7 @@
   "version": "5",
   "specifiers": {
     "jsr:@ry/cells@*": "0.2.0",
-    "jsr:@ry/cells@0.3": "0.3.0",
+    "jsr:@ry/cells@~0.4.1": "0.4.1",
     "jsr:@std/assert@1": "1.0.13",
     "jsr:@std/ulid@1": "1.0.0",
     "npm:@preact/preset-vite@^2.10.1": "2.10.1_@babel+core@7.27.4_vite@6.3.5__picomatch@4.0.2_preact@10.26.8_@types+node@22.15.29",
@@ -17,8 +17,8 @@
     "@ry/cells@0.2.0": {
       "integrity": "2773d255e7997943cca83e7f0d6fd76e8cabdc60b46aa53e35523769fa27f6be"
     },
-    "@ry/cells@0.3.0": {
-      "integrity": "59f095836dc062b01f08c78a4bf7332d080b9caae58d8613f80445e2cba55bf0",
+    "@ry/cells@0.4.1": {
+      "integrity": "f9309d164ee3cc8e206c120178bd6ca0149cdc9ccba6f4470670d31699ce8aa9",
       "dependencies": [
         "jsr:@std/assert",
         "jsr:@std/ulid"
@@ -1793,7 +1793,7 @@
   },
   "workspace": {
     "dependencies": [
-      "jsr:@ry/cells@0.3"
+      "jsr:@ry/cells@~0.4.1"
     ],
     "packageJson": {
       "dependencies": [
