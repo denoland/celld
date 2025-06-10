@@ -332,7 +332,9 @@ export class WorkflowRuntime {
           outputData: fromJson(row.output_data as string | null),
           stepType: row.step_type as string,
           invokedWorkflowRunId: row.invoked_workflow_run_id as string | null,
-          completedAt: new Date(row.completed_at as string),
+          completedAt: row.completed_at
+            ? new Date(row.completed_at as string)
+            : null,
         };
       }),
     };
@@ -409,7 +411,9 @@ export class WorkflowRuntime {
             outputData: fromJson(row.output_data as string | null),
             stepType: row.step_type as string,
             invokedWorkflowRunId: row.invoked_workflow_run_id as string | null,
-            completedAt: new Date(row.completed_at as string),
+            completedAt: row.completed_at
+              ? new Date(row.completed_at as string)
+              : null,
           };
         }),
       };

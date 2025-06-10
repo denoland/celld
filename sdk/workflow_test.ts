@@ -685,3 +685,154 @@ Deno.test("listRuns public API works correctly", async () => {
     assertExists(combinedRuns[0].completedAt);
   });
 });
+
+Deno.test("step.sleep suspends and resumes workflow execution", async () => {
+  const { runtime, dbAccessor } = createTestRuntime();
+
+  await withRuntimeAsync(runtime, async () => {
+    const sleepWorkflow = define<{ durationMs: number }, { message: string }>({
+      name: "sleep-test",
+      handler: async ({ input, step }) => {
+        await step.run("before-sleep", () => "started");
+        await step.sleep("wait", input.durationMs);
+        await step.run("after-sleep", () => "completed");
+        return { message: `Slept for ${input.durationMs}ms` };
+      },
+    });
+
+    const startTime = Date.now();
+    const runId = dispatch(sleepWorkflow, { durationMs: 100 });
+
+    // Initially workflow should be suspended (not completed)
+    await delay(50);
+    let progress = runtime.getRunProgress(runId);
+    assertExists(progress);
+    assertEquals(progress.completedAt, null);
+    assertEquals(progress.steps.length, 2); // before-sleep and sleep step
+
+    // Check sleep step was created with correct metadata
+    const sleepStep = progress.steps.find((s) => s.stepType === "sleep");
+    assertExists(sleepStep);
+    assertEquals(sleepStep.name, "wait");
+    assertEquals(sleepStep.completedAt, null);
+
+    // Check sleep step metadata
+    const sleepData = sleepStep.outputData as {
+      wakeUpTime: number;
+      durationMs: number;
+    };
+    assertEquals(sleepData.durationMs, 100);
+    assertExists(sleepData.wakeUpTime);
+
+    // Simulate alarm processing - mark sleep step as completed and retry workflow
+    dbAccessor.db.prepare(`
+      UPDATE workflow_steps 
+      SET completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc')
+      WHERE workflow_run_id = ? AND step_index = ? AND step_type = 'sleep'
+    `).run(runId, sleepStep.stepIndex);
+
+    const retried = runtime.retry(runId);
+    assertEquals(retried, true);
+
+    // Wait for workflow completion
+    progress = await waitForCompletion(runtime, runId);
+
+    // Verify workflow completed successfully
+    assertEquals(progress.steps.length, 3); // before-sleep, sleep, after-sleep
+    assertEquals(progress.steps[0].name, "before-sleep");
+    assertEquals(progress.steps[0].outputData, "started");
+    assertEquals(progress.steps[1].name, "wait");
+    assertEquals(progress.steps[1].stepType, "sleep");
+    assertExists(progress.steps[1].completedAt); // Sleep step is now completed
+    assertEquals(progress.steps[2].name, "after-sleep");
+    assertEquals(progress.steps[2].outputData, "completed");
+
+    // Verify final output
+    assertEquals(progress.outputData, { message: "Slept for 100ms" });
+    assertExists(progress.completedAt);
+
+    const elapsed = Date.now() - startTime;
+    // Should take more than 50ms (we waited that long before simulating alarm)
+    assert(elapsed >= 50);
+  });
+});
+
+Deno.test("step.sleep is idempotent on retry", async () => {
+  const { runtime, dbAccessor } = createTestRuntime();
+
+  await withRuntimeAsync(runtime, async () => {
+    // Simulate a workflow that was interrupted during sleep
+    const runId = workflowRunId(ulid());
+
+    // Insert test data - first register workflow
+    dbAccessor.db.prepare(`
+      INSERT OR IGNORE INTO workflows (name) VALUES ('sleep-retry-test')
+    `).run();
+
+    // Insert workflow run
+    dbAccessor.db.prepare(`
+      INSERT INTO workflow_runs (id, workflow_name, input_data)
+      VALUES (?, 'sleep-retry-test', '{"durationMs": 200}')
+    `).run(runId);
+
+    // Insert completed sleep step (simulating alarm already fired)
+    dbAccessor.db.prepare(`
+      INSERT INTO workflow_steps (workflow_run_id, step_index, name, step_type, output_data, completed_at)
+      VALUES (?, 1, 'wait', 'sleep', '{"wakeUpTime": 1234567890, "durationMs": 200}', datetime('now'))
+    `).run(runId);
+
+    const sleepRetryWorkflow = define<{ durationMs: number }, string>({
+      name: "sleep-retry-test",
+      handler: async ({ input, step }) => {
+        // Sleep method will be called but won't suspend since step already completed
+        await step.sleep("wait", input.durationMs);
+        return "completed";
+      },
+    });
+
+    // Retry the workflow
+    const retried = runtime.retry(runId);
+    assertEquals(retried, true);
+
+    const progress = await waitForCompletion(runtime, runId);
+    assertEquals(progress.steps.length, 1);
+    assertEquals(progress.steps[0].name, "wait");
+    assertEquals(progress.steps[0].stepType, "sleep");
+    assertExists(progress.steps[0].completedAt);
+    assertEquals(progress.outputData, "completed");
+  });
+});
+
+Deno.test("step.sleep schedules wake-up task correctly", async () => {
+  const { runtime, dbAccessor } = createTestRuntime();
+
+  await withRuntimeAsync(runtime, async () => {
+    const taskSchedulingWorkflow = define<{ sleepMs: number }, null>({
+      name: "task-scheduling-test",
+      handler: async ({ input, step }) => {
+        await step.sleep("test-sleep", input.sleepMs);
+        return null;
+      },
+    });
+
+    const runId = dispatch(taskSchedulingWorkflow, { sleepMs: 500 });
+
+    // Let workflow execute and suspend
+    await delay(50);
+
+    // Check that a wake-sleep-step task was scheduled
+    const tasks = dbAccessor.db.prepare(`
+      SELECT * FROM scheduled_tasks 
+      WHERE JSON_EXTRACT(payload, '$.kind') = 'wake-sleep-step'
+    `).all();
+
+    assertEquals(tasks.length, 1);
+
+    const task = tasks[0];
+    const payload = JSON.parse(task.payload as string);
+
+    assertEquals(payload.kind, "wake-sleep-step");
+    assertEquals(payload.workflowRunId, runId);
+    assertEquals(payload.stepIndex, 1);
+  });
+});

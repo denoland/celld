@@ -49,7 +49,7 @@ export type WorkflowRunProgress = {
     outputData: JSONValue;
     stepType?: string;
     invokedWorkflowRunId?: string | null;
-    completedAt: Date;
+    completedAt: Date | null;
   }[];
 };
 
