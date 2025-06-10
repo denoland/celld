@@ -90,7 +90,10 @@ const childWorkflow = cell.workflow.define<{ x: number }, number>({
   },
 });
 
-const parentWorkflow = cell.workflow.define<{ value: number }, { finalResult: number }>({
+const parentWorkflow = cell.workflow.define<
+  { value: number },
+  { finalResult: number }
+>({
   name: "parent",
   handler: async ({ input, step }) => {
     const result = await step.invoke(childWorkflow, { x: input.value });
@@ -98,7 +101,10 @@ const parentWorkflow = cell.workflow.define<{ value: number }, { finalResult: nu
   },
 });
 
-const sleepWorkflow = define<{ sleepDurationMs: number }, { message: string }>({
+const sleepWorkflow = cell.workflow.define<
+  { sleepDurationMs: number },
+  { message: string }
+>({
   name: "sleep-test",
   handler: async ({ input, step }) => {
     await step.run("before-sleep", () => {
@@ -174,7 +180,7 @@ cell.request(async (req: Request) => {
 
   if (lastPathSegment === "sleep" && req.method === "POST") {
     const { sleepDurationMs } = await req.json();
-    const runId = dispatch(sleepWorkflow, { sleepDurationMs });
+    const runId = cell.workflow.dispatch(sleepWorkflow, { sleepDurationMs });
     return new Response(runId);
   }
 
@@ -183,7 +189,9 @@ cell.request(async (req: Request) => {
     if (!runId) {
       return Response.json({ error: "id is required" }, { status: 400 });
     }
-    const runProgress = cell.workflow.getRunProgress(runId as types.WorkflowRunId);
+    const runProgress = cell.workflow.getRunProgress(
+      runId as types.WorkflowRunId,
+    );
     return Response.json(runProgress);
   }
 
