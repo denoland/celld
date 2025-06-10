@@ -781,7 +781,7 @@ Deno.test("step.sleep is idempotent on retry", async () => {
       VALUES (?, 1, 'wait', 'sleep', '{"wakeUpTime": 1234567890, "durationMs": 200}', datetime('now'))
     `).run(runId);
 
-    const sleepRetryWorkflow = define<{ durationMs: number }, string>({
+    define<{ durationMs: number }, string>({
       name: "sleep-retry-test",
       handler: async ({ input, step }) => {
         // Sleep method will be called but won't suspend since step already completed

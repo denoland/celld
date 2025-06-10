@@ -17,7 +17,7 @@ import {
 } from "./types.ts";
 
 class WorkflowSuspendedError extends Error {
-  constructor(public reason: string, public metadata?: any) {
+  constructor(public reason: string, public metadata?: unknown) {
     super(`Workflow suspended: ${reason}`);
     this.name = "WorkflowSuspendedError";
   }
@@ -284,7 +284,7 @@ export class WorkflowRuntime {
     });
   }
 
-  scheduleTask(task: Task) {
+  scheduleTask(task: Task): Promise<ScheduledTaskId> {
     return this.#taskScheduler.schedule(task);
   }
 
@@ -620,7 +620,12 @@ class WorkflowStepImpl implements WorkflowStep {
     ).run(toJson(result), this.#runId, this.#currentIndex);
   }
 
+  // deno-lint-ignore require-await
   async sleep(name: string, durationMs: number): Promise<void> {
+    if (durationMs <= 0) {
+      throw new Error(`Invalid sleep duration: ${durationMs}ms`);
+    }
+
     this.#currentIndex++;
 
     // Check if this sleep step already exists and is completed
