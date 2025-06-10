@@ -441,7 +441,7 @@ async fn test_sleep_workflow() {
   }
 
   let content = res.json::<Vec<Log>>().await.unwrap();
-  assert!(content.len() >= 2);
+  assert_eq!(content.len(), 2);
   // Logs are returned in reverse chronological order
   assert_eq!(content[0].text, "Sleep completed after 1000ms");
   assert_eq!(content[1].text, "Starting sleep for 1000ms");
