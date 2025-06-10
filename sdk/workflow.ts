@@ -3,6 +3,7 @@ import { assert } from "jsr:@std/assert@1/assert";
 import {
   type DbAccessor,
   type JSONValue,
+  type ScheduledTaskId,
   type Task,
   type TaskScheduler,
   type Unvoidable,
@@ -284,7 +285,7 @@ export class WorkflowRuntime {
     });
   }
 
-  scheduleTask(task: Task): Promise<ScheduledTaskId> {
+  scheduleTask(task: Task): Promise<ScheduledTaskId> | ScheduledTaskId {
     return this.#taskScheduler.schedule(task);
   }
 
