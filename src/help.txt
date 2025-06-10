@@ -44,6 +44,7 @@ CODE STRUCTURE
     - cell.db: SQLite database scoped to this cell
     - cell.request(), cell.connect(), cell.message(): HTTP/WebSocket handlers
     - cell.broadcast(): Send to all WebSocket connections
+    - cell.workflow: Durable workflow API for fault-tolerant multi-step processes
     - See https://jsr.io/@ry/cells for more APIs.
 
 CONFIGURATION

@@ -1,23 +1,24 @@
 # Cells Workflow API (MVP)
 
 This module defines a minimal workflow runtime for use with the Cells runtime
-(`jsr:@deno/cells`). Inspired by Inngest, it supports durable background
-functions triggered by events or schedules.
+(`jsr:@ry/cells`). Inspired by Inngest, it supports durable background functions
+triggered by events or schedules.
 
 Import:
 
 ```ts
-import { define, dispatch } from "jsr:@deno/cells/workflow";
+import { cell } from "jsr:@ry/cells";
 ```
 
 ## Defining Workflows
 
-Use the `define` function to create type-safe workflow definitions.
+Use the `cell.workflow.define` function to create type-safe workflow
+definitions.
 
 ### Simple Workflows (No Input)
 
 ```ts
-const dailyCleanup = define({
+const dailyCleanup = cell.workflow.define({
   name: "daily.cleanup",
   handler: async ({ step }) => {
     await step.run("delete-temp-files", () => deleteTempFiles());
@@ -26,13 +27,13 @@ const dailyCleanup = define({
 });
 
 // Dispatch without arguments
-dispatch(dailyCleanup);
+cell.workflow.dispatch(dailyCleanup);
 ```
 
 ### Workflows with Input
 
 ```ts
-const processOrder = define<{
+const processOrder = cell.workflow.define<{
   orderId: string;
   items: Array<{ productId: string; quantity: number }>;
 }>({
@@ -62,7 +63,7 @@ const processOrder = define<{
 });
 
 // Type-safe dispatch
-dispatch(processOrder, {
+cell.workflow.dispatch(processOrder, {
   orderId: "order_123",
   items: [{ productId: "prod_abc", quantity: 2 }],
 });
@@ -93,7 +94,7 @@ const result = await step.run("fetch-user", async () => {
 Invoke another workflow as a step:
 
 ```ts
-const emailWorkflow = define<{ to: string; subject: string }>({
+const emailWorkflow = cell.workflow.define<{ to: string; subject: string }>({
   name: "send.email",
   handler: async ({ input }) => {
     // Send email logic
@@ -101,7 +102,7 @@ const emailWorkflow = define<{ to: string; subject: string }>({
   },
 });
 
-const mainWorkflow = define({
+const mainWorkflow = cell.workflow.define({
   name: "user.onboard",
   handler: async ({ step }) => {
     // Invoke another workflow
@@ -144,10 +145,10 @@ resume when the sleep duration expires, even if running on a different node.
 ### Get Run Progress
 
 ```ts
-const runId = dispatch(myWorkflow, { data: "example" });
+const runId = cell.workflow.dispatch(myWorkflow, { data: "example" });
 
 // Check progress
-const progress = getRunProgress(runId);
+const progress = cell.workflow.getRunProgress(runId);
 console.log(progress);
 // {
 //   id: "01JWQF48VFXJ5Q0BCRM03HA2XQ",
@@ -167,11 +168,11 @@ console.log(progress);
 
 ```ts
 // All runs in this Cell
-const allRuns = listRuns();
+const allRuns = cell.workflow.listRuns();
 
 // Filter options
-const pendingRuns = listRuns({ status: "pending" });
-const recentSignups = listRuns({
+const pendingRuns = cell.workflow.listRuns({ status: "pending" });
+const recentSignups = cell.workflow.listRuns({
   workflowName: "user.signup",
   status: "completed",
   limit: 10,
@@ -196,7 +197,7 @@ isolation between Cells.
 
 ```ts
 // Email workflow (reusable)
-const sendEmail = define<{
+const sendEmail = cell.workflow.define<{
   to: string;
   subject: string;
   template: string;
@@ -219,7 +220,7 @@ const sendEmail = define<{
 });
 
 // User signup workflow
-const userSignup = define<{
+const userSignup = cell.workflow.define<{
   email: string;
   name: string;
 }>({
@@ -253,7 +254,7 @@ const userSignup = define<{
 });
 
 // Usage
-const runId = dispatch(userSignup, {
+const runId = cell.workflow.dispatch(userSignup, {
   email: "alice@example.com",
   name: "Alice",
 });
