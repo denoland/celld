@@ -1,5 +1,4 @@
 import { cell, types } from "../../../sdk/mod.ts";
-import { define, dispatch, getRunProgress } from "../../../sdk/workflow.ts";
 import { delay } from "jsr:@std/async@1.0.13/delay";
 import { randomIntegerBetween } from "jsr:@std/random@0.1.1";
 
@@ -17,7 +16,7 @@ cell.db.exec(`
   )
 `);
 
-const reliableWorkflow = define<
+const reliableWorkflow = cell.workflow.define<
   { username: string; email: string; phoneNumber: string },
   null
 >({
@@ -51,7 +50,7 @@ const reliableWorkflow = define<
 // until an entry with key "flaky" is present in `key_values` table. Finally,
 // the last step multiplies the random number by 2.
 // This aims to verify the result memoization in retried workflow runs.
-const flakyWorkflow = define<null, null>({
+const flakyWorkflow = cell.workflow.define<null, null>({
   name: "flaky",
   handler: async ({ step }) => {
     const randomNumber = await step.run(
@@ -81,7 +80,7 @@ const flakyWorkflow = define<null, null>({
   },
 });
 
-const childWorkflow = define<{ x: number }, number>({
+const childWorkflow = cell.workflow.define<{ x: number }, number>({
   name: "child",
   handler: async ({ input, step }) => {
     return await step.run("add-5", async () => {
@@ -91,7 +90,7 @@ const childWorkflow = define<{ x: number }, number>({
   },
 });
 
-const parentWorkflow = define<{ value: number }, { finalResult: number }>({
+const parentWorkflow = cell.workflow.define<{ value: number }, { finalResult: number }>({
   name: "parent",
   handler: async ({ input, step }) => {
     const result = await step.invoke(childWorkflow, { x: input.value });
@@ -154,7 +153,7 @@ cell.request(async (req: Request) => {
 
   if (lastPathSegment === "reliable" && req.method === "POST") {
     const { username, email, phoneNumber } = await req.json();
-    const runId = dispatch(reliableWorkflow, {
+    const runId = cell.workflow.dispatch(reliableWorkflow, {
       username,
       email,
       phoneNumber,
@@ -163,13 +162,13 @@ cell.request(async (req: Request) => {
   }
 
   if (lastPathSegment === "flaky" && req.method === "POST") {
-    const runId = dispatch(flakyWorkflow);
+    const runId = cell.workflow.dispatch(flakyWorkflow);
     return new Response(runId);
   }
 
   if (lastPathSegment === "parent" && req.method === "POST") {
     const { value } = await req.json();
-    const runId = dispatch(parentWorkflow, { value });
+    const runId = cell.workflow.dispatch(parentWorkflow, { value });
     return new Response(runId);
   }
 
@@ -184,7 +183,7 @@ cell.request(async (req: Request) => {
     if (!runId) {
       return Response.json({ error: "id is required" }, { status: 400 });
     }
-    const runProgress = getRunProgress(runId as types.WorkflowRunId);
+    const runProgress = cell.workflow.getRunProgress(runId as types.WorkflowRunId);
     return Response.json(runProgress);
   }
 

@@ -48,25 +48,13 @@ interface WorkflowInvocationRow {
   child_run_id: string;
 }
 
-// Singleton pattern for global workflow runtime
-let globalRuntime: WorkflowRuntime | null = null;
-
-export function getRuntime(): WorkflowRuntime {
-  if (!globalRuntime) {
-    throw new Error("WorkflowRuntime not initialized");
-  }
-  return globalRuntime;
-}
-
-export function setRuntime(runtime: WorkflowRuntime): void {
-  globalRuntime = runtime;
-}
 
 export class WorkflowRuntime {
   static #runningWorkflows = 0;
 
   #dbAccessor: DbAccessor;
   #taskScheduler: TaskScheduler;
+  #tablesCreated = false;
 
   // Promise tracking for in-memory invocations
   #pendingInvocations = new Map<string, (output: JSONValue) => void>();
@@ -85,6 +73,7 @@ export class WorkflowRuntime {
     name: string,
     handler: (ctx: WorkflowCtx<Input>) => Promise<Output>,
   ): void {
+    this.ensureTablesExist();
     this.#dbAccessor.db.prepare(
       `INSERT OR IGNORE INTO workflows (name) VALUES (?)`,
     ).run(name);
@@ -105,6 +94,10 @@ export class WorkflowRuntime {
   constructor(dbAccessor: DbAccessor, taskScheduler: TaskScheduler) {
     this.#dbAccessor = dbAccessor;
     this.#taskScheduler = taskScheduler;
+  }
+
+  private ensureTablesExist(): void {
+    if (this.#tablesCreated) return;
 
     this.#dbAccessor.db.exec(`
       CREATE TABLE IF NOT EXISTS workflows (
@@ -142,12 +135,15 @@ export class WorkflowRuntime {
         UNIQUE(workflow_run_id, step_index)
       );
     `);
+
+    this.#tablesCreated = true;
   }
 
   dispatchByName(
     workflowName: string,
     inputData: JSONValue,
   ): WorkflowRunId | null {
+    this.ensureTablesExist();
     const handler = this.#workflows.get(workflowName);
     if (!handler) {
       return null;
@@ -290,6 +286,7 @@ export class WorkflowRuntime {
   }
 
   getRunProgress(runId: WorkflowRunId): WorkflowRunProgress | null {
+    this.ensureTablesExist();
     // Retrieve the workflow run joined with its workflow steps from DB.
     const runResult = this.#dbAccessor.db.prepare(`
       SELECT
@@ -346,6 +343,7 @@ export class WorkflowRuntime {
     status?: "pending" | "completed";
     limit?: number;
   }): WorkflowRunProgress[] {
+    this.ensureTablesExist();
     let sql = `
       SELECT
         id,
@@ -419,6 +417,43 @@ export class WorkflowRuntime {
         }),
       };
     });
+  }
+
+  define<Input extends JSONValue, Output extends Voidable<JSONValue>>(
+    config: WorkflowConfig<Input, Output>,
+  ): WorkflowDef<Input, Output> {
+    this.ensureTablesExist();
+
+    // Wrapper to convert from new API to internal format
+    const wrappedHandler = async (
+      ctx: WorkflowCtx<JSONValue>,
+    ) => {
+      if (ctx.input === null || ctx.input === undefined) {
+        return await config.handler(
+          { step: ctx.step, attempt: ctx.attempt } as WorkflowCtx<Input>,
+        );
+      } else {
+        return await config.handler(
+          { ...ctx, input: ctx.input as Input } as unknown as WorkflowCtx<Input>,
+        );
+      }
+    };
+
+    this.register(config.name, wrappedHandler);
+    return { config, name: config.name };
+  }
+
+  dispatch<Input extends JSONValue, Output extends Voidable<JSONValue>>(
+    workflow: WorkflowDef<Input, Output>,
+    input?: Input,
+  ): WorkflowRunId {
+    this.ensureTablesExist();
+    const inputData = input ?? null;
+    const runId = this.dispatchByName(workflow.name, inputData);
+    if (!runId) {
+      throw new Error(`Workflow ${workflow.name} not found`);
+    }
+    return runId;
   }
 }
 
@@ -668,62 +703,6 @@ class WorkflowStepImpl implements WorkflowStep {
   }
 }
 
-export function define<
-  Input extends JSONValue,
-  Output extends Voidable<JSONValue>,
->(
-  config: WorkflowConfig<Input, Output>,
-): WorkflowDef<Input, Output> {
-  const runtime = getRuntime();
-
-  // Wrapper to convert from new API to internal format
-  const wrappedHandler = async (
-    ctx: WorkflowCtx<JSONValue>,
-  ) => {
-    if (ctx.input === null || ctx.input === undefined) {
-      return await config.handler(
-        { step: ctx.step, attempt: ctx.attempt } as WorkflowCtx<Input>,
-      );
-    } else {
-      return await config.handler(
-        { ...ctx, input: ctx.input as Input } as unknown as WorkflowCtx<Input>,
-      );
-    }
-  };
-
-  runtime.register(config.name, wrappedHandler);
-  return { config, name: config.name };
-}
-
-export function dispatch<
-  Input extends JSONValue,
-  Output extends Voidable<JSONValue>,
->(
-  workflow: WorkflowDef<Input, Output>,
-  input?: Input,
-): WorkflowRunId {
-  const runtime = getRuntime();
-  const inputData = input ?? null;
-  const runId = runtime.dispatchByName(workflow.name, inputData);
-  if (!runId) {
-    throw new Error(`Workflow ${workflow.name} not found`);
-  }
-  return runId;
-}
-
-export function getRunProgress(
-  runId: WorkflowRunId,
-): WorkflowRunProgress | null {
-  return getRuntime().getRunProgress(runId);
-}
-
-export function listRuns(options?: {
-  workflowName?: string;
-  status?: "pending" | "completed";
-  limit?: number;
-}): WorkflowRunProgress[] {
-  return getRuntime().listRuns(options);
-}
 
 /** Safe JSON serialization that handles void (which is undefined at runtime) */
 function toJson(v: Voidable<JSONValue>): string {

@@ -1,10 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
 import {
-  define,
-  dispatch,
-  getRunProgress,
-  listRuns,
-  setRuntime,
   WorkflowRuntime,
 } from "./workflow.ts";
 import {
@@ -18,6 +13,7 @@ import {
 import { assert, assertEquals, assertExists } from "jsr:@std/assert@1";
 import { delay } from "jsr:@std/async@1/delay";
 import { ulid } from "jsr:@std/ulid@1/ulid";
+import { Cell } from "./cell.ts";
 
 function generateTempDbAccessor(): DbAccessor {
   const db = new DatabaseSync(":memory:");
@@ -52,43 +48,15 @@ function generateMockTaskScheduler(dbAccessor: DbAccessor): TaskScheduler {
   };
 }
 
-function createTestRuntime(): {
-  runtime: WorkflowRuntime;
-  dbAccessor: DbAccessor;
-  taskScheduler: TaskScheduler;
-} {
-  const dbAccessor = generateTempDbAccessor();
-  const taskScheduler = generateMockTaskScheduler(dbAccessor);
-  const runtime = new WorkflowRuntime(dbAccessor, taskScheduler);
-  setRuntime(runtime);
-  return { runtime, dbAccessor, taskScheduler };
+function createTestCell(): Cell {
+  return new Cell({
+    tenant: "test",
+    id: "test-cell",
+    dbPath: ":memory:",
+    ctlSockPath: "/dev/null"
+  });
 }
 
-// Helper function to set up runtime for a test
-function withRuntime<T>(
-  runtime: WorkflowRuntime,
-  fn: () => T,
-): T {
-  setRuntime(runtime);
-  try {
-    return fn();
-  } finally {
-    // Clean up if needed
-  }
-}
-
-// Async version for tests that need to wait
-async function withRuntimeAsync<T>(
-  runtime: WorkflowRuntime,
-  fn: () => Promise<T>,
-): Promise<T> {
-  setRuntime(runtime);
-  try {
-    return await fn();
-  } finally {
-    // Clean up if needed
-  }
-}
 
 // Helper to wait for workflow completion
 async function waitForCompletion(

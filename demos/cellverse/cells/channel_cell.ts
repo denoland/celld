@@ -1,4 +1,4 @@
-import { cell, define, dispatch } from "@ry/cells";
+import { cell } from "@ry/cells";
 import { z } from "npm:zod";
 import { extractBearerToken, verifyJWT } from "./utils.ts";
 
@@ -89,7 +89,7 @@ if (cell.id.startsWith("channel-")) {
     }),
   ]);
 
-  const reasoningWorkflow = define<{
+  const reasoningWorkflow = cell.workflow.define<{
     messages: {
       role: "user" | "assistant";
       content: string;
@@ -659,7 +659,7 @@ Respond naturally while occasionally storing or retrieving memories.`;
               }));
 
               // Start reasoning
-              dispatch(reasoningWorkflow, {
+              cell.workflow.dispatch(reasoningWorkflow, {
                 messages,
                 allowedSteps: 5,
               });

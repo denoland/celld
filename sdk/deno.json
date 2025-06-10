@@ -2,8 +2,7 @@
   "name": "@ry/cells",
   "version": "0.3.1",
   "exports": {
-    ".": "./mod.ts",
-    "./workflow": "./workflow.ts"
+    ".": "./mod.ts"
   },
   "license": "MIT",
   "imports": {

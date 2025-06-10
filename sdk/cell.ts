@@ -6,7 +6,7 @@ import {
   type Task,
   type TaskScheduler,
 } from "./types.ts";
-import { getRuntime, setRuntime, WorkflowRuntime } from "./workflow.ts";
+import { WorkflowRuntime } from "./workflow.ts";
 import { ulid } from "jsr:@std/ulid@^1.0.0/ulid";
 
 // Create a Cell class to track sockets and provide broadcast functionality
@@ -19,7 +19,7 @@ export class Cell implements DbAccessor, TaskScheduler {
   private server: Deno.HttpServer | null = null;
   private dbPath: string;
   private dbInstance: DatabaseSync | null = null;
-  private workflow: WorkflowRuntime | null = null;
+  private _workflow: WorkflowRuntime | null = null;
   private onRequestCallback:
     | ((req: Request) => Promise<Response> | Response | void)
     | null = null;
@@ -73,10 +73,6 @@ export class Cell implements DbAccessor, TaskScheduler {
     this.sockets = new Map<string, WebSocket>();
     this.setupServer();
     this.setupTables();
-
-    // Auto-initialize workflow runtime
-    setRuntime(new WorkflowRuntime(this, this));
-    this.workflow = getRuntime();
   }
 
   broadcast(
@@ -184,14 +180,14 @@ export class Cell implements DbAccessor, TaskScheduler {
           break;
         }
         case "resume-all-pending-workflow-runs": {
-          if (this.workflow) {
-            this.workflow.resumeAllPendingWorkflowRuns();
+          if (this._workflow) {
+            this._workflow.resumeAllPendingWorkflowRuns();
           }
           break;
         }
         case "retry-workflow-run": {
-          if (this.workflow) {
-            this.workflow.retry(payload.workflowRunId);
+          if (this._workflow) {
+            this._workflow.retry(payload.workflowRunId);
           }
           break;
         }
@@ -268,6 +264,13 @@ export class Cell implements DbAccessor, TaskScheduler {
       this.dbInstance = new DatabaseSync(this.dbPath);
     }
     return this.dbInstance;
+  }
+
+  get workflow(): WorkflowRuntime {
+    if (!this._workflow) {
+      this._workflow = new WorkflowRuntime(this, this);
+    }
+    return this._workflow;
   }
 
   private setupServer(): void {
