@@ -684,4 +684,64 @@ mod tests {
       assert_eq!(response_text, "hello\n");
     }
   }
+
+  #[tokio::test]
+  async fn test_auto_created_tables() {
+    use rusqlite::Connection;
+    use std::fs;
+
+    init();
+
+    let get_tables = |db_path: &str| -> Vec<String> {
+      if fs::metadata(db_path).is_err() {
+        return vec![];
+      }
+      let conn = Connection::open(db_path).unwrap();
+      let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").unwrap();
+      stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+    };
+
+    // Test hello.localhost
+    let c = reqwest::Client::new();
+    c.get("http://127.0.0.1:6146/cell/tables")
+      .header("Host", "hello.localhost")
+      .send()
+      .await
+      .unwrap();
+    let hello_tables = get_tables("data/hello.localhost/sqlite/tables.db");
+    assert_eq!(hello_tables, vec!["scheduled_tasks"]);
+
+    // Test basic-db.localhost
+    c.get("http://127.0.0.1:6146/cell/tables")
+      .header("Host", "basic-db.localhost")
+      .send()
+      .await
+      .unwrap();
+    let basic_tables = get_tables("data/basic-db.localhost/sqlite/tables.db");
+    assert_eq!(basic_tables, vec!["requests", "scheduled_tasks"]);
+
+    // Test workflow.localhost
+    c.get("http://127.0.0.1:6146/cell/tables")
+      .header("Host", "workflow.localhost")
+      .send()
+      .await
+      .unwrap();
+    let workflow_tables =
+      get_tables("data/workflow.localhost/sqlite/tables.db");
+    assert_eq!(
+      workflow_tables,
+      vec![
+        "key_values",
+        "logs",
+        "scheduled_tasks",
+        "workflow_runs",
+        "workflow_steps",
+        "workflows"
+      ]
+    );
+  }
 }
