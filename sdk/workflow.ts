@@ -95,7 +95,7 @@ export class WorkflowRuntime {
     this.#taskScheduler = taskScheduler;
   }
 
-  private ensureTablesExist(): void {
+  #ensureTablesExist(): void {
     if (this.#tablesCreated) return;
 
     this.#dbAccessor.db.exec(`
