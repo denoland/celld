@@ -72,7 +72,7 @@ export class WorkflowRuntime {
     name: string,
     handler: (ctx: WorkflowCtx<Input>) => Promise<Output>,
   ): void {
-    this.ensureTablesExist();
+    this.#ensureTablesExist();
     this.#dbAccessor.db.prepare(
       `INSERT OR IGNORE INTO workflows (name) VALUES (?)`,
     ).run(name);
@@ -142,7 +142,7 @@ export class WorkflowRuntime {
     workflowName: string,
     inputData: JSONValue,
   ): WorkflowRunId | null {
-    this.ensureTablesExist();
+    this.#ensureTablesExist();
     const handler = this.#workflows.get(workflowName);
     if (!handler) {
       return null;
@@ -285,7 +285,7 @@ export class WorkflowRuntime {
   }
 
   getRunProgress(runId: WorkflowRunId): WorkflowRunProgress | null {
-    this.ensureTablesExist();
+    this.#ensureTablesExist();
     // Retrieve the workflow run joined with its workflow steps from DB.
     const runResult = this.#dbAccessor.db.prepare(`
       SELECT
@@ -342,7 +342,7 @@ export class WorkflowRuntime {
     status?: "pending" | "completed";
     limit?: number;
   }): WorkflowRunProgress[] {
-    this.ensureTablesExist();
+    this.#ensureTablesExist();
     let sql = `
       SELECT
         id,
@@ -421,7 +421,7 @@ export class WorkflowRuntime {
   define<Input extends JSONValue, Output extends Voidable<JSONValue>>(
     config: WorkflowConfig<Input, Output>,
   ): WorkflowDef<Input, Output> {
-    this.ensureTablesExist();
+    this.#ensureTablesExist();
 
     // Wrapper to convert from new API to internal format
     const wrappedHandler = async (
@@ -448,7 +448,7 @@ export class WorkflowRuntime {
     workflow: WorkflowDef<Input, Output>,
     input?: Input,
   ): WorkflowRunId {
-    this.ensureTablesExist();
+    this.#ensureTablesExist();
     const inputData = input ?? null;
     const runId = this.dispatchByName(workflow.name, inputData);
     if (!runId) {
