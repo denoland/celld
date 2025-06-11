@@ -2,7 +2,7 @@ use std::{path::Path, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use tokio::net::TcpStream;
-use tracing::error;
+use tracing::{error, info};
 
 use crate::node_state::NodeState;
 
@@ -416,10 +416,12 @@ async fn dispatch_alarms(
     async move {
       if node_state.peer_manager.is_local_owner(&alarm.tenant, &alarm.cell_id) {
         // Dispatch the alarm to the local Deno process.
+        info!(?alarm, "Dispatching alarm to local cell");
         dispatch_alarm_locally(alarm.clone(), node_state.clone()).await.inspect_err(|e| {
           error!(?alarm, error = ?e, "Failed to dispatch alarm to local Deno process");
         }).ok()
       } else {
+        info!(?alarm, "Dispatching alarm to remote cell owner");
         dispatch_alarm_remotely(alarm.clone(), node_state.clone()).await.inspect_err(|e| {
           error!(?alarm, error = ?e, "Failed to dispatch alarm to remote cell owner");
         }).ok()

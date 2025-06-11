@@ -431,6 +431,10 @@ impl LockHandle {
   }
 
   pub async fn ping(&self) -> anyhow::Result<LockStateKind> {
+    info!(
+      descriptor = ?self.descriptor(),
+      "Pinging lock state loop to check its status"
+    );
     let (tx, rx) = oneshot::channel();
     self
       .tx
@@ -630,6 +634,10 @@ async fn lock_state_loop(
       }
 
       req = request_rx.recv() => {
+        info!(
+          descriptor = ?state.descriptor(),
+          "Received lock state request",
+        );
         match req {
           Some(LockStateRequest::SetResource(req)) => {
             handle_set_resource(req, &mut state);
@@ -696,6 +704,10 @@ fn handle_set_resource(req: SetResourceRequest, state: &mut LockState) {
 }
 
 fn handle_ping(req: PingRequest, state: &mut LockState) {
+  info!(
+    descriptor = ?state.descriptor(),
+    "Received ping request to check lock state",
+  );
   match state {
     LockState::Init { .. } => {
       let _ = req.res_chan.send(LockStateKind::Init);

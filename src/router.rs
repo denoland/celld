@@ -132,6 +132,7 @@ impl ProxyHttp for InternalAPI {
     session: &mut Session,
     _ctx: &mut Self::CTX,
   ) -> Result<bool> {
+    println!("[INTERNAL API] Request filter called");
     let req_header = session.req_header();
 
     // Get the path
@@ -249,6 +250,11 @@ impl ProxyHttp for InternalAPI {
 
     // Handle the alarms endpoint
     if path.starts_with("/_internal/alarms") {
+      info!(
+        path,
+        method = %req_header.method,
+        "Handling /_internal/alarms endpoint"
+      );
       let Some(system_main_cell_handle) =
         self.node_state.cell_manager.get_system_main_cell().await
       else {

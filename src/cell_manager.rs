@@ -168,6 +168,7 @@ impl CellManager {
 
   /// Get the handle to the system main cell if exists.
   pub async fn get_system_main_cell(&self) -> Option<LockHandle> {
+    info!("Getting system main cell");
     let system_main_cell_key = CellKey::new(SYSTEM_TENANT, SYSTEM_CELL_ID);
 
     // Get the clone of the key and handle with minimum lock contention
@@ -197,6 +198,8 @@ impl CellManager {
         }
       }
     };
+
+    info!(?maybe_handle, "System main cell pinged successfully",);
 
     if should_remove {
       self.cells.remove(&system_main_cell_key);
@@ -886,6 +889,7 @@ fn spawn_deno_process(
   let mut cmd = std::process::Command::new("deno");
   cmd
     .current_dir(tenant_dir)
+    .env("DENO_LOG", "debug")
     .env(
       "DENO_SERVE_ADDRESS",
       format!("unix:{}", serve_socket_path.display()),

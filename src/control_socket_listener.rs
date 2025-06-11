@@ -51,6 +51,7 @@ impl BackgroundService for ControlSocketListener {
         }
 
         stream = listener.accept() => {
+          info!("Control socket listener accepted a new connection");
           let stream = match stream {
             Ok((stream, _)) => stream,
             Err(e) => {
@@ -66,12 +67,16 @@ impl BackgroundService for ControlSocketListener {
             let node_state = node_state.clone();
 
             async move {
+              info!("routed request: {:?}", req.uri().path());
               if req.uri().path() == "/_internal/alarms" {
+                info!("Handling internal alarms request");
                 match node_state.cell_manager.get_system_main_cell().await {
                   Some(system_main_cell_handle) => {
+                    info!("Handling internal alarms request locally");
                     locally_handle_internal_alarms(req, system_main_cell_handle).await
                   }
                   None => {
+                    info!("No system main cell found, forwarding request to the owner of the system main cell");
                     // Forward to the owner of the system main cell
                     let system_main_cell_owner = node_state.peer_manager.get_owner_peer(SYSTEM_TENANT, SYSTEM_CELL_ID);
                     send_alarm_to_system_main_cell_owner(system_main_cell_owner, req).await
@@ -106,6 +111,7 @@ where
   B: hyper::body::Body<Error = E>,
   E: std::fmt::Debug,
 {
+  info!("Handling internal alarms request locally_handle_internal_alarms");
   let (parts, body) = req.into_parts();
   let req_body = match body.collect().await {
     Ok(body) => body,
