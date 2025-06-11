@@ -16,30 +16,30 @@ export class Cell implements DbAccessor, TaskScheduler {
   ctlClient: Deno.HttpClient;
   sockets: Map<string, WebSocket>;
 
-  private server: Deno.HttpServer | null = null;
-  private dbPath: string;
-  private dbInstance: DatabaseSync | null = null;
-  private _workflow: WorkflowRuntime | null = null;
-  private onRequestCallback:
+  #server: Deno.HttpServer | null = null;
+  #dbPath: string;
+  #dbInstance: DatabaseSync | null = null;
+  #workflow: WorkflowRuntime | null = null;
+  #onRequestCallback:
     | ((req: Request) => Promise<Response> | Response | void)
     | null = null;
-  private onConnectCallback:
+  #onConnectCallback:
     | ((socket: WebSocket, id: string) => Promise<void> | void)
     | null = null;
-  private onMessageCallback:
+  #onMessageCallback:
     | ((
       event: MessageEvent,
       socket: WebSocket,
       id: string,
     ) => Promise<void> | void)
     | null = null;
-  private onCloseCallback:
+  #onCloseCallback:
     | ((socket: WebSocket, id: string) => Promise<void> | void)
     | null = null;
-  private onErrorCallback:
+  #onErrorCallback:
     | ((error: Error | ErrorEvent | Event) => Promise<void> | void)
     | null = null;
-  private onAlarmCallback:
+  #onAlarmCallback:
     | (() => Promise<void> | void)
     | null = null;
 
@@ -62,7 +62,7 @@ export class Cell implements DbAccessor, TaskScheduler {
   }) {
     this.tenant = args?.tenant ?? Cell.#defaultTenant;
     this.id = args?.id ?? Cell.#defaultId;
-    this.dbPath = args?.dbPath ?? Cell.#defaultDbPath;
+    this.#dbPath = args?.dbPath ?? Cell.#defaultDbPath;
     const ctlSockPath = args?.ctlSockPath ?? Cell.#defaultCtlSockPath;
     this.ctlClient = Deno.createHttpClient({
       proxy: {
@@ -71,8 +71,8 @@ export class Cell implements DbAccessor, TaskScheduler {
       },
     });
     this.sockets = new Map<string, WebSocket>();
-    this.setupServer();
-    this.setupTables();
+    this.#setupServer();
+    this.#setupTables();
   }
 
   broadcast(
@@ -96,21 +96,21 @@ export class Cell implements DbAccessor, TaskScheduler {
   }
 
   request(cb: (req: Request) => Promise<Response> | Response | void): void {
-    if (this.onRequestCallback) {
+    if (this.#onRequestCallback) {
       throw new Error(
         `Handler for request already registered for cell ${this.id}`,
       );
     }
-    this.onRequestCallback = cb;
+    this.#onRequestCallback = cb;
   }
 
   alarm(cb: () => Promise<void> | void): void {
-    if (this.onAlarmCallback) {
+    if (this.#onAlarmCallback) {
       throw new Error(
         `Handler for alarm already registered for cell ${this.id}`,
       );
     }
-    this.onAlarmCallback = cb;
+    this.#onAlarmCallback = cb;
   }
 
   /**
@@ -165,7 +165,7 @@ export class Cell implements DbAccessor, TaskScheduler {
     return result.changes > 0;
   }
 
-  private async handleAlarm(scheduledTimeUnixMs: number): Promise<void> {
+  async #handleAlarm(scheduledTimeUnixMs: number): Promise<void> {
     // Retrieve tasks scheduled at the given timestamp
     const tasks = this.db.prepare(`
       SELECT id, payload FROM scheduled_tasks WHERE scheduled_time_unix_ms = ?
@@ -176,18 +176,18 @@ export class Cell implements DbAccessor, TaskScheduler {
       const payload = JSON.parse(task.payload as string) as Task;
       switch (payload.kind) {
         case "user-defined-alarm": {
-          await this.onAlarmCallback?.();
+          await this.#onAlarmCallback?.();
           break;
         }
         case "resume-all-pending-workflow-runs": {
-          if (this._workflow) {
-            this._workflow.resumeAllPendingWorkflowRuns();
+          if (this.#workflow) {
+            this.#workflow.resumeAllPendingWorkflowRuns();
           }
           break;
         }
         case "retry-workflow-run": {
-          if (this._workflow) {
-            this._workflow.retry(payload.workflowRunId);
+          if (this.#workflow) {
+            this.#workflow.retry(payload.workflowRunId);
           }
           break;
         }
@@ -218,12 +218,12 @@ export class Cell implements DbAccessor, TaskScheduler {
   }
 
   connect(cb: (socket: WebSocket, id: string) => Promise<void> | void): void {
-    if (this.onConnectCallback) {
+    if (this.#onConnectCallback) {
       throw new Error(
         `Handler for connect already registered for cell ${this.id}`,
       );
     }
-    this.onConnectCallback = cb;
+    this.#onConnectCallback = cb;
   }
 
   message(
@@ -233,48 +233,48 @@ export class Cell implements DbAccessor, TaskScheduler {
       id: string,
     ) => Promise<void> | void,
   ): void {
-    if (this.onMessageCallback) {
+    if (this.#onMessageCallback) {
       throw new Error(
         `Handler for message already registered for cell ${this.id}`,
       );
     }
-    this.onMessageCallback = cb;
+    this.#onMessageCallback = cb;
   }
 
   close(cb: (socket: WebSocket, id: string) => Promise<void> | void): void {
-    if (this.onCloseCallback) {
+    if (this.#onCloseCallback) {
       throw new Error(
         `Handler for close already registered for cell ${this.id}`,
       );
     }
-    this.onCloseCallback = cb;
+    this.#onCloseCallback = cb;
   }
 
   error(cb: (error: Error | ErrorEvent | Event) => Promise<void> | void): void {
-    if (this.onErrorCallback) {
+    if (this.#onErrorCallback) {
       throw new Error(
         `Handler for error already registered for cell ${this.id}`,
       );
     }
-    this.onErrorCallback = cb;
+    this.#onErrorCallback = cb;
   }
 
   get db(): DatabaseSync {
-    if (!this.dbInstance) {
-      this.dbInstance = new DatabaseSync(this.dbPath);
+    if (!this.#dbInstance) {
+      this.#dbInstance = new DatabaseSync(this.#dbPath);
     }
-    return this.dbInstance;
+    return this.#dbInstance;
   }
 
   get workflow(): WorkflowRuntime {
-    if (!this._workflow) {
-      this._workflow = new WorkflowRuntime(this, this);
+    if (!this.#workflow) {
+      this.#workflow = new WorkflowRuntime(this, this);
     }
-    return this._workflow;
+    return this.#workflow;
   }
 
-  private setupServer(): void {
-    this.server = Deno.serve(async (req) => {
+  #setupServer(): void {
+    this.#server = Deno.serve(async (req) => {
       console.error({ url: req.url, method: req.method });
       // Handle WebSocket connections
       if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
@@ -287,28 +287,28 @@ export class Cell implements DbAccessor, TaskScheduler {
 
         // Set up the WebSocket event handlers
         socket.onopen = () => {
-          if (this.onConnectCallback) {
-            this.onConnectCallback(socket, socketId);
+          if (this.#onConnectCallback) {
+            this.#onConnectCallback(socket, socketId);
           }
         };
 
         socket.onmessage = (e) => {
-          if (this.onMessageCallback) {
-            this.onMessageCallback(e, socket, socketId);
+          if (this.#onMessageCallback) {
+            this.#onMessageCallback(e, socket, socketId);
           }
         };
 
         socket.onclose = () => {
           this.sockets.delete(socketId);
 
-          if (this.onCloseCallback) {
-            this.onCloseCallback(socket, socketId);
+          if (this.#onCloseCallback) {
+            this.#onCloseCallback(socket, socketId);
           }
         };
 
         socket.onerror = (error) => {
-          if (this.onErrorCallback) {
-            this.onErrorCallback(error);
+          if (this.#onErrorCallback) {
+            this.#onErrorCallback(error);
           }
         };
 
@@ -326,7 +326,7 @@ export class Cell implements DbAccessor, TaskScheduler {
           });
         }
 
-        await this.handleAlarm(scheduledTimeUnixMs);
+        await this.#handleAlarm(scheduledTimeUnixMs);
 
         // Get the next task's scheduled time and schedule it as a global alarm
         const nextTask = this.db.prepare(`
@@ -335,7 +335,7 @@ export class Cell implements DbAccessor, TaskScheduler {
         if (nextTask !== undefined) {
           // TODO(magurotuna): The next task's schedule could be piggybacked on
           // the response instead of a separate request.
-          await this.scheduleGlobalAlarm(
+          await this.#scheduleGlobalAlarm(
             nextTask.scheduled_time_unix_ms as number,
           );
         }
@@ -344,12 +344,12 @@ export class Cell implements DbAccessor, TaskScheduler {
       }
 
       // Handle HTTP requests
-      if (this.onRequestCallback) {
+      if (this.#onRequestCallback) {
         const modifiedReq = new Request(
           req.url.replace(/^http\+unix:/, "http:"),
           req,
         );
-        const result = this.onRequestCallback(modifiedReq);
+        const result = this.#onRequestCallback(modifiedReq);
         if (result instanceof Promise) {
           return await result;
         }
@@ -370,7 +370,7 @@ export class Cell implements DbAccessor, TaskScheduler {
     });
   }
 
-  private setupTables(): void {
+  #setupTables(): void {
     // Ensure `scheduled_tasks` table exists.
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS scheduled_tasks (
@@ -385,9 +385,9 @@ export class Cell implements DbAccessor, TaskScheduler {
   }
 
   async shutdown(): Promise<never> {
-    if (this.server) {
-      await this.server.shutdown();
-      this.server = null;
+    if (this.#server) {
+      await this.#server.shutdown();
+      this.#server = null;
     }
 
     // Close all WebSocket connections
@@ -406,9 +406,9 @@ export class Cell implements DbAccessor, TaskScheduler {
     }
 
     // Close database connection if open
-    if (this.dbInstance) {
-      this.dbInstance.close();
-      this.dbInstance = null;
+    if (this.#dbInstance) {
+      this.#dbInstance.close();
+      this.#dbInstance = null;
     }
 
     console.log(
@@ -423,12 +423,12 @@ export class Cell implements DbAccessor, TaskScheduler {
       INSERT INTO scheduled_tasks (id, scheduled_time_unix_ms, payload) VALUES (?, ?, ?)
     `).run(id, task.scheduledTimeUnixMs, JSON.stringify(task));
 
-    await this.scheduleGlobalAlarm(task.scheduledTimeUnixMs);
+    await this.#scheduleGlobalAlarm(task.scheduledTimeUnixMs);
 
     return id;
   }
 
-  private async scheduleGlobalAlarm(
+  async #scheduleGlobalAlarm(
     scheduledTimeUnixMs: number,
   ): Promise<void> {
     await fetch("http://localhost/_internal/alarms", {
