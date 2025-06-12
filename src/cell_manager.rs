@@ -253,7 +253,8 @@ impl CellManager {
       .try_acquire(
         &lock_name,
         node_id,
-        node_state.config.lock_guard_ttl,
+        node_state.config.lock_guard_ttl_global,
+        node_state.config.lock_guard_ttl_local,
         node_state.distributed_lock.clone(),
       )
       .await
@@ -467,7 +468,8 @@ impl CellManager {
       .try_acquire(
         &lock_name,
         node_id,
-        node_state.config.lock_guard_ttl,
+        node_state.config.lock_guard_ttl_global,
+        node_state.config.lock_guard_ttl_local,
         node_state.distributed_lock.clone(),
       )
       .await

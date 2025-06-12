@@ -85,11 +85,26 @@ pub struct Config {
   pub heartbeat_interval: Duration,
   /// Staleness threshold in seconds for detecting inactive nodes
   pub staleness_threshold: Duration,
-  /// TTL for the lock guard. As long as a Deno process is up and running,
-  /// the lock guard will be renewed at the interval of one third of this value.
-  /// For example, if the value is 30 seconds, the lock guard will be renewed
-  /// every 10 seconds.
-  pub lock_guard_ttl: Duration,
+  /// TTL for the lock guard, visible to all other nodes in the cluster.
+  /// Once this TTL expires, other nodes consider the lock to be released, at
+  /// which point they may try to acquire it. We must ensure that the protected
+  /// resources have been terminated (either gracefully or forcibly) before
+  /// this TTL expires; otherwise, the system would get into an undefined state.
+  pub lock_guard_ttl_global: Duration,
+  /// TTL for the lock guard for local operations.
+  /// The lock owner is allowed to perform operations on the protected resource
+  /// until this TTL expires. Once it expires, it must start graceful shutdown.
+  ///
+  /// This value is equal to `lock_guard_ttl - lock_graceful_shutdown_timeout`.
+  ///
+  /// As long as the protected resource is alive, the lock guard will be renewed
+  /// at the interval of 1/4 of this value. For example, if the value is 20
+  /// seconds, the lock guard will be renewed every 5 seconds to extend TTL.
+  pub lock_guard_ttl_local: Duration,
+  /// Timeout for graceful shutdown of a distributed lock.
+  /// If this timeout is reached, the lock will be forcibly released (like
+  /// sending SIGKILL to relevant processes).
+  pub lock_graceful_shutdown_timeout: Duration,
   /// Interval for alarm scheduler
   pub alarm_scheduler_interval: Duration,
   /// Seed for deterministic hash ring (for testing)
@@ -224,11 +239,22 @@ impl Config {
       .map(Duration::from_secs)
       .unwrap_or(crate::cluster_membership::DEFAULT_STALENESS_THRESHOLD);
 
-    let lock_guard_ttl_secs = var("CELL_LOCK_GUARD_TTL_SECS")
+    let lock_guard_ttl_global_secs = var("CELL_LOCK_GUARD_TTL_SECS")
       .ok()
       .and_then(|s| s.parse::<u64>().ok())
       .unwrap_or(30);
-    let lock_guard_ttl = Duration::from_secs(lock_guard_ttl_secs);
+    let lock_guard_ttl_global = Duration::from_secs(lock_guard_ttl_global_secs);
+
+    let lock_graceful_shutdown_timeout_secs =
+      var("CELL_LOCK_GRACEFUL_SHUTDOWN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(10);
+    let lock_graceful_shutdown_timeout =
+      Duration::from_secs(lock_graceful_shutdown_timeout_secs);
+
+    let lock_guard_ttl_local =
+      lock_guard_ttl_global - lock_graceful_shutdown_timeout;
 
     let alarm_scheduler_interval_secs =
       var("CELL_ALARM_SCHEDULER_INTERVAL_SECS")
@@ -278,7 +304,9 @@ impl Config {
       data_dir,
       heartbeat_interval,
       staleness_threshold,
-      lock_guard_ttl,
+      lock_guard_ttl_global,
+      lock_guard_ttl_local,
+      lock_graceful_shutdown_timeout,
       alarm_scheduler_interval,
       s3_endpoint,
       s3_bucket,
