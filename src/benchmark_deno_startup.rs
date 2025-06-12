@@ -27,7 +27,6 @@ pub async fn run(iterations: usize) -> Result<()> {
         staleness_threshold: Duration::from_secs(90),
         lock_guard_ttl_global: Duration::from_secs(30),
         lock_guard_ttl_local: Duration::from_secs(20),
-        lock_graceful_shutdown_timeout: Duration::from_secs(10),
         alarm_scheduler_interval: Duration::from_secs(5),
         hashring_seed: None,
         system_main_cell_spawn_retries: 10,

@@ -101,10 +101,6 @@ pub struct Config {
   /// at the interval of 1/4 of this value. For example, if the value is 20
   /// seconds, the lock guard will be renewed every 5 seconds to extend TTL.
   pub lock_guard_ttl_local: Duration,
-  /// Timeout for graceful shutdown of a distributed lock.
-  /// If this timeout is reached, the lock will be forcibly released (like
-  /// sending SIGKILL to relevant processes).
-  pub lock_graceful_shutdown_timeout: Duration,
   /// Interval for alarm scheduler
   pub alarm_scheduler_interval: Duration,
   /// Seed for deterministic hash ring (for testing)
@@ -306,7 +302,6 @@ impl Config {
       staleness_threshold,
       lock_guard_ttl_global,
       lock_guard_ttl_local,
-      lock_graceful_shutdown_timeout,
       alarm_scheduler_interval,
       s3_endpoint,
       s3_bucket,
