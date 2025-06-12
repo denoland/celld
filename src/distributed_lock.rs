@@ -628,8 +628,17 @@ async fn lock_state_loop(
 
       _ = global_ttl_renewal_interval.tick() => {
         // Renew the TTL using the lock manager
-        if let Err(e) = state.renew_ttl(global_ttl, local_ttl, &mut global_ttl_expiry_timer, &mut local_ttl_expiry_timer).await {
-          error!(error = ?e, descriptor = ?state.descriptor(), "Failed to renew TTL");
+        match tokio::time::timeout_at(
+          local_ttl_expiry_timer.deadline(),
+          state.renew_ttl(global_ttl, local_ttl, &mut global_ttl_expiry_timer, &mut local_ttl_expiry_timer),
+        ).await {
+          Ok(Ok(_)) => {},
+          Ok(Err(e)) => {
+            error!(error = ?e, descriptor = ?state.descriptor(), "Failed to renew TTL");
+          }
+          Err(_elapsed) => {
+            error!(descriptor = ?state.descriptor(), "Failed to renew TTL because of timeout");
+          }
         }
       }
 
@@ -648,22 +657,52 @@ async fn lock_state_loop(
             handle_mutate_resource(req, &mut state);
           }
           Some(LockStateRequest::GetAlarm(req)) => {
-            handle_get_alarm(req, &mut state).await;
+            if let Err(_elapsed) = tokio::time::timeout_at(
+              local_ttl_expiry_timer.deadline(),
+              handle_get_alarm(req, &mut state),
+            ).await {
+              error!(descriptor = ?state.descriptor(), "Failed to get alarm because of timeout");
+            }
           }
           Some(LockStateRequest::DeleteAlarm(req)) => {
-            handle_delete_alarm(req, &mut state).await;
+            if let Err(_elapsed) = tokio::time::timeout_at(
+              local_ttl_expiry_timer.deadline(),
+              handle_delete_alarm(req, &mut state),
+            ).await {
+              error!(descriptor = ?state.descriptor(), "Failed to delete alarm because of timeout");
+            }
           }
           Some(LockStateRequest::SetAlarm(req)) => {
-            handle_set_alarm(req, &mut state).await;
+            if let Err(_elapsed) = tokio::time::timeout_at(
+              local_ttl_expiry_timer.deadline(),
+              handle_set_alarm(req, &mut state),
+            ).await {
+              error!(descriptor = ?state.descriptor(), "Failed to set alarm because of timeout");
+            }
           }
           Some(LockStateRequest::DispatchAlarms(req)) => {
-            handle_dispatch_alarms(req, &mut state).await;
+            if let Err(_elapsed) = tokio::time::timeout_at(
+              local_ttl_expiry_timer.deadline(),
+              handle_dispatch_alarms(req, &mut state),
+            ).await {
+              error!(descriptor = ?state.descriptor(), "Failed to dispatch alarms because of timeout");
+            }
           }
           Some(LockStateRequest::ReleaseIfIdle(req)) => {
-            handle_release_if_idle(req, &mut state, &mut global_ttl_expiry_timer).await;
+            if let Err(_elapsed) = tokio::time::timeout_at(
+              local_ttl_expiry_timer.deadline(),
+              handle_release_if_idle(req, &mut state, &mut global_ttl_expiry_timer),
+            ).await {
+              error!(descriptor = ?state.descriptor(), "Failed to release if idle because of timeout");
+            }
           }
           Some(LockStateRequest::Release(req)) => {
-            handle_release(req, &mut state, &mut global_ttl_expiry_timer).await;
+            if let Err(_elapsed) = tokio::time::timeout_at(
+              local_ttl_expiry_timer.deadline(),
+              handle_release(req, &mut state, &mut global_ttl_expiry_timer),
+            ).await {
+              error!(descriptor = ?state.descriptor(), "Failed to release because of timeout");
+            }
           }
           None => {
             // LockHandle was dropped; at this point, the state must be `Released`
