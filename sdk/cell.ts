@@ -165,11 +165,12 @@ export class Cell implements DbAccessor, TaskScheduler {
     return result.changes > 0;
   }
 
-  async #handleAlarm(scheduledTimeUnixMs: number): Promise<void> {
-    // Retrieve tasks scheduled at the given timestamp
+  async #handleAlarm(): Promise<void> {
+    // Retrieve all tasks that are due now
+    const currentTime = Date.now();
     const tasks = this.db.prepare(`
-      SELECT id, payload FROM scheduled_tasks WHERE scheduled_time_unix_ms = ?
-    `).all(scheduledTimeUnixMs);
+      SELECT id, payload FROM scheduled_tasks WHERE scheduled_time_unix_ms <= ?
+    `).all(currentTime);
 
     // Dispatch the associated operations based on the task kind
     for (const task of tasks) {
@@ -318,28 +319,7 @@ export class Cell implements DbAccessor, TaskScheduler {
       const url = new URL(req.url);
 
       if (req.method === "POST" && url.pathname === "/_internal/alarm") {
-        const body = await req.text();
-        const scheduledTimeUnixMs = parseInt(body, 10);
-        if (Number.isNaN(scheduledTimeUnixMs)) {
-          return new Response(`Unable to parse scheduled time: ${body}`, {
-            status: 400,
-          });
-        }
-
-        await this.#handleAlarm(scheduledTimeUnixMs);
-
-        // Get the next task's scheduled time and schedule it as a global alarm
-        const nextTask = this.db.prepare(`
-          SELECT scheduled_time_unix_ms FROM scheduled_tasks ORDER BY scheduled_time_unix_ms ASC LIMIT 1
-        `).get();
-        if (nextTask !== undefined) {
-          // TODO(magurotuna): The next task's schedule could be piggybacked on
-          // the response instead of a separate request.
-          await this.#scheduleGlobalAlarm(
-            nextTask.scheduled_time_unix_ms as number,
-          );
-        }
-
+        await this.#handleAlarm();
         return new Response("OK", { status: 200 });
       }
 
@@ -423,6 +403,7 @@ export class Cell implements DbAccessor, TaskScheduler {
       INSERT INTO scheduled_tasks (id, scheduled_time_unix_ms, payload) VALUES (?, ?, ?)
     `).run(id, task.scheduledTimeUnixMs, JSON.stringify(task));
 
+    // Always schedule a global alarm - let the alarm processor handle deduplication
     await this.#scheduleGlobalAlarm(task.scheduledTimeUnixMs);
 
     return id;
