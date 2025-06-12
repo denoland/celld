@@ -414,7 +414,7 @@ async fn test_node_failure_takeover() {
 }
 
 /// Tests concurrent takeover attempts to verify only one node succeeds via locking
-#[flaky_test::flaky_test(tokio)]
+#[test_log::test(tokio::test)]
 async fn test_concurrent_takeover_locking() {
   // Setup three celld nodes in the mesh with auto-allocated ports
   let mut test_env = TestEnv::new(3);
