@@ -249,8 +249,9 @@ impl Config {
     let lock_graceful_shutdown_timeout =
       Duration::from_secs(lock_graceful_shutdown_timeout_secs);
 
-    let lock_guard_ttl_local =
-      lock_guard_ttl_global - lock_graceful_shutdown_timeout;
+    let lock_guard_ttl_local = lock_guard_ttl_global
+      .checked_sub(lock_graceful_shutdown_timeout)
+      .expect("lock_guard_ttl_global must be greater than lock_graceful_shutdown_timeout");
 
     let alarm_scheduler_interval_secs =
       var("CELL_ALARM_SCHEDULER_INTERVAL_SECS")
