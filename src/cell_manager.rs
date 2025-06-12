@@ -41,7 +41,7 @@ pub struct CellEntry {
 }
 
 impl CellEntry {
-  pub async fn terminate(self) {
+  pub async fn terminate(mut self) {
     match self.inner {
       CellEntryInner::Normal {
         parent_exit_guard, ..
@@ -59,7 +59,7 @@ impl CellEntry {
       }
     }
 
-    if let Some(replica) = &self.replica {
+    if let Some(replica) = &mut self.replica {
       if let Err(e) = replica.shutdown().await {
         error!(
           error = ?e,
@@ -107,6 +107,12 @@ impl CellEntry {
         *incoming_connections == 0 || active_connections::count(*pid) == 0
       }
     }
+  }
+}
+
+impl Drop for CellEntry {
+  fn drop(&mut self) {
+    if let Some(replica) = &mut self.replica {}
   }
 }
 
@@ -727,7 +733,7 @@ impl CellManager {
     db_path: &Path,
   ) -> Result<Option<SqliteReplica>, CellManagerError> {
     // Try to initialize the SqliteReplica with the S3 config
-    let replica = match SqliteReplica::initialize(
+    let mut replica = match SqliteReplica::initialize(
       &self.data_dir,
       host,
       cell_id,
@@ -757,7 +763,7 @@ impl CellManager {
     };
 
     // Handle database restoration if necessary
-    if let Some(ref replica) = replica {
+    if let Some(ref mut replica) = replica {
       info!(
         tenant = %host,
         cell_id = %cell_id,

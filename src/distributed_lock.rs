@@ -216,7 +216,7 @@ impl LockState {
   async fn release_lock(
     &mut self,
     reason: LockReleaseReason,
-    ttl_expiry_timer: Option<&mut Pin<&mut Sleep>>,
+    global_ttl_expiry_timer: &mut Pin<&mut Sleep>,
   ) -> anyhow::Result<bool> {
     let released = match self {
       LockState::Init {
@@ -255,43 +255,37 @@ impl LockState {
           unreachable!("We already checked that the state is Active in the match statement");
         };
 
-        // Releasing the resource gracefully may be taking some time.
-        // To ensure that no other node will detect the lock as expired during the
-        // release process, if the deadline is close, we first extend it before
-        // releasing the lock.
-        if let Some(timer) = ttl_expiry_timer {
-          let now = Instant::now();
-          let deadline = timer.deadline();
-          if deadline < now + Duration::from_secs(10) {
-            // The current deadline is too close. Reset it to 30 seconds from now.
-            debug!(
-              ?descriptor,
-              "Extending lock deadline to 30 seconds from now to get enough time to gracefully terminate the protected resource"
-            );
-            let new_ttl = Duration::from_secs(30);
-            lock_manager.renew(&descriptor, new_ttl).await?;
-            timer.as_mut().reset(now + new_ttl);
-          }
-        }
+        // The release order matters. Deno process and Litestream replication
+        // must be stopped *before* other nodes detect the lock as released.
 
-        // The release order matters. Deno process and Litestream replication must
-        // be stopped *before* other nodes detect the lock as released.
+        let release_fut = async {
+          protected_resource.terminate().await;
+          match lock_manager.release(&descriptor).await {
+            Ok(_) => {
+              debug!(?descriptor, "Lock released");
+            }
+            Err(e) => {
+              error!(?descriptor, error = ?e, "Failed to release lock");
+            }
+          }
+        };
 
         // Shutdown the protected resource (i.e. Deno process and then Litestream
         // replication) gracefully
-        if tokio::time::timeout(
-          Duration::from_secs(5),
-          protected_resource.terminate(),
-        )
-        .await
-        .is_err()
-        {
-          // TODO(magurotuna): we should forcibly kill it here to ensure that
-          // the cell will not stay alive after the lock is released.
-          error!(
-            ?descriptor,
-            "Timed out while terminating protected resource gracefully"
-          );
+        tokio::select! {
+          biased;
+
+          _ = global_ttl_expiry_timer.as_mut() => {
+            // TODO(magurotuna): we should forcibly kill it here to ensure that
+            // the cell will not stay alive after the lock is released.
+            error!(
+              ?descriptor,
+              "Timed out while terminating protected resource gracefully"
+            );
+          }
+          _ = release_fut => {
+            // Do nothing
+          }
         }
 
         // Release the lock

@@ -135,6 +135,20 @@ pub struct SqliteReplica {
   config_path: PathBuf,
   /// Handle to the replication child process
   replication_process: Arc<Mutex<Option<tokio::process::Child>>>,
+  /// State of the replica
+  state: SqliteReplicaState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqliteReplicaState {
+  /// Initial state
+  Init,
+  /// Restore is done
+  Restored,
+  /// Replication is ongoing
+  Replicating,
+  /// Replication was shut down
+  Shutdown,
 }
 
 impl SqliteReplica {
@@ -179,6 +193,7 @@ impl SqliteReplica {
       s3_config: s3_config.clone(),
       config_path: config_file.clone(),
       replication_process: Arc::new(Mutex::new(None)),
+      state: SqliteReplicaState::Init,
     };
 
     // Write the config file (needed for restore/replicate operations)
@@ -199,7 +214,9 @@ impl SqliteReplica {
   /// Run the restore operation for this replica
   /// Returns true if data was restored, false if no backup was found or the database already exists
   #[instrument(skip(self))]
-  async fn run_restore(&self) -> Result<bool> {
+  async fn run_restore(&mut self) -> Result<bool> {
+    assert_eq!(self.state, SqliteReplicaState::Init);
+
     if std::fs::remove_file(&self.db_path).is_ok() {
       info!(
         tenant = %self.tenant,
@@ -286,6 +303,8 @@ impl SqliteReplica {
           return Err(e);
         }
 
+        self.state = SqliteReplicaState::Restored;
+
         // This wasn't an error, just no backup available yet
         return Ok(false);
       }
@@ -309,6 +328,8 @@ impl SqliteReplica {
       "Successfully restored database from S3"
     );
 
+    self.state = SqliteReplicaState::Restored;
+
     // Database was successfully restored
     Ok(true)
   }
@@ -317,7 +338,7 @@ impl SqliteReplica {
   /// This takes reference to a lock handle to make sure that the caller did acquire a lock.
   #[instrument(skip(self, _lock_handle))]
   pub async fn ensure_restored(
-    &self,
+    &mut self,
     _lock_handle: &distributed_lock::LockHandle,
   ) {
     // We got the lock, proceed with restore
@@ -416,7 +437,9 @@ impl SqliteReplica {
   }
 
   /// Spawns `litestream replicate -config ...` in background
-  pub async fn start_replication(&self) -> Result<()> {
+  pub async fn start_replication(&mut self) -> Result<()> {
+    assert_eq!(self.state, SqliteReplicaState::Restored);
+
     // Make sure we have a config file
     self.write_config()?;
 
@@ -441,18 +464,25 @@ impl SqliteReplica {
       .arg(&self.config_path)
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
+      // We usually gracefully terminate the litestream replication process,
+      // but if something weired or unexpected happens (for instance, the
+      // graceful shutdown takes so long that the associated distributed lock's
+      // TTL expires), we need to kill the process forcibly.
+      .kill_on_drop(true)
       .spawn()
       .context("Failed to start litestream replicate")?;
 
     *process_guard = Some(child);
     drop(process_guard);
 
+    self.state = SqliteReplicaState::Replicating;
+
     debug!("Litestream replication started");
     Ok(())
   }
 
-  /// Kills the replicate process
-  pub async fn shutdown(&self) -> Result<()> {
+  /// Gracefully shuts down the replicate process
+  pub async fn shutdown(&mut self) -> Result<()> {
     // Take the child process out of the mutex without holding the lock during the await
     let mut child_opt = {
       let mut process_guard = self.replication_process.lock().unwrap();
@@ -484,6 +514,8 @@ impl SqliteReplica {
     } else {
       debug!("No replication process to shutdown");
     }
+
+    self.state = SqliteReplicaState::Shutdown;
 
     Ok(())
   }
@@ -599,7 +631,7 @@ pub mod tests {
     let s3_config = create_test_s3_config(cell_id, &minio_guard);
 
     // Initialize the SqliteReplica with the new API
-    let replica = SqliteReplica::initialize(
+    let mut replica = SqliteReplica::initialize(
       data_dir,
       "test-tenant",
       cell_id,
