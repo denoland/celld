@@ -41,8 +41,8 @@ pub struct CellEntry {
 }
 
 impl CellEntry {
-  pub async fn terminate(mut self) {
-    match self.inner {
+  pub async fn terminate(&mut self) {
+    match &mut self.inner {
       CellEntryInner::Normal {
         parent_exit_guard, ..
       } => {
@@ -112,7 +112,27 @@ impl CellEntry {
 
 impl Drop for CellEntry {
   fn drop(&mut self) {
-    if let Some(replica) = &mut self.replica {}
+    match &mut self.inner {
+      CellEntryInner::Normal {
+        parent_exit_guard, ..
+      } => {
+        let finished = matches!(parent_exit_guard.try_wait(), Ok(Some(_)));
+        if !finished {
+          parent_exit_guard.kill(Signal::SIGKILL);
+          parent_exit_guard.wait();
+        }
+      }
+      CellEntryInner::SystemMain { alarm_processor } => {
+        alarm_processor.kill();
+      }
+    }
+
+    if let Some(replica) = self.replica.take() {
+      // `kill_on_drop` flag is enabled for `litestream replicate` process. So
+      // dropping the `replica` will send SIGKILL to the process, if the process
+      // is still running.
+      drop(replica);
+    }
   }
 }
 

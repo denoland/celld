@@ -185,6 +185,7 @@ impl LockState {
     &self,
     global_ttl: Duration,
     local_ttl: Duration,
+    global_ttl_expiry_timer: &mut Pin<&mut Sleep>,
     local_ttl_expiry_timer: &mut Pin<&mut Sleep>,
   ) -> anyhow::Result<()> {
     match self {
@@ -194,6 +195,7 @@ impl LockState {
       } => {
         let now = Instant::now();
         lock_manager.renew(descriptor, global_ttl).await?;
+        global_ttl_expiry_timer.as_mut().reset(now + global_ttl);
         local_ttl_expiry_timer.as_mut().reset(now + local_ttl);
       }
       LockState::Active {
@@ -203,6 +205,7 @@ impl LockState {
       } => {
         let now = Instant::now();
         lock_manager.renew(descriptor, global_ttl).await?;
+        global_ttl_expiry_timer.as_mut().reset(now + global_ttl);
         local_ttl_expiry_timer.as_mut().reset(now + local_ttl);
       }
       LockState::Released { .. } => {
@@ -249,48 +252,52 @@ impl LockState {
         let LockState::Active {
           descriptor,
           lock_manager,
-          protected_resource,
+          mut protected_resource,
         } = state
         else {
           unreachable!("We already checked that the state is Active in the match statement");
         };
 
+        // A future to shutdown the protected resource (i.e. Deno and then
+        // Litestream) gracefully, then release the lock.
         // The release order matters. Deno process and Litestream replication
         // must be stopped *before* other nodes detect the lock as released.
+        let release_fut = {
+          let descriptor = descriptor.clone();
+          let lock_manager = lock_manager.clone();
 
-        let release_fut = async {
-          protected_resource.terminate().await;
-          match lock_manager.release(&descriptor).await {
-            Ok(_) => {
-              debug!(?descriptor, "Lock released");
-            }
-            Err(e) => {
-              error!(?descriptor, error = ?e, "Failed to release lock");
+          async move {
+            protected_resource.terminate().await;
+            debug!(?descriptor, "protected resource gracefully terminated");
+
+            match lock_manager.release(&descriptor).await {
+              Ok(_) => {
+                debug!(?descriptor, "Lock released");
+              }
+              Err(e) => {
+                error!(?descriptor, error = ?e, "Failed to release lock");
+              }
             }
           }
         };
 
-        // Shutdown the protected resource (i.e. Deno process and then Litestream
-        // replication) gracefully
         tokio::select! {
           biased;
 
-          _ = global_ttl_expiry_timer.as_mut() => {
-            // TODO(magurotuna): we should forcibly kill it here to ensure that
-            // the cell will not stay alive after the lock is released.
+          _ = global_ttl_expiry_timer => {
             error!(
               ?descriptor,
-              "Timed out while terminating protected resource gracefully"
+              "Timed out while gracefully terminating protected resource"
             );
+
+            // Dropping `release_fut` kills the protected resources forcibly,
+            // ensuring that another node in the cluster can acquire the lock
+            // safely.
           }
           _ = release_fut => {
-            // Do nothing
+            debug!(?descriptor, "lock released successfully");
           }
         }
-
-        // Release the lock
-        lock_manager.release(&descriptor).await?;
-        debug!(?descriptor, "Lock released");
 
         true
       }
@@ -595,25 +602,24 @@ async fn lock_state_loop(
   };
 
   let mut global_ttl_renewal_interval = interval(local_ttl / 4);
-  let mut local_ttl_expiry_timer =
-    std::pin::pin!(sleep_until(Instant::now() + local_ttl));
+  let now = Instant::now();
+  let mut global_ttl_expiry_timer =
+    std::pin::pin!(sleep_until(now + global_ttl));
+  let mut local_ttl_expiry_timer = std::pin::pin!(sleep_until(now + local_ttl));
 
   loop {
     tokio::select! {
       biased;
 
       _ = &mut local_ttl_expiry_timer => {
-        info!(descriptor = ?state.descriptor(), "TTL expired; forcibly releasing lock");
         // TTL expired; forcibly release the lock and exit the loop
 
-        // TODO(magurotuna): actually, it is too late to terminate the process
-        // here because at this point another node may acquire the lock i.e.
-        // there are two nodes running the same cell and its associated SQLite
-        // replication. Probably we should do two phase expiry management, where
-        // shorter deadline is used to start the release process and longer one
-        // represents the actual expiry visible to other nodes in the cluster.
+        info!(descriptor = ?state.descriptor(), "TTL expired; forcibly releasing lock");
 
-        if let Err(e) = state.release_lock(LockReleaseReason::TTLExpired, None).await {
+        // Passing `global_ttl_expiry_timer` here so that this release operation
+        // will finish (either gracefully or forcibly) before the global TTL
+        // is reached.
+        if let Err(e) = state.release_lock(LockReleaseReason::TTLExpired, &mut global_ttl_expiry_timer).await {
           error!(error = ?e, descriptor = ?state.descriptor(), "Failed to release lock");
         }
 
@@ -622,7 +628,7 @@ async fn lock_state_loop(
 
       _ = global_ttl_renewal_interval.tick() => {
         // Renew the TTL using the lock manager
-        if let Err(e) = state.renew_ttl(global_ttl, local_ttl, &mut local_ttl_expiry_timer).await {
+        if let Err(e) = state.renew_ttl(global_ttl, local_ttl, &mut global_ttl_expiry_timer, &mut local_ttl_expiry_timer).await {
           error!(error = ?e, descriptor = ?state.descriptor(), "Failed to renew TTL");
         }
       }
@@ -654,10 +660,10 @@ async fn lock_state_loop(
             handle_dispatch_alarms(req, &mut state).await;
           }
           Some(LockStateRequest::ReleaseIfIdle(req)) => {
-            handle_release_if_idle(req, &mut state).await;
+            handle_release_if_idle(req, &mut state, &mut global_ttl_expiry_timer).await;
           }
           Some(LockStateRequest::Release(req)) => {
-            handle_release(req, &mut state, &mut local_ttl_expiry_timer).await;
+            handle_release(req, &mut state, &mut global_ttl_expiry_timer).await;
           }
           None => {
             // LockHandle was dropped; at this point, the state must be `Released`
@@ -879,13 +885,16 @@ async fn handle_dispatch_alarms(
 async fn handle_release_if_idle(
   req: ReleaseIfIdleRequest,
   state: &mut LockState,
+  global_ttl_expiry_timer: &mut Pin<&mut Sleep>,
 ) {
   match state {
     LockState::Active {
       protected_resource, ..
     } => {
       if protected_resource.is_idle(req.idle_timeout) {
-        let res = state.release_lock(LockReleaseReason::Idle, None).await;
+        let res = state
+          .release_lock(LockReleaseReason::Idle, global_ttl_expiry_timer)
+          .await;
         let _ = req.res_chan.send(res);
       } else {
         let _ = req.res_chan.send(Ok(false));
@@ -900,10 +909,10 @@ async fn handle_release_if_idle(
 async fn handle_release(
   req: ReleaseRequest,
   state: &mut LockState,
-  ttl_expiry_timer: &mut Pin<&mut Sleep>,
+  global_ttl_expiry_timer: &mut Pin<&mut Sleep>,
 ) {
   let res = state
-    .release_lock(LockReleaseReason::ExplicitRelease, Some(ttl_expiry_timer))
+    .release_lock(LockReleaseReason::ExplicitRelease, global_ttl_expiry_timer)
     .await;
   let _ = req.res_chan.send(res);
 }

@@ -134,21 +134,11 @@ pub struct SqliteReplica {
   /// Path to the Litestream configuration file
   config_path: PathBuf,
   /// Handle to the replication child process
+  /// Note that `kill_on_drop` is enabled for this child process, meaning that
+  /// SIGKILL will be sent to it when [`SqliteReplica`] is dropped. In normal
+  /// cases, make sure to call [`SqliteReplica::shutdown`] before dropping
+  /// this struct to prevent data loss.
   replication_process: Arc<Mutex<Option<tokio::process::Child>>>,
-  /// State of the replica
-  state: SqliteReplicaState,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SqliteReplicaState {
-  /// Initial state
-  Init,
-  /// Restore is done
-  Restored,
-  /// Replication is ongoing
-  Replicating,
-  /// Replication was shut down
-  Shutdown,
 }
 
 impl SqliteReplica {
@@ -193,7 +183,6 @@ impl SqliteReplica {
       s3_config: s3_config.clone(),
       config_path: config_file.clone(),
       replication_process: Arc::new(Mutex::new(None)),
-      state: SqliteReplicaState::Init,
     };
 
     // Write the config file (needed for restore/replicate operations)
@@ -214,9 +203,7 @@ impl SqliteReplica {
   /// Run the restore operation for this replica
   /// Returns true if data was restored, false if no backup was found or the database already exists
   #[instrument(skip(self))]
-  async fn run_restore(&mut self) -> Result<bool> {
-    assert_eq!(self.state, SqliteReplicaState::Init);
-
+  async fn run_restore(&self) -> Result<bool> {
     if std::fs::remove_file(&self.db_path).is_ok() {
       info!(
         tenant = %self.tenant,
@@ -303,8 +290,6 @@ impl SqliteReplica {
           return Err(e);
         }
 
-        self.state = SqliteReplicaState::Restored;
-
         // This wasn't an error, just no backup available yet
         return Ok(false);
       }
@@ -327,8 +312,6 @@ impl SqliteReplica {
       cell_id = %self.cell_id,
       "Successfully restored database from S3"
     );
-
-    self.state = SqliteReplicaState::Restored;
 
     // Database was successfully restored
     Ok(true)
@@ -437,9 +420,7 @@ impl SqliteReplica {
   }
 
   /// Spawns `litestream replicate -config ...` in background
-  pub async fn start_replication(&mut self) -> Result<()> {
-    assert_eq!(self.state, SqliteReplicaState::Restored);
-
+  pub async fn start_replication(&self) -> Result<()> {
     // Make sure we have a config file
     self.write_config()?;
 
@@ -474,8 +455,6 @@ impl SqliteReplica {
 
     *process_guard = Some(child);
     drop(process_guard);
-
-    self.state = SqliteReplicaState::Replicating;
 
     debug!("Litestream replication started");
     Ok(())
@@ -514,8 +493,6 @@ impl SqliteReplica {
     } else {
       debug!("No replication process to shutdown");
     }
-
-    self.state = SqliteReplicaState::Shutdown;
 
     Ok(())
   }
