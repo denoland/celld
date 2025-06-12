@@ -16,6 +16,8 @@ pub struct HeartbeatService {
   pub node_state: Arc<NodeState>,
   /// Interval between heartbeat operations
   pub interval: Duration,
+  /// Threshold for considering a node as stale
+  pub staleness_threshold: Duration,
 }
 
 #[async_trait::async_trait]
@@ -26,7 +28,7 @@ impl BackgroundService for HeartbeatService {
     let interval = self.interval;
 
     let mut interval_timer = tokio::time::interval(interval);
-    info!(?interval, "Heartbeat service started");
+    info!(?interval, staleness_threshold = ?self.staleness_threshold, "Heartbeat service started");
 
     loop {
       tokio::select! {
@@ -71,10 +73,27 @@ impl BackgroundService for HeartbeatService {
           // owner nodes can take over without waiting for TTL expiration.
           let cell_termination_fut = self.node_state.cell_manager.terminate_unowned_cells(&peer_manager);
 
-          futures::future::join(
-            system_main_cell_creation_fut,
-            cell_termination_fut,
+          // System cell creation and/or cell termination may take a while,
+          // blocking the next heartbeat. We need to make sure to give up these
+          // tasks and proceed to the next heartbeat so that this node is not
+          // considered as stale by other nodes.
+          let timeout = std::cmp::max(
+            self.staleness_threshold.saturating_sub(Duration::from_secs(5)),
+            Duration::from_secs(3),
+          );
+
+          let (system_main_cell_creation_res, cell_termination_res) = futures::future::join(
+            tokio::time::timeout(timeout, system_main_cell_creation_fut),
+            tokio::time::timeout(timeout, cell_termination_fut),
           ).await;
+
+          if let Err(e) = system_main_cell_creation_res {
+            error!(error = ?e, ?timeout, "Failed to ensure system main cell is spawned because of timeout");
+          }
+
+          if let Err(e) = cell_termination_res {
+            error!(error = ?e, ?timeout, "Failed to terminate unowned cells because of timeout");
+          }
         }
 
         _ = shutdown.changed() => {
