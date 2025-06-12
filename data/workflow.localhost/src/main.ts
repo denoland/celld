@@ -16,38 +16,33 @@ cell.db.exec(`
   )
 `);
 
-type MyWorkflow = {
-  "reliable": {
-    username: string;
-    email: string;
-    phoneNumber: string;
-  };
-  "flaky": null;
-};
-const workflow = cell.initWorkflow<MyWorkflow>();
-
-workflow.define({
+const reliableWorkflow = cell.workflow.define<
+  { username: string; email: string; phoneNumber: string },
+  null
+>({
   name: "reliable",
-  handler: async (ctx) => {
-    await ctx.step.run("send-email", async () => {
+  handler: async ({ input, step }) => {
+    await step.run("send-email", async () => {
       // Simulate a delay of sending email
       await delay(500);
       // Save the email sent log to the database
       cell.db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
-        `${ctx.event.data.username} signup email sent to ${ctx.event.data.email}`,
+        `${input.username} signup email sent to ${input.email}`,
       );
       return null;
     });
 
-    await ctx.step.run("send-sms", async () => {
+    await step.run("send-sms", async () => {
       // Simulate a delay of sending SMS
       await delay(800);
       // Save the SMS sent log to the database
       cell.db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
-        `${ctx.event.data.username} signup SMS sent to ${ctx.event.data.phoneNumber}`,
+        `${input.username} signup SMS sent to ${input.phoneNumber}`,
       );
       return null;
     });
+
+    return null;
   },
 });
 
@@ -55,10 +50,10 @@ workflow.define({
 // until an entry with key "flaky" is present in `key_values` table. Finally,
 // the last step multiplies the random number by 2.
 // This aims to verify the result memoization in retried workflow runs.
-workflow.define({
+const flakyWorkflow = cell.workflow.define<null, null>({
   name: "flaky",
-  handler: async (ctx) => {
-    const randomNumber = await ctx.step.run(
+  handler: async ({ step }) => {
+    const randomNumber = await step.run(
       "generate-random-number",
       async () => {
         await delay(500);
@@ -67,7 +62,7 @@ workflow.define({
       },
     );
 
-    await ctx.step.run("throws-until-flaky-key-is-set", async () => {
+    await step.run("throws-until-flaky-key-is-set", async () => {
       const flakyToggle = cell.db.prepare(
         `SELECT value FROM key_values WHERE key = 'flaky'`,
       ).get();
@@ -77,9 +72,58 @@ workflow.define({
       return null;
     });
 
-    await ctx.step.run("multiply-random-number-by-2", async () => {
+    await step.run("multiply-random-number-by-2", () => {
       return randomNumber * 2;
     });
+
+    return null;
+  },
+});
+
+const childWorkflow = cell.workflow.define<{ x: number }, number>({
+  name: "child",
+  handler: async ({ input, step }) => {
+    return await step.run("add-5", async () => {
+      await delay(100);
+      return input.x + 5;
+    });
+  },
+});
+
+const parentWorkflow = cell.workflow.define<
+  { value: number },
+  { finalResult: number }
+>({
+  name: "parent",
+  handler: async ({ input, step }) => {
+    const result = await step.invoke(childWorkflow, { x: input.value });
+    return { finalResult: result };
+  },
+});
+
+const sleepWorkflow = cell.workflow.define<
+  { sleepDurationMs: number },
+  { message: string }
+>({
+  name: "sleep-test",
+  handler: async ({ input, step }) => {
+    await step.run("before-sleep", () => {
+      cell.db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
+        `Starting sleep for ${input.sleepDurationMs}ms`,
+      );
+      return null;
+    });
+
+    await step.sleep("wait", input.sleepDurationMs);
+
+    await step.run("after-sleep", () => {
+      cell.db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
+        `Sleep completed after ${input.sleepDurationMs}ms`,
+      );
+      return null;
+    });
+
+    return { message: `Slept for ${input.sleepDurationMs}ms` };
   },
 });
 
@@ -115,7 +159,7 @@ cell.request(async (req: Request) => {
 
   if (lastPathSegment === "reliable" && req.method === "POST") {
     const { username, email, phoneNumber } = await req.json();
-    const runId = workflow.dispatch("reliable", {
+    const runId = cell.workflow.dispatch(reliableWorkflow, {
       username,
       email,
       phoneNumber,
@@ -124,7 +168,19 @@ cell.request(async (req: Request) => {
   }
 
   if (lastPathSegment === "flaky" && req.method === "POST") {
-    const runId = workflow.dispatch("flaky", null);
+    const runId = cell.workflow.dispatch(flakyWorkflow);
+    return new Response(runId);
+  }
+
+  if (lastPathSegment === "parent" && req.method === "POST") {
+    const { value } = await req.json();
+    const runId = cell.workflow.dispatch(parentWorkflow, { value });
+    return new Response(runId);
+  }
+
+  if (lastPathSegment === "sleep" && req.method === "POST") {
+    const { sleepDurationMs } = await req.json();
+    const runId = cell.workflow.dispatch(sleepWorkflow, { sleepDurationMs });
     return new Response(runId);
   }
 
@@ -133,7 +189,9 @@ cell.request(async (req: Request) => {
     if (!runId) {
       return Response.json({ error: "id is required" }, { status: 400 });
     }
-    const runProgress = workflow.getRunProgress(runId as types.WorkflowRunId);
+    const runProgress = cell.workflow.getRunProgress(
+      runId as types.WorkflowRunId,
+    );
     return Response.json(runProgress);
   }
 

@@ -119,15 +119,19 @@ Phase 2 is now complete! GitHub OAuth authentication is fully working.
 
 **Phase 3 & 4 Progress Update (June 1, 2025)**
 
-Phases 3 and 4 are now complete! Full channel management and real-time chat functionality is working.
+Phases 3 and 4 are now complete! Full channel management and real-time chat
+functionality is working.
 
 **Implementation Notes:**
 
 **Phase 3 - Channel Management:**
+
 - Channel registry endpoints in `cells/main.ts`:
-  - `POST /create` - Creates new channels with slug-based IDs (e.g., `channel-foo`)
+  - `POST /create` - Creates new channels with slug-based IDs (e.g.,
+    `channel-foo`)
   - `GET /list` - Returns all channels
-- Slug generation from channel names (e.g., "My Cool Channel" → `channel-my-cool-channel`)
+- Slug generation from channel names (e.g., "My Cool Channel" →
+  `channel-my-cool-channel`)
 - Duplicate channel detection
 - Beautiful channel UI with:
   - Channel list with creation dates
@@ -136,6 +140,7 @@ Phases 3 and 4 are now complete! Full channel management and real-time chat func
   - Glassmorphism design
 
 **Phase 4 - Real-time Chat:**
+
 - WebSocket implementation for real-time messaging
 - Chat features:
   - JWT-based WebSocket authentication
@@ -151,6 +156,7 @@ Phases 3 and 4 are now complete! Full channel management and real-time chat func
   - Empty state with welcome message
 
 **UI/UX Improvements:**
+
 - Dark theme with purple gradient accents
 - Improved login page with centered card design
 - GitHub-styled login button with logo
@@ -159,12 +165,14 @@ Phases 3 and 4 are now complete! Full channel management and real-time chat func
 - Professional glassmorphism effects
 
 **Key Technical Decisions:**
+
 - Changed from UUID-based channel IDs to human-readable slugs
 - SQLite BOOLEAN type replaced with INTEGER for compatibility
 - Timestamps stored in UTC, converted to local time in UI
 - WebSocket connections scoped per channel cell
 
 **Current Status:**
+
 - Full multi-user chat working in channels
 - Messages persist across sessions
 - Clean, Discord-like UI
@@ -267,9 +275,11 @@ Phases 3 and 4 are now complete! Full channel management and real-time chat func
 
 **Phase 4 Continuation: LLM Integration**
 
-Now that the basic chat infrastructure is working, we need to integrate an LLM to respond to user messages.
+Now that the basic chat infrastructure is working, we need to integrate an LLM
+to respond to user messages.
 
 **Tasks:**
+
 1. **Choose LLM Provider:**
    - Option A: OpenAI API (requires API key)
    - Option B: Anthropic Claude API (requires API key)
@@ -351,6 +361,7 @@ Now that the basic chat infrastructure is working, we need to integrate an LLM t
 All core functionality is now complete and tested!
 
 **Testing Results:**
+
 - ✅ Multi-user real-time chat works perfectly
 - ✅ Messages persist across container restarts
 - ✅ Usernames display correctly next to messages
@@ -358,6 +369,7 @@ All core functionality is now complete and tested!
 - ✅ Channel-specific conversation history maintained
 
 **Key Features Demonstrated:**
+
 1. **Real-time Multi-User Chat:**
    - Multiple users can join the same channel
    - Messages broadcast instantly to all connected users
@@ -376,10 +388,11 @@ All core functionality is now complete and tested!
    - Channel-specific system prompts
    - Graceful fallback if API unavailable
 
-**Testing Guide:**
-See `demos/cellverse/TESTING.md` for comprehensive testing procedures.
+**Testing Guide:** See `demos/cellverse/TESTING.md` for comprehensive testing
+procedures.
 
 **Architecture Highlights:**
+
 - Each channel is an isolated Deno Cell (`channel-{slug}`)
 - Channel cells maintain their own SQLite database
 - WebSocket connections scoped per cell
@@ -387,6 +400,7 @@ See `demos/cellverse/TESTING.md` for comprehensive testing procedures.
 - Clean separation of concerns between cells
 
 This demo successfully showcases Deno Cells' ability to:
+
 - Manage isolated, stateful components
 - Handle real-time WebSocket connections
 - Persist data per cell
@@ -427,17 +441,19 @@ This demo successfully showcases Deno Cells' ability to:
 
 ## CellVerse Demo Complete! 🎉
 
-**What We Built:**
-A fully functional Discord-like chat application that demonstrates the power of Deno Cells:
+**What We Built:** A fully functional Discord-like chat application that
+demonstrates the power of Deno Cells:
 
 - **GitHub OAuth Authentication**: Secure login with GitHub accounts
 - **Channel Management**: Create and join chat channels with slug-based URLs
 - **Real-time Multi-User Chat**: WebSocket-based messaging with instant updates
 - **AI Assistant Integration**: GPT-3.5 responds in every channel with context
-- **Beautiful UI**: Dark theme with glassmorphism, smooth animations, and responsive design
+- **Beautiful UI**: Dark theme with glassmorphism, smooth animations, and
+  responsive design
 - **Full Persistence**: All data persists across container restarts
 
 **Technical Achievements:**
+
 - Each channel runs as an isolated Deno Cell with its own SQLite database
 - Clean separation between auth, channel registry, and channel chat cells
 - JWT-based authentication for both HTTP and WebSocket connections
@@ -445,6 +461,7 @@ A fully functional Discord-like chat application that demonstrates the power of 
 - Human-readable channel slugs (e.g., `channel-general` instead of UUIDs)
 
 **Next Steps & Enhancements:**
+
 1. Add channel deletion and management features
 2. Implement user presence indicators
 3. Add file upload/sharing capabilities
@@ -454,6 +471,7 @@ A fully functional Discord-like chat application that demonstrates the power of 
 7. Deploy to production with proper domain and HTTPS
 
 **Running the Demo:**
+
 ```bash
 # Backend (requires OPENAI_API_KEY in .env)
 cd demos/cellverse
@@ -466,4 +484,5 @@ npm run dev
 # Visit http://localhost:5173
 ```
 
-This demo proves that Deno Cells is perfect for building stateful, real-time applications with isolated components that can scale independently!
+This demo proves that Deno Cells is perfect for building stateful, real-time
+applications with isolated components that can scale independently!

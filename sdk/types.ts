@@ -11,7 +11,8 @@ export type Task = {
 export type TaskKind =
   | UserDefinedAlarm
   | RetryWorkflowRun
-  | ResumeAllPendingWorkflowRuns;
+  | ResumeAllPendingWorkflowRuns
+  | WakeSleepStep;
 
 export type UserDefinedAlarm = {
   kind: "user-defined-alarm";
@@ -26,6 +27,12 @@ export type ResumeAllPendingWorkflowRuns = {
   kind: "resume-all-pending-workflow-runs";
 };
 
+export type WakeSleepStep = {
+  kind: "wake-sleep-step";
+  workflowRunId: WorkflowRunId;
+  stepIndex: number;
+};
+
 export interface TaskScheduler {
   schedule(task: Task): Promise<ScheduledTaskId> | ScheduledTaskId;
 }
@@ -33,13 +40,16 @@ export interface TaskScheduler {
 export type WorkflowRunProgress = {
   id: WorkflowRunId;
   workflowName: string;
+  outputData: JSONValue | null;
   dispatchedAt: Date;
   completedAt: Date | null;
   steps: {
     stepIndex: number;
     name: string;
     outputData: JSONValue;
-    completedAt: Date;
+    stepType?: string;
+    invokedWorkflowRunId?: string | null;
+    completedAt: Date | null;
   }[];
 };
 
@@ -64,25 +74,45 @@ export type JSONValue =
   | { [key: string]: JSONValue }
   | JSONValue[];
 
+export type Voidable<T> = T | void;
+export type Unvoidable<T> = T extends void ? null : T;
+
 export interface WorkflowStep {
-  run<StepOutput extends JSONValue>(
+  run<StepOutput extends Voidable<JSONValue>>(
     name: string,
     fn: () => StepOutput | Promise<StepOutput>,
-  ): Promise<StepOutput>;
+  ): Promise<Unvoidable<StepOutput>>;
+
+  invoke<
+    Input extends JSONValue,
+    Output extends Voidable<JSONValue>,
+  >(
+    workflow: WorkflowDef<Input, Output>,
+    input?: Input,
+  ): Promise<Output>;
+
+  sleep(name: string, durationMs: number): Promise<void>;
 }
 
-export type WorkflowDefinition<
-  WorkflowInputs extends Record<string, JSONValue>,
-  WorkflowName extends keyof WorkflowInputs,
-> = {
-  name: WorkflowName;
-  handler: (ctx: {
-    event: {
-      id: WorkflowRunId;
-      name: WorkflowName;
-      data: WorkflowInputs[WorkflowName];
-    };
-    step: WorkflowStep;
-    attempt: number;
-  }) => Promise<void> | void;
-};
+export interface WorkflowConfig<
+  Input extends JSONValue = null,
+  Output extends Voidable<JSONValue> = null,
+> {
+  name: string;
+  handler: (ctx: WorkflowCtx<Input>) => Promise<Output> | Output;
+  retries?: number;
+  concurrency?: number;
+}
+
+export interface WorkflowDef<
+  Input extends JSONValue,
+  Output extends Voidable<JSONValue>,
+> {
+  readonly config: WorkflowConfig<Input, Output>;
+  readonly name: string;
+}
+
+export type WorkflowCtx<Input = void> = {
+  step: WorkflowStep;
+  attempt: number;
+} & (Input extends void ? Record<PropertyKey, never> : { input: Input });
