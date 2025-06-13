@@ -679,7 +679,7 @@ async fn test_alarm_dispatch_to_remote_cell_owner() {
   }
 }
 
-async fn test_multiple_alarms_with_delays(delays: &[u32]) {
+async fn test_multi_alarms_with_delays(delays: &[u32]) {
   let test_env = TestEnv::new(1);
   let port = test_env.ports[0].public();
 
@@ -747,17 +747,17 @@ async fn test_multiple_alarms_with_delays(delays: &[u32]) {
 }
 
 #[tokio::test]
-async fn test_multiple_alarm_scheduling() {
-  test_multiple_alarms_with_delays(&[500, 1000, 1500]).await;
+async fn test_multi_alarm_forward() {
+  test_multi_alarms_with_delays(&[500, 1000, 1500]).await;
 }
 
 #[tokio::test]
-async fn test_reverse_order_alarm_scheduling() {
-  test_multiple_alarms_with_delays(&[1500, 1000, 500]).await;
+async fn test_multi_alarm_reverse() {
+  test_multi_alarms_with_delays(&[1500, 1000, 500]).await;
 }
 
 #[tokio::test]
-async fn test_sequential_alarm_scheduling() {
+async fn test_multi_alarm_sequential() {
   let test_env = TestEnv::new(1);
   let port = test_env.ports[0].public();
 
