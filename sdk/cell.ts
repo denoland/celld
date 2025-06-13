@@ -232,12 +232,12 @@ export class Cell implements DbAccessor, TaskScheduler {
     }
 
     // AFTER processing all due tasks, schedule the next alarm if any. Use
-    // queueMicrotask to avoid connection issues with the current alarm request
-    queueMicrotask(() => {
+    // setTimeout to avoid connection issues with the current alarm request
+    setTimeout(() => {
       this.#scheduleNextAlarm().catch((error) => {
         console.error("Failed to schedule next alarm:", error);
       });
-    });
+    }, 0);
   }
 
   async #scheduleNextAlarm(): Promise<void> {
