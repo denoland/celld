@@ -8,6 +8,7 @@ import {
 } from "./types.ts";
 import { WorkflowRuntime } from "./workflow.ts";
 import { ulid } from "jsr:@std/ulid@^1.0.0/ulid";
+import { setImmediate } from "node:timers/promises";
 
 // Create a Cell class to track sockets and provide broadcast functionality
 export class Cell implements DbAccessor, TaskScheduler {
@@ -232,7 +233,12 @@ export class Cell implements DbAccessor, TaskScheduler {
     }
 
     // AFTER processing all due tasks, schedule the next alarm if any
-    await this.#scheduleNextAlarm();
+    // Use setImmediate to avoid connection issues with the current alarm request
+    setImmediate(() => {
+      this.#scheduleNextAlarm().catch((error) => {
+        console.error("Failed to schedule next alarm:", error);
+      });
+    });
   }
 
   async #scheduleNextAlarm(): Promise<void> {
