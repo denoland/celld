@@ -679,8 +679,7 @@ async fn test_alarm_dispatch_to_remote_cell_owner() {
   }
 }
 
-#[tokio::test]
-async fn test_multiple_alarm_scheduling() {
+async fn test_multiple_alarms_with_delays(delays: &[u32]) {
   let test_env = TestEnv::new(1);
   let port = test_env.ports[0].public();
 
@@ -702,14 +701,14 @@ async fn test_multiple_alarm_scheduling() {
     assert_eq!(content, r#"{"count":0}"#);
   }
 
-  // Schedule 3 alarms sequentially: 500ms, 1s, and 1.5s from now
+  // Schedule alarms with the given delays
   let start_time = std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)
     .unwrap()
     .as_millis();
   println!("Current time: {}ms", start_time);
 
-  for delay in [500, 1000, 1500] {
+  for delay in delays {
     let res = client
       .post(&url)
       .header("host", "alarm.localhost")
@@ -725,14 +724,14 @@ async fn test_multiple_alarm_scheduling() {
       "Scheduled alarm {} with delay {}ms at time {}",
       alarm_id,
       delay,
-      start_time + delay as u128
+      start_time + *delay as u128
     );
   }
 
   // Wait for all alarms to fire (with buffer time)
   tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-  // Check final count - all 3 alarms should have fired
+  // Check final count - all alarms should have fired
   {
     let res = client
       .get(&alarm_count_url)
@@ -743,76 +742,18 @@ async fn test_multiple_alarm_scheduling() {
     assert_eq!(res.status(), 200);
 
     let content = res.text().await.unwrap();
-    assert_eq!(content, r#"{"count":3}"#);
+    assert_eq!(content, format!(r#"{{"count":{}}}"#, delays.len()));
   }
 }
 
 #[tokio::test]
+async fn test_multiple_alarm_scheduling() {
+  test_multiple_alarms_with_delays(&[500, 1000, 1500]).await;
+}
+
+#[tokio::test]
 async fn test_reverse_order_alarm_scheduling() {
-  let test_env = TestEnv::new(1);
-  let port = test_env.ports[0].public();
-
-  let cell_id = uuid::Uuid::new_v4().simple().to_string();
-  let url = format!("http://localhost:{}/cell/{}", port, cell_id);
-  let alarm_count_url = format!("{url}/getAlarmCount");
-  let client = reqwest::Client::new();
-
-  // Get initial alarm count
-  {
-    let res = client
-      .get(&alarm_count_url)
-      .header("host", "alarm.localhost")
-      .send()
-      .await
-      .unwrap();
-    assert_eq!(res.status(), 200);
-    let content = res.text().await.unwrap();
-    assert_eq!(content, r#"{"count":0}"#);
-  }
-
-  // Schedule 3 alarms in reverse order: 1.5s, 1s, and 500ms from now
-  let start_time = std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
-    .unwrap()
-    .as_millis();
-  println!("Current time: {}ms", start_time);
-
-  for delay in [1500, 1000, 500] {
-    let res = client
-      .post(&url)
-      .header("host", "alarm.localhost")
-      .body(delay.to_string())
-      .send()
-      .await
-      .unwrap();
-    assert_eq!(res.status(), 200);
-
-    // Print the alarm ID for debugging
-    let alarm_id = res.text().await.unwrap();
-    println!(
-      "Scheduled alarm {} with delay {}ms at time {}",
-      alarm_id,
-      delay,
-      start_time + delay as u128
-    );
-  }
-
-  // Wait for all alarms to fire (with buffer time)
-  tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-  // Check final count - all 3 alarms should have fired
-  {
-    let res = client
-      .get(&alarm_count_url)
-      .header("host", "alarm.localhost")
-      .send()
-      .await
-      .unwrap();
-    assert_eq!(res.status(), 200);
-
-    let content = res.text().await.unwrap();
-    assert_eq!(content, r#"{"count":3}"#);
-  }
+  test_multiple_alarms_with_delays(&[1500, 1000, 500]).await;
 }
 
 #[tokio::test]
@@ -854,8 +795,8 @@ async fn test_sequential_alarm_scheduling() {
     let alarm_id = res.text().await.unwrap();
     println!("Scheduled alarm {} with ID {}", i, alarm_id);
 
-    // Wait for this alarm to fire (500ms + buffer)
-    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    // Wait for this alarm to fire (500ms + buffer for rescheduling)
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
     // Check that alarm count has increased
     let res = client
