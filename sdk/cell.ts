@@ -8,7 +8,6 @@ import {
 } from "./types.ts";
 import { WorkflowRuntime } from "./workflow.ts";
 import { ulid } from "jsr:@std/ulid@^1.0.0/ulid";
-import { setImmediate } from "node:timers/promises";
 
 // Create a Cell class to track sockets and provide broadcast functionality
 export class Cell implements DbAccessor, TaskScheduler {
@@ -232,9 +231,9 @@ export class Cell implements DbAccessor, TaskScheduler {
       `).run(task.id);
     }
 
-    // AFTER processing all due tasks, schedule the next alarm if any
-    // Use setImmediate to avoid connection issues with the current alarm request
-    setImmediate(() => {
+    // AFTER processing all due tasks, schedule the next alarm if any. Use
+    // queueMicrotask to avoid connection issues with the current alarm request
+    queueMicrotask(() => {
       this.#scheduleNextAlarm().catch((error) => {
         console.error("Failed to schedule next alarm:", error);
       });
