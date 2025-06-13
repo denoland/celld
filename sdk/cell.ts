@@ -165,56 +165,95 @@ export class Cell implements DbAccessor, TaskScheduler {
     return result.changes > 0;
   }
 
+  // Track the currently scheduled global alarm time
+  #currentGlobalAlarmTime: number | null = null;
+
   async #handleAlarm(): Promise<void> {
-    // Retrieve all tasks that are due now
     const currentTime = Date.now();
-    const tasks = this.db.prepare(`
-      SELECT id, payload FROM scheduled_tasks WHERE scheduled_time_unix_ms <= ?
+
+    // Clear our tracked alarm time since we're handling it now
+    this.#currentGlobalAlarmTime = null;
+
+    // Retrieve ALL tasks that are due now or overdue
+    const dueTasks = this.db.prepare(`
+      SELECT id, payload FROM scheduled_tasks
+      WHERE scheduled_time_unix_ms <= ?
+      ORDER BY scheduled_time_unix_ms ASC
     `).all(currentTime);
 
     // Dispatch the associated operations based on the task kind
-    for (const task of tasks) {
+    for (const task of dueTasks) {
       const payload = JSON.parse(task.payload as string) as Task;
-      switch (payload.kind) {
-        case "user-defined-alarm": {
-          await this.#onAlarmCallback?.();
-          break;
-        }
-        case "resume-all-pending-workflow-runs": {
-          if (this.#workflow) {
-            this.#workflow.resumeAllPendingWorkflowRuns();
+      try {
+        switch (payload.kind) {
+          case "user-defined-alarm": {
+            await this.#onAlarmCallback?.();
+            break;
           }
-          break;
-        }
-        case "retry-workflow-run": {
-          if (this.#workflow) {
-            this.#workflow.retry(payload.workflowRunId);
+          case "resume-all-pending-workflow-runs": {
+            if (this.#workflow) {
+              this.#workflow.resumeAllPendingWorkflowRuns();
+            }
+            break;
           }
-          break;
-        }
-        case "wake-sleep-step": {
-          // Mark the sleep step as completed
-          this.db.prepare(`
-            UPDATE workflow_steps 
+          case "retry-workflow-run": {
+            if (this.#workflow) {
+              this.#workflow.retry(payload.workflowRunId);
+            }
+            break;
+          }
+          case "wake-sleep-step": {
+            // Mark the sleep step as completed
+            this.db.prepare(`
+            UPDATE workflow_steps
             SET completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc')
             WHERE workflow_run_id = ? AND step_index = ?
           `).run(payload.workflowRunId, payload.stepIndex);
 
-          // Retry the workflow directly
-          if (this.workflow) {
-            this.workflow.retry(payload.workflowRunId);
+            // Retry the workflow directly
+            if (this.workflow) {
+              this.workflow.retry(payload.workflowRunId);
+            }
+            break;
           }
-          break;
+          default: {
+            throw new Error(`Unknown task kind: ${payload satisfies never}`);
+          }
         }
-        default: {
-          throw new Error(`Unknown task kind: ${payload satisfies never}`);
-        }
+      } catch (error) {
+        console.error(`Error processing task ${task.id}:`, error);
+        // Continue processing other tasks even if one fails
       }
 
       // Delete the task
       this.db.prepare(`
         DELETE FROM scheduled_tasks WHERE id = ?
       `).run(task.id);
+    }
+
+    // AFTER processing all due tasks, schedule the next alarm if any
+    await this.#scheduleNextAlarm();
+  }
+
+  async #scheduleNextAlarm(): Promise<void> {
+    // Get the next task that needs to run
+    const nextTask = this.db.prepare(`
+      SELECT scheduled_time_unix_ms FROM scheduled_tasks
+      ORDER BY scheduled_time_unix_ms ASC
+      LIMIT 1
+    `).get();
+
+    if (nextTask) {
+      const nextTime = nextTask.scheduled_time_unix_ms as number;
+
+      if (
+        !this.#currentGlobalAlarmTime || nextTime < this.#currentGlobalAlarmTime
+      ) {
+        await this.#scheduleGlobalAlarm(nextTime);
+      }
+    } else {
+      // No more tasks, clear our tracked time
+      this.#currentGlobalAlarmTime = null;
     }
   }
 
@@ -403,8 +442,16 @@ export class Cell implements DbAccessor, TaskScheduler {
       INSERT INTO scheduled_tasks (id, scheduled_time_unix_ms, payload) VALUES (?, ?, ?)
     `).run(id, task.scheduledTimeUnixMs, JSON.stringify(task));
 
-    // Always schedule a global alarm - let the alarm processor handle deduplication
-    await this.#scheduleGlobalAlarm(task.scheduledTimeUnixMs);
+    // Check if we need to update the global alarm
+    // This happens if:
+    // 1. We don't have a global alarm scheduled yet, OR
+    // 2. The new task should run before the current global alarm
+    if (
+      !this.#currentGlobalAlarmTime ||
+      task.scheduledTimeUnixMs < this.#currentGlobalAlarmTime
+    ) {
+      await this.#scheduleGlobalAlarm(task.scheduledTimeUnixMs);
+    }
 
     return id;
   }
@@ -412,6 +459,9 @@ export class Cell implements DbAccessor, TaskScheduler {
   async #scheduleGlobalAlarm(
     scheduledTimeUnixMs: number,
   ): Promise<void> {
+    // Update our tracked time before making the call
+    this.#currentGlobalAlarmTime = scheduledTimeUnixMs;
+
     await fetch("http://localhost/_internal/alarms", {
       client: this.ctlClient,
       method: "POST",
