@@ -516,7 +516,7 @@ class WorkflowStepImpl implements WorkflowStep {
     const result = await fn();
 
     this.#dbAccessor.db.prepare(
-      `INSERT INTO workflow_steps (workflow_run_id, step_index, name, output_data, step_type) VALUES (?, ?, ?, ?, 'run')`,
+      `INSERT INTO workflow_steps (workflow_run_id, step_index, name, output_data, step_type, completed_at) VALUES (?, ?, ?, ?, 'run', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc'))`,
     )
       .run(this.#runId, this.#currentIndex, name, toJson(result));
 
