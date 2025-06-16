@@ -61,6 +61,8 @@ impl StaticFallbackStrategy {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+  /// Name of the celld node used (primarily for debugging)
+  pub node_name: String,
   /// Directory to store data in
   pub data_dir: PathBuf,
   /// IP:port to listen on
@@ -183,6 +185,9 @@ impl Config {
         "127.0.0.1:8000".parse().unwrap()
       });
 
+    let node_name = var("CELL_NODE_NAME")
+      .unwrap_or_else(|_| format!("celld({})", advertise_addr));
+
     // Get listen_addr with fallback to advertise_addr port
     let listen_addr = var("LISTEN_ADDR")
       .ok()
@@ -295,6 +300,7 @@ impl Config {
       Duration::from_millis(system_main_cell_retry_delay_ms);
 
     Ok(Config {
+      node_name,
       listen_addr,
       advertise_addr,
       internal_listen_addr,

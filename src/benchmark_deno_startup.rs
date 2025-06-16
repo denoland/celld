@@ -13,6 +13,7 @@ pub async fn run(iterations: usize) -> Result<()> {
     Err(_) => {
       // Create a minimal default config for benchmark purposes
       Config {
+        node_name: "celld-benchmark".to_string(),
         data_dir: PathBuf::from("./data"),
         listen_addr: "127.0.0.1:8000".parse().unwrap(),
         advertise_addr: "127.0.0.1:8000".parse().unwrap(),
