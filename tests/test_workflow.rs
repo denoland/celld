@@ -6,7 +6,8 @@ use tracing::{debug, info};
 
 #[test_log::test(tokio::test)]
 async fn test_reliable_workflow_in_single_node_cluster() {
-  let test_env = TestEnv::new(1, "test_reliable_workflow_in_single_node_cluster").await;
+  let test_env =
+    TestEnv::new(1, "test_reliable_workflow_in_single_node_cluster").await;
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
@@ -81,7 +82,8 @@ async fn test_reliable_workflow_in_single_node_cluster() {
 
 #[test_log::test(tokio::test)]
 async fn test_flaky_workflow_in_single_node_cluster() {
-  let test_env = TestEnv::new(1, "test_flaky_workflow_in_single_node_cluster").await;
+  let test_env =
+    TestEnv::new(1, "test_flaky_workflow_in_single_node_cluster").await;
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
@@ -166,7 +168,8 @@ async fn test_flaky_workflow_in_single_node_cluster() {
 
 #[test_log::test(tokio::test)]
 async fn test_workflow_automatic_resume_after_node_failure() {
-  let mut test_env = TestEnv::new(3, "test_workflow_automatic_resume_after_node_failure").await;
+  let mut test_env =
+    TestEnv::new(3, "test_workflow_automatic_resume_after_node_failure").await;
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
   let client = reqwest::Client::new();
