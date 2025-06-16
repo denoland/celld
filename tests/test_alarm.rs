@@ -4,7 +4,8 @@ use common::TestEnv;
 
 #[test_log::test(tokio::test)]
 async fn test_alarm_crud_in_single_node_cluster() {
-  let test_env = TestEnv::new(1, "test_alarm_crud_in_single_node_cluster").await;
+  let test_env =
+    TestEnv::new(1, "test_alarm_crud_in_single_node_cluster").await;
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
@@ -100,9 +101,10 @@ async fn test_alarm_crud_in_single_node_cluster() {
   }
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_alarm_dispatch_in_single_node_cluster() {
-  let test_env = TestEnv::new(1, "test_alarm_dispatch_in_single_node_cluster").await;
+  let test_env =
+    TestEnv::new(1, "test_alarm_dispatch_in_single_node_cluster").await;
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
@@ -154,9 +156,13 @@ async fn test_alarm_dispatch_in_single_node_cluster() {
   }
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_multiple_cells_alarm_dispatch_in_single_node_cluster() {
-  let test_env = TestEnv::new(1, "test_multiple_cells_alarm_dispatch_in_single_node_cluster").await;
+  let test_env = TestEnv::new(
+    1,
+    "test_multiple_cells_alarm_dispatch_in_single_node_cluster",
+  )
+  .await;
   let port = test_env.ports[0].public();
 
   let cell1_id = uuid::Uuid::new_v4().simple().to_string();
@@ -284,7 +290,7 @@ async fn test_multiple_cells_alarm_dispatch_in_single_node_cluster() {
   }
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_system_main_cell_takeover() {
   let client = reqwest::Client::new();
 
@@ -390,11 +396,15 @@ async fn test_system_main_cell_takeover() {
   }
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_alarm_crud_operations_forwarded_to_system_main_cell_node() {
   let client = reqwest::Client::new();
 
-  let test_env = TestEnv::new(2, "test_alarm_crud_operations_forwarded_to_system_main_cell_node").await;
+  let test_env = TestEnv::new(
+    2,
+    "test_alarm_crud_operations_forwarded_to_system_main_cell_node",
+  )
+  .await;
 
   let mut system_main_cell_index = None;
   struct Port {
@@ -559,11 +569,12 @@ async fn test_alarm_crud_operations_forwarded_to_system_main_cell_node() {
 // 1. A primary node (where the system main cell is running)
 // 2. A secondary node (where "alarm.localhost/<some-cell-id>" is running)
 // This test verifies that the primary node will dispatch an alarm to the secondary node and then alarm.localhost's alarm handler will be triggered.
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_alarm_dispatch_to_remote_cell_owner() {
   let client = reqwest::Client::new();
 
-  let test_env = TestEnv::new(2, "test_alarm_dispatch_to_remote_cell_owner").await;
+  let test_env =
+    TestEnv::new(2, "test_alarm_dispatch_to_remote_cell_owner").await;
 
   let mut system_main_cell_index = None;
   struct Port {

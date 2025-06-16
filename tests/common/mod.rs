@@ -19,6 +19,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tempfile::TempDir;
 use test_utils::MinioTestServer;
+use tracing::warn;
 use uuid::Uuid;
 
 static USED_PORTS: LazyLock<Mutex<HashSet<u16>>> =
@@ -217,13 +218,7 @@ impl TestEnv {
       shutdown_node_logs: HashMap::new(),
     };
 
-    test_env.spawn_cell_instance(ports, test_case_name);
-
-    // Wait for servers to be ready by probing TCP connections
-    println!("Waiting for servers to initialize...");
-    for port in &test_env.ports {
-      Self::wait_for_server_ready(port);
-    }
+    test_env.spawn_cell_instance(ports, test_case_name).await;
 
     // Longer delay for peer exchange after TCP connections are ready
     // This is important to give time for S3 registration and peer discovery
@@ -265,7 +260,7 @@ impl TestEnv {
     self.shutdown_node_logs.insert(node_name, (stdout, stderr));
   }
 
-  pub fn spawn_cell_instance(
+  pub async fn spawn_cell_instance(
     &mut self,
     ports: Vec<PortLease>,
     node_name_prefix: &str,
@@ -334,7 +329,7 @@ impl TestEnv {
         port.public(), advertise_addr, data_dir_path
       );
 
-      Self::wait_for_server_ready(&port);
+      Self::wait_for_server_ready(&port, &node_name).await;
 
       self.servers.push(server);
       self.ports.push(port);
@@ -342,29 +337,62 @@ impl TestEnv {
     }
   }
 
-  // Wait for a server to be ready by probing its TCP port
-  fn wait_for_server_ready(port: &PortLease) {
+  // Wait for a server to be ready by checking its health endpoint
+  async fn wait_for_server_ready(port: &PortLease, node_name: &str) {
     const MAX_ATTEMPTS: usize = 10;
     const RETRY_DELAY_MS: u64 = 200;
 
+    let client = reqwest::Client::new();
+
     for p in [port.public(), port.internal()] {
+      let mut ok = false;
+
       for attempt in 1..=MAX_ATTEMPTS {
-        match std::net::TcpStream::connect(format!("127.0.0.1:{}", p)) {
-          Ok(_) => {
-            println!("Port {} is ready", p);
-            break;
-          }
-          Err(_) => {
-            println!(
-              "Waiting for server on port {} (attempt {}/{})",
-              p, attempt, MAX_ATTEMPTS
-            );
-            std::thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
-            if attempt == MAX_ATTEMPTS {
-              panic!("Server on port {} failed to start", p);
-            }
-          }
+        if attempt > 1 {
+          tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
         }
+
+        let Ok(res) = client
+          .get(format!("http://127.0.0.1:{}/_health", p))
+          .send()
+          .await
+        else {
+          warn!(
+            port = p,
+            attempt, "Failed to connect to health check endpoint"
+          );
+          continue;
+        };
+
+        if !res.status().is_success() {
+          warn!(
+            port = p,
+            attempt, "Health check endpoint returned non-success status",
+          );
+          continue;
+        }
+
+        let body = res.text().await.unwrap();
+        if !body.contains(node_name) {
+          warn!(
+            port = p,
+            expected_node_name = node_name,
+            body,
+            attempt,
+            "Health check endpoint returned unexpected node name",
+          );
+          continue;
+        }
+
+        ok = true;
+        break;
+      }
+
+      if !ok {
+        panic!(
+          "Server on port {} for node {} failed to start",
+          p, node_name
+        );
       }
     }
   }
@@ -463,7 +491,7 @@ fn copy_directory_without_sqlite(
 }
 
 /// Example of using the port allocation mechanism to get non-conflicting ports
-#[test]
+#[test_log::test]
 pub fn test_port_allocation() {
   // Allocate 3 ports starting from 8000 with spacing of 2
   let ports = TestEnv::allocate_ports(8000, 3, 2);
@@ -498,7 +526,7 @@ pub fn test_port_allocation() {
 }
 
 /// Example of using the automatic port allocation in TestEnv
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_auto_port_allocation() {
   // Create two TestEnv instances with 3 nodes each
   let env1 = TestEnv::new(3, "test_auto_port_allocation_env1").await;

@@ -11,7 +11,7 @@ use uuid::Uuid;
 use common::TestEnv;
 
 /// Tests that we can connect to a cell through any node in the mesh
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_mesh_cell_connection() {
   // Start 3 server instances with auto-allocated ports
   let test_env = TestEnv::new(3, "test_mesh_cell_connection").await;
@@ -62,7 +62,7 @@ async fn test_mesh_cell_connection() {
 }
 
 /// Tests that messages broadcast correctly across the mesh
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_mesh_message_broadcast() {
   // Start 3 server instances with auto-allocated ports
   let test_env = TestEnv::new(3, "test_mesh_message_broadcast").await;
@@ -114,7 +114,7 @@ async fn test_mesh_message_broadcast() {
 }
 
 /// Tests dynamic node membership in the mesh
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_mesh_dynamic_membership() {
   let mut test_env = TestEnv::new(3, "test_mesh_dynamic_membership").await;
 
@@ -159,7 +159,9 @@ async fn test_mesh_dynamic_membership() {
   println!("Starting a new node...");
   let new_port = TestEnv::allocate_ports(7044, 1, 2);
   assert_eq!(new_port.len(), 1);
-  test_env.spawn_cell_instance(new_port, "test_mesh_dynamic_membership");
+  test_env
+    .spawn_cell_instance(new_port, "test_mesh_dynamic_membership")
+    .await;
 
   // Wait for peer exchange
   println!("Waiting for peer exchange...");
@@ -193,7 +195,7 @@ async fn test_mesh_dynamic_membership() {
 }
 
 /// Tests that cell isolation works properly in the mesh
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_mesh_cell_isolation() {
   // Start 3 server instances with auto-allocated ports
   let test_env = TestEnv::new(3, "test_mesh_cell_isolation").await;
@@ -250,7 +252,7 @@ async fn test_mesh_cell_isolation() {
 
 /// Tests the node failure scenario - when the primary node for a cell fails,
 /// another node automatically takes over responsibility for the cell (Durability Test 2)
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_node_failure_takeover() {
   // Setup three nodes in the mesh with auto-allocated ports
   let mut test_env = TestEnv::new(3, "test_node_failure_takeover").await;
@@ -593,7 +595,7 @@ async fn test_concurrent_takeover_locking() {
 }
 
 /// Tests proxy forwarding to verify it correctly retries down the owner list
-#[tokio::test]
+#[test_log::test(tokio::test)]
 // Not working yet - not sure how pingera can allow us to do this.  Might need
 // to move to hyper to get better control of the request forwarding.
 #[ignore]
@@ -749,7 +751,7 @@ async fn test_proxy_forwarding_retry() {
 }
 
 /// Tests that database restore coordination works properly across nodes
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_restore_coordination() {
   // Use unique cell ID to avoid conflicts with other tests
   let test_cell_id = format!("restore-coord-{}", Uuid::new_v4().simple());
@@ -823,9 +825,13 @@ async fn test_restore_coordination() {
   );
 
   println!("Starting Node B on port {}", port_b.public());
-  test_env.spawn_cell_instance(vec![port_b], "test_restore_coordination_b");
+  test_env
+    .spawn_cell_instance(vec![port_b], "test_restore_coordination_b")
+    .await;
   println!("Starting Node C on port {}", port_c.public());
-  test_env.spawn_cell_instance(vec![port_c], "test_restore_coordination_c");
+  test_env
+    .spawn_cell_instance(vec![port_c], "test_restore_coordination_c")
+    .await;
 
   // Give time for the started nodes to settle on the latest view of the cluster
   sleep(Duration::from_secs(8)).await;
@@ -878,7 +884,7 @@ async fn test_restore_coordination() {
 }
 
 /// Tests that replication and restore works correctly within a single cell
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_restore_single() {
   // Create a single-node environment
   let mut test_env = TestEnv::new(1, "test_restore_single").await;
@@ -906,7 +912,9 @@ async fn test_restore_single() {
     new_port[0].public(),
     test_cell_id
   );
-  test_env.spawn_cell_instance(new_port, "test_restore_single");
+  test_env
+    .spawn_cell_instance(new_port, "test_restore_single")
+    .await;
 
   let response2 = client.get(&new_url).send().await.unwrap();
   assert_eq!(response2.status(), 200);

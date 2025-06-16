@@ -77,7 +77,9 @@ async fn test_system_main_cell_relocation() {
 
   // Add a second node that should trigger relocation due to deterministic hashing
   let second_internal_port = second_ports[0].internal();
-  test_env.spawn_cell_instance(second_ports, "test_system_main_cell_relocation");
+  test_env
+    .spawn_cell_instance(second_ports, "test_system_main_cell_relocation")
+    .await;
 
   // Wait for cluster membership to stabilize
   tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -219,7 +221,12 @@ async fn test_system_main_cell_relocation_with_existing_db() {
   // Add a second node that should trigger relocation due to deterministic hashing
   let second_port = second_ports[0].public();
   let second_internal_port = second_ports[0].internal();
-  test_env.spawn_cell_instance(second_ports, "test_system_main_cell_relocation_with_existing_db");
+  test_env
+    .spawn_cell_instance(
+      second_ports,
+      "test_system_main_cell_relocation_with_existing_db",
+    )
+    .await;
 
   // Wait for cluster membership to stabilize
   tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
