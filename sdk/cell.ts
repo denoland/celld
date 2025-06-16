@@ -464,9 +464,6 @@ export class Cell implements DbAccessor, TaskScheduler {
   async #scheduleGlobalAlarm(
     scheduledTimeUnixMs: number,
   ): Promise<void> {
-    // Update our tracked time before making the call
-    this.#currentGlobalAlarmTime = scheduledTimeUnixMs;
-
     await fetch("http://localhost/_internal/alarms", {
       client: this.ctlClient,
       method: "POST",
@@ -476,6 +473,9 @@ export class Cell implements DbAccessor, TaskScheduler {
         scheduled_time_unix_ms: scheduledTimeUnixMs,
       }),
     });
+
+    // Update our tracked time
+    this.#currentGlobalAlarmTime = scheduledTimeUnixMs;
   }
 }
 
