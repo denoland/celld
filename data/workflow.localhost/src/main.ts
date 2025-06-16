@@ -107,16 +107,26 @@ const sleepWorkflow = cell.workflow.define<
 >({
   name: "sleep-test",
   handler: async ({ input, step }) => {
-    await step.run("before-sleep", () => {
+    await step.run("before-sleep", async () => {
       cell.db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
         `Starting sleep for ${input.sleepDurationMs}ms`,
       );
+      // Add delay before sleep to create timing conditions
+      await delay(500);
       return null;
     });
 
+    // Add delay right before sleep
+    await delay(200);
+    
     await step.sleep("wait", input.sleepDurationMs);
+    
+    // Add delay right after sleep
+    await delay(300);
 
-    await step.run("after-sleep", () => {
+    await step.run("after-sleep", async () => {
+      // Add delay in the after step too
+      await delay(100);
       cell.db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
         `Sleep completed after ${input.sleepDurationMs}ms`,
       );
@@ -124,6 +134,58 @@ const sleepWorkflow = cell.workflow.define<
     });
 
     return { message: `Slept for ${input.sleepDurationMs}ms` };
+  },
+});
+
+const delaySleepWorkflow = cell.workflow.define<
+  { sleepDurationMs: number; delayMs: number },
+  { message: string }
+>({
+  name: "delay-sleep",
+  handler: async ({ input, step }) => {
+    // Step 1: Match reasoning-step-0 with more complex async operations
+    await step.run("reasoning-step-0", async () => {
+      // Multiple async operations like in cellverse
+      await delay(input.delayMs);
+      
+      // Simulate network calls like cellverse's OpenAI requests
+      for (let i = 0; i < 3; i++) {
+        await delay(50);
+        cell.db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
+          `Reasoning step operation ${i + 1}`
+        );
+      }
+      
+      return "reasoning complete";
+    });
+
+    // Step 2: Match execute-step-0 with synchronous database operations like cellverse
+    await step.run("execute-step-0", async () => {
+      // Perform synchronous database operations like cellverse's executeReasoningStep
+      cell.db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
+        "Execute step: performing database operations"
+      );
+      
+      // Simulate memory storage operation
+      cell.db.prepare(`INSERT OR REPLACE INTO key_values (key, value) VALUES (?, ?)`).run(
+        "execute_step_memory", 1
+      );
+      
+      // Simulate memory retrieval operation
+      const memoryResult = cell.db.prepare(`SELECT value FROM key_values WHERE key = ?`).get("execute_step_memory");
+      
+      // Another database write
+      cell.db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
+        `Execute step complete, memory value: ${memoryResult?.value || 'none'}`
+      );
+      
+      return "execution complete";
+    });
+
+    // Step 3: Now sleep at the same step index as reasoning workflow
+    await step.sleep("alarm-delay", input.sleepDurationMs);
+
+    return { message: "Completed with matching step pattern" };
   },
 });
 
@@ -181,6 +243,12 @@ cell.request(async (req: Request) => {
   if (lastPathSegment === "sleep" && req.method === "POST") {
     const { sleepDurationMs } = await req.json();
     const runId = cell.workflow.dispatch(sleepWorkflow, { sleepDurationMs });
+    return new Response(runId);
+  }
+
+  if (lastPathSegment === "delay-sleep" && req.method === "POST") {
+    const { sleepDurationMs, delayMs } = await req.json();
+    const runId = cell.workflow.dispatch(delaySleepWorkflow, { sleepDurationMs, delayMs });
     return new Response(runId);
   }
 

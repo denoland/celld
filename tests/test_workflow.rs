@@ -283,6 +283,131 @@ async fn test_sleep_workflow() {
   assert_eq!(content[1].text, "Starting sleep for 1000ms");
 }
 
+#[test_log::test(tokio::test)]
+async fn test_sleep_workflow_single_node_no_s3() {
+  use std::process::Command;
+  use std::time::{Duration, Instant};
+  use tempfile::TempDir;
+  use uuid::Uuid;
+
+  // Allocate ports for this test
+  let ports = TestEnv::allocate_ports(7600, 1, 2);
+  let port = &ports[0];
+  let advertise_addr = format!("127.0.0.1:{}", port.public());
+  let internal_addr = format!("127.0.0.1:{}", port.internal());
+
+  // Create temporary directory with proper structure
+  let temp_dir = TempDir::new().expect("Failed to create temp dir");
+  let project_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+  let src_data_path = project_root.join("data");
+  let src_sdk_path = project_root.join("sdk");
+  let dst_data_path = temp_dir.path().join("data");
+  let dst_sdk_path = temp_dir.path().join("sdk");
+
+  // Copy directories
+  std::fs::create_dir_all(&dst_data_path).unwrap();
+  common::copy_directory_without_sqlite(&src_sdk_path, &dst_sdk_path).unwrap();
+  common::copy_directory_without_sqlite(&src_data_path, &dst_data_path).unwrap();
+
+  info!("Starting celld in single-node mode without S3...");
+
+  // Start celld without any S3 configuration
+  let mut celld_process = Command::new(env!("CARGO_BIN_EXE_celld"))
+    .env("RUST_LOG", "debug,celld=warn") // Enable debug logging to see our alarm debugging
+    .env("ADVERTISE_ADDR", &advertise_addr)
+    .env("INTERNAL_LISTEN_ADDR", &internal_addr)
+    .env("DATA", &dst_data_path)
+    .env("CELL_HEARTBEAT_INTERVAL", "1")
+    .env("CELL_GRACE_PERIOD_SECONDS", "5")
+    .env("CELL_STALENESS_THRESHOLD_SECS", "6")
+    .env("CELL_LOCK_GUARD_TTL_SECS", "6")
+    .env("CELL_ALARM_SCHEDULER_INTERVAL_SECS", "1") // Check alarms frequently
+    .env("CELL_DENO_OUTPUT", "1")
+    // Explicitly do NOT set any CELL_S3_* environment variables
+    .current_dir(temp_dir.path())
+    .spawn()
+    .expect("Failed to start celld");
+
+  // Wait for server to be ready
+  info!("Waiting for celld to be ready on port {}...", port.public());
+  let max_attempts = 20;
+  let mut server_ready = false;
+  for attempt in 1..=max_attempts {
+    match std::net::TcpStream::connect(&advertise_addr) {
+      Ok(_) => {
+        info!("Celld is ready on port {}", port.public());
+        server_ready = true;
+        break;
+      }
+      Err(_) => {
+        info!("Waiting for celld (attempt {}/{})", attempt, max_attempts);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+      }
+    }
+  }
+
+  if !server_ready {
+    // Kill the process and get output for debugging
+    let _ = celld_process.kill();
+    let _ = celld_process.wait().unwrap();
+    panic!("couldn't start celld");
+  }
+
+  // Give it a moment more to fully initialize
+  tokio::time::sleep(Duration::from_secs(2)).await;
+
+  let cell_id = Uuid::new_v4().simple().to_string();
+  let url = format!("http://localhost:{}/cell/{}", port.public(), cell_id);
+  let client = reqwest::Client::new();
+
+  info!("Testing delay-sleep workflow with exact cellverse step pattern...");
+  let start_time = Instant::now();
+
+  let sleep_ms = 10000;
+
+  // Test with exact cellverse step pattern: reasoning-step-0, execute-step-0, alarm-delay
+  // Use longer sleep duration to test if timing matters
+  let run_id = dispatch_workflow(
+    &client,
+    &url,
+    "delay-sleep",
+    json!({ "sleepDurationMs": sleep_ms, "delayMs": 500 }),
+  )
+  .await;
+
+  info!("Delay-sleep workflow dispatched, run_id: {}", run_id);
+
+  // Wait for workflow to reach the sleep step, but don't poll for completion
+  info!("Waiting for workflow to reach sleep step...");
+  tokio::time::sleep(Duration::from_secs(2)).await;
+
+  // Check the global_alarms table directly using rusqlite
+  let db_path = dst_data_path.join("_system/sqlite/main.db");
+  info!("Checking global alarms table at: {:?}", db_path);
+
+  let alarm_count =  {
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let count = conn.query_row("SELECT COUNT(*) FROM global_alarms", [], |row| { row.get::<_, i32>(0) }).unwrap();
+    assert_eq!(count, 1, "Expected exactly 1 global alarm to be scheduled.");
+  };
+
+
+  // Wait for workflow to reach the sleep step, but don't poll for completion
+  info!("Waiting for workflow to reach sleep step...");
+  tokio::time::sleep(Duration::from_millis(sleep_ms + 1000)).await;
+
+
+  let alarm_count =  {
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let count = conn.query_row("SELECT COUNT(*) FROM global_alarms", [], |row| { row.get::<_, i32>(0) }).unwrap();
+    assert_eq!(count, 0, "Expected no global alarms after sleep step.");
+  };
+
+  // Clean up: kill the celld process
+  let _ = celld_process.kill();
+  let _ = celld_process.wait().unwrap();
+}
+
 // Helper functions for workflow testing
 async fn dispatch_workflow(
   client: &reqwest::Client,
