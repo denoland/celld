@@ -304,6 +304,14 @@ impl TestEnv {
           )
           .env("CELL_DENO_OUTPUT", "1")
           .envs(&self.envs);
+
+        // Propagate the RUST_LOG env var to the celld processes if it exists
+        // This overrides the default log level set above.
+        // This is useful for setting more verbose logs in CI, which would help
+        // us understand what is going on in the tests that may be flaky.
+        if let Ok(rust_log) = std::env::var("RUST_LOG") {
+          cmd.env("RUST_LOG", rust_log);
+        }
       };
       let server = CapturedSubprocess::new(
         format!("celld({})", port.public()),
