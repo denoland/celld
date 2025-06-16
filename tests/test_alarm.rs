@@ -4,7 +4,7 @@ use common::TestEnv;
 
 #[test_log::test(tokio::test)]
 async fn test_alarm_crud_in_single_node_cluster() {
-  let test_env = TestEnv::new(1).await;
+  let test_env = TestEnv::new(1, "test_alarm_crud_in_single_node_cluster").await;
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
@@ -102,7 +102,7 @@ async fn test_alarm_crud_in_single_node_cluster() {
 
 #[tokio::test]
 async fn test_alarm_dispatch_in_single_node_cluster() {
-  let test_env = TestEnv::new(1).await;
+  let test_env = TestEnv::new(1, "test_alarm_dispatch_in_single_node_cluster").await;
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
@@ -156,7 +156,7 @@ async fn test_alarm_dispatch_in_single_node_cluster() {
 
 #[tokio::test]
 async fn test_multiple_cells_alarm_dispatch_in_single_node_cluster() {
-  let test_env = TestEnv::new(1).await;
+  let test_env = TestEnv::new(1, "test_multiple_cells_alarm_dispatch_in_single_node_cluster").await;
   let port = test_env.ports[0].public();
 
   let cell1_id = uuid::Uuid::new_v4().simple().to_string();
@@ -288,7 +288,7 @@ async fn test_multiple_cells_alarm_dispatch_in_single_node_cluster() {
 async fn test_system_main_cell_takeover() {
   let client = reqwest::Client::new();
 
-  let mut test_env = TestEnv::new(2).await;
+  let mut test_env = TestEnv::new(2, "test_system_main_cell_takeover").await;
 
   let mut system_main_cell_index = None;
   let mut secondary_cell_external_ports = Vec::new();
@@ -394,7 +394,7 @@ async fn test_system_main_cell_takeover() {
 async fn test_alarm_crud_operations_forwarded_to_system_main_cell_node() {
   let client = reqwest::Client::new();
 
-  let test_env = TestEnv::new(2).await;
+  let test_env = TestEnv::new(2, "test_alarm_crud_operations_forwarded_to_system_main_cell_node").await;
 
   let mut system_main_cell_index = None;
   struct Port {
@@ -563,7 +563,7 @@ async fn test_alarm_crud_operations_forwarded_to_system_main_cell_node() {
 async fn test_alarm_dispatch_to_remote_cell_owner() {
   let client = reqwest::Client::new();
 
-  let test_env = TestEnv::new(2).await;
+  let test_env = TestEnv::new(2, "test_alarm_dispatch_to_remote_cell_owner").await;
 
   let mut system_main_cell_index = None;
   struct Port {

@@ -178,18 +178,22 @@ impl TestEnv {
   }
 
   // Start mesh nodes with auto-allocated non-conflicting ports
-  pub async fn new(count: usize) -> Self {
+  pub async fn new(count: usize, test_case_name: &str) -> Self {
     // Start with port 7500 and use spacing of 2 to avoid conflicts with internal ports
     let ports = Self::allocate_ports(7500, count, 2);
-    Self::new_with_ports(ports).await
+    Self::new_with_ports(ports, test_case_name).await
   }
 
-  pub async fn new_with_ports(ports: Vec<PortLease>) -> Self {
-    Self::new_with_ports_and_envs(ports, &[]).await
+  pub async fn new_with_ports(
+    ports: Vec<PortLease>,
+    test_case_name: &str,
+  ) -> Self {
+    Self::new_with_ports_and_envs(ports, test_case_name, &[]).await
   }
 
   pub async fn new_with_ports_and_envs(
     ports: Vec<PortLease>,
+    test_case_name: &str,
     envs: &[(&str, &str)],
   ) -> Self {
     // Start MinIO server for testing with a dynamically assigned port
@@ -213,7 +217,7 @@ impl TestEnv {
       shutdown_node_logs: HashMap::new(),
     };
 
-    test_env.spawn_cell_instance(ports);
+    test_env.spawn_cell_instance(ports, test_case_name);
 
     // Wait for servers to be ready by probing TCP connections
     println!("Waiting for servers to initialize...");
@@ -261,10 +265,15 @@ impl TestEnv {
     self.shutdown_node_logs.insert(node_name, (stdout, stderr));
   }
 
-  pub fn spawn_cell_instance(&mut self, ports: Vec<PortLease>) {
-    for port in ports {
+  pub fn spawn_cell_instance(
+    &mut self,
+    ports: Vec<PortLease>,
+    node_name_prefix: &str,
+  ) {
+    for (i, port) in ports.into_iter().enumerate() {
       let advertise_addr = format!("127.0.0.1:{}", port.public());
       let internal_addr = format!("127.0.0.1:{}", port.internal());
+      let node_name = format!("{}-{}", node_name_prefix, i);
 
       // Prepare a properly structured temporary directory
       // This creates a temp dir with both sdk/ and data/ to maintain relative imports
@@ -275,6 +284,7 @@ impl TestEnv {
       let server_cmd_setup = |cmd: &mut Command| {
         cmd
           .env("RUST_LOG", "info,celld=warn")
+          .env("CELL_NODE_NAME", &node_name)
           .env("ADVERTISE_ADDR", &advertise_addr)
           .env("INTERNAL_LISTEN_ADDR", &internal_addr)
           .current_dir(temp_dir.path())
@@ -491,8 +501,8 @@ pub fn test_port_allocation() {
 #[tokio::test]
 async fn test_auto_port_allocation() {
   // Create two TestEnv instances with 3 nodes each
-  let env1 = TestEnv::new(3).await;
-  let env2 = TestEnv::new(3).await;
+  let env1 = TestEnv::new(3, "test_auto_port_allocation_env1").await;
+  let env2 = TestEnv::new(3, "test_auto_port_allocation_env2").await;
 
   println!("Env1 ports: {:?}", env1.ports);
   println!("Env2 ports: {:?}", env2.ports);
