@@ -178,6 +178,10 @@ Deno.test("define workflow with one step and dispatch it", async () => {
   assertEquals(progress2.steps.length, 1);
   assertEquals(progress2.steps[0].outputData, 84);
   assertExists(progress2.completedAt);
+
+  // Verify step has completed_at timestamp
+  assertExists(progress2.steps[0].completedAt);
+  assertEquals(progress2.steps[0].stepType, "run");
 });
 
 Deno.test("step.run that was already executed is not executed again on retry", async () => {
@@ -199,8 +203,8 @@ Deno.test("step.run that was already executed is not executed again on retry", a
 
   // Insert a workflow step record to simulate a step that was executed
   dbAccessor.db.prepare(`
-      INSERT INTO workflow_steps (workflow_run_id, step_index, name, output_data, step_type)
-      VALUES (?, 1, 'step1', '"first run"', 'run')
+      INSERT INTO workflow_steps (workflow_run_id, step_index, name, output_data, step_type, completed_at)
+      VALUES (?, 1, 'step1', '"first run"', 'run', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc'))
     `).run(runId);
 
   let step1Reexecuted = false;
@@ -233,6 +237,12 @@ Deno.test("step.run that was already executed is not executed again on retry", a
   assertEquals(progress.steps[0].outputData, "first run");
   assertEquals(progress.steps[1].name, "step2");
   assertEquals(progress.outputData, "first run");
+
+  // Verify both steps have completed_at timestamps
+  assertExists(progress.steps[0].completedAt);
+  assertExists(progress.steps[1].completedAt);
+  assertEquals(progress.steps[0].stepType, "run");
+  assertEquals(progress.steps[1].stepType, "run");
 });
 
 Deno.test("step.invoke enables workflow composition", async () => {
@@ -263,6 +273,12 @@ Deno.test("step.invoke enables workflow composition", async () => {
 
   // Should have 2 invoke steps
   assertEquals(progress.steps.length, 2);
+
+  // Verify both invoke steps have completed_at timestamps
+  assertExists(progress.steps[0].completedAt);
+  assertExists(progress.steps[1].completedAt);
+  assertEquals(progress.steps[0].stepType, "invoke");
+  assertEquals(progress.steps[1].stepType, "invoke");
 
   // Check the output data was stored
   const outputRow = dbAccessor.db.prepare(
@@ -422,6 +438,14 @@ Deno.test("multiple step.invoke calls work sequentially", async () => {
 
   assertEquals(progress.steps.length, 3);
 
+  // Verify all invoke steps have completed_at timestamps
+  assertExists(progress.steps[0].completedAt);
+  assertExists(progress.steps[1].completedAt);
+  assertExists(progress.steps[2].completedAt);
+  assertEquals(progress.steps[0].stepType, "invoke");
+  assertEquals(progress.steps[1].stepType, "invoke");
+  assertEquals(progress.steps[2].stepType, "invoke");
+
   // Final output should be 16 (10 + 1 + 2 + 3)
   const outputRow = runtime.getRunProgress(runId);
   assertExists(outputRow);
@@ -485,6 +509,10 @@ Deno.test("parent down child completed recovery", async () => {
   assertEquals(progress.steps[0].name, "invoke:child");
   assertEquals(progress.steps[0].outputData, 50);
 
+  // Verify invoke step has completed_at timestamp
+  assertExists(progress.steps[0].completedAt);
+  assertEquals(progress.steps[0].stepType, "invoke");
+
   // Verify final parent output
   const parentRun = dbAccessor.db.prepare(
     "SELECT output_data FROM workflow_runs WHERE id = ?",
@@ -528,6 +556,10 @@ Deno.test("void returning workflows work correctly", async () => {
   assertEquals(progress.steps[0].name, "invoke:void-workflow");
   assertEquals(progress.steps[0].outputData, null);
 
+  // Verify invoke step has completed_at timestamp
+  assertExists(progress.steps[0].completedAt);
+  assertEquals(progress.steps[0].stepType, "invoke");
+
   // Verify final parent output shows void was handled correctly
   const dbRow = dbAccessor.db.prepare(
     "SELECT output_data FROM workflow_runs WHERE id = ?",
@@ -567,6 +599,10 @@ Deno.test("getRunProgress public API works correctly", async () => {
   assertEquals(finalProgress.steps[0].name, "double");
   assertEquals(finalProgress.steps[0].outputData, 10);
   assertExists(finalProgress.completedAt);
+
+  // Verify step has completed_at timestamp
+  assertExists(finalProgress.steps[0].completedAt);
+  assertEquals(finalProgress.steps[0].stepType, "run");
 });
 
 Deno.test("listRuns public API works correctly", async () => {
@@ -697,6 +733,14 @@ Deno.test("step.sleep suspends and resumes workflow execution", async () => {
   assertExists(progress.steps[1].completedAt); // Sleep step is now completed
   assertEquals(progress.steps[2].name, "after-sleep");
   assertEquals(progress.steps[2].outputData, "completed");
+
+  // Verify all steps have completed_at timestamps
+  assertExists(progress.steps[0].completedAt); // before-sleep (run step)
+  assertExists(progress.steps[1].completedAt); // wait (sleep step)
+  assertExists(progress.steps[2].completedAt); // after-sleep (run step)
+  assertEquals(progress.steps[0].stepType, "run");
+  assertEquals(progress.steps[1].stepType, "sleep");
+  assertEquals(progress.steps[2].stepType, "run");
 
   // Verify final output
   assertEquals(progress.outputData, { message: "Slept for 100ms" });
