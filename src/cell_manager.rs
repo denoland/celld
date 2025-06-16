@@ -889,7 +889,6 @@ fn spawn_deno_process(
   let mut cmd = std::process::Command::new("deno");
   cmd
     .current_dir(tenant_dir)
-    .env("DENO_LOG", "debug")
     .env(
       "DENO_SERVE_ADDRESS",
       format!("unix:{}", serve_socket_path.display()),
