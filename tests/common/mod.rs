@@ -178,17 +178,17 @@ impl TestEnv {
   }
 
   // Start mesh nodes with auto-allocated non-conflicting ports
-  pub fn new(count: usize) -> Self {
+  pub async fn new(count: usize) -> Self {
     // Start with port 7500 and use spacing of 2 to avoid conflicts with internal ports
     let ports = Self::allocate_ports(7500, count, 2);
-    Self::new_with_ports(ports)
+    Self::new_with_ports(ports).await
   }
 
-  pub fn new_with_ports(ports: Vec<PortLease>) -> Self {
-    Self::new_with_ports_and_envs(ports, &[])
+  pub async fn new_with_ports(ports: Vec<PortLease>) -> Self {
+    Self::new_with_ports_and_envs(ports, &[]).await
   }
 
-  pub fn new_with_ports_and_envs(
+  pub async fn new_with_ports_and_envs(
     ports: Vec<PortLease>,
     envs: &[(&str, &str)],
   ) -> Self {
@@ -223,7 +223,7 @@ impl TestEnv {
 
     // Longer delay for peer exchange after TCP connections are ready
     // This is important to give time for S3 registration and peer discovery
-    std::thread::sleep(Duration::from_secs(SERVER_STARTUP_WAIT_SECS));
+    tokio::time::sleep(Duration::from_secs(SERVER_STARTUP_WAIT_SECS)).await;
     println!("All servers are ready now");
     test_env
   }
@@ -480,11 +480,11 @@ pub fn test_port_allocation() {
 }
 
 /// Example of using the automatic port allocation in TestEnv
-#[test]
-pub fn test_auto_port_allocation() {
+#[tokio::test]
+async fn test_auto_port_allocation() {
   // Create two TestEnv instances with 3 nodes each
-  let env1 = TestEnv::new(3);
-  let env2 = TestEnv::new(3);
+  let env1 = TestEnv::new(3).await;
+  let env2 = TestEnv::new(3).await;
 
   println!("Env1 ports: {:?}", env1.ports);
   println!("Env2 ports: {:?}", env2.ports);

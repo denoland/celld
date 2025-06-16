@@ -6,7 +6,7 @@ use tracing::{debug, info};
 
 #[test_log::test(tokio::test)]
 async fn test_reliable_workflow_in_single_node_cluster() {
-  let test_env = TestEnv::new(1);
+  let test_env = TestEnv::new(1).await;
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
@@ -81,7 +81,7 @@ async fn test_reliable_workflow_in_single_node_cluster() {
 
 #[test_log::test(tokio::test)]
 async fn test_flaky_workflow_in_single_node_cluster() {
-  let test_env = TestEnv::new(1);
+  let test_env = TestEnv::new(1).await;
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
@@ -166,7 +166,7 @@ async fn test_flaky_workflow_in_single_node_cluster() {
 
 #[test_log::test(tokio::test)]
 async fn test_workflow_automatic_resume_after_node_failure() {
-  let mut test_env = TestEnv::new(3);
+  let mut test_env = TestEnv::new(3).await;
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
   let client = reqwest::Client::new();
@@ -323,7 +323,7 @@ async fn test_workflow_automatic_resume_after_node_failure() {
 
 #[test_log::test(tokio::test)]
 async fn test_invoke_workflow() {
-  let test_env = TestEnv::new(1);
+  let test_env = TestEnv::new(1).await;
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
@@ -369,7 +369,7 @@ async fn test_invoke_workflow() {
 
 #[test_log::test(tokio::test)]
 async fn test_sleep_workflow() {
-  let test_env = TestEnv::new(1);
+  let test_env = TestEnv::new(1).await;
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();

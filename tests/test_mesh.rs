@@ -14,7 +14,7 @@ use common::TestEnv;
 #[tokio::test]
 async fn test_mesh_cell_connection() {
   // Start 3 server instances with auto-allocated ports
-  let test_env = TestEnv::new(3);
+  let test_env = TestEnv::new(3).await;
 
   // Servers are already initialized with the TCP health checks
 
@@ -65,7 +65,7 @@ async fn test_mesh_cell_connection() {
 #[tokio::test]
 async fn test_mesh_message_broadcast() {
   // Start 3 server instances with auto-allocated ports
-  let test_env = TestEnv::new(3);
+  let test_env = TestEnv::new(3).await;
 
   // Servers are already initialized with the TCP health checks
 
@@ -116,7 +116,7 @@ async fn test_mesh_message_broadcast() {
 /// Tests dynamic node membership in the mesh
 #[tokio::test]
 async fn test_mesh_dynamic_membership() {
-  let mut test_env = TestEnv::new(3);
+  let mut test_env = TestEnv::new(3).await;
 
   // 1. Query the first node's internal mesh/peers endpoint to check if all nodes are visible
   let peers_url = format!(
@@ -196,7 +196,7 @@ async fn test_mesh_dynamic_membership() {
 #[tokio::test]
 async fn test_mesh_cell_isolation() {
   // Start 3 server instances with auto-allocated ports
-  let test_env = TestEnv::new(3);
+  let test_env = TestEnv::new(3).await;
 
   // Servers are already initialized with the TCP health checks
 
@@ -253,7 +253,7 @@ async fn test_mesh_cell_isolation() {
 #[tokio::test]
 async fn test_node_failure_takeover() {
   // Setup three nodes in the mesh with auto-allocated ports
-  let mut test_env = TestEnv::new(3);
+  let mut test_env = TestEnv::new(3).await;
 
   // Use unique cell ID to avoid conflicts with other tests
   let test_cell_id = format!("failover-test-{}", Uuid::new_v4().simple());
@@ -417,7 +417,7 @@ async fn test_node_failure_takeover() {
 #[test_log::test(tokio::test)]
 async fn test_concurrent_takeover_locking() {
   // Setup three celld nodes in the mesh with auto-allocated ports
-  let mut test_env = TestEnv::new(3);
+  let mut test_env = TestEnv::new(3).await;
 
   // Use unique cell ID to avoid conflicts with other tests
   let test_cell_id = format!("takeover-lock-test-{}", Uuid::new_v4().simple());
@@ -599,7 +599,7 @@ async fn test_concurrent_takeover_locking() {
 #[ignore]
 async fn test_proxy_forwarding_retry() {
   // Setup three nodes in the mesh with auto-allocated ports
-  let mut test_env = TestEnv::new(3);
+  let mut test_env = TestEnv::new(3).await;
 
   // Use unique cell ID to avoid conflicts with other tests
   let test_cell_id = format!("proxy-retry-test-{}", Uuid::new_v4().simple());
@@ -756,7 +756,7 @@ async fn test_restore_coordination() {
   println!("test_restore_coordination with cell ID: {}", test_cell_id);
 
   // Create a single-node environment
-  let mut test_env = TestEnv::new(1);
+  let mut test_env = TestEnv::new(1).await;
   let port_a = test_env.ports[0].public();
 
   // Send request to Node A to create data in the cell
@@ -881,7 +881,7 @@ async fn test_restore_coordination() {
 #[tokio::test]
 async fn test_restore_single() {
   // Create a single-node environment
-  let mut test_env = TestEnv::new(1);
+  let mut test_env = TestEnv::new(1).await;
   let port = test_env.ports[0].public();
 
   let test_cell_id = "test-restore";

@@ -24,7 +24,8 @@ async fn test_system_main_cell_relocation() {
     initial_ports,
     // Set the environment variable for deterministic hashing
     &[("CELL_HASHRING_SEED", CELL_HASHRING_SEED)],
-  );
+  )
+  .await;
 
   let initial_port = test_env.ports[0].public();
   let initial_internal_port = test_env.ports[0].internal();
@@ -167,7 +168,8 @@ async fn test_system_main_cell_relocation_with_existing_db() {
     initial_ports,
     // Set the environment variable for deterministic hashing
     &[("CELL_HASHRING_SEED", CELL_HASHRING_SEED)],
-  );
+  )
+  .await;
 
   let initial_port = test_env.ports[0].public();
   let initial_internal_port = test_env.ports[0].internal();

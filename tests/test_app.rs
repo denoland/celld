@@ -4,7 +4,7 @@ use common::TestEnv;
 
 #[test_log::test(tokio::test)]
 async fn test_hono() {
-  let test_env = TestEnv::new(1);
+  let test_env = TestEnv::new(1).await;
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
