@@ -165,6 +165,14 @@ enum LockState {
     lock_manager: Arc<dyn DistributedLock>,
     protected_resource: Box<CellEntry>,
   },
+  Releasing {
+    descriptor: LockDescriptor,
+    lock_manager: Arc<dyn DistributedLock>,
+    /// This is present when it went through `Active` state. If it became
+    /// `Releasing` state directly from `Init`, this is `None`.
+    protected_resource: Option<Box<CellEntry>>,
+    reason: LockReleaseReason,
+  },
   Released {
     descriptor: LockDescriptor,
     _reason: LockReleaseReason,
@@ -176,6 +184,7 @@ impl LockState {
     match self {
       LockState::Init { descriptor, .. } => descriptor,
       LockState::Active { descriptor, .. } => descriptor,
+      LockState::Releasing { descriptor, .. } => descriptor,
       LockState::Released { descriptor, .. } => descriptor,
     }
   }
@@ -203,6 +212,9 @@ impl LockState {
         lock_manager.renew(descriptor, ttl).await?;
         ttl_expiry_timer.as_mut().reset(now + ttl);
       }
+      LockState::Releasing { .. } => {
+        // Do nothing
+      }
       LockState::Released { .. } => {
         // Do nothing
       }
@@ -211,9 +223,10 @@ impl LockState {
     Ok(())
   }
 
-  async fn release_lock(
+  fn initiate_lock_release(
     &mut self,
     reason: LockReleaseReason,
+    self_request_tx: mpsc::UnboundedSender<LockStateRequest>,
     ttl_expiry_timer: Option<&mut Pin<&mut Sleep>>,
   ) -> anyhow::Result<bool> {
     let released = match self {
@@ -221,37 +234,77 @@ impl LockState {
         descriptor,
         lock_manager,
       } => {
-        // Release the lock
-        lock_manager.release(descriptor).await?;
-        debug!(?descriptor, "Lock released");
-
-        *self = LockState::Released {
+        *self = LockState::Releasing {
           descriptor: descriptor.clone(),
-          _reason: reason,
+          lock_manager: lock_manager.clone(),
+          protected_resource: None,
+          reason,
         };
+
+        // Spawn a task to release the lock.
+        tokio::spawn({
+          let descriptor = descriptor.clone();
+          let lock_manager = lock_manager.clone();
+          async move {
+            match lock_manager.release(&descriptor).await {
+              Ok(_) => {
+                debug!(?descriptor, "Lock release completed");
+                self_request_tx.send(LockStateRequest::ReleaseCompleted);
+              }
+              Err(e) => {
+                error!(?descriptor, error = ?e, "Failed to release lock");
+              }
+            }
+          }
+        });
 
         true
       }
-      LockState::Active { descriptor, .. } => {
-        let descriptor = descriptor.clone();
-        // Set the state to Released before actually processing the resource
-        // cleanup to get the ownership.
-        let state = std::mem::replace(
-          self,
-          LockState::Released {
-            descriptor,
-            _reason: reason,
-          },
-        );
-
+      LockState::Active {
+        descriptor,
+        lock_manager,
+        ..
+      } => {
         let LockState::Active {
-          descriptor,
-          lock_manager,
-          protected_resource,
-        } = state
+          protected_resource, ..
+        } = std::mem::replace(
+          self,
+          LockState::Releasing {
+            descriptor: descriptor.clone(),
+            lock_manager: lock_manager.clone(),
+            protected_resource: None,
+            reason,
+          },
+        )
         else {
           unreachable!("We already checked that the state is Active in the match statement");
         };
+
+        *self = LockState::Releasing {
+          descriptor: descriptor.clone(),
+          lock_manager: lock_manager.clone(),
+          protected_resource: Some(protected_resource),
+          reason,
+        };
+
+        // Spawn a task to release the lock.
+        // TODO: this is not perfect. Let's fix it when we resolve the conflict
+        // with https://github.com/denoland/cells/pull/87
+        tokio::spawn({
+          let descriptor = descriptor.clone();
+          let lock_manager = lock_manager.clone();
+          async move {
+            match lock_manager.release(&descriptor).await {
+              Ok(_) => {
+                debug!(?descriptor, "Lock release completed");
+                self_request_tx.send(LockStateRequest::ReleaseCompleted);
+              }
+              Err(e) => {
+                error!(?descriptor, error = ?e, "Failed to release lock");
+              }
+            }
+          }
+        });
 
         // Releasing the resource gracefully may be taking some time.
         // To ensure that no other node will detect the lock as expired during the
@@ -298,6 +351,10 @@ impl LockState {
 
         true
       }
+      LockState::Releasing { .. } => {
+        // Lock is already being released. Do nothing.
+        false
+      }
       LockState::Released { .. } => {
         // Lock was already released. Do nothing.
         false
@@ -319,6 +376,7 @@ enum LockStateRequest {
   DispatchAlarms(DispatchAlarmsRequest),
   ReleaseIfIdle(ReleaseIfIdleRequest),
   Release(ReleaseRequest),
+  ReleaseCompleted,
 }
 
 struct SetResourceRequest {
@@ -329,6 +387,7 @@ struct SetResourceRequest {
 pub enum LockStateKind {
   Init,
   Active,
+  Releasing,
   Released,
 }
 
@@ -405,8 +464,9 @@ impl LockHandle {
     tokio::spawn({
       let descriptor = lock_descriptor.clone();
       let lock_manager = lock_manager.clone();
+      let tx = tx.clone();
 
-      lock_state_loop(descriptor, lock_manager, ttl, rx)
+      lock_state_loop(descriptor, lock_manager, ttl, tx, rx)
     });
 
     Self {
@@ -589,6 +649,7 @@ async fn lock_state_loop(
   descriptor: LockDescriptor,
   lock_manager: Arc<dyn DistributedLock>,
   ttl: Duration,
+  request_tx: mpsc::UnboundedSender<LockStateRequest>,
   mut request_rx: mpsc::UnboundedReceiver<LockStateRequest>,
 ) {
   let mut state = LockState::Init {
@@ -630,6 +691,15 @@ async fn lock_state_loop(
       }
 
       req = request_rx.recv() => {
+        // NOTE: it is important to keep message handlers non-async.
+        //
+        // If one is async, that may block the lock state loop from processing
+        // other queued messages. And what's worse, it may cause deadlock if the
+        // handler sends a message back to the `request_rx` channel and awaits
+        // it - the handler waits for the response, but in order for the message
+        // to be processed, the handler needs to finish and the loop needs to
+        // continue to process the next message.
+
         match req {
           Some(LockStateRequest::SetResource(req)) => {
             handle_set_resource(req, &mut state);
@@ -644,22 +714,22 @@ async fn lock_state_loop(
             handle_mutate_resource(req, &mut state);
           }
           Some(LockStateRequest::GetAlarm(req)) => {
-            handle_get_alarm(req, &mut state).await;
+            handle_get_alarm(req, &mut state);
           }
           Some(LockStateRequest::DeleteAlarm(req)) => {
-            handle_delete_alarm(req, &mut state).await;
+            handle_delete_alarm(req, &mut state);
           }
           Some(LockStateRequest::SetAlarm(req)) => {
-            handle_set_alarm(req, &mut state).await;
+            handle_set_alarm(req, &mut state);
           }
           Some(LockStateRequest::DispatchAlarms(req)) => {
-            handle_dispatch_alarms(req, &mut state).await;
+            handle_dispatch_alarms(req, &mut state);
           }
           Some(LockStateRequest::ReleaseIfIdle(req)) => {
-            handle_release_if_idle(req, &mut state).await;
+            handle_release_if_idle(req, &mut state);
           }
           Some(LockStateRequest::Release(req)) => {
-            handle_release(req, &mut state, &mut ttl_expiry_timer).await;
+            handle_release(req, &mut state, &mut ttl_expiry_timer);
           }
           None => {
             // LockHandle was dropped; at this point, the state must be `Released`
@@ -703,6 +773,9 @@ fn handle_ping(req: PingRequest, state: &mut LockState) {
     LockState::Active { .. } => {
       let _ = req.res_chan.send(LockStateKind::Active);
     }
+    LockState::Releasing { .. } => {
+      let _ = req.res_chan.send(LockStateKind::Releasing);
+    }
     LockState::Released { .. } => {
       let _ = req.res_chan.send(LockStateKind::Released);
     }
@@ -724,6 +797,10 @@ fn handle_get_socket_path(
       let socket_path = (req.accessor)(protected_resource);
       let _ = req.res_chan.send(socket_path);
     }
+    LockState::Releasing { .. } => {
+      // Do nothing
+      let _ = req.res_chan.send(None);
+    }
     LockState::Released { .. } => {
       // Do nothing
       let _ = req.res_chan.send(None);
@@ -741,6 +818,9 @@ fn handle_mutate_resource(req: MutateResourceRequest, state: &mut LockState) {
     } => {
       (req.mutator)(protected_resource);
     }
+    LockState::Releasing { .. } => {
+      // Do nothing
+    }
     LockState::Released { .. } => {
       // Do nothing
     }
@@ -749,7 +829,7 @@ fn handle_mutate_resource(req: MutateResourceRequest, state: &mut LockState) {
   let _ = req.res_chan.send(());
 }
 
-async fn handle_get_alarm(req: GetAlarmRequest, state: &mut LockState) {
+fn handle_get_alarm(req: GetAlarmRequest, state: &mut LockState) {
   match state {
     LockState::Init { .. } => {
       let _ = req.res_chan.send(None);
@@ -762,10 +842,22 @@ async fn handle_get_alarm(req: GetAlarmRequest, state: &mut LockState) {
         return;
       };
 
-      let maybe_alarm = alarm_processor.get(req.tenant, req.cell_id).await.ok();
-      let _ = req.res_chan.send(maybe_alarm.map(|alarm| GetAlarmResponse {
-        scheduled_time_unix_ms: alarm.scheduled_time_unix_ms,
-      }));
+      tokio::spawn({
+        let alarm_processor_handle = alarm_processor.handle();
+        async move {
+          let maybe_alarm = alarm_processor_handle
+            .get(req.tenant, req.cell_id)
+            .await
+            .ok();
+          let _ =
+            req.res_chan.send(maybe_alarm.map(|alarm| GetAlarmResponse {
+              scheduled_time_unix_ms: alarm.scheduled_time_unix_ms,
+            }));
+        }
+      });
+    }
+    LockState::Releasing { .. } => {
+      let _ = req.res_chan.send(None);
     }
     LockState::Released { .. } => {
       let _ = req.res_chan.send(None);
@@ -790,11 +882,23 @@ async fn handle_delete_alarm(req: DeleteAlarmRequest, state: &mut LockState) {
         return;
       };
 
-      if let Err(e) = alarm_processor.delete(req.tenant, req.cell_id).await {
-        let _ = req.res_chan.send(Err(e.into()));
-      } else {
-        let _ = req.res_chan.send(Ok(()));
-      }
+      tokio::spawn({
+        let alarm_processor_handle = alarm_processor.handle();
+        async move {
+          if let Err(e) =
+            alarm_processor_handle.delete(req.tenant, req.cell_id).await
+          {
+            let _ = req.res_chan.send(Err(e.into()));
+          } else {
+            let _ = req.res_chan.send(Ok(()));
+          }
+        }
+      });
+    }
+    LockState::Releasing { .. } => {
+      let _ = req
+        .res_chan
+        .send(Err(anyhow::anyhow!("Cell is being released")));
     }
     LockState::Released { .. } => {
       let _ = req
@@ -821,14 +925,24 @@ async fn handle_set_alarm(req: SetAlarmRequest, state: &mut LockState) {
         return;
       };
 
-      if let Err(e) = alarm_processor
-        .set(req.tenant, req.cell_id, req.scheduled_time_unix_ms)
-        .await
-      {
-        let _ = req.res_chan.send(Err(e.into()));
-      } else {
-        let _ = req.res_chan.send(Ok(()));
-      }
+      tokio::spawn({
+        let alarm_processor_handle = alarm_processor.handle();
+        async move {
+          if let Err(e) = alarm_processor_handle
+            .set(req.tenant, req.cell_id, req.scheduled_time_unix_ms)
+            .await
+          {
+            let _ = req.res_chan.send(Err(e.into()));
+          } else {
+            let _ = req.res_chan.send(Ok(()));
+          }
+        }
+      });
+    }
+    LockState::Releasing { .. } => {
+      let _ = req
+        .res_chan
+        .send(Err(anyhow::anyhow!("Cell is being released")));
     }
     LockState::Released { .. } => {
       let _ = req
@@ -858,17 +972,27 @@ async fn handle_dispatch_alarms(
         return;
       };
 
-      match alarm_processor
-        .dispatch(req.node_state, req.now, req.limit)
-        .await
-      {
-        Ok(_) => {
-          let _ = req.res_chan.send(Ok(()));
+      tokio::spawn({
+        let alarm_processor_handle = alarm_processor.handle();
+        async move {
+          match alarm_processor_handle
+            .dispatch(req.node_state, req.now, req.limit)
+            .await
+          {
+            Ok(_) => {
+              let _ = req.res_chan.send(Ok(()));
+            }
+            Err(e) => {
+              let _ = req.res_chan.send(Err(e.into()));
+            }
+          }
         }
-        Err(e) => {
-          let _ = req.res_chan.send(Err(e.into()));
-        }
-      }
+      });
+    }
+    LockState::Releasing { .. } => {
+      let _ = req
+        .res_chan
+        .send(Err(anyhow::anyhow!("Cell is being released")));
     }
     LockState::Released { .. } => {
       let _ = req
@@ -878,10 +1002,7 @@ async fn handle_dispatch_alarms(
   }
 }
 
-async fn handle_release_if_idle(
-  req: ReleaseIfIdleRequest,
-  state: &mut LockState,
-) {
+fn handle_release_if_idle(req: ReleaseIfIdleRequest, state: &mut LockState) {
   match state {
     LockState::Active {
       protected_resource, ..
@@ -899,7 +1020,7 @@ async fn handle_release_if_idle(
   }
 }
 
-async fn handle_release(
+fn handle_release(
   req: ReleaseRequest,
   state: &mut LockState,
   ttl_expiry_timer: &mut Pin<&mut Sleep>,

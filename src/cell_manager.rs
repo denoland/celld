@@ -50,7 +50,7 @@ impl CellEntry {
         parent_exit_guard.wait();
       }
       CellEntryInner::SystemMain { alarm_processor } => {
-        if let Err(e) = alarm_processor.shutdown().await {
+        if let Err(e) = alarm_processor.handle().shutdown().await {
           error!(
             error = ?e,
             "Error shutting down alarm processor"
