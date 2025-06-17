@@ -122,7 +122,8 @@ pub trait DistributedLock: Send + Sync {
     &self,
     lock_name: &str,
     node_id: &NodeId,
-    ttl: Duration,
+    global_ttl: Duration,
+    local_ttl: Duration,
     // The lock manager instance to be set for use by LockHandle.
     lock_manager: Arc<dyn DistributedLock>,
   ) -> Result<LockHandle, LockAcquireError>;
@@ -191,8 +192,10 @@ impl LockState {
 
   async fn renew_ttl(
     &self,
-    ttl: Duration,
-    ttl_expiry_timer: &mut Pin<&mut Sleep>,
+    global_ttl: Duration,
+    local_ttl: Duration,
+    global_ttl_expiry_timer: &mut Pin<&mut Sleep>,
+    local_ttl_expiry_timer: &mut Pin<&mut Sleep>,
   ) -> anyhow::Result<()> {
     match self {
       LockState::Init {
@@ -200,8 +203,9 @@ impl LockState {
         lock_manager,
       } => {
         let now = Instant::now();
-        lock_manager.renew(descriptor, ttl).await?;
-        ttl_expiry_timer.as_mut().reset(now + ttl);
+        lock_manager.renew(descriptor, global_ttl).await?;
+        global_ttl_expiry_timer.as_mut().reset(now + global_ttl);
+        local_ttl_expiry_timer.as_mut().reset(now + local_ttl);
       }
       LockState::Active {
         lock_manager,
@@ -209,8 +213,9 @@ impl LockState {
         ..
       } => {
         let now = Instant::now();
-        lock_manager.renew(descriptor, ttl).await?;
-        ttl_expiry_timer.as_mut().reset(now + ttl);
+        lock_manager.renew(descriptor, global_ttl).await?;
+        global_ttl_expiry_timer.as_mut().reset(now + global_ttl);
+        local_ttl_expiry_timer.as_mut().reset(now + local_ttl);
       }
       LockState::Releasing { .. } => {
         // Do nothing
@@ -227,7 +232,7 @@ impl LockState {
     &mut self,
     reason: LockReleaseReason,
     self_request_tx: mpsc::UnboundedSender<LockStateRequest>,
-    ttl_expiry_timer: Option<&mut Pin<&mut Sleep>>,
+    global_ttl_expiry_timer: &mut Pin<&mut Sleep>,
   ) -> anyhow::Result<bool> {
     let released = match self {
       LockState::Init {
@@ -304,50 +309,25 @@ impl LockState {
               }
             }
           }
-        });
+        };
 
-        // Releasing the resource gracefully may be taking some time.
-        // To ensure that no other node will detect the lock as expired during the
-        // release process, if the deadline is close, we first extend it before
-        // releasing the lock.
-        if let Some(timer) = ttl_expiry_timer {
-          let now = Instant::now();
-          let deadline = timer.deadline();
-          if deadline < now + Duration::from_secs(10) {
-            // The current deadline is too close. Reset it to 30 seconds from now.
-            debug!(
+        tokio::select! {
+          biased;
+
+          _ = global_ttl_expiry_timer => {
+            error!(
               ?descriptor,
-              "Extending lock deadline to 30 seconds from now to get enough time to gracefully terminate the protected resource"
+              "Timed out while gracefully terminating protected resource"
             );
-            let new_ttl = Duration::from_secs(30);
-            lock_manager.renew(&descriptor, new_ttl).await?;
-            timer.as_mut().reset(now + new_ttl);
+
+            // Dropping `release_fut` kills the protected resources forcibly,
+            // ensuring that another node in the cluster can acquire the lock
+            // safely.
+          }
+          _ = release_fut => {
+            debug!(?descriptor, "lock released successfully");
           }
         }
-
-        // The release order matters. Deno process and Litestream replication must
-        // be stopped *before* other nodes detect the lock as released.
-
-        // Shutdown the protected resource (i.e. Deno process and then Litestream
-        // replication) gracefully
-        if tokio::time::timeout(
-          Duration::from_secs(5),
-          protected_resource.terminate(),
-        )
-        .await
-        .is_err()
-        {
-          // TODO(magurotuna): we should forcibly kill it here to ensure that
-          // the cell will not stay alive after the lock is released.
-          error!(
-            ?descriptor,
-            "Timed out while terminating protected resource gracefully"
-          );
-        }
-
-        // Release the lock
-        lock_manager.release(&descriptor).await?;
-        debug!(?descriptor, "Lock released");
 
         true
       }
@@ -457,7 +437,8 @@ impl LockHandle {
   pub fn new(
     lock_descriptor: LockDescriptor,
     lock_manager: Arc<dyn DistributedLock>,
-    ttl: Duration,
+    global_ttl: Duration,
+    local_ttl: Duration,
   ) -> Self {
     let (tx, rx) = mpsc::unbounded_channel();
 
@@ -466,7 +447,7 @@ impl LockHandle {
       let lock_manager = lock_manager.clone();
       let tx = tx.clone();
 
-      lock_state_loop(descriptor, lock_manager, ttl, tx, rx)
+      lock_state_loop(descriptor, lock_manager, global_ttl, local_ttl, tx, rx)
     });
 
     Self {
@@ -648,7 +629,8 @@ impl LockHandle {
 async fn lock_state_loop(
   descriptor: LockDescriptor,
   lock_manager: Arc<dyn DistributedLock>,
-  ttl: Duration,
+  global_ttl: Duration,
+  local_ttl: Duration,
   request_tx: mpsc::UnboundedSender<LockStateRequest>,
   mut request_rx: mpsc::UnboundedReceiver<LockStateRequest>,
 ) {
@@ -657,36 +639,44 @@ async fn lock_state_loop(
     lock_manager,
   };
 
-  let mut ttl_renewal_interval = interval(ttl / 3);
-  // TODO: maybe subtract some second from this to account for the clock skew or network latency
-  let mut ttl_expiry_timer = std::pin::pin!(sleep_until(Instant::now() + ttl));
+  let mut global_ttl_renewal_interval = interval(local_ttl / 4);
+  let now = Instant::now();
+  let mut global_ttl_expiry_timer =
+    std::pin::pin!(sleep_until(now + global_ttl));
+  let mut local_ttl_expiry_timer = std::pin::pin!(sleep_until(now + local_ttl));
 
   loop {
     tokio::select! {
       biased;
 
-      _ = &mut ttl_expiry_timer => {
-        info!(descriptor = ?state.descriptor(), "TTL expired; forcibly releasing lock");
+      _ = &mut local_ttl_expiry_timer => {
         // TTL expired; forcibly release the lock and exit the loop
 
-        // TODO(magurotuna): actually, it is too late to terminate the process
-        // here because at this point another node may acquire the lock i.e.
-        // there are two nodes running the same cell and its associated SQLite
-        // replication. Probably we should do two phase expiry management, where
-        // shorter deadline is used to start the release process and longer one
-        // represents the actual expiry visible to other nodes in the cluster.
+        info!(descriptor = ?state.descriptor(), "TTL expired; forcibly releasing lock");
 
-        if let Err(e) = state.release_lock(LockReleaseReason::TTLExpired, None).await {
+        // Passing `global_ttl_expiry_timer` here so that this release operation
+        // will finish (either gracefully or forcibly) before the global TTL
+        // is reached.
+        if let Err(e) = state.release_lock(LockReleaseReason::TTLExpired, &mut global_ttl_expiry_timer).await {
           error!(error = ?e, descriptor = ?state.descriptor(), "Failed to release lock");
         }
 
         return;
       }
 
-      _ = ttl_renewal_interval.tick() => {
+      _ = global_ttl_renewal_interval.tick() => {
         // Renew the TTL using the lock manager
-        if let Err(e) = state.renew_ttl(ttl, &mut ttl_expiry_timer).await {
-          error!(error = ?e, descriptor = ?state.descriptor(), "Failed to renew TTL");
+        match tokio::time::timeout_at(
+          local_ttl_expiry_timer.deadline(),
+          state.renew_ttl(global_ttl, local_ttl, &mut global_ttl_expiry_timer, &mut local_ttl_expiry_timer),
+        ).await {
+          Ok(Ok(_)) => {},
+          Ok(Err(e)) => {
+            error!(error = ?e, descriptor = ?state.descriptor(), "Failed to renew TTL");
+          }
+          Err(_elapsed) => {
+            error!(descriptor = ?state.descriptor(), "Failed to renew TTL because of timeout");
+          }
         }
       }
 
@@ -1002,13 +992,19 @@ async fn handle_dispatch_alarms(
   }
 }
 
-fn handle_release_if_idle(req: ReleaseIfIdleRequest, state: &mut LockState) {
+fn handle_release_if_idle(
+  req: ReleaseIfIdleRequest,
+  state: &mut LockState,
+  global_ttl_expiry_timer: &mut Pin<&mut Sleep>,
+) {
   match state {
     LockState::Active {
       protected_resource, ..
     } => {
       if protected_resource.is_idle(req.idle_timeout) {
-        let res = state.release_lock(LockReleaseReason::Idle, None).await;
+        let res = state
+          .release_lock(LockReleaseReason::Idle, global_ttl_expiry_timer)
+          .await;
         let _ = req.res_chan.send(res);
       } else {
         let _ = req.res_chan.send(Ok(false));
@@ -1023,10 +1019,10 @@ fn handle_release_if_idle(req: ReleaseIfIdleRequest, state: &mut LockState) {
 fn handle_release(
   req: ReleaseRequest,
   state: &mut LockState,
-  ttl_expiry_timer: &mut Pin<&mut Sleep>,
+  global_ttl_expiry_timer: &mut Pin<&mut Sleep>,
 ) {
   let res = state
-    .release_lock(LockReleaseReason::ExplicitRelease, Some(ttl_expiry_timer))
+    .release_lock(LockReleaseReason::ExplicitRelease, global_ttl_expiry_timer)
     .await;
   let _ = req.res_chan.send(res);
 }
@@ -1071,16 +1067,23 @@ impl DistributedLock for S3DistributedLock {
     &self,
     lock_name: &str,
     node_id: &NodeId,
-    ttl: Duration,
+    global_ttl: Duration,
+    local_ttl: Duration,
     lock_manager: Arc<dyn DistributedLock>,
   ) -> Result<LockHandle, LockAcquireError> {
     let lock_key = self.get_lock_key(lock_name);
-    debug!(lock_key, ?node_id, ?ttl, "Attempting to acquire S3 lock");
+    debug!(
+      lock_key,
+      ?node_id,
+      ?global_ttl,
+      ?local_ttl,
+      "Attempting to acquire S3 lock"
+    );
 
     let lock_info = LockInfo {
       node_id: node_id.clone(),
       timestamp: Utc::now(),
-      ttl_secs: ttl.as_secs(),
+      ttl_secs: global_ttl.as_secs(),
     };
 
     let body_bytes = match serde_json::to_vec(&lock_info) {
@@ -1110,7 +1113,8 @@ impl DistributedLock for S3DistributedLock {
             node_id: node_id.clone(),
           },
           lock_manager,
-          ttl,
+          global_ttl,
+          local_ttl,
         ))
       }
       Err(SdkError::ServiceError(service_err)) => {
@@ -1206,7 +1210,8 @@ impl DistributedLock for S3DistributedLock {
                         node_id: node_id.clone(),
                       },
                       lock_manager,
-                      ttl,
+                      global_ttl,
+                      local_ttl,
                     ))
                   }
                   Err(SdkError::ServiceError(retry_service_err)) => {
@@ -1264,7 +1269,8 @@ impl DistributedLock for S3DistributedLock {
                         node_id: node_id.clone(),
                       },
                       lock_manager,
-                      ttl,
+                      global_ttl,
+                      local_ttl,
                     ))
                   }
                   Err(SdkError::ServiceError(retry_service_err)) => {
@@ -1528,7 +1534,8 @@ impl DistributedLock for StandaloneDistributedLock {
     &self,
     lock_name: &str,
     node_id: &NodeId,
-    ttl: Duration,
+    global_ttl: Duration,
+    local_ttl: Duration,
     lock_manager: Arc<dyn DistributedLock>,
   ) -> Result<LockHandle, LockAcquireError> {
     Ok(LockHandle::new(
@@ -1537,7 +1544,8 @@ impl DistributedLock for StandaloneDistributedLock {
         node_id: node_id.clone(),
       },
       lock_manager,
-      ttl,
+      global_ttl,
+      local_ttl,
     ))
   }
 
@@ -1625,11 +1633,18 @@ mod tests {
 
     let lock_name = "test_lock_1";
     let node_id = NodeId::new("node_a");
-    let ttl = Duration::from_secs(60);
+    let global_ttl = Duration::from_secs(60);
+    let local_ttl = Duration::from_secs(50);
 
     let handle = lock_manager
       .clone()
-      .try_acquire(lock_name, &node_id, ttl, lock_manager.clone())
+      .try_acquire(
+        lock_name,
+        &node_id,
+        global_ttl,
+        local_ttl,
+        lock_manager.clone(),
+      )
       .await
       .expect("Failed to acquire lock");
 
@@ -1664,17 +1679,30 @@ mod tests {
     let lock_name = "test_lock_2";
     let node_a = NodeId::new("node_a");
     let node_b = NodeId::new("node_b");
-    let ttl = Duration::from_secs(60);
+    let global_ttl = Duration::from_secs(60);
+    let local_ttl = Duration::from_secs(50);
 
     let handle_a = lock_manager
       .clone()
-      .try_acquire(lock_name, &node_a, ttl, lock_manager.clone())
+      .try_acquire(
+        lock_name,
+        &node_a,
+        global_ttl,
+        local_ttl,
+        lock_manager.clone(),
+      )
       .await
       .expect("Node A failed to acquire lock");
 
     let handle_b = lock_manager
       .clone()
-      .try_acquire(lock_name, &node_b, ttl, lock_manager.clone())
+      .try_acquire(
+        lock_name,
+        &node_b,
+        global_ttl,
+        local_ttl,
+        lock_manager.clone(),
+      )
       .await;
 
     match handle_b {
@@ -1691,7 +1719,13 @@ mod tests {
 
     // Now node B should be able to acquire the lock
     let handle_b = lock_manager
-      .try_acquire(lock_name, &node_b, ttl, lock_manager.clone())
+      .try_acquire(
+        lock_name,
+        &node_b,
+        global_ttl,
+        local_ttl,
+        lock_manager.clone(),
+      )
       .await
       .expect("Node B failed to acquire lock after release");
 
@@ -1712,12 +1746,13 @@ mod tests {
         &self,
         lock_name: &str,
         node_id: &NodeId,
-        ttl: Duration,
+        global_ttl: Duration,
+        local_ttl: Duration,
         lock_manager: Arc<dyn DistributedLock>,
       ) -> Result<LockHandle, LockAcquireError> {
         self
           .0
-          .try_acquire(lock_name, node_id, ttl, lock_manager)
+          .try_acquire(lock_name, node_id, global_ttl, local_ttl, lock_manager)
           .await
       }
 
@@ -1742,20 +1777,34 @@ mod tests {
     let lock_name = "test_lock_3";
     let node_a = NodeId::new("node_a");
     let node_b = NodeId::new("node_b");
-    let short_ttl = Duration::from_secs(2);
-    let long_ttl = Duration::from_secs(60);
+    let short_global_ttl = Duration::from_secs(2);
+    let short_local_ttl = Duration::from_secs(1);
+    let long_global_ttl = Duration::from_secs(60);
+    let long_local_ttl = Duration::from_secs(50);
 
     let handle_a = lock_manager
       .clone()
-      .try_acquire(lock_name, &node_a, short_ttl, lock_manager.clone())
+      .try_acquire(
+        lock_name,
+        &node_a,
+        short_global_ttl,
+        short_local_ttl,
+        lock_manager.clone(),
+      )
       .await
       .expect("Node A failed to acquire lock with short TTL");
 
     // Wait until the lock expires
-    sleep(short_ttl + Duration::from_secs(1)).await;
+    sleep(short_global_ttl + Duration::from_secs(1)).await;
 
     let handle_b = lock_manager
-      .try_acquire(lock_name, &node_b, long_ttl, lock_manager.clone())
+      .try_acquire(
+        lock_name,
+        &node_b,
+        long_global_ttl,
+        long_local_ttl,
+        lock_manager.clone(),
+      )
       .await
       .expect("Node B failed to acquire expired lock");
 
@@ -1797,7 +1846,8 @@ mod tests {
       NodeId::new("node_2"),
       NodeId::new("node_3"),
     ];
-    let ttl = Duration::from_secs(10);
+    let global_ttl = Duration::from_secs(10);
+    let local_ttl = Duration::from_secs(5);
 
     let mut handles = vec![];
     for node_id in &node_ids {
@@ -1805,7 +1855,13 @@ mod tests {
       let node_id = node_id.clone();
       let handle = tokio::spawn(async move {
         lock_manager_
-          .try_acquire(lock_name, &node_id, ttl, lock_manager_.clone())
+          .try_acquire(
+            lock_name,
+            &node_id,
+            global_ttl,
+            local_ttl,
+            lock_manager_.clone(),
+          )
           .await
       });
       handles.push(handle);
@@ -1853,13 +1909,20 @@ mod tests {
 
     let lock_name = "test_lock_renewal";
     let node_id = NodeId::new("node_a");
-    // Lock renewal happens every one third of the TTL i.e. 2 seconds.
-    let ttl = Duration::from_secs(6);
+    // Lock renewal happens every one fourth of the TTL i.e. 2 seconds.
+    let global_ttl = Duration::from_secs(8);
+    let local_ttl = Duration::from_secs(4);
 
     // First acquire the lock
     let handle = lock_manager
       .clone()
-      .try_acquire(lock_name, &node_id, ttl, lock_manager.clone())
+      .try_acquire(
+        lock_name,
+        &node_id,
+        global_ttl,
+        local_ttl,
+        lock_manager.clone(),
+      )
       .await
       .expect("Failed to acquire lock initially");
 
@@ -1931,7 +1994,7 @@ mod tests {
       node_id: different_node_id,
     };
 
-    match lock_manager.renew(&invalid_descriptor, ttl).await {
+    match lock_manager.renew(&invalid_descriptor, global_ttl).await {
       Err(LockAcquireError::LockHeld(Some(info))) => {
         assert_eq!(
           info.node_id, node_id,

@@ -144,6 +144,7 @@ fn start_server(config: config::Config) -> Server {
     heartbeat_service::HeartbeatService {
       node_state: node_state.clone(),
       interval: node_state.config.heartbeat_interval,
+      staleness_threshold: node_state.config.staleness_threshold,
     },
   ));
 

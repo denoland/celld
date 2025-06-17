@@ -139,6 +139,23 @@ impl ProxyHttp for InternalAPI {
 
     info!(path, method = %req_header.method, "Internal API request received");
 
+    // Handle health check endpoint
+    if path == "/_health" {
+      let response = format!("{} OK\n", self.node_state.config.node_name);
+      let content_length = response.len();
+      let mut resp =
+        pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
+      resp
+        .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
+        .unwrap();
+      resp
+        .insert_header(http::header::CONTENT_TYPE, "text/plain")
+        .unwrap();
+
+      write_response_close_conn(session, resp, response.into()).await?;
+      return Ok(true);
+    }
+
     // Handle internal endpoints
     if path == "/_internal/mesh/peers" {
       let local_peer = self.node_state.peer_manager.get_local_peer();
@@ -528,7 +545,7 @@ impl ProxyHttp for Proxy {
 
     // Handle health check endpoint
     if path == "/_health" {
-      let response = "OK\n";
+      let response = format!("{} OK\n", self.node_state.config.node_name);
       let content_length = response.len();
       let mut resp =
         pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();

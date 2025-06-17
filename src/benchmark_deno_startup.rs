@@ -13,6 +13,7 @@ pub async fn run(iterations: usize) -> Result<()> {
     Err(_) => {
       // Create a minimal default config for benchmark purposes
       Config {
+        node_name: "celld-benchmark".to_string(),
         data_dir: PathBuf::from("./data"),
         listen_addr: "127.0.0.1:8000".parse().unwrap(),
         advertise_addr: "127.0.0.1:8000".parse().unwrap(),
@@ -25,7 +26,8 @@ pub async fn run(iterations: usize) -> Result<()> {
         s3_secret_access_key: None,
         heartbeat_interval: Duration::from_secs(30),
         staleness_threshold: Duration::from_secs(90),
-        lock_guard_ttl: Duration::from_secs(30),
+        lock_guard_ttl_global: Duration::from_secs(30),
+        lock_guard_ttl_local: Duration::from_secs(20),
         alarm_scheduler_interval: Duration::from_secs(5),
         hashring_seed: None,
         system_main_cell_spawn_retries: 10,

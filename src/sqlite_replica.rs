@@ -134,6 +134,10 @@ pub struct SqliteReplica {
   /// Path to the Litestream configuration file
   config_path: PathBuf,
   /// Handle to the replication child process
+  /// Note that `kill_on_drop` is enabled for this child process, meaning that
+  /// SIGKILL will be sent to it when [`SqliteReplica`] is dropped. In normal
+  /// cases, make sure to call [`SqliteReplica::shutdown`] before dropping
+  /// this struct to prevent data loss.
   replication_process: Arc<Mutex<Option<tokio::process::Child>>>,
 }
 
@@ -317,7 +321,7 @@ impl SqliteReplica {
   /// This takes reference to a lock handle to make sure that the caller did acquire a lock.
   #[instrument(skip(self, _lock_handle))]
   pub async fn ensure_restored(
-    &self,
+    &mut self,
     _lock_handle: &distributed_lock::LockHandle,
   ) {
     // We got the lock, proceed with restore
@@ -441,6 +445,11 @@ impl SqliteReplica {
       .arg(&self.config_path)
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
+      // We usually gracefully terminate the litestream replication process,
+      // but if something weired or unexpected happens (for instance, the
+      // graceful shutdown takes so long that the associated distributed lock's
+      // TTL expires), we need to kill the process forcibly.
+      .kill_on_drop(true)
       .spawn()
       .context("Failed to start litestream replicate")?;
 
@@ -451,8 +460,8 @@ impl SqliteReplica {
     Ok(())
   }
 
-  /// Kills the replicate process
-  pub async fn shutdown(&self) -> Result<()> {
+  /// Gracefully shuts down the replicate process
+  pub async fn shutdown(&mut self) -> Result<()> {
     // Take the child process out of the mutex without holding the lock during the await
     let mut child_opt = {
       let mut process_guard = self.replication_process.lock().unwrap();
@@ -599,7 +608,7 @@ pub mod tests {
     let s3_config = create_test_s3_config(cell_id, &minio_guard);
 
     // Initialize the SqliteReplica with the new API
-    let replica = SqliteReplica::initialize(
+    let mut replica = SqliteReplica::initialize(
       data_dir,
       "test-tenant",
       cell_id,

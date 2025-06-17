@@ -8,6 +8,7 @@ import {
 } from "./types.ts";
 import { WorkflowRuntime } from "./workflow.ts";
 import { ulid } from "jsr:@std/ulid@^1.0.0/ulid";
+import { logger, setup as setupLogger } from "./logger.ts";
 
 // Create a Cell class to track sockets and provide broadcast functionality
 export class Cell implements DbAccessor, TaskScheduler {
@@ -62,6 +63,7 @@ export class Cell implements DbAccessor, TaskScheduler {
   }) {
     this.tenant = args?.tenant ?? Cell.#defaultTenant;
     this.id = args?.id ?? Cell.#defaultId;
+    setupLogger(this.tenant, this.id, "DEBUG");
     this.#dbPath = args?.dbPath ?? Cell.#defaultDbPath;
     const ctlSockPath = args?.ctlSockPath ?? Cell.#defaultCtlSockPath;
     this.ctlClient = Deno.createHttpClient({
@@ -320,7 +322,7 @@ export class Cell implements DbAccessor, TaskScheduler {
 
   #setupServer(): void {
     this.#server = Deno.serve(async (req) => {
-      console.error({ url: req.url, method: req.method });
+      logger().debug({ url: req.url, method: req.method });
       // Handle WebSocket connections
       if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
         const { response, socket } = Deno.upgradeWebSocket(req);
@@ -387,7 +389,7 @@ export class Cell implements DbAccessor, TaskScheduler {
 
     // Handle SIGTERM for graceful shutdown
     Deno.addSignalListener("SIGTERM", () => {
-      console.log(
+      logger().info(
         `SIGTERM received, shutting down ${this.tenant}/${this.id} gracefully...`,
       );
       this.shutdown();
@@ -414,30 +416,36 @@ export class Cell implements DbAccessor, TaskScheduler {
       this.#server = null;
     }
 
+    logger().debug("Server closed");
+
     // Close all WebSocket connections
     for (const socket of this.sockets.values()) {
       socket.close(1000, "Server shutting down");
     }
     this.sockets.clear();
 
+    logger().debug("WebSocket connections closed");
+
     // If there are ongoing workflow runs, schedule a task to resume them on
     // another node later.
     if (WorkflowRuntime.runningWorkflows() > 0) {
+      logger().debug("Scheduling a task to resume all pending workflow runs");
       await this.schedule({
         kind: "resume-all-pending-workflow-runs",
         scheduledTimeUnixMs: Date.now() + 10_000,
       });
+      logger().debug("Scheduled to resume all pending workflow runs");
     }
 
     // Close database connection if open
     if (this.#dbInstance) {
       this.#dbInstance.close();
       this.#dbInstance = null;
+      logger().debug("Database connection closed");
     }
 
-    console.log(
-      `Shutdown complete for ${this.tenant}/${this.id}`,
-    );
+    logger().info("Shutdown complete");
+
     Deno.exit(0);
   }
 
@@ -464,18 +472,27 @@ export class Cell implements DbAccessor, TaskScheduler {
   async #scheduleGlobalAlarm(
     scheduledTimeUnixMs: number,
   ): Promise<void> {
-    await fetch("http://localhost/_internal/alarms", {
-      client: this.ctlClient,
-      method: "POST",
-      body: JSON.stringify({
-        tenant: this.tenant,
-        cell_id: this.id,
-        scheduled_time_unix_ms: scheduledTimeUnixMs,
-      }),
-    });
-
-    // Update our tracked time
-    this.#currentGlobalAlarmTime = scheduledTimeUnixMs;
+    try {
+      const res = await fetch("http://localhost/_internal/alarms", {
+        client: this.ctlClient,
+        method: "POST",
+        body: JSON.stringify({
+          tenant: this.tenant,
+          cell_id: this.id,
+          scheduled_time_unix_ms: scheduledTimeUnixMs,
+        }),
+      });
+      if (res.ok) {
+        // Update our tracked time
+        this.#currentGlobalAlarmTime = scheduledTimeUnixMs;
+      } else {
+        logger().error(
+          `Failed to schedule global alarm: ${await res.text()}`,
+        );
+      }
+    } catch (e) {
+      logger().error(e);
+    }
   }
 }
 

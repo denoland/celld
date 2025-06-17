@@ -41,8 +41,8 @@ pub struct CellEntry {
 }
 
 impl CellEntry {
-  pub async fn terminate(self) {
-    match self.inner {
+  pub async fn terminate(&mut self) {
+    match &mut self.inner {
       CellEntryInner::Normal {
         parent_exit_guard, ..
       } => {
@@ -59,7 +59,7 @@ impl CellEntry {
       }
     }
 
-    if let Some(replica) = &self.replica {
+    if let Some(replica) = &mut self.replica {
       if let Err(e) = replica.shutdown().await {
         error!(
           error = ?e,
@@ -106,6 +106,32 @@ impl CellEntry {
 
         *incoming_connections == 0 || active_connections::count(*pid) == 0
       }
+    }
+  }
+}
+
+impl Drop for CellEntry {
+  fn drop(&mut self) {
+    match &mut self.inner {
+      CellEntryInner::Normal {
+        parent_exit_guard, ..
+      } => {
+        let finished = matches!(parent_exit_guard.try_wait(), Ok(Some(_)));
+        if !finished {
+          parent_exit_guard.kill(Signal::SIGKILL);
+          parent_exit_guard.wait();
+        }
+      }
+      CellEntryInner::SystemMain { alarm_processor } => {
+        alarm_processor.kill();
+      }
+    }
+
+    if let Some(replica) = self.replica.take() {
+      // `kill_on_drop` flag is enabled for `litestream replicate` process. So
+      // dropping the `replica` will send SIGKILL to the process, if the process
+      // is still running.
+      drop(replica);
     }
   }
 }
@@ -253,7 +279,8 @@ impl CellManager {
       .try_acquire(
         &lock_name,
         node_id,
-        node_state.config.lock_guard_ttl,
+        node_state.config.lock_guard_ttl_global,
+        node_state.config.lock_guard_ttl_local,
         node_state.distributed_lock.clone(),
       )
       .await
@@ -467,7 +494,8 @@ impl CellManager {
       .try_acquire(
         &lock_name,
         node_id,
-        node_state.config.lock_guard_ttl,
+        node_state.config.lock_guard_ttl_global,
+        node_state.config.lock_guard_ttl_local,
         node_state.distributed_lock.clone(),
       )
       .await
@@ -725,7 +753,7 @@ impl CellManager {
     db_path: &Path,
   ) -> Result<Option<SqliteReplica>, CellManagerError> {
     // Try to initialize the SqliteReplica with the S3 config
-    let replica = match SqliteReplica::initialize(
+    let mut replica = match SqliteReplica::initialize(
       &self.data_dir,
       host,
       cell_id,
@@ -755,7 +783,7 @@ impl CellManager {
     };
 
     // Handle database restoration if necessary
-    if let Some(ref replica) = replica {
+    if let Some(ref mut replica) = replica {
       info!(
         tenant = %host,
         cell_id = %cell_id,

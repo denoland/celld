@@ -22,9 +22,11 @@ async fn test_system_main_cell_relocation() {
   // Start with a single node cluster using a seeded hasher
   let mut test_env = TestEnv::new_with_ports_and_envs(
     initial_ports,
+    "test_system_main_cell_relocation",
     // Set the environment variable for deterministic hashing
     &[("CELL_HASHRING_SEED", CELL_HASHRING_SEED)],
-  );
+  )
+  .await;
 
   let initial_port = test_env.ports[0].public();
   let initial_internal_port = test_env.ports[0].internal();
@@ -75,7 +77,9 @@ async fn test_system_main_cell_relocation() {
 
   // Add a second node that should trigger relocation due to deterministic hashing
   let second_internal_port = second_ports[0].internal();
-  test_env.spawn_cell_instance(second_ports);
+  test_env
+    .spawn_cell_instance(second_ports, "test_system_main_cell_relocation")
+    .await;
 
   // Wait for cluster membership to stabilize
   tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -165,9 +169,11 @@ async fn test_system_main_cell_relocation_with_existing_db() {
   // Start with a single node cluster using a seeded hasher
   let mut test_env = TestEnv::new_with_ports_and_envs(
     initial_ports,
+    "test_system_main_cell_relocation_with_existing_db",
     // Set the environment variable for deterministic hashing
     &[("CELL_HASHRING_SEED", CELL_HASHRING_SEED)],
-  );
+  )
+  .await;
 
   let initial_port = test_env.ports[0].public();
   let initial_internal_port = test_env.ports[0].internal();
@@ -215,7 +221,12 @@ async fn test_system_main_cell_relocation_with_existing_db() {
   // Add a second node that should trigger relocation due to deterministic hashing
   let second_port = second_ports[0].public();
   let second_internal_port = second_ports[0].internal();
-  test_env.spawn_cell_instance(second_ports);
+  test_env
+    .spawn_cell_instance(
+      second_ports,
+      "test_system_main_cell_relocation_with_existing_db",
+    )
+    .await;
 
   // Wait for cluster membership to stabilize
   tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
