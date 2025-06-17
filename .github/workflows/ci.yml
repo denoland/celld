@@ -103,6 +103,8 @@ jobs:
 
     - name: Run cargo test
       run: cargo test --verbose
+      env:
+        RUST_LOG: info,celld=debug
 
     - name: Run deno test
       run: |

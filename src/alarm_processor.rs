@@ -58,6 +58,7 @@ pub enum AlarmProcessRequest {
 #[derive(Debug)]
 pub struct AlarmProcessor {
   _handle: std::thread::JoinHandle<()>,
+  abort_handle: tokio::task::AbortHandle,
   request_tx: tokio::sync::mpsc::Sender<AlarmProcessRequest>,
 }
 
@@ -85,6 +86,7 @@ impl AlarmProcessor {
     )?;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+    let (abort_handle_tx, abort_handle_rx) = std::sync::mpsc::channel();
 
     // Spawn a thread dedicated to process alarm requests.
     // This is necessary because SQLite client is not Send.
@@ -96,7 +98,7 @@ impl AlarmProcessor {
         .unwrap();
       let local = tokio::task::LocalSet::new();
 
-      local.spawn_local(async move {
+      let handle = local.spawn_local(async move {
         while let Some(request) = rx.recv().await {
           match request {
             AlarmProcessRequest::Get {
@@ -148,11 +150,20 @@ impl AlarmProcessor {
         }
       });
 
+      abort_handle_tx
+        .send(handle.abort_handle())
+        .expect("abort_handle_rx should be alive");
+
       rt.block_on(local);
     });
 
+    let abort_handle = abort_handle_rx
+      .recv()
+      .expect("a tokio task that processes alarm requests should be spawned");
+
     Ok(Self {
       _handle: handle,
+      abort_handle,
       request_tx: tx,
     })
   }
@@ -234,10 +245,10 @@ impl AlarmProcessor {
     res_rx.await?
   }
 
-  /// Shutdown the alarm processor.
+  /// Shutdown the alarm processor gracefully.
   /// This will resolve when the alarm processor has finished processing all
   /// requests.
-  pub async fn shutdown(self) -> Result<(), AlarmError> {
+  pub async fn shutdown(&mut self) -> Result<(), AlarmError> {
     let (res_tx, res_rx) = tokio::sync::oneshot::channel();
     self
       .request_tx
@@ -245,6 +256,16 @@ impl AlarmProcessor {
       .await?;
     res_rx.await?;
     Ok(())
+  }
+
+  /// Kill the alarm processor forcibly, without waiting for pending requests
+  /// to finish.
+  pub fn kill(&self) {
+    if self.abort_handle.is_finished() {
+      return;
+    }
+
+    self.abort_handle.abort();
   }
 }
 

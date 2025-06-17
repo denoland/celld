@@ -214,7 +214,7 @@ impl ChildOnParentExit {
   }
 
   /// Close the pipe (triggering kill on macOS) and wait for the watcher.
-  pub fn wait(mut self) {
+  pub fn wait(&mut self) {
     if self.reaped_status.is_some() {
       assert!(self.death_pipe_w.is_none(), "Pipe should be closed on drop");
       return;
@@ -289,7 +289,8 @@ mod tests {
   fn test_kill_long_running_process() {
     let mut cmd = Command::new("sleep");
     cmd.arg("60");
-    let guard = ChildOnParentExit::spawn(cmd).expect("failed to spawn process");
+    let mut guard =
+      ChildOnParentExit::spawn(cmd).expect("failed to spawn process");
 
     let start = Instant::now();
     guard.kill(Signal::SIGTERM);
@@ -306,7 +307,8 @@ mod tests {
   #[test]
   fn test_wait_on_short_process() {
     let cmd = Command::new("true");
-    let guard = ChildOnParentExit::spawn(cmd).expect("failed to spawn process");
+    let mut guard =
+      ChildOnParentExit::spawn(cmd).expect("failed to spawn process");
 
     let start = Instant::now();
     guard.wait();

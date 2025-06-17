@@ -61,6 +61,8 @@ impl StaticFallbackStrategy {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+  /// Name of the celld node used (primarily for debugging)
+  pub node_name: String,
   /// Directory to store data in
   pub data_dir: PathBuf,
   /// IP:port to listen on
@@ -85,11 +87,22 @@ pub struct Config {
   pub heartbeat_interval: Duration,
   /// Staleness threshold in seconds for detecting inactive nodes
   pub staleness_threshold: Duration,
-  /// TTL for the lock guard. As long as a Deno process is up and running,
-  /// the lock guard will be renewed at the interval of one third of this value.
-  /// For example, if the value is 30 seconds, the lock guard will be renewed
-  /// every 10 seconds.
-  pub lock_guard_ttl: Duration,
+  /// TTL for the lock guard, visible to all other nodes in the cluster.
+  /// Once this TTL expires, other nodes consider the lock to be released, at
+  /// which point they may try to acquire it. We must ensure that the protected
+  /// resources have been terminated (either gracefully or forcibly) before
+  /// this TTL expires; otherwise, the system would get into an undefined state.
+  pub lock_guard_ttl_global: Duration,
+  /// TTL for the lock guard for local operations.
+  /// The lock owner is allowed to perform operations on the protected resource
+  /// until this TTL expires. Once it expires, it must start graceful shutdown.
+  ///
+  /// This value is equal to `lock_guard_ttl - lock_graceful_shutdown_timeout`.
+  ///
+  /// As long as the protected resource is alive, the lock guard will be renewed
+  /// at the interval of 1/4 of this value. For example, if the value is 20
+  /// seconds, the lock guard will be renewed every 5 seconds to extend TTL.
+  pub lock_guard_ttl_local: Duration,
   /// Interval for alarm scheduler
   pub alarm_scheduler_interval: Duration,
   /// Seed for deterministic hash ring (for testing)
@@ -172,6 +185,9 @@ impl Config {
         "127.0.0.1:8000".parse().unwrap()
       });
 
+    let node_name = var("CELL_NODE_NAME")
+      .unwrap_or_else(|_| format!("celld({})", advertise_addr));
+
     // Get listen_addr with fallback to advertise_addr port
     let listen_addr = var("LISTEN_ADDR")
       .ok()
@@ -224,11 +240,30 @@ impl Config {
       .map(Duration::from_secs)
       .unwrap_or(crate::cluster_membership::DEFAULT_STALENESS_THRESHOLD);
 
-    let lock_guard_ttl_secs = var("CELL_LOCK_GUARD_TTL_SECS")
+    let lock_guard_ttl_global_secs = var("CELL_LOCK_GUARD_TTL_SECS")
       .ok()
       .and_then(|s| s.parse::<u64>().ok())
       .unwrap_or(30);
-    let lock_guard_ttl = Duration::from_secs(lock_guard_ttl_secs);
+    let lock_guard_ttl_global = Duration::from_secs(lock_guard_ttl_global_secs);
+
+    let lock_graceful_shutdown_timeout_secs =
+      var("CELL_LOCK_GRACEFUL_SHUTDOWN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(10);
+    let lock_graceful_shutdown_timeout =
+      Duration::from_secs(lock_graceful_shutdown_timeout_secs);
+
+    let lock_guard_ttl_local = lock_guard_ttl_global
+      .checked_sub(lock_graceful_shutdown_timeout)
+      .expect("lock_guard_ttl_global must be greater than lock_graceful_shutdown_timeout");
+
+    // Note: lock_guard_ttl_local / 4 will be used as the interval for lock
+    // renewals (see `lock_state_loop` in distributed_lock.rs)
+    assert!(
+      lock_guard_ttl_local >= Duration::from_secs(4),
+      "CELL_LOCK_GUARD_TTL_SECS - CELL_LOCK_GRACEFUL_SHUTDOWN_TIMEOUT_SECS must be >= 4 seconds to avoid too frequent lock renewals"
+    );
 
     let alarm_scheduler_interval_secs =
       var("CELL_ALARM_SCHEDULER_INTERVAL_SECS")
@@ -272,13 +307,15 @@ impl Config {
       Duration::from_millis(system_main_cell_retry_delay_ms);
 
     Ok(Config {
+      node_name,
       listen_addr,
       advertise_addr,
       internal_listen_addr,
       data_dir,
       heartbeat_interval,
       staleness_threshold,
-      lock_guard_ttl,
+      lock_guard_ttl_global,
+      lock_guard_ttl_local,
       alarm_scheduler_interval,
       s3_endpoint,
       s3_bucket,

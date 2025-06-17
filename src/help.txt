@@ -58,14 +58,15 @@ CONFIGURATION
     CELL_S3_PREFIX
 
   Behavior tuning:
-    DATA                               # Data directory (default: ./data)
-    CELL_GRACE_PERIOD_SECONDS          # Delay on SIGTERM (default: 300)
-    CELL_HEARTBEAT_INTERVAL            # S3 heartbeat interval (default: 30)
-    CELL_STALENESS_THRESHOLD_SECS      # Max allowed time without heartbeat
-    CELL_LOCK_GUARD_TTL_SECS           # Lock expiration time
-    CELL_ALARM_SCHEDULER_INTERVAL_SECS # Frequency of polling by system cell
-    CELL_HASHRING_SEED                 # Optional hash ring stability seed
-    CELL_DENO_OUTPUT                   # If set, forwards Deno stdout/stderr
+    DATA                                     # Data directory (default: ./data)
+    CELL_GRACE_PERIOD_SECONDS                # Delay on SIGTERM (default: 300)
+    CELL_HEARTBEAT_INTERVAL                  # S3 heartbeat interval (default: 30)
+    CELL_STALENESS_THRESHOLD_SECS            # Max allowed time without heartbeat
+    CELL_LOCK_GUARD_TTL_SECS                 # Lock expiration time
+    CELL_LOCK_GRACEFUL_SHUTDOWN_TIMEOUT_SECS # Timeout for graceful shutdown on lock release
+    CELL_ALARM_SCHEDULER_INTERVAL_SECS       # Frequency of polling by system cell
+    CELL_HASHRING_SEED                       # Optional hash ring stability seed
+    CELL_DENO_OUTPUT                         # If set, forwards Deno stdout/stderr
 
 DATA DIRECTORY
 
