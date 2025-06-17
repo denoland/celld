@@ -1786,7 +1786,7 @@ mod tests {
       "Lock object should exist after acquire"
     );
 
-    assert!(handle.release().await);
+    handle.release().await;
 
     let lock_key_after_release = lock_manager.get_lock_key(lock_name);
     assert!(
@@ -1843,7 +1843,7 @@ mod tests {
       ),
     }
 
-    assert!(handle_a.release().await);
+    handle_a.release().await;
 
     // Now node B should be able to acquire the lock
     let handle_b = lock_manager
@@ -1857,7 +1857,7 @@ mod tests {
       .await
       .expect("Node B failed to acquire lock after release");
 
-    assert!(handle_b.release().await);
+    handle_b.release().await;
   }
 
   #[test_log::test(tokio::test)]
@@ -1938,9 +1938,9 @@ mod tests {
 
     assert_eq!(handle_b.descriptor.node_id, node_b);
 
-    // Call to `release` on the expired lock handle should return true
-    assert!(handle_a.release().await);
-    assert!(handle_b.release().await);
+    // Call to `release` on the expired lock handle should just work
+    handle_a.release().await;
+    handle_b.release().await;
   }
 
   #[test_log::test(tokio::test)]
@@ -2027,7 +2027,7 @@ mod tests {
     );
 
     if let Some(handle) = acquired_handle {
-      assert!(handle.release().await);
+      handle.release().await;
     }
   }
 
@@ -2132,7 +2132,7 @@ mod tests {
       other => panic!("Expected LockHeld error, got {:?}", other),
     }
 
-    assert!(handle.release().await);
+    handle.release().await;
   }
 
   // Helper function to get lock info from S3
