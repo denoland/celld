@@ -258,6 +258,13 @@ impl Config {
       .checked_sub(lock_graceful_shutdown_timeout)
       .expect("lock_guard_ttl_global must be greater than lock_graceful_shutdown_timeout");
 
+    // Note: lock_guard_ttl_local / 4 will be used as the interval for lock
+    // renewals (see `lock_state_loop` in distributed_lock.rs)
+    assert!(
+      lock_guard_ttl_local >= Duration::from_secs(4),
+      "CELL_LOCK_GUARD_TTL_SECS - CELL_LOCK_GRACEFUL_SHUTDOWN_TIMEOUT_SECS must be >= 4 seconds to avoid too frequent lock renewals"
+    );
+
     let alarm_scheduler_interval_secs =
       var("CELL_ALARM_SCHEDULER_INTERVAL_SECS")
         .ok()
