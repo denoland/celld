@@ -157,6 +157,19 @@ impl AlarmProcessor {
     })
   }
 
+  pub fn handle(&self) -> AlarmProcessorHandle {
+    AlarmProcessorHandle {
+      request_tx: self.request_tx.clone(),
+    }
+  }
+}
+
+#[derive(Debug, Clone)]
+pub struct AlarmProcessorHandle {
+  request_tx: tokio::sync::mpsc::Sender<AlarmProcessRequest>,
+}
+
+impl AlarmProcessorHandle {
   /// Get an alarm set for the given tenant and cell id.
   pub async fn get(
     &self,
@@ -450,41 +463,42 @@ mod tests {
     let data_dir = tempfile::tempdir().unwrap();
     let db_path = data_dir.path().join("alarm.db");
     let alarm_processor = AlarmProcessor::new(&db_path).unwrap();
+    let handle = alarm_processor.handle();
 
-    let result = alarm_processor
+    let result = handle
       .get("mytenant".to_string(), "foo".to_string())
       .await
       .unwrap_err();
     assert!(matches!(result, AlarmError::AlarmNotFound), "{result:?}");
 
-    let result = alarm_processor
+    let result = handle
       .delete("mytenant".to_string(), "foo".to_string())
       .await
       .unwrap_err();
     assert!(matches!(result, AlarmError::AlarmNotFound), "{result:?}");
 
-    alarm_processor
+    handle
       .set("mytenant".to_string(), "foo".to_string(), 1000)
       .await
       .unwrap();
 
-    let result = alarm_processor
+    let result = handle
       .get("mytenant".to_string(), "foo".to_string())
       .await
       .unwrap();
     assert_eq!(result.scheduled_time_unix_ms, 1000);
-    let result = alarm_processor
+    let result = handle
       .get("mytenant".to_string(), "different_cell".to_string())
       .await
       .unwrap_err();
     assert!(matches!(result, AlarmError::AlarmNotFound), "{result:?}");
 
-    alarm_processor
+    handle
       .delete("mytenant".to_string(), "foo".to_string())
       .await
       .unwrap();
 
-    let result = alarm_processor
+    let result = handle
       .get("mytenant".to_string(), "foo".to_string())
       .await
       .unwrap_err();
