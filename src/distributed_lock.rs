@@ -168,7 +168,6 @@ enum LockState {
   },
   Releasing {
     descriptor: LockDescriptor,
-    lock_manager: Arc<dyn DistributedLock>,
     reason: LockReleaseReason,
   },
   Released {
@@ -247,7 +246,6 @@ impl LockState {
 
         *self = LockState::Releasing {
           descriptor: descriptor.clone(),
-          lock_manager: lock_manager.clone(),
           reason,
         };
 
@@ -312,7 +310,6 @@ impl LockState {
           self,
           LockState::Releasing {
             descriptor: descriptor.clone(),
-            lock_manager: lock_manager.clone(),
             reason,
           },
         )
@@ -322,7 +319,6 @@ impl LockState {
 
         *self = LockState::Releasing {
           descriptor: descriptor.clone(),
-          lock_manager: lock_manager.clone(),
           reason,
         };
 
