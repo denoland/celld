@@ -172,7 +172,7 @@ enum LockState {
   },
   Released {
     descriptor: LockDescriptor,
-    is_gracefully_shut_down: bool,
+    _is_gracefully_shut_down: bool,
     _reason: LockReleaseReason,
   },
 }
@@ -1142,7 +1142,7 @@ fn handle_release_completed(
       );
       *state = LockState::Released {
         descriptor: descriptor.clone(),
-        is_gracefully_shut_down: req.is_gracefully_shut_down,
+        _is_gracefully_shut_down: req.is_gracefully_shut_down,
         _reason: *reason,
       };
       // Send the result to the requester of the lock release.
