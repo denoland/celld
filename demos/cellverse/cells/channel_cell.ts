@@ -564,33 +564,63 @@ if (cell.id.startsWith("channel-")) {
 
         // Handle alarm case with step.sleep in this workflow
         if (executionResult && executionResult.alarm) {
+          console.log(`[DEBUG] ReasoningWorkflow alarm detected:`, {
+            alarm: executionResult.alarm,
+            delaySeconds: executionResult.alarm.delaySeconds,
+            delayMs: executionResult.alarm.delaySeconds * 1000,
+            message: executionResult.alarm.message,
+            timestamp: new Date().toISOString(),
+          });
+
           console.log(
             `[ReasoningWorkflow] About to sleep for ${executionResult.alarm.delaySeconds} seconds`,
           );
-          await step.sleep(
-            "alarm-delay",
-            executionResult.alarm.delaySeconds * 1000,
-          );
-          console.log(
-            `[ReasoningWorkflow] Woke up from alarm sleep, sending delayed message`,
-          );
 
-          // Send the delayed message
-          const delayedResult = insertMessage(
-            cell.db,
-            null,
-            "bot",
-            executionResult.alarm.message,
-            "bot",
-            "respond",
-          );
+          console.log(`[DEBUG] Calling step.sleep for alarm:`, {
+            name: "alarm-delay",
+            durationMs: executionResult.alarm.delaySeconds * 1000,
+            delaySeconds: executionResult.alarm.delaySeconds,
+            timestamp: new Date().toISOString(),
+          });
 
-          broadcastMessage(cell, delayedResult);
-          console.log(
-            `[ReasoningWorkflow] Sent delayed message: "${executionResult.alarm.message}"`,
-          );
+          try {
+            await step.sleep(
+              "alarm-delay",
+              executionResult.alarm.delaySeconds * 1000,
+            );
+            console.log(
+              `[ReasoningWorkflow] Woke up from alarm sleep, sending delayed message`,
+            );
 
-          // Continue the reasoning workflow - don't break here
+            console.log(`[DEBUG] Successfully woke up from alarm sleep:`, {
+              message: executionResult.alarm.message,
+              timestamp: new Date().toISOString(),
+            });
+
+            // Send the delayed message
+            const delayedResult = insertMessage(
+              cell.db,
+              null,
+              "bot",
+              executionResult.alarm.message,
+              "bot",
+              "respond",
+            );
+
+            broadcastMessage(cell, delayedResult);
+            console.log(
+              `[ReasoningWorkflow] Sent delayed message: "${executionResult.alarm.message}"`,
+            );
+
+            // Continue the reasoning workflow - don't break here
+          } catch (error) {
+            console.log(`[DEBUG] Error during step.sleep:`, {
+              error: error.message,
+              stack: error.stack,
+              timestamp: new Date().toISOString(),
+            });
+            throw error;
+          }
         }
 
         if (executionResult.finished) {

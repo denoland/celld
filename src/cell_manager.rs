@@ -168,43 +168,72 @@ impl CellManager {
 
   /// Get the handle to the system main cell if exists.
   pub async fn get_system_main_cell(&self) -> Option<LockHandle> {
-    info!("Getting system main cell");
+    debug!("get_system_main_cell: Entry");
     let system_main_cell_key = CellKey::new(SYSTEM_TENANT, SYSTEM_CELL_ID);
+
+    debug!(
+      tenant = SYSTEM_TENANT,
+      cell_id = SYSTEM_CELL_ID,
+      "get_system_main_cell: Looking for system main cell"
+    );
 
     // Get the clone of the key and handle with minimum lock contention
     let (key, handle) = {
-      let entry = self.cells.get(&system_main_cell_key)?;
+      let entry = match self.cells.get(&system_main_cell_key) {
+        Some(entry) => {
+          debug!("get_system_main_cell: Found system main cell entry in cells map");
+          entry
+        },
+        None => {
+          debug!("get_system_main_cell: No system main cell found in cells map");
+          return None;
+        }
+      };
       let key = entry.key().clone();
       let handle = entry.value().clone();
+      debug!(?key, "get_system_main_cell: Retrieved key and handle");
       (key, handle)
     };
 
+    debug!("get_system_main_cell: About to ping handle");
     let (maybe_handle, should_remove) = {
       match handle.ping().await {
-        Ok(status) => match status {
-          LockStateKind::Init => {
-            unreachable!("CellEntry should be inserted to self.cells after it transitioned to Active state");
+        Ok(status) => {
+          debug!(?status, "get_system_main_cell: Handle ping successful");
+          match status {
+            LockStateKind::Init => {
+              error!("get_system_main_cell: Unexpected Init state - this should not happen");
+              unreachable!("CellEntry should be inserted to self.cells after it transitioned to Active state");
+            }
+            LockStateKind::Active => {
+              debug!("get_system_main_cell: Handle is Active, returning handle");
+              (Some(handle), false)
+            },
+            LockStateKind::Released => {
+              debug!("get_system_main_cell: Handle is Released, will remove from cells");
+              (None, true)
+            },
           }
-          LockStateKind::Active => (Some(handle), false),
-          LockStateKind::Released => (None, true),
         },
         Err(e) => {
           error!(
             error = ?e,
             ?key,
-            "Error pinging system main cell, removing it from cells"
+            "get_system_main_cell: Error pinging system main cell, removing it from cells"
           );
           (None, true)
         }
       }
     };
 
-    info!(?maybe_handle, "System main cell pinged successfully",);
+    debug!(?maybe_handle, "get_system_main_cell: Ping operation completed");
 
     if should_remove {
+      debug!("get_system_main_cell: Removing system main cell from cells map");
       self.cells.remove(&system_main_cell_key);
     }
 
+    debug!(?maybe_handle, "get_system_main_cell: Returning result");
     maybe_handle
   }
 

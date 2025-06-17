@@ -326,6 +326,7 @@ struct SetResourceRequest {
   res_chan: oneshot::Sender<()>,
 }
 
+#[derive(Debug)]
 pub enum LockStateKind {
   Init,
   Active,

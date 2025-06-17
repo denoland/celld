@@ -442,7 +442,22 @@ export class Cell implements DbAccessor, TaskScheduler {
   }
 
   async schedule(task: Task): Promise<ScheduledTaskId> {
+    console.log(`[DEBUG] Cell.schedule entry:`, {
+      cellId: this.id,
+      task: task,
+      currentGlobalAlarmTime: this.#currentGlobalAlarmTime,
+      timestamp: new Date().toISOString(),
+    });
+
     const id = scheduledTaskId(ulid());
+    
+    console.log(`[DEBUG] Inserting task into scheduled_tasks:`, {
+      id,
+      scheduledTimeUnixMs: task.scheduledTimeUnixMs,
+      scheduledTimeDate: new Date(task.scheduledTimeUnixMs).toISOString(),
+      timestamp: new Date().toISOString(),
+    });
+
     this.db.prepare(`
       INSERT INTO scheduled_tasks (id, scheduled_time_unix_ms, payload) VALUES (?, ?, ?)
     `).run(id, task.scheduledTimeUnixMs, JSON.stringify(task));
@@ -451,10 +466,24 @@ export class Cell implements DbAccessor, TaskScheduler {
     // This happens if:
     // 1. We don't have a global alarm scheduled yet, OR
     // 2. The new task should run before the current global alarm
-    if (
-      !this.#currentGlobalAlarmTime ||
-      task.scheduledTimeUnixMs < this.#currentGlobalAlarmTime
-    ) {
+    const shouldScheduleGlobalAlarm = !this.#currentGlobalAlarmTime ||
+      task.scheduledTimeUnixMs < this.#currentGlobalAlarmTime;
+
+    console.log(`[DEBUG] Global alarm scheduling decision:`, {
+      shouldScheduleGlobalAlarm,
+      hasCurrentGlobalAlarm: !!this.#currentGlobalAlarmTime,
+      currentGlobalAlarmTime: this.#currentGlobalAlarmTime,
+      taskScheduledTime: task.scheduledTimeUnixMs,
+      isEarlier: task.scheduledTimeUnixMs < (this.#currentGlobalAlarmTime || Infinity),
+      timestamp: new Date().toISOString(),
+    });
+
+    if (shouldScheduleGlobalAlarm) {
+      console.log(`[DEBUG] Calling scheduleGlobalAlarm with time:`, {
+        scheduledTimeUnixMs: task.scheduledTimeUnixMs,
+        scheduledTimeDate: new Date(task.scheduledTimeUnixMs).toISOString(),
+        timestamp: new Date().toISOString(),
+      });
       await this.#scheduleGlobalAlarm(task.scheduledTimeUnixMs);
     }
 
@@ -464,18 +493,102 @@ export class Cell implements DbAccessor, TaskScheduler {
   async #scheduleGlobalAlarm(
     scheduledTimeUnixMs: number,
   ): Promise<void> {
-    await fetch("http://localhost/_internal/alarms", {
-      client: this.ctlClient,
-      method: "POST",
-      body: JSON.stringify({
-        tenant: this.tenant,
-        cell_id: this.id,
-        scheduled_time_unix_ms: scheduledTimeUnixMs,
-      }),
+    console.log(`[DEBUG] scheduleGlobalAlarm entry:`, {
+      cellId: this.id,
+      tenant: this.tenant,
+      scheduledTimeUnixMs,
+      scheduledTimeDate: new Date(scheduledTimeUnixMs).toISOString(),
+      timestamp: new Date().toISOString(),
     });
+
+    const requestBody = {
+      tenant: this.tenant,
+      cell_id: this.id,
+      scheduled_time_unix_ms: scheduledTimeUnixMs,
+    };
+
+    console.log(`[DEBUG] Making fetch request to schedule global alarm:`, {
+      url: "http://localhost/_internal/alarms",
+      method: "POST",
+      body: requestBody,
+      timestamp: new Date().toISOString(),
+    });
+
+    // Create AbortController for 10-second timeout
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => {
+      console.log(`[DEBUG] Global alarm fetch timeout after 10 seconds:`, {
+        timestamp: new Date().toISOString(),
+      });
+      abortController.abort();
+    }, 10000);
+
+    try {
+      console.log(`[DEBUG] Starting fetch with 10-second timeout:`, {
+        timestamp: new Date().toISOString(),
+      });
+
+      const response = await fetch("http://localhost/_internal/alarms", {
+        client: this.ctlClient,
+        method: "POST",
+        body: JSON.stringify(requestBody),
+        signal: abortController.signal,
+      });
+
+      // Clear the timeout since request completed
+      clearTimeout(timeoutId);
+
+      console.log(`[DEBUG] Global alarm fetch response:`, {
+        status: response.status,
+        statusText: response.statusText,
+        ok: response.ok,
+        timestamp: new Date().toISOString(),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.log(`[DEBUG] Global alarm fetch error response:`, {
+          status: response.status,
+          statusText: response.statusText,
+          errorText,
+          timestamp: new Date().toISOString(),
+        });
+        throw new Error(`Failed to schedule global alarm: ${response.status} ${response.statusText} - ${errorText}`);
+      }
+
+      console.log(`[DEBUG] Global alarm scheduled successfully:`, {
+        scheduledTimeUnixMs,
+        timestamp: new Date().toISOString(),
+      });
+
+    } catch (error) {
+      // Clear timeout in case of error
+      clearTimeout(timeoutId);
+      
+      if (error.name === 'AbortError') {
+        console.log(`[DEBUG] Global alarm fetch was aborted (timeout):`, {
+          error: error.message,
+          timestamp: new Date().toISOString(),
+        });
+        // Don't throw on timeout - let workflow continue
+        console.log(`[DEBUG] Continuing workflow despite alarm scheduling timeout`);
+        return;
+      }
+      
+      console.log(`[DEBUG] Global alarm scheduling failed with error:`, {
+        error: error.message,
+        stack: error.stack,
+        timestamp: new Date().toISOString(),
+      });
+      throw error;
+    }
 
     // Update our tracked time
     this.#currentGlobalAlarmTime = scheduledTimeUnixMs;
+    console.log(`[DEBUG] Updated currentGlobalAlarmTime:`, {
+      currentGlobalAlarmTime: this.#currentGlobalAlarmTime,
+      timestamp: new Date().toISOString(),
+    });
   }
 }
 

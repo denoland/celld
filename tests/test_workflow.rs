@@ -363,15 +363,13 @@ async fn test_sleep_workflow_single_node_no_s3() {
   info!("Testing delay-sleep workflow with exact cellverse step pattern...");
   let start_time = Instant::now();
 
-  let sleep_ms = 10000;
+  let sleep_ms = 5000;
 
-  // Test with exact cellverse step pattern: reasoning-step-0, execute-step-0, alarm-delay
-  // Use longer sleep duration to test if timing matters
-  let run_id = dispatch_workflow(
-    &client,
+  // Test WebSocket dispatch like cellverse with persistent connection
+  let (run_id, mut ws_connection) = dispatch_workflow_via_websocket_persistent(
     &url,
-    "delay-sleep",
-    json!({ "sleepDurationMs": sleep_ms, "delayMs": 500 }),
+    sleep_ms,
+    500,
   )
   .await;
 
@@ -394,7 +392,7 @@ async fn test_sleep_workflow_single_node_no_s3() {
 
   // Wait for workflow to reach the sleep step, but don't poll for completion
   info!("Waiting for workflow to reach sleep step...");
-  tokio::time::sleep(Duration::from_millis(sleep_ms + 1000)).await;
+  tokio::time::sleep(Duration::from_millis(sleep_ms + 4000)).await;
 
 
   let alarm_count =  {
@@ -403,7 +401,10 @@ async fn test_sleep_workflow_single_node_no_s3() {
     assert_eq!(count, 0, "Expected no global alarms after sleep step.");
   };
 
-  // Clean up: kill the celld process
+  // Clean up: close WebSocket connection and kill the celld process
+  info!("Closing WebSocket connection...");
+  ws_connection.close().await;
+  
   let _ = celld_process.kill();
   let _ = celld_process.wait().unwrap();
 }
@@ -465,6 +466,84 @@ async fn set_key_value(
     .await
     .unwrap();
   assert_eq!(res.status(), 200);
+}
+
+struct WebSocketConnection {
+  sender: futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, tokio_tungstenite::tungstenite::protocol::Message>,
+  receiver: futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>,
+}
+
+impl WebSocketConnection {
+  async fn close(mut self) {
+    use futures_util::SinkExt;
+    let _ = self.sender.close().await;
+  }
+}
+
+async fn dispatch_workflow_via_websocket_persistent(
+  base_url: &str,
+  sleep_duration_ms: u64,
+  delay_ms: u64,
+) -> (String, WebSocketConnection) {
+  use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+  use futures_util::{SinkExt, StreamExt};
+  
+  // Convert HTTP URL to WebSocket URL and add proper host header
+  let ws_url = base_url.replace("http://", "ws://");
+  info!("Connecting to WebSocket: {}", ws_url);
+  
+  // Create request with proper Host header for workflow.localhost
+  let request = tokio_tungstenite::tungstenite::http::Request::builder()
+    .uri(&ws_url)
+    .header("Host", "workflow.localhost")
+    .header("Connection", "Upgrade")
+    .header("Upgrade", "websocket")
+    .header("Sec-WebSocket-Version", "13")
+    .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
+    .body(())
+    .unwrap();
+  
+  let (ws_stream, _) = connect_async(request).await.expect("Failed to connect to WebSocket");
+  let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+  
+  // Send dispatch message
+  let dispatch_message = json!({
+    "type": "dispatch_delay_sleep",
+    "sleepDurationMs": sleep_duration_ms,
+    "delayMs": delay_ms
+  });
+  
+  info!("Sending WebSocket message: {}", dispatch_message);
+  ws_sender
+    .send(Message::Text(dispatch_message.to_string().into()))
+    .await
+    .expect("Failed to send WebSocket message");
+  
+  // Wait for response with run_id
+  while let Some(msg) = ws_receiver.next().await {
+    match msg {
+      Ok(Message::Text(text)) => {
+        info!("Received WebSocket response: {}", text);
+        let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+        if response["type"] == "workflow_dispatched" {
+          let run_id = response["runId"].as_str().unwrap().to_string();
+          info!("Keeping WebSocket connection open like cellverse...");
+          return (run_id, WebSocketConnection { sender: ws_sender, receiver: ws_receiver });
+        } else if response["type"] == "error" {
+          panic!("WebSocket error: {}", response["message"]);
+        }
+      }
+      Ok(Message::Close(_)) => {
+        panic!("WebSocket closed unexpectedly");
+      }
+      Err(e) => {
+        panic!("WebSocket error: {}", e);
+      }
+      _ => {} // Ignore other message types
+    }
+  }
+  
+  panic!("Did not receive workflow_dispatched response");
 }
 
 async fn wait_for_workflow_step_count(

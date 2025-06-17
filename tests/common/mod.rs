@@ -416,7 +416,7 @@ fn prepare_test_directory() -> io::Result<(TempDir, PathBuf)> {
 }
 
 /// Recursively copies a directory and all its contents, skipping sqlite directories
-fn copy_directory_without_sqlite(
+pub fn copy_directory_without_sqlite(
   src: impl AsRef<Path>,
   dst: impl AsRef<Path>,
 ) -> io::Result<()> {

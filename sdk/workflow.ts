@@ -659,11 +659,24 @@ class WorkflowStepImpl implements WorkflowStep {
 
   // deno-lint-ignore require-await
   async sleep(name: string, durationMs: number): Promise<void> {
+    console.log(`[DEBUG] WorkflowStepImpl.sleep entry:`, {
+      name,
+      durationMs,
+      workflowRunId: this.#runId,
+      currentIndex: this.#currentIndex,
+      timestamp: new Date().toISOString(),
+    });
+
     if (durationMs <= 0) {
       throw new Error(`Invalid sleep duration: ${durationMs}ms`);
     }
 
     this.#currentIndex++;
+
+    console.log(`[DEBUG] Sleep step index incremented:`, {
+      stepIndex: this.#currentIndex,
+      timestamp: new Date().toISOString(),
+    });
 
     // Check if this sleep step already exists and is completed
     const existingStep = this.#dbAccessor.db.prepare(`
@@ -671,14 +684,42 @@ class WorkflowStepImpl implements WorkflowStep {
       WHERE workflow_run_id = ? AND step_index = ?
     `).get(this.#runId, this.#currentIndex);
 
+    console.log(`[DEBUG] Checking existing sleep step:`, {
+      existingStep,
+      hasExistingStep: !!existingStep,
+      isCompleted: !!existingStep?.completed_at,
+      timestamp: new Date().toISOString(),
+    });
+
     if (existingStep?.completed_at) {
       // Sleep already completed in a previous run
+      console.log(`[DEBUG] Sleep step already completed, returning:`, {
+        completedAt: existingStep.completed_at,
+        timestamp: new Date().toISOString(),
+      });
       return;
     }
 
     const wakeUpTime = Date.now() + durationMs;
 
+    console.log(`[DEBUG] Calculated wake up time:`, {
+      currentTime: Date.now(),
+      currentTimeDate: new Date().toISOString(),
+      durationMs,
+      wakeUpTime,
+      wakeUpTimeDate: new Date(wakeUpTime).toISOString(),
+      timestamp: new Date().toISOString(),
+    });
+
     if (!existingStep) {
+      console.log(`[DEBUG] Creating new sleep step in database:`, {
+        workflowRunId: this.#runId,
+        stepIndex: this.#currentIndex,
+        name,
+        outputData: { wakeUpTime, durationMs },
+        timestamp: new Date().toISOString(),
+      });
+
       // First time executing this sleep - create the step
       this.#dbAccessor.db.prepare(`
         INSERT INTO workflow_steps (workflow_run_id, step_index, name, step_type, output_data)
@@ -690,14 +731,27 @@ class WorkflowStepImpl implements WorkflowStep {
         JSON.stringify({ wakeUpTime, durationMs }),
       );
 
-      // Schedule the wake-up alarm
-      this.#runtime.scheduleTask({
+      const scheduleTask = {
         kind: "wake-sleep-step",
         scheduledTimeUnixMs: wakeUpTime,
         workflowRunId: this.#runId,
         stepIndex: this.#currentIndex,
-      } as Task);
+      } as Task;
+
+      console.log(`[DEBUG] Calling runtime.scheduleTask:`, {
+        task: scheduleTask,
+        timestamp: new Date().toISOString(),
+      });
+
+      // Schedule the wake-up alarm
+      await this.#runtime.scheduleTask(scheduleTask);
     }
+
+    console.log(`[DEBUG] Throwing WorkflowSuspendedError:`, {
+      untilTime: wakeUpTime,
+      untilTimeDate: new Date(wakeUpTime).toISOString(),
+      timestamp: new Date().toISOString(),
+    });
 
     // Throw special error to suspend workflow execution
     throw new WorkflowSuspendedError("sleep", { untilTime: wakeUpTime });

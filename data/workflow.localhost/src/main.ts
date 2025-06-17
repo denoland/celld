@@ -265,3 +265,39 @@ cell.request(async (req: Request) => {
 
   return new Response("Not found", { status: 404 });
 });
+
+// Add WebSocket handlers to mimic cellverse behavior
+cell.connect((socket: WebSocket, id: string) => {
+  console.log(`WebSocket connected: ${id}`);
+});
+
+cell.message(async (event: MessageEvent, socket: WebSocket, id: string) => {
+  try {
+    const data = JSON.parse(event.data);
+    console.log(`WebSocket message from ${id}:`, data);
+    
+    // Handle delay-sleep dispatch via WebSocket (like cellverse)
+    if (data.type === "dispatch_delay_sleep") {
+      console.log("Dispatching delay-sleep workflow via WebSocket");
+      const runId = cell.workflow.dispatch(delaySleepWorkflow, {
+        sleepDurationMs: data.sleepDurationMs || 5000,
+        delayMs: data.delayMs || 500,
+      });
+      
+      socket.send(JSON.stringify({
+        type: "workflow_dispatched",
+        runId: runId,
+      }));
+    }
+  } catch (error) {
+    console.error("Error handling WebSocket message:", error);
+    socket.send(JSON.stringify({
+      type: "error",
+      message: error.message,
+    }));
+  }
+});
+
+cell.close((socket: WebSocket, id: string) => {
+  console.log(`WebSocket closed: ${id}`);
+});
