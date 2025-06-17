@@ -827,8 +827,8 @@ async fn test_multi_alarm_sequential() {
 }
 
 #[test_log::test(tokio::test)]
-async fn test_resursive_alarm() {
-  let test_env = TestEnv::new(1);
+async fn test_recursive_alarm() {
+  let test_env = TestEnv::new(1, "test_recursive_alarm").await;
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
