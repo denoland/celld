@@ -211,6 +211,7 @@ impl CellManager {
             unreachable!("CellEntry should be inserted to self.cells after it transitioned to Active state");
           }
           LockStateKind::Active => (Some(handle), false),
+          LockStateKind::Releasing => (None, false),
           LockStateKind::Released => (None, true),
         },
         Err(e) => {
@@ -352,14 +353,8 @@ impl CellManager {
     for entry in &self.cells {
       let key = entry.key();
       if !peer_manager.is_local_owner(&key.host, &key.cell_id) {
-        if entry.value().release().await {
-          released_keys.insert(key.clone());
-        } else {
-          error!(
-            descriptor = ?entry.value().descriptor(),
-            "Error releasing cell lock"
-          );
-        }
+        entry.value().release().await;
+        released_keys.insert(key.clone());
       }
     }
 
@@ -630,9 +625,7 @@ impl CellManager {
 
         // Remove the entry from the map to avoid stale entries
         if let Some((_, handle)) = self.cells.remove(&cell_key) {
-          if !handle.release().await {
-            warn!(?cell_key, "Failed to release cell lock");
-          }
+          handle.release().await;
         }
 
         // The tempdir will be dropped at the end of this scope, cleaning up the socket file
@@ -692,9 +685,7 @@ impl CellManager {
 
           // Remove the entry from the map to avoid stale entries
           if let Some((_, handle)) = self.cells.remove(&cell_key) {
-            if !handle.release().await {
-              warn!(?cell_key, "Failed to release cell lock");
-            }
+            handle.release().await;
           }
 
           // The tempdir will be dropped at the end of this scope, cleaning up the socket file
@@ -734,11 +725,7 @@ impl CellManager {
     for handle in self.cells.iter().map(|entry| entry.value().clone()) {
       debug!(descriptor = ?handle.descriptor(), "Cell termination starts");
 
-      if handle.release().await {
-        debug!(descriptor = ?handle.descriptor(), "Cell terminated");
-      } else {
-        debug!(descriptor = ?handle.descriptor(), "Cell was already terminated");
-      }
+      handle.release().await;
     }
 
     debug!("{num_cells} cells terminated");

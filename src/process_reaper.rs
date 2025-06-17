@@ -33,10 +33,7 @@ impl ProcessReaper {
     for entry in &self.node_state.cell_manager.cells {
       let process_key = entry.key();
       let entry = entry.value();
-      let reaped = entry
-        .release_if_idle(self.idle_timeout)
-        .await
-        .unwrap_or(false);
+      let reaped = entry.release_if_idle(self.idle_timeout).await;
       if reaped {
         info!(?process_key, "Process was reaped due to inactivity");
         reaped_process_keys.insert(process_key.clone());
