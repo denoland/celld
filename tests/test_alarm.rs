@@ -812,3 +812,79 @@ async fn test_multi_alarm_sequential() {
     println!("Confirmed alarm {} fired, count is now {}", i, i);
   }
 }
+
+#[test_log::test(tokio::test)]
+async fn test_resursive_alarm() {
+  let test_env = TestEnv::new(1);
+  let port = test_env.ports[0].public();
+
+  let cell_id = uuid::Uuid::new_v4().simple().to_string();
+  let url = format!("http://localhost:{}/cell/{}", port, cell_id);
+  let client = reqwest::Client::new();
+
+  #[derive(Debug, serde::Deserialize)]
+  struct GetResponse {
+    count: u32,
+  }
+
+  // Get initial alarm count
+  {
+    let res = client
+      .get(&url)
+      .header("host", "recursive-alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+    let content = res.json::<GetResponse>().await.unwrap();
+    assert_eq!(content.count, 0);
+  }
+
+  // Start a recursive alarm
+  {
+    let res = client
+      .post(&url)
+      .header("host", "recursive-alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+  }
+
+  // Wait for the alarm to be dispatched some times
+  tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+  // Get alarm count (which will be compared to later)
+  let count = {
+    let res = client
+      .get(&url)
+      .header("host", "recursive-alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+    let content = res.json::<GetResponse>().await.unwrap();
+    content.count
+  };
+
+  // Wait for the alarm to be dispatched more times
+  tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+  // Get alarm count, should be greater than the initial count
+  {
+    let res = client
+      .get(&url)
+      .header("host", "recursive-alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+    let content = res.json::<GetResponse>().await.unwrap();
+    assert!(
+      content.count > count,
+      "content.count: {}, count: {}",
+      content.count,
+      count
+    );
+  }
+}
