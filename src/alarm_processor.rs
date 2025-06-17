@@ -173,6 +173,16 @@ impl AlarmProcessor {
       request_tx: self.request_tx.clone(),
     }
   }
+
+  /// Kill the alarm processor forcibly, without waiting for pending requests
+  /// to finish.
+  pub fn kill(&self) {
+    if self.abort_handle.is_finished() {
+      return;
+    }
+
+    self.abort_handle.abort();
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -269,16 +279,6 @@ impl AlarmProcessorHandle {
       .await?;
     res_rx.await?;
     Ok(())
-  }
-
-  /// Kill the alarm processor forcibly, without waiting for pending requests
-  /// to finish.
-  pub fn kill(&self) {
-    if self.abort_handle.is_finished() {
-      return;
-    }
-
-    self.abort_handle.abort();
   }
 }
 
