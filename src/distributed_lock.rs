@@ -261,7 +261,7 @@ impl LockState {
 
               _ = release_cancel_token.cancelled() => {
                 warn!(?descriptor, "Lock release cancelled");
-                self_request_tx.send(LockStateRequest::ReleaseCompleted(
+                let _ = self_request_tx.send(LockStateRequest::ReleaseCompleted(
                   ReleaseCompletedMessage {
                     is_gracefully_shut_down: false,
                     res_chan,
@@ -273,7 +273,7 @@ impl LockState {
                 match res {
                   Ok(_) => {
                     debug!(?descriptor, "Lock release completed");
-                    self_request_tx.send(LockStateRequest::ReleaseCompleted(
+                    let _ = self_request_tx.send(LockStateRequest::ReleaseCompleted(
                       ReleaseCompletedMessage {
                         is_gracefully_shut_down: true,
                         res_chan,
@@ -282,7 +282,7 @@ impl LockState {
                   }
                   Err(e) => {
                     error!(?descriptor, error = ?e, "Failed to release lock");
-                    self_request_tx.send(LockStateRequest::ReleaseCompleted(
+                    let _ = self_request_tx.send(LockStateRequest::ReleaseCompleted(
                       ReleaseCompletedMessage {
                         is_gracefully_shut_down: false,
                         res_chan,
@@ -351,7 +351,7 @@ impl LockState {
                   "Timed out while gracefully terminating protected resource"
                 );
 
-                self_request_tx.send(LockStateRequest::ReleaseCompleted(
+                let _ = self_request_tx.send(LockStateRequest::ReleaseCompleted(
                   ReleaseCompletedMessage {
                     is_gracefully_shut_down: false,
                     res_chan,
@@ -367,7 +367,7 @@ impl LockState {
                 match res {
                   Ok(_) => {
                     debug!(?descriptor, "Lock release completed");
-                    self_request_tx.send(LockStateRequest::ReleaseCompleted(
+                    let _ = self_request_tx.send(LockStateRequest::ReleaseCompleted(
                       ReleaseCompletedMessage {
                         is_gracefully_shut_down: true,
                         res_chan,
@@ -376,7 +376,7 @@ impl LockState {
                   }
                   Err(e) => {
                     error!(?descriptor, error = ?e, "Failed to release lock");
-                    self_request_tx.send(LockStateRequest::ReleaseCompleted(
+                    let _ = self_request_tx.send(LockStateRequest::ReleaseCompleted(
                       ReleaseCompletedMessage {
                         is_gracefully_shut_down: false,
                         res_chan,
@@ -391,11 +391,11 @@ impl LockState {
       }
       LockState::Releasing { .. } => {
         // Lock is already being released. Let the requester know about it.
-        res_chan.send(false);
+        let _ = res_chan.send(false);
       }
       LockState::Released { .. } => {
         // Lock was already released. Let the requester know about it.
-        res_chan.send(false);
+        let _ = res_chan.send(false);
       }
     }
   }
@@ -945,7 +945,7 @@ fn handle_get_alarm(req: GetAlarmRequest, state: &mut LockState) {
   }
 }
 
-async fn handle_delete_alarm(req: DeleteAlarmRequest, state: &mut LockState) {
+fn handle_delete_alarm(req: DeleteAlarmRequest, state: &mut LockState) {
   match state {
     LockState::Init { .. } => {
       let _ = req
@@ -988,7 +988,7 @@ async fn handle_delete_alarm(req: DeleteAlarmRequest, state: &mut LockState) {
   }
 }
 
-async fn handle_set_alarm(req: SetAlarmRequest, state: &mut LockState) {
+fn handle_set_alarm(req: SetAlarmRequest, state: &mut LockState) {
   match state {
     LockState::Init { .. } => {
       let _ = req
@@ -1032,10 +1032,7 @@ async fn handle_set_alarm(req: SetAlarmRequest, state: &mut LockState) {
   }
 }
 
-async fn handle_dispatch_alarms(
-  req: DispatchAlarmsRequest,
-  state: &mut LockState,
-) {
+fn handle_dispatch_alarms(req: DispatchAlarmsRequest, state: &mut LockState) {
   match state {
     LockState::Init { .. } => {
       let _ = req
