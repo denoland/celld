@@ -768,6 +768,8 @@ async fn lock_state_loop(
       }
 
       _ = global_ttl_renewal_interval.tick() => {
+        debug!(descriptor = ?state.descriptor(), "Renewing TTL");
+
         // Renew the TTL using the lock manager
         match tokio::time::timeout_at(
           local_ttl_expiry_timer.deadline(),
@@ -784,6 +786,9 @@ async fn lock_state_loop(
       }
 
       req = request_rx.recv() => {
+        let kind = req.as_ref().map(|r| r.kind()).unwrap_or("None");
+        debug!(descriptor = ?state.descriptor(), ?kind, "Received request in lock state loop");
+
         // NOTE: it is important to keep message handlers non-async.
         //
         // If one is async, that may block the lock state loop from processing
@@ -836,6 +841,8 @@ async fn lock_state_loop(
             return;
           }
         }
+
+        debug!(descriptor = ?state.descriptor(), ?kind, "Handled request in lock state loop");
       }
     }
   }
