@@ -3,6 +3,7 @@ use crate::{
   consistent_hash::{create_consistent_hash, ConsistentHash},
 };
 use std::{net::SocketAddr, sync::RwLock};
+use tracing::debug;
 
 // A separate struct to hold the state that will be updated via RwLock
 struct PeerManagerState {
@@ -120,7 +121,7 @@ impl PeerManager {
   pub fn is_peer_active(&self, node_addr: SocketAddr) -> bool {
     let state = self.state.read().unwrap();
     // The `state.peers` list only contains nodes deemed active by ClusterMembership
-    println!(">> is_peer_active state.peers {:?}", state.peers);
+    debug!("is_peer_active state.peers {:?}", state.peers);
     state
       .peers
       .iter()

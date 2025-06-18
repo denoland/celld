@@ -184,7 +184,7 @@ fn main() {
   // see benchmark_deno_startup.sh
   if std::env::var("BENCHMARK_DENO_STARTUP").is_ok() {
     let iterations = 100;
-    println!(
+    info!(
       "Running Deno startup time benchmark (iterations: {})...",
       iterations
     );

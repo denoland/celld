@@ -45,3 +45,8 @@ url = "2.5"
 test-log = { version = "0.2.17", features = ["trace"] }
 proptest = "1"
 fake = "4"
+
+[lints.clippy]
+print_stdout = "deny"
+print_stderr = "deny"
+dbg_macro = "warn"

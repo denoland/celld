@@ -1,3 +1,5 @@
+#![allow(clippy::print_stdout)]
+
 use anyhow::Result;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
