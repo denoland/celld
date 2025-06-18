@@ -1,6 +1,6 @@
 use std::{
   io::{BufRead as _, BufReader},
-  process::{Child, Command},
+  process::{Child, Command, Stdio},
   sync::{Arc, Mutex},
   thread::JoinHandle,
 };
@@ -22,6 +22,23 @@ impl CapturedSubprocess {
     setup_cmd: impl FnOnce(&mut Command),
   ) -> Self {
     setup_cmd(&mut cmd);
+
+    // Check if output streaming is enabled via env var
+    if std::env::var("CELL_TEST_OUTPUT").is_ok() {
+      // Stream directly to console without buffering
+      cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+      let child = cmd.spawn().unwrap();
+      return Self {
+        process_name,
+        child,
+        captured_stdout: Arc::new(Mutex::new(String::new())),
+        captured_stderr: Arc::new(Mutex::new(String::new())),
+        stdout_relay_handle: None,
+        stderr_relay_handle: None,
+      };
+    }
+
+    // Default behavior: capture output for buffering
     cmd
       .stdout(std::process::Stdio::piped())
       .stderr(std::process::Stdio::piped());
@@ -113,7 +130,7 @@ impl Drop for CapturedSubprocess {
       }
     }
 
-    if std::thread::panicking() {
+    if std::thread::panicking() && self.stdout_relay_handle.is_some() {
       #[allow(clippy::print_stdout)]
       {
         println!(
