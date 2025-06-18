@@ -521,32 +521,28 @@ fn dispatch_alarms_handler(
 
   // Spawn a task to dispatch alarms in the background.
   tokio::task::spawn_local(async move {
-    let mut dispatched_alarms = Vec::new();
-
-    for alarm in alarms {
-      let res = if node_state
+    let futs = alarms.into_iter().map(|alarm| {
+      use futures::{FutureExt as _, TryFutureExt as _};
+      if node_state
         .peer_manager
         .is_local_owner(&alarm.tenant, &alarm.cell_id)
       {
-        // Dispatch the alarm to the local Deno process.
-        dispatch_alarm_locally(alarm.clone(), node_state.clone()).await.inspect_err(|e| {
+        dispatch_alarm_locally(alarm.clone(), node_state.clone()).inspect_err(move |e| {
           error!(?alarm, error = ?e, "Failed to dispatch alarm to local Deno process");
-        })
+        }).boxed()
       } else {
-        dispatch_alarm_remotely(alarm.clone(), node_state.clone()).await.inspect_err(|e| {
+        dispatch_alarm_remotely(alarm.clone(), node_state.clone()).inspect_err(move |e| {
           error!(?alarm, error = ?e, "Failed to dispatch alarm to remote cell owner");
-        })
-      };
-
-      match res {
-        Ok(alarm) => {
-          dispatched_alarms.push(alarm);
-        }
-        Err(e) => {
-          error!(?alarm, error = ?e, "Failed to dispatch alarm");
-        }
+        }).boxed()
       }
-    }
+    });
+
+    // Awaits all futures and collect successfully dispatched alarms.
+    let dispatched_alarms = futures::future::join_all(futs)
+      .await
+      .into_iter()
+      .flatten()
+      .collect();
 
     // Send a message to the message box to notify that the requested dispatch
     // is completed.
