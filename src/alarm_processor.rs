@@ -50,9 +50,26 @@ pub enum AlarmProcessRequest {
     limit: u32,
     response: tokio::sync::oneshot::Sender<Result<(), AlarmError>>,
   },
+  DispatchCompleted {
+    response: tokio::sync::oneshot::Sender<Result<(), AlarmError>>,
+    dispatched_alarms: Vec<Alarm>,
+  },
   Shutdown {
     response: tokio::sync::oneshot::Sender<()>,
   },
+}
+
+impl AlarmProcessRequest {
+  fn kind(&self) -> &'static str {
+    match self {
+      AlarmProcessRequest::Get { .. } => "Get",
+      AlarmProcessRequest::Delete { .. } => "Delete",
+      AlarmProcessRequest::Set { .. } => "Set",
+      AlarmProcessRequest::Dispatch { .. } => "Dispatch",
+      AlarmProcessRequest::DispatchCompleted { .. } => "DispatchCompleted",
+      AlarmProcessRequest::Shutdown { .. } => "Shutdown",
+    }
+  }
 }
 
 #[derive(Debug)]
@@ -85,7 +102,8 @@ impl AlarmProcessor {
       (),
     )?;
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AlarmProcessRequest>(100);
+    let self_message_tx = tx.clone();
     let (abort_handle_tx, abort_handle_rx) = std::sync::mpsc::channel();
 
     // Spawn a thread dedicated to process alarm requests.
@@ -100,6 +118,9 @@ impl AlarmProcessor {
 
       let handle = local.spawn_local(async move {
         while let Some(request) = rx.recv().await {
+          let kind = request.kind();
+          tracing::debug!(?kind, "AlarmProcessor received request");
+
           match request {
             AlarmProcessRequest::Get {
               tenant,
@@ -137,20 +158,28 @@ impl AlarmProcessor {
               limit,
               response,
             } => {
-              let res = dispatch_alarms_handler(
+              dispatch_alarms_handler(
                 &mut conn,
                 node_state,
                 current_timestamp,
                 limit,
-              )
-              .await;
-              let _ = response.send(res);
+                self_message_tx.clone(),
+                response,
+              );
+            }
+            AlarmProcessRequest::DispatchCompleted {
+              response,
+              dispatched_alarms,
+            } => {
+              dispatch_completed_handler(&conn, dispatched_alarms, response);
             }
             AlarmProcessRequest::Shutdown { response } => {
               let _ = response.send(());
               break;
             }
           }
+
+          tracing::debug!(?kind, "AlarmProcessor processed request");
         }
       });
 
@@ -239,16 +268,35 @@ impl AlarmProcessorHandle {
     scheduled_time_unix_ms: u64,
   ) -> Result<(), AlarmError> {
     let (res_tx, res_rx) = tokio::sync::oneshot::channel();
+    tracing::debug!(
+      ?tenant,
+      ?cell_id,
+      ?scheduled_time_unix_ms,
+      "AlarmProcessor set alarm 1"
+    );
     self
       .request_tx
       .send(AlarmProcessRequest::Set {
-        tenant,
-        cell_id,
+        tenant: tenant.clone(),
+        cell_id: cell_id.clone(),
         scheduled_time_unix_ms,
         response: res_tx,
       })
       .await?;
-    res_rx.await?
+    tracing::debug!(
+      ?tenant,
+      ?cell_id,
+      ?scheduled_time_unix_ms,
+      "AlarmProcessor set alarm 2"
+    );
+    let res = res_rx.await?;
+    tracing::debug!(
+      ?tenant,
+      ?cell_id,
+      ?scheduled_time_unix_ms,
+      "AlarmProcessor set alarm 3"
+    );
+    res
   }
 
   /// Dispatch all alarms that are due at the given timestamp. Dispatched alarms
@@ -423,15 +471,12 @@ async fn dispatch_alarm_remotely(
   Ok(alarm)
 }
 
-async fn dispatch_alarms_handler(
-  conn: &mut rusqlite::Connection,
-  node_state: Arc<NodeState>,
+fn get_due_alarms(
+  conn: &rusqlite::Connection,
   current_timestamp: DateTime<Utc>,
   limit: u32,
-) -> Result<(), AlarmError> {
-  let tx = conn.transaction()?;
-
-  let mut stmt = tx.prepare(
+) -> Result<Vec<Alarm>, AlarmError> {
+  let mut stmt = conn.prepare(
     "SELECT tenant, cell_id, scheduled_time_unix_ms FROM global_alarms WHERE scheduled_time_unix_ms <= ? ORDER BY scheduled_time_unix_ms LIMIT ?",
   )?;
   let rows = stmt.query_map(
@@ -446,37 +491,96 @@ async fn dispatch_alarms_handler(
   )?;
   let alarms = rows.collect::<Result<Vec<_>, _>>()?;
   stmt.finalize()?;
+  Ok(alarms)
+}
 
-  let futs = alarms.into_iter().map(|alarm| {
-    let node_state = node_state.clone();
+fn dispatch_alarms_handler(
+  conn: &mut rusqlite::Connection,
+  node_state: Arc<NodeState>,
+  current_timestamp: DateTime<Utc>,
+  limit: u32,
+  self_message_tx: tokio::sync::mpsc::Sender<AlarmProcessRequest>,
+  response: tokio::sync::oneshot::Sender<Result<(), AlarmError>>,
+) {
+  let alarms = match get_due_alarms(conn, current_timestamp, limit) {
+    Ok(alarms) => alarms,
+    Err(e) => {
+      error!(error = ?e, "Failed to get due alarms");
+      let _ = response.send(Err(e));
+      return;
+    }
+  };
 
-    // Return `Some(alarm)` if the alarm was processed successfully, otherwise `None`.
-    async move {
-      if node_state.peer_manager.is_local_owner(&alarm.tenant, &alarm.cell_id) {
+  // Spawn a task to dispatch alarms in the background.
+  tokio::task::spawn_local(async move {
+    let mut dispatched_alarms = Vec::new();
+
+    for alarm in alarms {
+      let res = if node_state
+        .peer_manager
+        .is_local_owner(&alarm.tenant, &alarm.cell_id)
+      {
         // Dispatch the alarm to the local Deno process.
         dispatch_alarm_locally(alarm.clone(), node_state.clone()).await.inspect_err(|e| {
           error!(?alarm, error = ?e, "Failed to dispatch alarm to local Deno process");
-        }).ok()
+        })
       } else {
         dispatch_alarm_remotely(alarm.clone(), node_state.clone()).await.inspect_err(|e| {
           error!(?alarm, error = ?e, "Failed to dispatch alarm to remote cell owner");
-        }).ok()
+        })
+      };
+
+      match res {
+        Ok(alarm) => {
+          dispatched_alarms.push(alarm);
+        }
+        Err(e) => {
+          error!(?alarm, error = ?e, "Failed to dispatch alarm");
+        }
       }
     }
+
+    // Send a message to the message box to notify that the requested dispatch
+    // is completed.
+    let _ = self_message_tx
+      .send(AlarmProcessRequest::DispatchCompleted {
+        response,
+        dispatched_alarms,
+      })
+      .await;
   });
+}
 
-  let mut stmt =
-    tx.prepare("DELETE FROM global_alarms WHERE tenant = ? AND cell_id = ?")?;
-  for processed_alarm in
-    futures::future::join_all(futs).await.into_iter().flatten()
-  {
-    stmt.execute([processed_alarm.tenant, processed_alarm.cell_id])?;
+fn dispatch_completed_handler(
+  conn: &rusqlite::Connection,
+  dispatched_alarms: Vec<Alarm>,
+  response: tokio::sync::oneshot::Sender<Result<(), AlarmError>>,
+) {
+  if dispatched_alarms.is_empty() {
+    let _ = response.send(Ok(()));
+    return;
   }
-  stmt.finalize()?;
 
-  tx.commit()?;
+  // Delete the dispatched alarms from the internal datastore.
+  // Note that new alarms may have been set while dispatching alarms. In order
+  // to avoid deleting such alarms, we delete alarms whose scheduled time
+  // matches the dispatched one.
+  for alarm in dispatched_alarms {
+    let Ok(mut stmt) = conn.prepare("DELETE FROM global_alarms WHERE tenant = ? AND cell_id = ? AND scheduled_time_unix_ms = ?").inspect_err(|e| {
+      error!(?alarm, error = ?e, "Failed to prepare statement to delete alarm");
+    }) else {
+      continue;
+    };
+    if let Err(e) = stmt.execute([
+      alarm.tenant.clone(),
+      alarm.cell_id.clone(),
+      alarm.scheduled_time_unix_ms.to_string(),
+    ]) {
+      error!(?alarm, error = ?e, "Failed to delete alarm");
+    }
+  }
 
-  Ok(())
+  let _ = response.send(Ok(()));
 }
 
 #[cfg(test)]

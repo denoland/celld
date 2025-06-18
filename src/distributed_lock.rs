@@ -415,6 +415,24 @@ enum LockStateRequest {
   ReleaseCompleted(ReleaseCompletedMessage),
 }
 
+impl LockStateRequest {
+  fn kind(&self) -> &'static str {
+    match self {
+      LockStateRequest::SetResource(_) => "set_resource",
+      LockStateRequest::Ping(_) => "ping",
+      LockStateRequest::GetSocketPath(_) => "get_socket_path",
+      LockStateRequest::MutateResource(_) => "mutate_resource",
+      LockStateRequest::GetAlarm(_) => "get_alarm",
+      LockStateRequest::DeleteAlarm(_) => "delete_alarm",
+      LockStateRequest::SetAlarm(_) => "set_alarm",
+      LockStateRequest::DispatchAlarms(_) => "dispatch_alarms",
+      LockStateRequest::ReleaseIfIdle(_) => "release_if_idle",
+      LockStateRequest::Release(_) => "release",
+      LockStateRequest::ReleaseCompleted(_) => "release_completed",
+    }
+  }
+}
+
 struct SetResourceRequest {
   resource: Box<CellEntry>,
   res_chan: oneshot::Sender<()>,
