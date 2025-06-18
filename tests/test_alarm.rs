@@ -808,8 +808,9 @@ async fn test_multi_alarm_sequential() {
     let alarm_id = res.text().await.unwrap();
     println!("Scheduled alarm {} with ID {}", i, alarm_id);
 
-    // Wait for this alarm to fire (500ms + buffer for rescheduling)
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    // Wait for this alarm to fire (500ms + buffer, because the frequency of
+    // checking global_alarms table is 1s in tests)
+    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
 
     // Check that alarm count has increased
     let res = client
