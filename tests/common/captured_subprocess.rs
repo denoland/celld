@@ -114,16 +114,22 @@ impl Drop for CapturedSubprocess {
     }
 
     if std::thread::panicking() {
-      println!(
-        "---- {} stdout ----\n{}",
-        self.process_name,
-        self.captured_stdout.lock().unwrap()
-      );
-      eprintln!(
-        "---- {} stderr ----\n{}",
-        self.process_name,
-        self.captured_stderr.lock().unwrap()
-      );
+      #[allow(clippy::print_stdout)]
+      {
+        println!(
+          "---- {} stdout ----\n{}",
+          self.process_name,
+          self.captured_stdout.lock().unwrap()
+        );
+      }
+      #[allow(clippy::print_stderr)]
+      {
+        eprintln!(
+          "---- {} stderr ----\n{}",
+          self.process_name,
+          self.captured_stderr.lock().unwrap()
+        );
+      }
     }
   }
 }

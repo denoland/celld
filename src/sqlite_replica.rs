@@ -578,7 +578,7 @@ pub mod tests {
     }
   }
 
-  #[test]
+  #[test_log::test]
   fn test_create_empty_database_file() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");
@@ -593,7 +593,7 @@ pub mod tests {
     assert!(output.status.success());
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn basic_replica_lifecycle() {
     let _ = tracing_subscriber::fmt::try_init();
 
@@ -649,7 +649,7 @@ pub mod tests {
       "SQLite command should succeed: {}",
       String::from_utf8_lossy(&output.stderr)
     );
-    println!("Inserted data into SQLite DB {}", db_path);
+    tracing::debug!("Inserted data into SQLite DB {}", db_path);
 
     // Start replication
     let start_result = replica.start_replication().await;
@@ -660,7 +660,7 @@ pub mod tests {
     );
 
     // Give the replication process time to run and create snapshots
-    println!("Waiting for replication to complete...");
+    tracing::debug!("Waiting for replication to complete...");
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Stop replication cleanly
@@ -674,6 +674,6 @@ pub mod tests {
     // Check MinIO to ensure data was replicated
     assert!(minio_guard.has_files_for_cell(cell_id, cell_id));
 
-    println!("Basic replica lifecycle test completed successfully");
+    tracing::debug!("Basic replica lifecycle test completed successfully");
   }
 }

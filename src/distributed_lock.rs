@@ -1899,8 +1899,8 @@ mod tests {
     .expect("Failed to get renewed lock info");
 
     // Print timestamps for debugging
-    println!("Initial timestamp: {:?}", initial_lock_info.timestamp);
-    println!("Renewed timestamp: {:?}", renewed_lock_info.timestamp);
+    tracing::debug!("Initial timestamp: {:?}", initial_lock_info.timestamp);
+    tracing::debug!("Renewed timestamp: {:?}", renewed_lock_info.timestamp);
 
     // Verify the timestamp was updated (renewed)
     assert!(

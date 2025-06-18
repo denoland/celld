@@ -1,6 +1,7 @@
 mod common;
 
 use common::TestEnv;
+use tracing::info;
 
 #[test_log::test(tokio::test)]
 async fn test_alarm_crud_in_single_node_cluster() {
@@ -365,14 +366,14 @@ async fn test_system_main_cell_takeover() {
   };
 
   // Wait for Litestream to replicate data to S3
-  println!("Waiting for Litestream to replicate data to S3...");
+  info!("Waiting for Litestream to replicate data to S3...");
   tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
   // Shutdown the node that the system main cell belongs to
   test_env.graceful_shutdown_cell_instance(system_main_cell_index);
 
   // Wait for the shutdown to be detected
-  println!("Waiting for primary node failure to be detected...");
+  info!("Waiting for primary node failure to be detected...");
   tokio::time::sleep(std::time::Duration::from_secs(8)).await;
 
   // Get the set alarm through the secondary node to see the system main cell's DB has been restored
@@ -717,7 +718,7 @@ async fn test_multi_alarms_with_delays(delays: &[u32], test_case_name: &str) {
     .duration_since(std::time::UNIX_EPOCH)
     .unwrap()
     .as_millis();
-  println!("Current time: {}ms", start_time);
+  info!("Current time: {}ms", start_time);
 
   for delay in delays {
     let res = client
@@ -731,7 +732,7 @@ async fn test_multi_alarms_with_delays(delays: &[u32], test_case_name: &str) {
 
     // Print the alarm ID for debugging
     let alarm_id = res.text().await.unwrap();
-    println!(
+    info!(
       "Scheduled alarm {} with delay {}ms at time {}",
       alarm_id,
       delay,
@@ -794,7 +795,7 @@ async fn test_multi_alarm_sequential() {
 
   // Schedule and wait for each alarm sequentially
   for i in 1..=3 {
-    println!("Scheduling alarm {} with 500ms delay", i);
+    info!("Scheduling alarm {} with 500ms delay", i);
 
     let res = client
       .post(&url)
@@ -806,7 +807,7 @@ async fn test_multi_alarm_sequential() {
     assert_eq!(res.status(), 200);
 
     let alarm_id = res.text().await.unwrap();
-    println!("Scheduled alarm {} with ID {}", i, alarm_id);
+    info!("Scheduled alarm {} with ID {}", i, alarm_id);
 
     // Wait for this alarm to fire (500ms + buffer for rescheduling)
     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
@@ -822,6 +823,6 @@ async fn test_multi_alarm_sequential() {
 
     let content = res.text().await.unwrap();
     assert_eq!(content, format!(r#"{{"count":{}}}"#, i));
-    println!("Confirmed alarm {} fired, count is now {}", i, i);
+    info!("Confirmed alarm {} fired, count is now {}", i, i);
   }
 }

@@ -1032,7 +1032,7 @@ fn spawn_deno_process(
 mod tests {
   use super::*;
 
-  #[test]
+  #[test_log::test]
   fn test_parse_env_vars() {
     // Test content with various environment variable formats
     let content = r#"

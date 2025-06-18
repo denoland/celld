@@ -341,7 +341,7 @@ mod tests {
     )
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_register_creates_correct_s3_object() {
     let minio = MinioTestServer::start();
     let node_id = NodeId::new_uuid_v4();
@@ -395,7 +395,7 @@ mod tests {
     }
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_heartbeat_updates_timestamp() {
     let minio = MinioTestServer::start();
     let node_id = NodeId::new_uuid_v4();
@@ -457,7 +457,7 @@ mod tests {
     }
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_get_active_peers_filters_stale_nodes() {
     let minio = MinioTestServer::start();
 
@@ -511,7 +511,7 @@ mod tests {
     assert_eq!(peers.len(), 2);
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_unregister_deletes_s3_object() {
     let minio = MinioTestServer::start();
     let node_id = NodeId::new_uuid_v4();

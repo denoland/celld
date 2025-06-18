@@ -114,7 +114,8 @@ mod linux {
     count
   }
 
-  #[test]
+  #[cfg(test)]
+  #[test_log::test]
   fn test_count_filtered_connections_empty() {
     let sample = b" sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 3600007F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000   991        0 6423 1 0000000000000000 100 0 0 10 5
@@ -130,7 +131,8 @@ mod linux {
     assert_eq!(count_filtered_connections(cursor, &inode_set), 0);
   }
 
-  #[test]
+  #[cfg(test)]
+  #[test_log::test]
   fn test_count_filtered_connections_one() {
     let sample = b"  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
        0: 3600007F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000   991        0 6423 1 0000000000000000 100 0 0 10 5
@@ -215,7 +217,7 @@ mod tests {
     panic!("could not spawn nc: {}", e);
   }
 
-  #[test]
+  #[test_log::test]
   fn test_count_server() {
     // Pick an OS-assigned port via a temp listener, then close it.
     let port = {
@@ -261,7 +263,7 @@ mod tests {
     let _ = server.wait();
   }
 
-  #[test]
+  #[test_log::test]
   fn test_count_client() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();

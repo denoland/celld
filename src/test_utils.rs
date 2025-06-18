@@ -92,7 +92,7 @@ impl MinioTestServer {
       .unwrap();
 
     if !status.success() {
-      eprintln!("Failed to create bucket with MC_HOST_minio={}", mc_env);
+      tracing::error!("Failed to create bucket with MC_HOST_minio={}", mc_env);
       return Err("Failed to create bucket".to_string());
     }
 
@@ -115,7 +115,7 @@ impl MinioTestServer {
       .expect("Failed to list MinIO bucket contents");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    println!("MinIO bucket contents: {}", stdout);
+    tracing::debug!("MinIO bucket contents: {}", stdout);
 
     stdout.contains(cell_id)
   }
@@ -154,7 +154,7 @@ impl Drop for MinioTestServer {
   fn drop(&mut self) {
     // Kill the minio process
     if let Err(e) = self.process.kill() {
-      eprintln!("Failed to kill minio server: {}", e);
+      tracing::error!("Failed to kill minio server: {}", e);
     }
 
     // The tempdir will be cleaned up automatically when it's dropped
@@ -202,7 +202,7 @@ mod tests {
     Ok(None)
   }
 
-  #[test]
+  #[test_log::test]
   fn test_parse_minio_output() {
     let full_output_str = r#"
 # MINIO_CI_CD=1 minio server . --address=:0

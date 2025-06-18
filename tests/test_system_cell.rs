@@ -1,6 +1,7 @@
 mod common;
 
 use common::TestEnv;
+use tracing::info;
 
 #[test_log::test(tokio::test)]
 async fn test_system_main_cell_relocation() {
@@ -54,7 +55,7 @@ async fn test_system_main_cell_relocation() {
     "Initial node should own the system main cell"
   );
   let initial_owner = initial_resp["owner"].as_str().unwrap();
-  println!("Initial system main cell owner: {}", initial_owner);
+  info!("Initial system main cell owner: {}", initial_owner);
 
   let test_cell_id = uuid::Uuid::new_v4().simple().to_string();
 
@@ -72,7 +73,7 @@ async fn test_system_main_cell_relocation() {
   assert_eq!(res.status(), 200);
 
   // Wait for Litestream to replicate data to S3
-  println!("Waiting for Litestream to replicate data to S3...");
+  info!("Waiting for Litestream to replicate data to S3...");
   tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
   // Add a second node that should trigger relocation due to deterministic hashing
@@ -100,14 +101,14 @@ async fn test_system_main_cell_relocation() {
     .unwrap();
 
   let current_owner = owner_resp["owner"].as_str().unwrap();
-  println!(
+  info!(
     "System main cell owner after adding second node: {}",
     current_owner
   );
 
   assert!(owner_resp["is_local"].as_bool().unwrap());
 
-  println!("System main cell has been relocated to the new node!");
+  info!("System main cell has been relocated to the new node!");
 
   // Verify the initial node no longer owns the system main cell
   let initial_check_resp = client
@@ -143,7 +144,7 @@ async fn test_system_main_cell_relocation() {
   let content = res.text().await.unwrap();
   assert_ne!(content, "null");
 
-  println!("System main cell relocation test completed successfully!");
+  info!("System main cell relocation test completed successfully!");
 }
 
 // In this test, the system main cell is relocated Node A -> Node B -> Node A.
@@ -201,7 +202,7 @@ async fn test_system_main_cell_relocation_with_existing_db() {
     "Initial node should own the system main cell"
   );
   let initial_owner = initial_resp["owner"].as_str().unwrap();
-  println!("Initial system main cell owner: {}", initial_owner);
+  info!("Initial system main cell owner: {}", initial_owner);
 
   // Get the alarm, which should not exist yet
   let test_cell_id = uuid::Uuid::new_v4().simple().to_string();
@@ -247,14 +248,14 @@ async fn test_system_main_cell_relocation_with_existing_db() {
     .unwrap();
 
   let current_owner = owner_resp["owner"].as_str().unwrap();
-  println!(
+  info!(
     "System main cell owner after adding second node: {}",
     current_owner
   );
 
   assert!(owner_resp["is_local"].as_bool().unwrap());
 
-  println!("System main cell has been relocated to the new node!");
+  info!("System main cell has been relocated to the new node!");
 
   // Verify the initial node no longer owns the system main cell
   let initial_check_resp = client
@@ -292,7 +293,7 @@ async fn test_system_main_cell_relocation_with_existing_db() {
   assert_eq!(res.status(), 200);
 
   // Wait for Litestream to replicate data to S3
-  println!("Waiting for Litestream to replicate data to S3...");
+  info!("Waiting for Litestream to replicate data to S3...");
   tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
   // Get the alarm, which should now exist
@@ -311,7 +312,7 @@ async fn test_system_main_cell_relocation_with_existing_db() {
   // main cell back to the initial node
   test_env.graceful_shutdown_cell_instance(1);
 
-  println!("Waiting for second node shutdown to be detected...");
+  info!("Waiting for second node shutdown to be detected...");
   tokio::time::sleep(tokio::time::Duration::from_secs(8)).await;
 
   // Verify the initial node owns the system main cell again
