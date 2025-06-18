@@ -200,10 +200,11 @@ impl SqliteReplica {
     Ok(Some(replica))
   }
 
-  /// Run the restore operation for this replica
-  /// Returns true if data was restored, false if no backup was found or the database already exists
-  #[instrument(skip(self))]
-  async fn run_restore(&self) -> Result<bool> {
+  /// Clean up all SQLite-related files before restore
+  /// This includes the main DB file, WAL file, SHM file, and Litestream
+  /// directory as mentioned in https://litestream.io/tips/#deleting-sqlite-databases
+  fn cleanup_database_files(&self) {
+    // Delete main database file
     if std::fs::remove_file(&self.db_path).is_ok() {
       info!(
         tenant = %self.tenant,
@@ -212,6 +213,46 @@ impl SqliteReplica {
         "Existing database file was deleted"
       );
     }
+
+    // Delete WAL file (.wal)
+    let wal_path = self.db_path.with_extension("db-wal");
+    if std::fs::remove_file(&wal_path).is_ok() {
+      info!(
+        tenant = %self.tenant,
+        cell_id = %self.cell_id,
+        wal_path = %wal_path.display(),
+        "Existing WAL file was deleted"
+      );
+    }
+
+    // Delete shared memory file (.shm)
+    let shm_path = self.db_path.with_extension("db-shm");
+    if std::fs::remove_file(&shm_path).is_ok() {
+      info!(
+        tenant = %self.tenant,
+        cell_id = %self.cell_id,
+        shm_path = %shm_path.display(),
+        "Existing SHM file was deleted"
+      );
+    }
+
+    // Delete Litestream directory (-litestream)
+    let litestream_dir = format!("{}-litestream", self.db_path.display());
+    if std::fs::remove_dir_all(&litestream_dir).is_ok() {
+      info!(
+        tenant = %self.tenant,
+        cell_id = %self.cell_id,
+        litestream_dir = %litestream_dir,
+        "Existing Litestream directory was deleted"
+      );
+    }
+  }
+
+  /// Run the restore operation for this replica
+  /// Returns true if data was restored, false if no backup was found in S3
+  #[instrument(skip(self))]
+  async fn run_restore(&self) -> Result<bool> {
+    self.cleanup_database_files();
 
     // Ensure the database directory exists
     if let Some(parent) = self.db_path.parent() {
