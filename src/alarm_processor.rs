@@ -106,7 +106,7 @@ impl AlarmProcessor {
               cell_id,
               response,
             } => {
-              let res = get_alarm(&conn, &tenant, &cell_id);
+              let res = get_alarm_handler(&conn, &tenant, &cell_id);
               let _ = response.send(res);
             }
             AlarmProcessRequest::Delete {
@@ -114,7 +114,7 @@ impl AlarmProcessor {
               cell_id,
               response,
             } => {
-              let res = delete_alarm(&conn, &tenant, &cell_id);
+              let res = delete_alarm_handler(&conn, &tenant, &cell_id);
               let _ = response.send(res);
             }
             AlarmProcessRequest::Set {
@@ -123,8 +123,12 @@ impl AlarmProcessor {
               scheduled_time_unix_ms,
               response,
             } => {
-              let res =
-                set_alarm(&conn, &tenant, &cell_id, scheduled_time_unix_ms);
+              let res = set_alarm_handler(
+                &conn,
+                &tenant,
+                &cell_id,
+                scheduled_time_unix_ms,
+              );
               let _ = response.send(res);
             }
             AlarmProcessRequest::Dispatch {
@@ -133,7 +137,7 @@ impl AlarmProcessor {
               limit,
               response,
             } => {
-              let res = dispatch_alarms(
+              let res = dispatch_alarms_handler(
                 &mut conn,
                 node_state,
                 current_timestamp,
@@ -282,7 +286,7 @@ impl AlarmProcessorHandle {
   }
 }
 
-fn get_alarm(
+fn get_alarm_handler(
   conn: &rusqlite::Connection,
   tenant: &str,
   cell_id: &str,
@@ -306,7 +310,7 @@ fn get_alarm(
   Ok(alarm)
 }
 
-fn delete_alarm(
+fn delete_alarm_handler(
   conn: &rusqlite::Connection,
   tenant: &str,
   cell_id: &str,
@@ -322,7 +326,7 @@ fn delete_alarm(
   }
 }
 
-fn set_alarm(
+fn set_alarm_handler(
   conn: &rusqlite::Connection,
   tenant: &str,
   cell_id: &str,
@@ -419,7 +423,7 @@ async fn dispatch_alarm_remotely(
   Ok(alarm)
 }
 
-async fn dispatch_alarms(
+async fn dispatch_alarms_handler(
   conn: &mut rusqlite::Connection,
   node_state: Arc<NodeState>,
   current_timestamp: DateTime<Utc>,
