@@ -276,12 +276,6 @@ impl AlarmProcessorHandle {
     scheduled_time_unix_ms: u64,
   ) -> Result<(), AlarmError> {
     let (res_tx, res_rx) = tokio::sync::oneshot::channel();
-    tracing::debug!(
-      ?tenant,
-      ?cell_id,
-      ?scheduled_time_unix_ms,
-      "AlarmProcessor set alarm 1"
-    );
     self
       .request_tx
       .send(AlarmProcessRequest::Set {
@@ -291,20 +285,7 @@ impl AlarmProcessorHandle {
         response: res_tx,
       })
       .await?;
-    tracing::debug!(
-      ?tenant,
-      ?cell_id,
-      ?scheduled_time_unix_ms,
-      "AlarmProcessor set alarm 2"
-    );
-    let res = res_rx.await?;
-    tracing::debug!(
-      ?tenant,
-      ?cell_id,
-      ?scheduled_time_unix_ms,
-      "AlarmProcessor set alarm 3"
-    );
-    res
+    res_rx.await?
   }
 
   /// Dispatch all alarms that are due at the given timestamp. Dispatched alarms
