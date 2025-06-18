@@ -16,6 +16,7 @@ import {
   type WorkflowRunProgress,
   type WorkflowStep,
 } from "./types.ts";
+import { logger } from "./logger.ts";
 
 class WorkflowSuspendedError extends Error {
   constructor(public reason: string, public metadata?: unknown) {
@@ -209,10 +210,11 @@ export class WorkflowRuntime {
 
   resumeAllPendingWorkflowRuns() {
     const pendingRunIds = this.#dbAccessor.db.prepare(
-      `SELECT id FROM workflow_runs WHERE completed_at IS NULL`,
+      `SELECT id, workflow_name FROM workflow_runs WHERE completed_at IS NULL`,
     ).all();
 
-    for (const { id } of pendingRunIds) {
+    for (const { id, workflow_name } of pendingRunIds) {
+      logger().debug(`Retrying workflow run ${id} (${workflow_name})`);
       this.retry(id as WorkflowRunId);
     }
   }
@@ -220,7 +222,7 @@ export class WorkflowRuntime {
   async #dispatchInner(
     handler: (ctx: WorkflowCtx<JSONValue>) => Promise<Voidable<JSONValue>>,
     runId: WorkflowRunId,
-    _workflowName: string,
+    workflowName: string,
     inputData: JSONValue,
     step: WorkflowStepImpl,
   ) {
@@ -228,6 +230,10 @@ export class WorkflowRuntime {
     try {
       // Execute the workflow handler
       const output = await handler({ input: inputData, step, attempt: 1 });
+
+      logger().debug(
+        `Workflow run ${runId} (${workflowName.toString()}) completed`,
+      );
 
       // Store output in database
       this.#dbAccessor.db.prepare(
@@ -259,11 +265,18 @@ export class WorkflowRuntime {
       }
     } catch (e) {
       if (e instanceof WorkflowSuspendedError) {
+        logger().debug(
+          `Workflow run ${runId} (${workflowName.toString()}) suspended`,
+        );
         // Don't mark as failed, just exit cleanly
         // The workflow will be resumed when the alarm fires
         return;
       }
-      console.error(e);
+      logger().error(
+        `Workflow run ${runId} (${workflowName.toString()}) failed: ${
+          Deno.inspect(e)
+        }`,
+      );
       // Schedule a retry in 1 second.
       this.#scheduleRetry(runId, Date.now() + 1000);
       return;

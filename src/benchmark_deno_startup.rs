@@ -13,6 +13,7 @@ pub async fn run(iterations: usize) -> Result<()> {
     Err(_) => {
       // Create a minimal default config for benchmark purposes
       Config {
+        node_name: "celld-benchmark".to_string(),
         data_dir: PathBuf::from("./data"),
         listen_addr: "127.0.0.1:8000".parse().unwrap(),
         advertise_addr: "127.0.0.1:8000".parse().unwrap(),
@@ -25,7 +26,8 @@ pub async fn run(iterations: usize) -> Result<()> {
         s3_secret_access_key: None,
         heartbeat_interval: Duration::from_secs(30),
         staleness_threshold: Duration::from_secs(90),
-        lock_guard_ttl: Duration::from_secs(30),
+        lock_guard_ttl_global: Duration::from_secs(30),
+        lock_guard_ttl_local: Duration::from_secs(20),
         alarm_scheduler_interval: Duration::from_secs(5),
         hashring_seed: None,
         system_main_cell_spawn_retries: 10,
@@ -47,10 +49,13 @@ pub async fn run(iterations: usize) -> Result<()> {
   let cell_id_base = "benchmark";
 
   // Perform the benchmark
-  println!(
-    "Starting Deno coldstart benchmark with {} iterations...",
-    iterations
-  );
+  #[allow(clippy::print_stdout)]
+  {
+    println!(
+      "Starting Deno coldstart benchmark with {} iterations...",
+      iterations
+    );
+  }
   for i in 0..iterations {
     // Use a unique cell_id for each iteration to ensure a new process each time
     let cell_id = format!("{}-{}", cell_id_base, i);
@@ -68,7 +73,10 @@ pub async fn run(iterations: usize) -> Result<()> {
     results.push(elapsed);
 
     if i % 10 == 0 {
-      println!("Iteration {}: {} ms", i, elapsed.as_millis());
+      #[allow(clippy::print_stdout)]
+      {
+        println!("Iteration {}: {} ms", i, elapsed.as_millis());
+      }
     }
 
     // Wait a bit to prevent resource exhaustion
@@ -92,13 +100,16 @@ pub async fn run(iterations: usize) -> Result<()> {
     let total: Duration = results.iter().sum();
     let avg = total / results.len() as u32;
 
-    println!("\nDeno Startup Statistics:");
-    println!("Min: {} ms", min.as_millis());
-    println!("Max: {} ms", max.as_millis());
-    println!("Avg: {} ms", avg.as_millis());
-    println!("p50: {} ms", p50.as_millis());
-    println!("p90: {} ms", p90.as_millis());
-    println!("p99: {} ms", p99.as_millis());
+    #[allow(clippy::print_stdout)]
+    {
+      println!("\nDeno Startup Statistics:");
+      println!("Min: {} ms", min.as_millis());
+      println!("Max: {} ms", max.as_millis());
+      println!("Avg: {} ms", avg.as_millis());
+      println!("p50: {} ms", p50.as_millis());
+      println!("p90: {} ms", p90.as_millis());
+      println!("p99: {} ms", p99.as_millis());
+    }
   }
 
   node_state.cell_manager.terminate_all().await;

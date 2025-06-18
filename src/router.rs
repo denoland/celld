@@ -140,6 +140,23 @@ impl ProxyHttp for InternalAPI {
 
     info!(path, method = %req_header.method, "Internal API request received");
 
+    // Handle health check endpoint
+    if path == "/_health" {
+      let response = format!("{} OK\n", self.node_state.config.node_name);
+      let content_length = response.len();
+      let mut resp =
+        pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
+      resp
+        .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
+        .unwrap();
+      resp
+        .insert_header(http::header::CONTENT_TYPE, "text/plain")
+        .unwrap();
+
+      write_response_close_conn(session, resp, response.into()).await?;
+      return Ok(true);
+    }
+
     // Handle internal endpoints
     if path == "/_internal/mesh/peers" {
       let local_peer = self.node_state.peer_manager.get_local_peer();
@@ -534,7 +551,7 @@ impl ProxyHttp for Proxy {
 
     // Handle health check endpoint
     if path == "/_health" {
-      let response = "OK\n";
+      let response = format!("{} OK\n", self.node_state.config.node_name);
       let content_length = response.len();
       let mut resp =
         pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
@@ -908,7 +925,7 @@ mod tests {
   use super::*;
   use proptest::prelude::*;
 
-  #[test]
+  #[test_log::test]
   fn test_remove_cell_id_from_uri() {
     let uri = http::Uri::from_static("http://example.com");
     let new_uri = remove_cell_id_from_uri(uri, "123");
@@ -983,7 +1000,7 @@ mod tests {
   }
 
   proptest! {
-    #[test]
+    #[test_log::test]
     fn prop_test_remove_cell_id_from_uri(uri in uri_strategy()) {
       let normalized_uri = remove_cell_id_from_uri(uri, "deadbeef1234");
       if let Some(path_and_query) = normalized_uri.path_and_query() {
@@ -993,7 +1010,7 @@ mod tests {
     }
   }
 
-  #[test]
+  #[test_log::test]
   fn test_strict_mode_file_not_found() {
     let temp_dir = tempfile::tempdir().unwrap();
     let strategy = crate::config::StaticFallbackStrategy::Strict;
@@ -1006,7 +1023,7 @@ mod tests {
     assert_eq!(decision, StaticFileDecision::HandleAsGeneric404);
   }
 
-  #[test]
+  #[test_log::test]
   fn test_strict_mode_file_exists() {
     let temp_dir = tempfile::tempdir().unwrap();
     let file_path = temp_dir.path().join("existing.html");
@@ -1028,7 +1045,7 @@ mod tests {
     );
   }
 
-  #[test]
+  #[test_log::test]
   fn test_spa_mode_serves_default_index() {
     let temp_dir = tempfile::tempdir().unwrap();
     let index_path = temp_dir.path().join("index.html");
@@ -1052,7 +1069,7 @@ mod tests {
     );
   }
 
-  #[test]
+  #[test_log::test]
   fn test_spa_mode_with_custom_root_file() {
     let temp_dir = tempfile::tempdir().unwrap();
     let app_path = temp_dir.path().join("app.html");
@@ -1076,7 +1093,7 @@ mod tests {
     );
   }
 
-  #[test]
+  #[test_log::test]
   fn test_spa_mode_when_root_file_missing() {
     let temp_dir = tempfile::tempdir().unwrap();
 
@@ -1092,7 +1109,7 @@ mod tests {
     assert_eq!(decision, StaticFileDecision::HandleAsGeneric404);
   }
 
-  #[test]
+  #[test_log::test]
   fn test_custom404_mode_serves_default_404() {
     let temp_dir = tempfile::tempdir().unwrap();
     let not_found_path = temp_dir.path().join("404.html");
@@ -1116,7 +1133,7 @@ mod tests {
     );
   }
 
-  #[test]
+  #[test_log::test]
   fn test_custom404_mode_with_specified_page() {
     let temp_dir = tempfile::tempdir().unwrap();
     let error_path = temp_dir.path().join("custom_error.html");
@@ -1140,7 +1157,7 @@ mod tests {
     );
   }
 
-  #[test]
+  #[test_log::test]
   fn test_custom404_mode_when_404_file_missing() {
     let temp_dir = tempfile::tempdir().unwrap();
 
@@ -1156,7 +1173,7 @@ mod tests {
     assert_eq!(decision, StaticFileDecision::HandleAsGeneric404);
   }
 
-  #[test]
+  #[test_log::test]
   fn test_cell_paths_proceed_to_cell_logic() {
     let temp_dir = tempfile::tempdir().unwrap();
     let strategy = crate::config::StaticFallbackStrategy::Strict;
@@ -1170,7 +1187,7 @@ mod tests {
     assert_eq!(decision, StaticFileDecision::ProceedToCellLogic);
   }
 
-  #[test]
+  #[test_log::test]
   fn test_non_get_head_requests() {
     let temp_dir = tempfile::tempdir().unwrap();
     let strategy = crate::config::StaticFallbackStrategy::Strict;
@@ -1184,7 +1201,7 @@ mod tests {
     assert_eq!(decision, StaticFileDecision::HandleAsGeneric404);
   }
 
-  #[test]
+  #[test_log::test]
   fn test_root_path_serves_index_html() {
     let temp_dir = tempfile::tempdir().unwrap();
     let index_path = temp_dir.path().join("index.html");
@@ -1223,7 +1240,7 @@ mod tests {
     );
   }
 
-  #[test]
+  #[test_log::test]
   fn test_directory_path_serves_index_html() {
     let temp_dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(temp_dir.path().join("subdir")).unwrap();

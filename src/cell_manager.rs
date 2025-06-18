@@ -41,8 +41,8 @@ pub struct CellEntry {
 }
 
 impl CellEntry {
-  pub async fn terminate(self) {
-    match self.inner {
+  pub async fn terminate(&mut self) {
+    match &mut self.inner {
       CellEntryInner::Normal {
         parent_exit_guard, ..
       } => {
@@ -50,7 +50,7 @@ impl CellEntry {
         parent_exit_guard.wait();
       }
       CellEntryInner::SystemMain { alarm_processor } => {
-        if let Err(e) = alarm_processor.shutdown().await {
+        if let Err(e) = alarm_processor.handle().shutdown().await {
           error!(
             error = ?e,
             "Error shutting down alarm processor"
@@ -59,7 +59,7 @@ impl CellEntry {
       }
     }
 
-    if let Some(replica) = &self.replica {
+    if let Some(replica) = &mut self.replica {
       if let Err(e) = replica.shutdown().await {
         error!(
           error = ?e,
@@ -106,6 +106,32 @@ impl CellEntry {
 
         *incoming_connections == 0 || active_connections::count(*pid) == 0
       }
+    }
+  }
+}
+
+impl Drop for CellEntry {
+  fn drop(&mut self) {
+    match &mut self.inner {
+      CellEntryInner::Normal {
+        parent_exit_guard, ..
+      } => {
+        let finished = matches!(parent_exit_guard.try_wait(), Ok(Some(_)));
+        if !finished {
+          parent_exit_guard.kill(Signal::SIGKILL);
+          parent_exit_guard.wait();
+        }
+      }
+      CellEntryInner::SystemMain { alarm_processor } => {
+        alarm_processor.kill();
+      }
+    }
+
+    if let Some(replica) = self.replica.take() {
+      // `kill_on_drop` flag is enabled for `litestream replicate` process. So
+      // dropping the `replica` will send SIGKILL to the process, if the process
+      // is still running.
+      drop(replica);
     }
   }
 }
@@ -168,72 +194,41 @@ impl CellManager {
 
   /// Get the handle to the system main cell if exists.
   pub async fn get_system_main_cell(&self) -> Option<LockHandle> {
-    debug!("get_system_main_cell: Entry");
     let system_main_cell_key = CellKey::new(SYSTEM_TENANT, SYSTEM_CELL_ID);
-
-    debug!(
-      tenant = SYSTEM_TENANT,
-      cell_id = SYSTEM_CELL_ID,
-      "get_system_main_cell: Looking for system main cell"
-    );
 
     // Get the clone of the key and handle with minimum lock contention
     let (key, handle) = {
-      let entry = match self.cells.get(&system_main_cell_key) {
-        Some(entry) => {
-          debug!("get_system_main_cell: Found system main cell entry in cells map");
-          entry
-        },
-        None => {
-          debug!("get_system_main_cell: No system main cell found in cells map");
-          return None;
-        }
-      };
+      let entry = self.cells.get(&system_main_cell_key)?;
       let key = entry.key().clone();
       let handle = entry.value().clone();
-      debug!(?key, "get_system_main_cell: Retrieved key and handle");
       (key, handle)
     };
 
-    debug!("get_system_main_cell: About to ping handle");
     let (maybe_handle, should_remove) = {
       match handle.ping().await {
-        Ok(status) => {
-          debug!(?status, "get_system_main_cell: Handle ping successful");
-          match status {
-            LockStateKind::Init => {
-              error!("get_system_main_cell: Unexpected Init state - this should not happen");
-              unreachable!("CellEntry should be inserted to self.cells after it transitioned to Active state");
-            }
-            LockStateKind::Active => {
-              debug!("get_system_main_cell: Handle is Active, returning handle");
-              (Some(handle), false)
-            },
-            LockStateKind::Released => {
-              debug!("get_system_main_cell: Handle is Released, will remove from cells");
-              (None, true)
-            },
+        Ok(status) => match status {
+          LockStateKind::Init => {
+            unreachable!("CellEntry should be inserted to self.cells after it transitioned to Active state");
           }
+          LockStateKind::Active => (Some(handle), false),
+          LockStateKind::Releasing => (None, false),
+          LockStateKind::Released => (None, true),
         },
         Err(e) => {
           error!(
             error = ?e,
             ?key,
-            "get_system_main_cell: Error pinging system main cell, removing it from cells"
+            "Error pinging system main cell, removing it from cells"
           );
           (None, true)
         }
       }
     };
 
-    debug!(?maybe_handle, "get_system_main_cell: Ping operation completed");
-
     if should_remove {
-      debug!("get_system_main_cell: Removing system main cell from cells map");
       self.cells.remove(&system_main_cell_key);
     }
 
-    debug!(?maybe_handle, "get_system_main_cell: Returning result");
     maybe_handle
   }
 
@@ -285,7 +280,8 @@ impl CellManager {
       .try_acquire(
         &lock_name,
         node_id,
-        node_state.config.lock_guard_ttl,
+        node_state.config.lock_guard_ttl_global,
+        node_state.config.lock_guard_ttl_local,
         node_state.distributed_lock.clone(),
       )
       .await
@@ -357,14 +353,8 @@ impl CellManager {
     for entry in &self.cells {
       let key = entry.key();
       if !peer_manager.is_local_owner(&key.host, &key.cell_id) {
-        if entry.value().release().await {
-          released_keys.insert(key.clone());
-        } else {
-          error!(
-            descriptor = ?entry.value().descriptor(),
-            "Error releasing cell lock"
-          );
-        }
+        entry.value().release().await;
+        released_keys.insert(key.clone());
       }
     }
 
@@ -499,7 +489,8 @@ impl CellManager {
       .try_acquire(
         &lock_name,
         node_id,
-        node_state.config.lock_guard_ttl,
+        node_state.config.lock_guard_ttl_global,
+        node_state.config.lock_guard_ttl_local,
         node_state.distributed_lock.clone(),
       )
       .await
@@ -634,9 +625,7 @@ impl CellManager {
 
         // Remove the entry from the map to avoid stale entries
         if let Some((_, handle)) = self.cells.remove(&cell_key) {
-          if !handle.release().await {
-            warn!(?cell_key, "Failed to release cell lock");
-          }
+          handle.release().await;
         }
 
         // The tempdir will be dropped at the end of this scope, cleaning up the socket file
@@ -696,9 +685,7 @@ impl CellManager {
 
           // Remove the entry from the map to avoid stale entries
           if let Some((_, handle)) = self.cells.remove(&cell_key) {
-            if !handle.release().await {
-              warn!(?cell_key, "Failed to release cell lock");
-            }
+            handle.release().await;
           }
 
           // The tempdir will be dropped at the end of this scope, cleaning up the socket file
@@ -738,11 +725,7 @@ impl CellManager {
     for handle in self.cells.iter().map(|entry| entry.value().clone()) {
       debug!(descriptor = ?handle.descriptor(), "Cell termination starts");
 
-      if handle.release().await {
-        debug!(descriptor = ?handle.descriptor(), "Cell terminated");
-      } else {
-        debug!(descriptor = ?handle.descriptor(), "Cell was already terminated");
-      }
+      handle.release().await;
     }
 
     debug!("{num_cells} cells terminated");
@@ -757,7 +740,7 @@ impl CellManager {
     db_path: &Path,
   ) -> Result<Option<SqliteReplica>, CellManagerError> {
     // Try to initialize the SqliteReplica with the S3 config
-    let replica = match SqliteReplica::initialize(
+    let mut replica = match SqliteReplica::initialize(
       &self.data_dir,
       host,
       cell_id,
@@ -787,7 +770,7 @@ impl CellManager {
     };
 
     // Handle database restoration if necessary
-    if let Some(ref replica) = replica {
+    if let Some(ref mut replica) = replica {
       info!(
         tenant = %host,
         cell_id = %cell_id,
@@ -1036,7 +1019,7 @@ fn spawn_deno_process(
 mod tests {
   use super::*;
 
-  #[test]
+  #[test_log::test]
   fn test_parse_env_vars() {
     // Test content with various environment variable formats
     let content = r#"

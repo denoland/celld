@@ -1,10 +1,12 @@
 mod common;
 
 use common::TestEnv;
+use tracing::info;
 
 #[test_log::test(tokio::test)]
 async fn test_alarm_crud_in_single_node_cluster() {
-  let test_env = TestEnv::new(1);
+  let test_env =
+    TestEnv::new(1, "test_alarm_crud_in_single_node_cluster").await;
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
@@ -100,9 +102,10 @@ async fn test_alarm_crud_in_single_node_cluster() {
   }
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_alarm_dispatch_in_single_node_cluster() {
-  let test_env = TestEnv::new(1);
+  let test_env =
+    TestEnv::new(1, "test_alarm_dispatch_in_single_node_cluster").await;
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
@@ -154,9 +157,13 @@ async fn test_alarm_dispatch_in_single_node_cluster() {
   }
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_multiple_cells_alarm_dispatch_in_single_node_cluster() {
-  let test_env = TestEnv::new(1);
+  let test_env = TestEnv::new(
+    1,
+    "test_multiple_cells_alarm_dispatch_in_single_node_cluster",
+  )
+  .await;
   let port = test_env.ports[0].public();
 
   let cell1_id = uuid::Uuid::new_v4().simple().to_string();
@@ -284,11 +291,11 @@ async fn test_multiple_cells_alarm_dispatch_in_single_node_cluster() {
   }
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_system_main_cell_takeover() {
   let client = reqwest::Client::new();
 
-  let mut test_env = TestEnv::new(2);
+  let mut test_env = TestEnv::new(2, "test_system_main_cell_takeover").await;
 
   let mut system_main_cell_index = None;
   let mut secondary_cell_external_ports = Vec::new();
@@ -359,14 +366,14 @@ async fn test_system_main_cell_takeover() {
   };
 
   // Wait for Litestream to replicate data to S3
-  println!("Waiting for Litestream to replicate data to S3...");
+  info!("Waiting for Litestream to replicate data to S3...");
   tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
   // Shutdown the node that the system main cell belongs to
   test_env.graceful_shutdown_cell_instance(system_main_cell_index);
 
   // Wait for the shutdown to be detected
-  println!("Waiting for primary node failure to be detected...");
+  info!("Waiting for primary node failure to be detected...");
   tokio::time::sleep(std::time::Duration::from_secs(8)).await;
 
   // Get the set alarm through the secondary node to see the system main cell's DB has been restored
@@ -390,11 +397,15 @@ async fn test_system_main_cell_takeover() {
   }
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_alarm_crud_operations_forwarded_to_system_main_cell_node() {
   let client = reqwest::Client::new();
 
-  let test_env = TestEnv::new(2);
+  let test_env = TestEnv::new(
+    2,
+    "test_alarm_crud_operations_forwarded_to_system_main_cell_node",
+  )
+  .await;
 
   let mut system_main_cell_index = None;
   struct Port {
@@ -559,11 +570,12 @@ async fn test_alarm_crud_operations_forwarded_to_system_main_cell_node() {
 // 1. A primary node (where the system main cell is running)
 // 2. A secondary node (where "alarm.localhost/<some-cell-id>" is running)
 // This test verifies that the primary node will dispatch an alarm to the secondary node and then alarm.localhost's alarm handler will be triggered.
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_alarm_dispatch_to_remote_cell_owner() {
   let client = reqwest::Client::new();
 
-  let test_env = TestEnv::new(2);
+  let test_env =
+    TestEnv::new(2, "test_alarm_dispatch_to_remote_cell_owner").await;
 
   let mut system_main_cell_index = None;
   struct Port {
@@ -679,8 +691,8 @@ async fn test_alarm_dispatch_to_remote_cell_owner() {
   }
 }
 
-async fn test_multi_alarms_with_delays(delays: &[u32]) {
-  let test_env = TestEnv::new(1);
+async fn test_multi_alarms_with_delays(delays: &[u32], test_case_name: &str) {
+  let test_env = TestEnv::new(1, test_case_name).await;
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
@@ -706,7 +718,7 @@ async fn test_multi_alarms_with_delays(delays: &[u32]) {
     .duration_since(std::time::UNIX_EPOCH)
     .unwrap()
     .as_millis();
-  println!("Current time: {}ms", start_time);
+  info!("Current time: {}ms", start_time);
 
   for delay in delays {
     let res = client
@@ -720,7 +732,7 @@ async fn test_multi_alarms_with_delays(delays: &[u32]) {
 
     // Print the alarm ID for debugging
     let alarm_id = res.text().await.unwrap();
-    println!(
+    info!(
       "Scheduled alarm {} with delay {}ms at time {}",
       alarm_id,
       delay,
@@ -746,19 +758,21 @@ async fn test_multi_alarms_with_delays(delays: &[u32]) {
   }
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_multi_alarm_forward() {
-  test_multi_alarms_with_delays(&[500, 1000, 1500]).await;
+  test_multi_alarms_with_delays(&[500, 1000, 1500], "test_multi_alarm_forward")
+    .await;
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_multi_alarm_reverse() {
-  test_multi_alarms_with_delays(&[1500, 1000, 500]).await;
+  test_multi_alarms_with_delays(&[1500, 1000, 500], "test_multi_alarm_reverse")
+    .await;
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_multi_alarm_sequential() {
-  let test_env = TestEnv::new(1);
+  let test_env = TestEnv::new(1, "test_multi_alarm_sequential").await;
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
@@ -781,7 +795,7 @@ async fn test_multi_alarm_sequential() {
 
   // Schedule and wait for each alarm sequentially
   for i in 1..=3 {
-    println!("Scheduling alarm {} with 500ms delay", i);
+    info!("Scheduling alarm {} with 500ms delay", i);
 
     let res = client
       .post(&url)
@@ -793,10 +807,11 @@ async fn test_multi_alarm_sequential() {
     assert_eq!(res.status(), 200);
 
     let alarm_id = res.text().await.unwrap();
-    println!("Scheduled alarm {} with ID {}", i, alarm_id);
+    info!("Scheduled alarm {} with ID {}", i, alarm_id);
 
-    // Wait for this alarm to fire (500ms + buffer for rescheduling)
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    // Wait for this alarm to fire (500ms + buffer, because the frequency of
+    // checking global_alarms table is 1s in tests)
+    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
 
     // Check that alarm count has increased
     let res = client
@@ -809,6 +824,87 @@ async fn test_multi_alarm_sequential() {
 
     let content = res.text().await.unwrap();
     assert_eq!(content, format!(r#"{{"count":{}}}"#, i));
-    println!("Confirmed alarm {} fired, count is now {}", i, i);
+    info!("Confirmed alarm {} fired, count is now {}", i, i);
   }
+}
+
+#[test_log::test(tokio::test)]
+async fn test_recursive_alarm() {
+  let test_env = TestEnv::new(1, "test_recursive_alarm").await;
+  let port = test_env.ports[0].public();
+
+  let cell_id = uuid::Uuid::new_v4().simple().to_string();
+  let url = format!("http://localhost:{}/cell/{}", port, cell_id);
+  let client = reqwest::Client::new();
+
+  #[derive(Debug, serde::Deserialize)]
+  struct GetResponse {
+    count: u32,
+  }
+
+  // Get initial alarm count
+  {
+    let res = client
+      .get(&url)
+      .header("host", "recursive-alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+    let content = res.json::<GetResponse>().await.unwrap();
+    assert_eq!(content.count, 0);
+  }
+
+  // Start a recursive alarm
+  {
+    let res = client
+      .post(&url)
+      .header("host", "recursive-alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+  }
+
+  async fn poll_for_alarm_count_increase(
+    client: &reqwest::Client,
+    url: &str,
+    target_count: u32,
+  ) {
+    let poll_interval = std::time::Duration::from_millis(100);
+
+    loop {
+      let res = client
+        .get(url)
+        .header("host", "recursive-alarm.localhost")
+        .send()
+        .await
+        .unwrap();
+      assert_eq!(res.status(), 200);
+      let content = res.json::<GetResponse>().await.unwrap();
+
+      if content.count >= target_count {
+        return;
+      }
+
+      tokio::time::sleep(poll_interval).await;
+    }
+  }
+
+  // Confirm the alarm is dispatched at least once within 5 seconds
+  tokio::time::timeout(
+    std::time::Duration::from_secs(5),
+    poll_for_alarm_count_increase(&client, &url, 1),
+  )
+  .await
+  .unwrap();
+
+  // Wait for the alarm to be dispatched 2 more times within 5 seconds to verify
+  // that recursively set alarms are dispatched.
+  tokio::time::timeout(
+    std::time::Duration::from_secs(5),
+    poll_for_alarm_count_increase(&client, &url, 3),
+  )
+  .await
+  .unwrap();
 }

@@ -134,6 +134,10 @@ pub struct SqliteReplica {
   /// Path to the Litestream configuration file
   config_path: PathBuf,
   /// Handle to the replication child process
+  /// Note that `kill_on_drop` is enabled for this child process, meaning that
+  /// SIGKILL will be sent to it when [`SqliteReplica`] is dropped. In normal
+  /// cases, make sure to call [`SqliteReplica::shutdown`] before dropping
+  /// this struct to prevent data loss.
   replication_process: Arc<Mutex<Option<tokio::process::Child>>>,
 }
 
@@ -196,10 +200,11 @@ impl SqliteReplica {
     Ok(Some(replica))
   }
 
-  /// Run the restore operation for this replica
-  /// Returns true if data was restored, false if no backup was found or the database already exists
-  #[instrument(skip(self))]
-  async fn run_restore(&self) -> Result<bool> {
+  /// Clean up all SQLite-related files before restore
+  /// This includes the main DB file, WAL file, SHM file, and Litestream
+  /// directory as mentioned in https://litestream.io/tips/#deleting-sqlite-databases
+  fn cleanup_database_files(&self) {
+    // Delete main database file
     if std::fs::remove_file(&self.db_path).is_ok() {
       info!(
         tenant = %self.tenant,
@@ -208,6 +213,46 @@ impl SqliteReplica {
         "Existing database file was deleted"
       );
     }
+
+    // Delete WAL file (.wal)
+    let wal_path = self.db_path.with_extension("db-wal");
+    if std::fs::remove_file(&wal_path).is_ok() {
+      info!(
+        tenant = %self.tenant,
+        cell_id = %self.cell_id,
+        wal_path = %wal_path.display(),
+        "Existing WAL file was deleted"
+      );
+    }
+
+    // Delete shared memory file (.shm)
+    let shm_path = self.db_path.with_extension("db-shm");
+    if std::fs::remove_file(&shm_path).is_ok() {
+      info!(
+        tenant = %self.tenant,
+        cell_id = %self.cell_id,
+        shm_path = %shm_path.display(),
+        "Existing SHM file was deleted"
+      );
+    }
+
+    // Delete Litestream directory (-litestream)
+    let litestream_dir = format!("{}-litestream", self.db_path.display());
+    if std::fs::remove_dir_all(&litestream_dir).is_ok() {
+      info!(
+        tenant = %self.tenant,
+        cell_id = %self.cell_id,
+        litestream_dir = %litestream_dir,
+        "Existing Litestream directory was deleted"
+      );
+    }
+  }
+
+  /// Run the restore operation for this replica
+  /// Returns true if data was restored, false if no backup was found in S3
+  #[instrument(skip(self))]
+  async fn run_restore(&self) -> Result<bool> {
+    self.cleanup_database_files();
 
     // Ensure the database directory exists
     if let Some(parent) = self.db_path.parent() {
@@ -317,7 +362,7 @@ impl SqliteReplica {
   /// This takes reference to a lock handle to make sure that the caller did acquire a lock.
   #[instrument(skip(self, _lock_handle))]
   pub async fn ensure_restored(
-    &self,
+    &mut self,
     _lock_handle: &distributed_lock::LockHandle,
   ) {
     // We got the lock, proceed with restore
@@ -441,6 +486,11 @@ impl SqliteReplica {
       .arg(&self.config_path)
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
+      // We usually gracefully terminate the litestream replication process,
+      // but if something weired or unexpected happens (for instance, the
+      // graceful shutdown takes so long that the associated distributed lock's
+      // TTL expires), we need to kill the process forcibly.
+      .kill_on_drop(true)
       .spawn()
       .context("Failed to start litestream replicate")?;
 
@@ -451,8 +501,8 @@ impl SqliteReplica {
     Ok(())
   }
 
-  /// Kills the replicate process
-  pub async fn shutdown(&self) -> Result<()> {
+  /// Gracefully shuts down the replicate process
+  pub async fn shutdown(&mut self) -> Result<()> {
     // Take the child process out of the mutex without holding the lock during the await
     let mut child_opt = {
       let mut process_guard = self.replication_process.lock().unwrap();
@@ -569,7 +619,7 @@ pub mod tests {
     }
   }
 
-  #[test]
+  #[test_log::test]
   fn test_create_empty_database_file() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");
@@ -584,7 +634,7 @@ pub mod tests {
     assert!(output.status.success());
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn basic_replica_lifecycle() {
     let _ = tracing_subscriber::fmt::try_init();
 
@@ -599,7 +649,7 @@ pub mod tests {
     let s3_config = create_test_s3_config(cell_id, &minio_guard);
 
     // Initialize the SqliteReplica with the new API
-    let replica = SqliteReplica::initialize(
+    let mut replica = SqliteReplica::initialize(
       data_dir,
       "test-tenant",
       cell_id,
@@ -640,7 +690,7 @@ pub mod tests {
       "SQLite command should succeed: {}",
       String::from_utf8_lossy(&output.stderr)
     );
-    println!("Inserted data into SQLite DB {}", db_path);
+    tracing::debug!("Inserted data into SQLite DB {}", db_path);
 
     // Start replication
     let start_result = replica.start_replication().await;
@@ -651,7 +701,7 @@ pub mod tests {
     );
 
     // Give the replication process time to run and create snapshots
-    println!("Waiting for replication to complete...");
+    tracing::debug!("Waiting for replication to complete...");
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Stop replication cleanly
@@ -665,6 +715,6 @@ pub mod tests {
     // Check MinIO to ensure data was replicated
     assert!(minio_guard.has_files_for_cell(cell_id, cell_id));
 
-    println!("Basic replica lifecycle test completed successfully");
+    tracing::debug!("Basic replica lifecycle test completed successfully");
   }
 }
