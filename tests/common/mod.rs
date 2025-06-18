@@ -63,7 +63,7 @@ pub struct TestEnv {
   servers: Vec<CapturedSubprocess>,
   /// Celld server ports (public and internal)
   pub ports: Vec<PortLease>,
-  pub minio_server: MinioTestServer,
+  pub minio_server: Option<MinioTestServer>,
   pub test_id: String,
   pub bucket_name: String,
   /// Temporary directories for each server instance's data
@@ -185,6 +185,12 @@ impl TestEnv {
     Self::new_with_ports(ports, test_case_name).await
   }
 
+  // Start a single node without MinIO
+  pub async fn new_single_node_without_minio(test_case_name: &str) -> Self {
+    let ports = Self::allocate_ports(7500, 1, 2);
+    Self::new_with_ports_and_settings(ports, test_case_name, &[], false).await
+  }
+
   pub async fn new_with_ports(
     ports: Vec<PortLease>,
     test_case_name: &str,
@@ -197,10 +203,32 @@ impl TestEnv {
     test_case_name: &str,
     envs: &[(&str, &str)],
   ) -> Self {
-    // Start MinIO server for testing with a dynamically assigned port
+    Self::new_with_ports_and_settings(ports, test_case_name, envs, true).await
+  }
+
+  pub async fn new_with_ports_and_settings(
+    ports: Vec<PortLease>,
+    test_case_name: &str,
+    envs: &[(&str, &str)],
+    use_minio: bool,
+  ) -> Self {
+    // Validate single-node mode constraint
+    if !use_minio && ports.len() != 1 {
+      panic!(
+        "Single-node mode without MinIO requires exactly 1 node, got {}",
+        ports.len()
+      );
+    }
+
+    // Start MinIO server for testing with a dynamically assigned port (if enabled)
     let bucket_name = "test-mesh-bucket".to_string();
-    let minio_server = MinioTestServer::start();
-    minio_server.create_bucket(&bucket_name).unwrap();
+    let minio_server = if use_minio {
+      let server = MinioTestServer::start();
+      server.create_bucket(&bucket_name).unwrap();
+      Some(server)
+    } else {
+      None
+    };
 
     let test_id = Uuid::new_v4().simple().to_string();
 
@@ -295,20 +323,23 @@ impl TestEnv {
           .env("CELL_LOCK_GRACEFUL_SHUTDOWN_TIMEOUT_SECS", "2")
           // Configure alarm scheduler to check alarms every second
           .env("CELL_ALARM_SCHEDULER_INTERVAL_SECS", "1")
-          .env(
-            "CELL_S3_ENDPOINT",
-            format!("http://127.0.0.1:{}", self.minio_server.port),
-          )
-          .env("CELL_S3_BUCKET", &self.bucket_name)
-          .env("CELL_S3_REGION", "us-east-1")
-          .env("CELL_S3_PREFIX", format!("celld-test-{}", self.test_id))
-          .env("CELL_S3_ACCESS_KEY_ID", &self.minio_server.access_key_id)
-          .env(
-            "CELL_S3_SECRET_ACCESS_KEY",
-            &self.minio_server.secret_access_key,
-          )
-          .env("CELL_DENO_OUTPUT", "1")
-          .envs(&self.envs);
+          .env("CELL_DENO_OUTPUT", "1");
+
+        // Only set S3 env vars if MinIO is enabled
+        if let Some(ref minio_server) = self.minio_server {
+          cmd
+            .env(
+              "CELL_S3_ENDPOINT",
+              format!("http://127.0.0.1:{}", minio_server.port),
+            )
+            .env("CELL_S3_BUCKET", &self.bucket_name)
+            .env("CELL_S3_REGION", "us-east-1")
+            .env("CELL_S3_PREFIX", format!("celld-test-{}", self.test_id))
+            .env("CELL_S3_ACCESS_KEY_ID", &minio_server.access_key_id)
+            .env("CELL_S3_SECRET_ACCESS_KEY", &minio_server.secret_access_key);
+        }
+
+        cmd.envs(&self.envs);
 
         // Propagate the RUST_LOG env var to the celld processes if it exists
         // This overrides the default log level set above.
