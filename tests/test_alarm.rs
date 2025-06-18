@@ -826,3 +826,84 @@ async fn test_multi_alarm_sequential() {
     println!("Confirmed alarm {} fired, count is now {}", i, i);
   }
 }
+
+#[test_log::test(tokio::test)]
+async fn test_recursive_alarm() {
+  let test_env = TestEnv::new(1, "test_recursive_alarm").await;
+  let port = test_env.ports[0].public();
+
+  let cell_id = uuid::Uuid::new_v4().simple().to_string();
+  let url = format!("http://localhost:{}/cell/{}", port, cell_id);
+  let client = reqwest::Client::new();
+
+  #[derive(Debug, serde::Deserialize)]
+  struct GetResponse {
+    count: u32,
+  }
+
+  // Get initial alarm count
+  {
+    let res = client
+      .get(&url)
+      .header("host", "recursive-alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+    let content = res.json::<GetResponse>().await.unwrap();
+    assert_eq!(content.count, 0);
+  }
+
+  // Start a recursive alarm
+  {
+    let res = client
+      .post(&url)
+      .header("host", "recursive-alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+  }
+
+  async fn poll_for_alarm_count_increase(
+    client: &reqwest::Client,
+    url: &str,
+    target_count: u32,
+  ) {
+    let poll_interval = std::time::Duration::from_millis(100);
+
+    loop {
+      let res = client
+        .get(url)
+        .header("host", "recursive-alarm.localhost")
+        .send()
+        .await
+        .unwrap();
+      assert_eq!(res.status(), 200);
+      let content = res.json::<GetResponse>().await.unwrap();
+
+      if content.count >= target_count {
+        return;
+      }
+
+      tokio::time::sleep(poll_interval).await;
+    }
+  }
+
+  // Confirm the alarm is dispatched at least once within 5 seconds
+  tokio::time::timeout(
+    std::time::Duration::from_secs(5),
+    poll_for_alarm_count_increase(&client, &url, 1),
+  )
+  .await
+  .unwrap();
+
+  // Wait for the alarm to be dispatched 2 more times within 5 seconds to verify
+  // that recursively set alarms are dispatched.
+  tokio::time::timeout(
+    std::time::Duration::from_secs(5),
+    poll_for_alarm_count_increase(&client, &url, 3),
+  )
+  .await
+  .unwrap();
+}
