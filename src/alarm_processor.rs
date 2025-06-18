@@ -574,6 +574,7 @@ fn dispatch_completed_handler(
   // to avoid deleting such alarms, we delete alarms whose scheduled time
   // matches the dispatched one.
   for alarm in dispatched_alarms {
+    // TODO: can we do all DELETEs in one go?
     let Ok(mut stmt) = conn.prepare("DELETE FROM global_alarms WHERE tenant = ? AND cell_id = ? AND scheduled_time_unix_ms = ?").inspect_err(|e| {
       error!(?alarm, error = ?e, "Failed to prepare statement to delete alarm");
     }) else {
