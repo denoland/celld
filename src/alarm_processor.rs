@@ -121,6 +121,14 @@ impl AlarmProcessor {
           let kind = request.kind();
           tracing::debug!(?kind, "AlarmProcessor received request");
 
+          // NOTE: it is important to keep message handlers non-async.
+          //
+          // If one is async, that may block the alarm processor loop from
+          // processing other queued messages. And what's worse, it may cause
+          // deadlock if the handler sends a message back to the channel and
+          // awaits it - the handler waits for the response, but in order for
+          // the message to be processed, the handler needs to finish and the
+          // loop needs to continue to process the next message.
           match request {
             AlarmProcessRequest::Get {
               tenant,
