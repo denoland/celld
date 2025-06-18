@@ -285,7 +285,7 @@ mod tests {
   use std::process::Command;
   use std::time::{Duration, Instant};
 
-  #[test]
+  #[test_log::test]
   fn test_kill_long_running_process() {
     let mut cmd = Command::new("sleep");
     cmd.arg("60");
@@ -304,7 +304,7 @@ mod tests {
     );
   }
 
-  #[test]
+  #[test_log::test]
   fn test_wait_on_short_process() {
     let cmd = Command::new("true");
     let mut guard =
@@ -321,7 +321,7 @@ mod tests {
     );
   }
 
-  #[test]
+  #[test_log::test]
   fn test_try_wait_on_running_process() {
     let mut cmd = Command::new("sleep");
     cmd.arg("1");

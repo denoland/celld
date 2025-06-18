@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tempfile::TempDir;
 use test_utils::MinioTestServer;
-use tracing::warn;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 static USED_PORTS: LazyLock<Mutex<HashSet<u16>>> =
@@ -223,7 +223,7 @@ impl TestEnv {
     // Longer delay for peer exchange after TCP connections are ready
     // This is important to give time for S3 registration and peer discovery
     tokio::time::sleep(Duration::from_secs(SERVER_STARTUP_WAIT_SECS)).await;
-    println!("All servers are ready now");
+    info!("All servers are ready now");
     test_env
   }
 
@@ -324,7 +324,7 @@ impl TestEnv {
         server_cmd_setup,
       );
 
-      println!(
+      info!(
         "Started server on port {} with ADVERTISE_ADDR={}, S3 mesh, DATA_DIR={:?}",
         port.public(), advertise_addr, data_dir_path
       );
@@ -407,8 +407,20 @@ impl Drop for TestEnv {
 
     if std::thread::panicking() {
       for (node_name, (stdout, stderr)) in self.shutdown_node_logs.iter() {
-        println!("---- terminated node {} stdout ----\n{}", node_name, stdout);
-        eprintln!("---- terminated node {} stderr ----\n{}", node_name, stderr);
+        #[allow(clippy::print_stdout)]
+        {
+          println!(
+            "---- terminated node {} stdout ----\n{}",
+            node_name, stdout
+          );
+        }
+        #[allow(clippy::print_stderr)]
+        {
+          eprintln!(
+            "---- terminated node {} stderr ----\n{}",
+            node_name, stderr
+          );
+        }
       }
     }
   }
@@ -532,8 +544,8 @@ async fn test_auto_port_allocation() {
   let env1 = TestEnv::new(3, "test_auto_port_allocation_env1").await;
   let env2 = TestEnv::new(3, "test_auto_port_allocation_env2").await;
 
-  println!("Env1 ports: {:?}", env1.ports);
-  println!("Env2 ports: {:?}", env2.ports);
+  info!("Env1 ports: {:?}", env1.ports);
+  info!("Env2 ports: {:?}", env2.ports);
 
   // Check that no ports conflict
   for p1 in &env1.ports {

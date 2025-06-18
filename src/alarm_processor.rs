@@ -586,7 +586,7 @@ fn dispatch_completed_handler(
 mod tests {
   use super::*;
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_alarm_processor() {
     let data_dir = tempfile::tempdir().unwrap();
     let db_path = data_dir.path().join("alarm.db");

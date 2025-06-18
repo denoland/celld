@@ -184,7 +184,7 @@ fn main() {
   // see benchmark_deno_startup.sh
   if std::env::var("BENCHMARK_DENO_STARTUP").is_ok() {
     let iterations = 100;
-    println!(
+    info!(
       "Running Deno startup time benchmark (iterations: {})...",
       iterations
     );
@@ -316,7 +316,7 @@ mod tests {
     let _ = *TEST_SERVER;
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_proxy_with_ephemeral_port() {
     init();
 
@@ -336,7 +336,7 @@ mod tests {
     assert_eq!("hello\n", response);
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_static_file_serving() {
     init();
 
@@ -355,7 +355,7 @@ mod tests {
     }
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn basic_db() {
     init();
 
@@ -459,7 +459,7 @@ mod tests {
     (ws_stream, username)
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_websocket_echo() {
     init();
 
@@ -489,7 +489,7 @@ mod tests {
     ws_stream.close(None).await.unwrap();
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_websocket_broadcast() {
     init();
 
@@ -542,7 +542,7 @@ mod tests {
     client2.close(None).await.unwrap();
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_separate_isolates_per_cell() {
     init();
 
@@ -595,7 +595,7 @@ mod tests {
     client2.close(None).await.unwrap();
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn env_test() {
     init();
     let response = reqwest::Client::new()
@@ -613,7 +613,7 @@ mod tests {
     assert_eq!(env_obj.len(), 3, "Expected exactly 4 environment variables");
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_default_tenant() {
     init();
 
@@ -629,7 +629,7 @@ mod tests {
     assert!(response.contains("default tenant"));
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_internal_endpoint_is_not_accessible_to_external_clients() {
     init();
 
@@ -686,7 +686,7 @@ mod tests {
     }
   }
 
-  #[tokio::test]
+  #[test_log::test(tokio::test)]
   async fn test_auto_created_tables() {
     use rusqlite::Connection;
     use std::fs;
