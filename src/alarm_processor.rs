@@ -550,20 +550,33 @@ fn dispatch_completed_handler(
   // Note that new alarms may have been set while dispatching alarms. In order
   // to avoid deleting such alarms, we delete alarms whose scheduled time
   // matches the dispatched one.
-  for alarm in dispatched_alarms {
-    // TODO: can we do all DELETEs in one go?
-    let Ok(mut stmt) = conn.prepare("DELETE FROM global_alarms WHERE tenant = ? AND cell_id = ? AND scheduled_time_unix_ms = ?").inspect_err(|e| {
-      error!(?alarm, error = ?e, "Failed to prepare statement to delete alarm");
-    }) else {
-      continue;
-    };
-    if let Err(e) = stmt.execute([
+  let placeholders = dispatched_alarms
+    .iter()
+    .map(|_| "(?, ?, ?)")
+    .collect::<Vec<_>>()
+    .join(", ");
+  let sql = format!(
+    "DELETE FROM global_alarms WHERE (tenant, cell_id, scheduled_time_unix_ms) IN ({})",
+    placeholders
+  );
+
+  let Ok(mut stmt) = conn.prepare(&sql).inspect_err(|e| {
+    error!(error = ?e, "Failed to prepare batch delete statement");
+  }) else {
+    let _ = response.send(Ok(()));
+    return;
+  };
+
+  let params = dispatched_alarms.iter().flat_map(|alarm| {
+    [
       alarm.tenant.clone(),
       alarm.cell_id.clone(),
       alarm.scheduled_time_unix_ms.to_string(),
-    ]) {
-      error!(?alarm, error = ?e, "Failed to delete alarm");
-    }
+    ]
+  });
+
+  if let Err(e) = stmt.execute(rusqlite::params_from_iter(params)) {
+    error!(error = ?e, "Failed to batch delete dispatched alarms");
   }
 
   let _ = response.send(Ok(()));
