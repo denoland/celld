@@ -277,29 +277,84 @@ The bridge properly handles:
 - ✅ **Bridge Pattern**: Clean conversion between hyper and Pingora types
 - ✅ **Error Handling**: Proper Pingora Error types used for logging
 
-#### Phase 7: WebSocket Support
+#### Phase 7: WebSocket Support ✅
 
 **Goal**: Implement WebSocket upgrade handling
 
-- [ ] In `src/pingora_hyper/proxy.rs`:
-  - [ ] Add WebSocket detection to Session
-  - [ ] Implement upgrade handling:
-    - [ ] Follow pattern from `docs/hyper-example.rs`
-    - [ ] Detect upgrade headers
-    - [ ] Handle bidirectional streaming with `tokio::io::copy_bidirectional`
-  - [ ] Ensure connection tracking works for WebSockets
+- [x] **WebSocket Detection & Routing**: Added early detection in
+      `proxy_http_bridge()`:
+  - [x] Check for `sec-websocket-key` header to detect WebSocket upgrade
+        requests
+  - [x] Route WebSocket requests to dedicated `handle_websocket_bridge()`
+        function
+  - [x] Preserve original `hyper::Request` for upgrade while processing through
+        ProxyHttp
 
-- [ ] Key implementation details from example:
-  - [ ] Check for `SEC_WEBSOCKET_KEY` header
-  - [ ] Create upgrade response with proper headers
-  - [ ] Use `hyper::upgrade::on()` for both client and upstream
-  - [ ] Handle the upgraded connections properly
+- [x] **WebSocket Bridge Implementation**:
+  - [x] Created `handle_websocket_bridge()` that processes WebSocket requests
+        through full ProxyHttp flow
+  - [x] Maintains separation of concerns - WebSocket detection in compatibility
+        layer, routing logic in application
+  - [x] Properly handles request_filter, upstream_peer, and
+        upstream_request_filter for WebSocket requests
 
-**Test checkpoints**:
+- [x] **Unix Socket WebSocket Upgrade**:
+  - [x] Implemented `handle_websocket_uds_upgrade()` following patterns from
+        `docs/hyper-example.rs`
+  - [x] Forward WebSocket upgrade headers (`sec-websocket-*`, `upgrade`,
+        `connection`) to upstream
+  - [x] Handle upgrade handshake on both client and upstream sides
+  - [x] Use `hyper::upgrade::on()` for both client and upstream connections
+  - [x] Use `tokio::io::copy_bidirectional()` for transparent bidirectional
+        streaming
 
-- [ ] `test_websocket_echo` passes
-- [ ] `test_websocket_broadcast` passes
-- [ ] `test_separate_isolates_per_cell` passes
+- [x] **HTTP Server Configuration**:
+  - [x] Enabled `.with_upgrades()` on Hyper HTTP server to support connection
+        upgrades
+  - [x] Proper error handling for upgrade failures with appropriate HTTP status
+        codes
+
+**Test checkpoints**: ✅
+
+- [x] ✅ `test_websocket_echo` passes - Single client WebSocket echo works
+- [x] ✅ `test_websocket_broadcast` passes - Multi-client WebSocket broadcast
+      works
+- [x] ✅ `test_separate_isolates_per_cell` passes - WebSocket isolation between
+      cells works
+- [x] ✅ Regular HTTP functionality continues to work (static files, cell
+      routing)
+
+**Implementation Details**:
+
+The WebSocket upgrade flow follows these steps:
+
+1. **Early Detection**: Check for `sec-websocket-key` header in
+   `proxy_http_bridge()`
+2. **ProxyHttp Processing**: Process WebSocket requests through the same
+   ProxyHttp flow as regular HTTP
+3. **Dual Upgrade**: Perform WebSocket upgrade handshake with both client and
+   upstream Deno process
+4. **Bidirectional Proxy**: Use `tokio::io::copy_bidirectional()` to
+   transparently forward all WebSocket traffic
+
+Key implementation functions:
+
+- `handle_websocket_bridge()`: Main WebSocket bridge that processes through
+  ProxyHttp flow
+- `handle_websocket_uds_upgrade()`: Handles the actual WebSocket upgrade over
+  Unix sockets
+- HTTP server configured with `.with_upgrades()` to support connection upgrades
+
+**Architecture Notes**:
+
+- ✅ **Separation of Concerns**: WebSocket upgrade logic is purely in
+  compatibility layer
+- ✅ **ProxyHttp Integration**: WebSocket requests go through same ProxyHttp
+  flow as regular HTTP
+- ✅ **Transparent Proxying**: Bidirectional streaming maintains full WebSocket
+  protocol compatibility
+- ✅ **Error Handling**: Proper error handling with HTTP status codes (400,
+  502, 503)
 
 #### Phase 8: Background Services
 
