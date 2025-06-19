@@ -446,6 +446,7 @@ where
 }
 
 /// Handle upstream connection via Unix domain socket
+/// TODO: CRITICAL - This function needs streaming support for production use
 async fn handle_uds_upstream(
   upstream_peer: &HttpPeer,
   upstream_request: RequestHeader,
@@ -496,7 +497,7 @@ async fn handle_uds_upstream(
 
   // Convert the upstream response to our response format
   let (parts, body) = upstream_response.into_parts();
-  let body_bytes = body.collect().await?.to_bytes();
+  let body_bytes = body.collect().await?.to_bytes(); // TODO: CRITICAL - Replace with streaming
 
   // Build final response
   let mut response_builder = hyper::Response::builder()
@@ -512,6 +513,7 @@ async fn handle_uds_upstream(
 }
 
 /// Handle upstream connection via TCP
+/// TODO: CRITICAL - This function needs streaming support for production use
 async fn handle_tcp_upstream(
   upstream_peer: &HttpPeer,
   upstream_request: RequestHeader,
@@ -562,7 +564,7 @@ async fn handle_tcp_upstream(
 
   // Convert the upstream response to our response format
   let (parts, body) = upstream_response.into_parts();
-  let body_bytes = body.collect().await?.to_bytes();
+  let body_bytes = body.collect().await?.to_bytes(); // TODO: CRITICAL - Replace with streaming
 
   // Build final response
   let mut response_builder = hyper::Response::builder()

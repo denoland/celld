@@ -1,4 +1,6 @@
 #[cfg(feature = "hyper-compat")]
+pub mod connection_pool;
+#[cfg(feature = "hyper-compat")]
 pub mod error;
 #[cfg(feature = "hyper-compat")]
 pub mod http;

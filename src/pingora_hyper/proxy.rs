@@ -93,12 +93,14 @@ impl From<http::response::Parts> for ResponseHeader {
 }
 
 /// A concrete Session type for the hyper compatibility layer
+/// TODO: CRITICAL - This struct needs complete redesign for streaming support
+/// Current response_body Vec<bytes::Bytes> buffers all content in memory
 pub struct Session {
   req_header: RequestHeader,
   _body: bytes::Bytes,
   response_status: Option<StatusCode>,
   response_headers: HeaderMap,
-  response_body: Vec<bytes::Bytes>,
+  response_body: Vec<bytes::Bytes>, // TODO: Replace with streaming response writer
   _keepalive: Option<u64>,
 }
 
@@ -132,13 +134,16 @@ impl Session {
     Ok(())
   }
 
+  /// TODO: CRITICAL - This method must stream immediately for production readiness
+  /// Current implementation buffers all chunks in Vec - needs to forward to hyper immediately
+  /// Must support both current usage (single large write) and future usage (chunked writes)
   pub async fn write_response_body(
     &mut self,
     data: Option<bytes::Bytes>,
     _end_of_stream: bool,
   ) -> Result<()> {
     if let Some(data) = data {
-      self.response_body.push(data);
+      self.response_body.push(data); // TODO: Replace with immediate streaming
     }
     Ok(())
   }

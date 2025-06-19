@@ -416,7 +416,22 @@ async fn serve_static_file(
   status: StatusCode,
   is_head_request: bool,
 ) -> Result<()> {
-  // Try to read the file
+  // TODO: CRITICAL - Full streaming support needed in pingora_hyper bridge
+  // Current approach loads entire file into memory - unsuitable for production
+  //
+  // The pingora_hyper bridge should implement full streaming support so that:
+  // 1. This application code can continue to work unchanged (loads file, writes once)
+  // 2. Future application code can stream via multiple write_response_body() calls
+  // 3. Both patterns result in streamed responses, never buffering in bridge
+  //
+  // Bridge implementation needs:
+  // - Session::write_response_body() streams immediately via channels
+  // - Session::build_response() returns streaming body type
+  // - Support for both single large write (current) and chunked writes (future)
+  //
+  // This ensures production safety regardless of how application uses the API.
+
+  // Try to read the file (CURRENT BLOCKING IMPLEMENTATION)
   let file = match std::fs::read(file_path) {
     Ok(file) => file,
     Err(e) => {

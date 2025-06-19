@@ -461,13 +461,76 @@ socket connections but uses `TcpStream::connect()` instead of
   connections
 - ✅ **Compatibility**: Full compatibility with existing Pingora API patterns
 
-#### Phase 10: Advanced Features
+#### Phase 10: Full Streaming Bridge Implementation (Critical) 🚨
 
-**Goal**: Complete remaining functionality
+**Goal**: Implement complete streaming support in the pingora_hyper bridge for
+production readiness
 
-- [ ] Request body handling:
-  - [ ] Implement `Session::read_request_body()`
-  - [ ] Handle streaming for large bodies
+**⚠️ CRITICAL LIMITATION**: The current bridge buffers all content in memory,
+making it unsuitable for production use with large files or streaming responses.
+
+**Design Principle**: The bridge should support full streaming capabilities
+regardless of current application usage. This ensures production readiness and
+future-proofs the implementation.
+
+- [ ] **Response Body Streaming Architecture**:
+  - [ ] Replace `Session::build_response()` return type from `Full<Bytes>` to
+        streaming body
+  - [ ] Implement `Session::write_response_body()` to stream chunks immediately
+        via channels
+  - [ ] Support backpressure and flow control between Session and hyper response
+  - [ ] Handle end-of-stream signaling properly with `_end_of_stream` parameter
+
+- [ ] **Upstream Response Streaming**:
+  - [ ] Replace `body.collect().await` with streaming in `handle_tcp_upstream()`
+  - [ ] Replace `body.collect().await` with streaming in `handle_uds_upstream()`
+  - [ ] Forward upstream response chunks immediately without buffering
+  - [ ] Support for real-time data streams (Server-Sent Events, streaming JSON)
+  - [ ] Maintain response headers and status code while streaming body
+
+- [ ] **Request Body Streaming**:
+  - [ ] Replace `body.collect().await` in `proxy_http_bridge()` with on-demand
+        reading
+  - [ ] Implement `Session::read_request_body()` to provide chunks on demand
+  - [ ] Support streaming request bodies for large uploads
+  - [ ] Handle chunked transfer encoding properly
+
+- [ ] **Bridge Response Types**:
+  - [ ] Implement custom streaming body type that wraps tokio channels
+  - [ ] Support `http_body::Body` trait for hyper compatibility
+  - [ ] Handle connection cleanup and error propagation
+  - [ ] Support both buffered (current app) and streaming (future app) usage
+        patterns
+
+**Current Memory Usage Issues**:
+
+- 🚨 **Static files**: O(file_size) memory per concurrent request
+- 🚨 **Proxy responses**: O(response_size) memory per concurrent request
+- 🚨 **Large uploads**: O(request_size) memory per concurrent request
+
+**With Streaming (Target)**:
+
+- ✅ **All operations**: O(buffer_size) memory - typically 8KB-64KB regardless
+  of content size
+- ✅ **Latency**: First bytes sent immediately, not after full content load
+- ✅ **Throughput**: Limited only by I/O bandwidth, not memory
+
+**Benefits of Full Streaming Bridge**:
+
+- ✅ **Immediate Production Readiness**: Bridge can handle large files and
+  streaming responses safely
+- ✅ **Application Compatibility**: Current buffering-based app code continues
+  to work unchanged
+- ✅ **Future-Proof**: Application can be updated to use streaming incrementally
+- ✅ **Memory Safety**: Eliminates O(content_size) memory usage regardless of
+  application patterns
+
+**Implementation Complexity**: HIGH - Requires fundamental changes to Session
+and bridge architecture
+
+#### Phase 11: Advanced Features
+
+**Goal**: Complete remaining functionality after streaming is implemented
 
 - [ ] Internal API support:
   - [ ] Ensure internal server works on separate port
@@ -569,21 +632,42 @@ migration path from Pingora to Hyper.
 - ✅ **Multi-node support**: TCP client connections enable distributed celld
   operations
 
-**⚠️ Known Limitations**:
+**🚨 CRITICAL LIMITATIONS**:
+
+- **Memory Usage**: All content (static files, proxy responses, uploads) is
+  buffered entirely in memory
+- **Large Files**: Serving large static files (videos, downloads) will cause
+  memory exhaustion
+- **Streaming Responses**: Cannot handle real-time streams, Server-Sent Events,
+  or streaming JSON
+- **Production Readiness**: Current implementation is unsuitable for production
+  use with large content
+
+**⚠️ Other Known Limitations**:
 
 - **Multi-node tests**: May require additional configuration (S3, network) in
   test environments
 - **Connection pooling**: Not yet implemented for performance optimization
 - **Advanced features**: Some optimization and refinement work remains
 
-**📋 Remaining Work (Phase 10)**:
+**📋 Remaining Work (Phase 10 - CRITICAL)**:
+
+- **URGENT**: Implement streaming support for static files and proxy responses
+- Fix memory buffering issues that prevent production deployment
+- Add proper chunked response handling and backpressure support
+
+**📋 Future Work (Phase 11)**:
 
 - Add connection pooling and performance optimizations
-- Complete advanced features (request body streaming, internal API refinements)
+- Complete advanced features (internal API refinements, error handling)
 - Performance testing and Pingora dependency removal
 
 The current implementation provides complete celld functionality with full
 Pingora API compatibility, including both single-node and multi-node support.
-All operations work correctly: HTTP serving, WebSocket upgrades, Deno process
-communication, background service management, and TCP-based inter-node
-communication for distributed celld mesh operations.
+All basic operations work correctly: HTTP serving, WebSocket upgrades, Deno
+process communication, background service management, and TCP-based inter-node
+communication.
+
+**However, the implementation has critical memory buffering issues that make it
+unsuitable for production use with large files or streaming responses. Phase 10
+streaming support is essential before production deployment.**
