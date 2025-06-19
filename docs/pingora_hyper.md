@@ -557,9 +557,81 @@ modes.
 **✅ Result**: Both regular and hyper-compat builds work seamlessly with
 identical code paths and full test compatibility.
 
-#### Phase 11: Advanced Features & Optimization
+#### Phase 11: Request Body Streaming Implementation
 
-**Goal**: Complete remaining functionality after streaming is implemented
+**Goal**: Implement missing Pingora-compatible request body streaming
+
+**🚨 CRITICAL COMPATIBILITY GAP**: Our current implementation has a major
+deviation from Pingora's architecture:
+
+**Current (Broken) Implementation**:
+
+```rust
+// server_impl.rs:371 - Buffers entire request body in memory
+let body_bytes = match body.collect().await {
+  Ok(collected) => collected.to_bytes(),
+  Err(_) => Bytes::new(),
+};
+
+// Session::new() takes complete buffered body
+let mut session = Session::new(req_header, body_bytes.clone());
+```
+
+**Target (Pingora-Compatible) Implementation**:
+
+```rust
+// Should pass hyper::body::Incoming directly to Session
+let mut session = Session::new(req_header, body); // body: hyper::body::Incoming
+
+// Session should implement streaming read_request_body()
+impl Session {
+  pub async fn read_request_body(&mut self) -> Result<Option<Bytes>> {
+    // Return chunks from Incoming body, None when complete
+  }
+}
+
+// ProxyHttp trait needs request_body_filter for chunk processing
+async fn request_body_filter(
+  &self,
+  session: &mut Session,
+  body: &mut Option<Bytes>,
+  end_of_stream: bool,
+  ctx: &mut Self::CTX,
+) -> Result<()>
+```
+
+**Required Changes**:
+
+- [ ] **Session struct redesign**: Accept `hyper::body::Incoming` instead of
+      `Bytes`
+- [ ] **Implement `read_request_body()`**: Streaming chunk-by-chunk body reading
+- [ ] **Add `request_body_filter()`**: Missing ProxyHttp trait method for chunk
+      processing
+- [ ] **Streaming upstream forwarding**: Stream request body chunks directly to
+      upstream
+- [ ] **Remove `body.collect().await`**: Eliminate request body buffering in
+      bridge
+- [ ] **Handle chunked encoding**: Support HTTP/1.1 chunked transfers properly
+- [ ] **HTTP/2 compatibility**: Ensure streaming works with HTTP/2 DATA frames
+
+**Architectural Impact**:
+
+- **Breaking Change**: Session API will change significantly
+- **Memory Usage**: Request uploads become O(buffer_size) instead of
+  O(content_size)
+- **Compatibility**: Achieves true Pingora parity for request handling
+- **Performance**: Enables large file uploads without memory exhaustion
+
+**Test Requirements**:
+
+- Large file uploads (GB+ POST/PUT requests)
+- Chunked transfer encoding requests
+- HTTP/2 streaming uploads
+- Concurrent bidirectional streaming (request upload + response download)
+
+#### Phase 12: Advanced Features & Optimization
+
+**Goal**: Complete remaining functionality after streaming is fully implemented
 
 - [ ] Internal API support:
   - [ ] Ensure internal server works on separate port
@@ -691,8 +763,10 @@ migration path from Pingora to Hyper.
   Pingora and hyper-compat modes
 - **Minimal Changes**: Zero logic changes, imports only
 
-**⚠️ Other Known Limitations (Phase 11)**:
+**⚠️ Known Limitations (Phase 11-12)**:
 
+- **🚨 CRITICAL: Request Body Streaming** - Major Pingora compatibility gap
+  affecting large uploads
 - **Multi-node tests**: May require additional configuration (S3, network) in
   test environments
 - **Connection pooling**: Not yet implemented for performance optimization
@@ -721,12 +795,25 @@ migration path from Pingora to Hyper.
 - **✅ Router Compatibility**: Unified compatibility layer eliminates
   conditional compilation
 
-**Remaining optimizations (non-critical)**:
+**Remaining Critical Compatibility Issues**:
 
-- Add request body streaming for large uploads (currently request bodies are
-  still buffered)
+- **🚨 CRITICAL: Request Body Streaming Missing** - Major compatibility gap with
+  Pingora
+  - Pingora natively supports streaming request bodies via
+    `Session::read_request_body()` chunks
+  - Pingora's `ProxyHttp::request_body_filter()` processes each chunk as it
+    streams
+  - Our implementation buffers entire request bodies with `body.collect().await`
+  - This causes OOM on large uploads and breaks chunked/streaming requests
+  - **Solution**: Use `hyper::body::Incoming` throughout instead of `Bytes`
+  - **Impact**: Large file uploads, chunked transfers, HTTP/2 streaming all
+    broken vs Pingora
+
+**Additional Optimizations (lower priority)**:
+
 - Add proper chunked transfer encoding handling
 - Add backpressure and flow control optimizations
+- Add connection pooling for performance
 
 **📋 Future Work (Phase 11)**:
 
