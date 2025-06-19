@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http_body_util::{BodyExt, Full};
 use http_body_util::combinators::BoxBody;
 use std::sync::Arc;
@@ -367,14 +367,8 @@ where
     headers: parts.headers,
   };
 
-  // Read the body
-  let body_bytes = match body.collect().await {
-    Ok(collected) => collected.to_bytes(),
-    Err(_) => Bytes::new(),
-  };
-
-  // Create a Session with the request
-  let mut session = Session::new(req_header, body_bytes.clone());
+  // Create a Session with the streaming request body
+  let mut session = Session::new(req_header, body);
   let mut ctx = proxy_service.new_ctx();
 
   // Store the original URI before request_filter potentially modifies it
@@ -420,6 +414,51 @@ where
     eprintln!("upstream_request_filter error: {:?}", e);
     return Ok(error_response(502, "Bad Gateway"));
   }
+
+  // Process request body through filters and collect for upstream
+  let mut request_body_chunks = Vec::new();
+  loop {
+    match session.read_request_body().await {
+      Ok(Some(chunk)) => {
+        let end_of_stream = false; // We'll know it's the end when we get None
+        if let Err(e) = proxy_service
+          .request_body_filter(&mut session, &mut Some(chunk.clone()), end_of_stream, &mut ctx)
+          .await
+        {
+          eprintln!("request_body_filter error: {:?}", e);
+          return Ok(error_response(500, "Internal Server Error"));
+        }
+        request_body_chunks.push(chunk);
+      }
+      Ok(None) => {
+        // End of stream, call filter one last time
+        if let Err(e) = proxy_service
+          .request_body_filter(&mut session, &mut None, true, &mut ctx)
+          .await
+        {
+          eprintln!("request_body_filter error on end of stream: {:?}", e);
+          return Ok(error_response(500, "Internal Server Error"));
+        }
+        break;
+      }
+      Err(e) => {
+        eprintln!("Error reading request body: {:?}", e);
+        return Ok(error_response(400, "Bad Request"));
+      }
+    }
+  }
+
+  // Combine all chunks for upstream forwarding
+  let body_bytes = if request_body_chunks.is_empty() {
+    Bytes::new()
+  } else {
+    let total_len: usize = request_body_chunks.iter().map(|b| b.len()).sum();
+    let mut combined = bytes::BytesMut::with_capacity(total_len);
+    for chunk in request_body_chunks {
+      combined.extend_from_slice(&chunk);
+    }
+    combined.freeze()
+  };
 
   // Handle upstream connection with streaming - now returns BoxBody directly
   let upstream_response = if upstream_peer.is_uds {
@@ -524,16 +563,43 @@ where
     headers: parts.headers.clone(),
   };
 
-  // Read the body (should be empty for WebSocket upgrade)
-  let body_bytes = match body.collect().await {
-    Ok(collected) => collected.to_bytes(),
-    Err(_) => Bytes::new(),
-  };
-
-  // Create a Session and go through ProxyHttp flow
-  let mut session = Session::new(req_header, body_bytes.clone());
+  // Create a Session with streaming body (should be empty for WebSocket upgrade)
+  let mut session = Session::new(req_header, body);
   let mut ctx = proxy_service.new_ctx();
   let original_uri = session.req_header().uri.clone();
+
+  // Process any request body (should be empty for WebSocket, but handle it anyway)
+  let mut request_body_chunks = Vec::new();
+  loop {
+    match session.read_request_body().await {
+      Ok(Some(chunk)) => {
+        let end_of_stream = false;
+        if let Err(e) = proxy_service
+          .request_body_filter(&mut session, &mut Some(chunk.clone()), end_of_stream, &mut ctx)
+          .await
+        {
+          eprintln!("WebSocket request_body_filter error: {:?}", e);
+          return Ok(error_response(500, "Internal Server Error"));
+        }
+        request_body_chunks.push(chunk);
+      }
+      Ok(None) => {
+        // End of stream
+        if let Err(e) = proxy_service
+          .request_body_filter(&mut session, &mut None, true, &mut ctx)
+          .await
+        {
+          eprintln!("WebSocket request_body_filter error on end of stream: {:?}", e);
+          return Ok(error_response(500, "Internal Server Error"));
+        }
+        break;
+      }
+      Err(e) => {
+        eprintln!("WebSocket error reading request body: {:?}", e);
+        return Ok(error_response(400, "Bad Request"));
+      }
+    }
+  }
 
   // Execute ProxyHttp flow
   match proxy_service.request_filter(&mut session, &mut ctx).await {

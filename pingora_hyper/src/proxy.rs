@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 use http::{HeaderMap, Method, StatusCode, Uri, Version};
+use hyper::body::Incoming;
+use http_body_util::BodyExt;
 
 use crate::error::{Error, Result};
 use crate::upstreams::peer::HttpPeer;
@@ -94,11 +96,10 @@ impl From<http::response::Parts> for ResponseHeader {
 }
 
 /// A concrete Session type for the hyper compatibility layer
-/// TODO: CRITICAL - This struct needs complete redesign for streaming support
-/// Current response_body Vec<bytes::Bytes> buffers all content in memory
+/// Now supports streaming request bodies via hyper::body::Incoming
 pub struct Session {
   req_header: RequestHeader,
-  _body: bytes::Bytes,
+  request_body: Option<Incoming>,
   response_status: Option<StatusCode>,
   response_headers: HeaderMap,
   response_body: Vec<bytes::Bytes>, // TODO: Replace with streaming response writer
@@ -106,10 +107,10 @@ pub struct Session {
 }
 
 impl Session {
-  pub fn new(req_header: RequestHeader, body: bytes::Bytes) -> Self {
+  pub fn new(req_header: RequestHeader, body: Incoming) -> Self {
     Self {
       req_header,
-      _body: body,
+      request_body: Some(body),
       response_status: None,
       response_headers: HeaderMap::new(),
       response_body: Vec::new(),
@@ -165,9 +166,37 @@ impl Session {
     Ok(())
   }
 
+  /// Read next chunk of request body
+  /// Returns Some(bytes) for each chunk, None when complete
+  /// This matches Pingora's streaming interface
   pub async fn read_request_body(&mut self) -> Result<Option<bytes::Bytes>> {
-    // In hyper compatibility layer, the body is already read
-    Ok(Some(self._body.clone()))
+    loop {
+      if let Some(body) = &mut self.request_body {
+        match body.frame().await {
+          Some(Ok(frame)) => {
+            if let Ok(data) = frame.into_data() {
+              return Ok(Some(data));
+            }
+            // Non-data frame (trailers, etc.), continue to next frame
+          }
+          Some(Err(_e)) => {
+            // Error reading frame, mark body as consumed
+            self.request_body = None;
+            return Err(Box::new(Error::InternalError(
+              "Error reading request body".to_string(),
+            )));
+          }
+          None => {
+            // End of stream
+            self.request_body = None;
+            return Ok(None);
+          }
+        }
+      } else {
+        // Body already consumed
+        return Ok(None);
+      }
+    }
   }
 
   /// Build the final hyper response from accumulated state
@@ -249,6 +278,19 @@ pub trait ProxyHttp {
     _upstream_request: &mut RequestHeader,
     _ctx: &mut Self::CTX,
   ) -> Result<()> {
+    Ok(())
+  }
+
+  /// Process request body chunks as they stream through
+  /// Called for each chunk of the request body, matching Pingora's interface
+  async fn request_body_filter(
+    &self,
+    _session: &mut Session,
+    _body: &mut Option<bytes::Bytes>,
+    _end_of_stream: bool,
+    _ctx: &mut Self::CTX,
+  ) -> Result<()> {
+    // Default implementation does nothing
     Ok(())
   }
 
