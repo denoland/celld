@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
+use http_body_util::combinators::BoxBody;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -8,17 +9,15 @@ use tokio::sync::watch;
 use crate::proxy::{ProxyHttp, RequestHeader, Session};
 use crate::upstreams::peer::HttpPeer;
 
-/// Convert streaming response to Full<Bytes> for compatibility during transition
-async fn convert_streaming_to_full(
-  response: hyper::Response<hyper::body::Incoming>,
-) -> Result<
-  hyper::Response<Full<Bytes>>,
-  Box<dyn std::error::Error + Send + Sync>,
-> {
-  let (parts, body) = response.into_parts();
-  let body_bytes = body.collect().await?.to_bytes();
-  Ok(hyper::Response::from_parts(parts, Full::new(body_bytes)))
+/// Helper function to create error responses with BoxBody
+fn error_response(status: u16, message: &str) -> hyper::Response<BoxBody<Bytes, hyper::Error>> {
+  let body = Full::new(Bytes::from(message.to_string())).map_err(|never| match never {}).boxed();
+  hyper::Response::builder()
+    .status(status)
+    .body(body)
+    .unwrap()
 }
+
 
 pub struct ShutdownWatch {
   receiver: watch::Receiver<()>,
@@ -348,7 +347,7 @@ where
 async fn proxy_http_bridge<SV>(
   proxy_service: Arc<SV>,
   hyper_req: hyper::Request<hyper::body::Incoming>,
-) -> Result<hyper::Response<Full<Bytes>>, hyper::Error>
+) -> Result<hyper::Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>
 where
   SV: ProxyHttp + Send + Sync + 'static,
 {
@@ -385,15 +384,14 @@ where
   match proxy_service.request_filter(&mut session, &mut ctx).await {
     Ok(true) => {
       // request_filter handled everything, return the response
-      return Ok(session.build_response());
+      return Ok(session.build_response_boxed());
     }
     Ok(false) => {
       // Continue to upstream logic
     }
     Err(e) => {
       eprintln!("request_filter error: {:?}", e);
-      let body = Full::new(Bytes::from("Internal Server Error"));
-      return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+      return Ok(error_response(500, "Internal Server Error"));
     }
   }
 
@@ -403,8 +401,7 @@ where
       Ok(peer) => peer,
       Err(e) => {
         eprintln!("upstream_peer error: {:?}", e);
-        let body = Full::new(Bytes::from("Bad Gateway"));
-        return Ok(hyper::Response::builder().status(502).body(body).unwrap());
+        return Ok(error_response(502, "Bad Gateway"));
       }
     };
 
@@ -421,13 +418,12 @@ where
     .await
   {
     eprintln!("upstream_request_filter error: {:?}", e);
-    let body = Full::new(Bytes::from("Bad Gateway"));
-    return Ok(hyper::Response::builder().status(502).body(body).unwrap());
+    return Ok(error_response(502, "Bad Gateway"));
   }
 
-  // Handle upstream connection with streaming
+  // Handle upstream connection with streaming - now returns BoxBody directly
   let upstream_response = if upstream_peer.is_uds {
-    // Unix socket connection with streaming - convert to Full<Bytes> for compatibility
+    // Unix socket connection with streaming
     match handle_uds_upstream_streaming(
       &upstream_peer,
       upstream_request.clone(),
@@ -436,25 +432,29 @@ where
     .await
     {
       Ok(streaming_response) => {
-        match convert_streaming_to_full(streaming_response).await {
-          Ok(response) => {
-            Ok::<hyper::Response<Full<Bytes>>, hyper::Error>(response)
-          }
-          Err(e) => {
-            eprintln!("Error converting streaming response: {:?}", e);
-            let body = Full::new(Bytes::from("Bad Gateway"));
-            Ok(hyper::Response::builder().status(502).body(body).unwrap())
-          }
+        // Convert Incoming body to BoxBody for streaming
+        let (parts, body) = streaming_response.into_parts();
+        let boxed_body = body.boxed();
+        
+        let mut response_builder = hyper::Response::builder()
+          .status(parts.status)
+          .version(parts.version);
+        
+        for (name, value) in parts.headers.iter() {
+          response_builder = response_builder.header(name, value);
         }
+        
+        Ok::<hyper::Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>(
+          response_builder.body(boxed_body).unwrap()
+        )
       }
       Err(e) => {
         eprintln!("Error in UDS streaming: {:?}", e);
-        let body = Full::new(Bytes::from("Bad Gateway"));
-        Ok(hyper::Response::builder().status(502).body(body).unwrap())
+        Ok(error_response(502, "Bad Gateway"))
       }
     }
   } else {
-    // TCP connection with streaming - convert to Full<Bytes> for compatibility
+    // TCP connection with streaming
     match handle_tcp_upstream_streaming(
       &upstream_peer,
       upstream_request.clone(),
@@ -463,21 +463,25 @@ where
     .await
     {
       Ok(streaming_response) => {
-        match convert_streaming_to_full(streaming_response).await {
-          Ok(response) => {
-            Ok::<hyper::Response<Full<Bytes>>, hyper::Error>(response)
-          }
-          Err(e) => {
-            eprintln!("Error converting streaming response: {:?}", e);
-            let body = Full::new(Bytes::from("Bad Gateway"));
-            Ok(hyper::Response::builder().status(502).body(body).unwrap())
-          }
+        // Convert Incoming body to BoxBody for streaming
+        let (parts, body) = streaming_response.into_parts();
+        let boxed_body = body.boxed();
+        
+        let mut response_builder = hyper::Response::builder()
+          .status(parts.status)
+          .version(parts.version);
+        
+        for (name, value) in parts.headers.iter() {
+          response_builder = response_builder.header(name, value);
         }
+        
+        Ok::<hyper::Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>(
+          response_builder.body(boxed_body).unwrap()
+        )
       }
       Err(e) => {
         eprintln!("Error in TCP streaming: {:?}", e);
-        let body = Full::new(Bytes::from("Bad Gateway"));
-        Ok(hyper::Response::builder().status(502).body(body).unwrap())
+        Ok(error_response(502, "Bad Gateway"))
       }
     }
   };
@@ -498,8 +502,7 @@ where
       proxy_service
         .logging(&mut session, Some(&pingora_error), &mut ctx)
         .await;
-      let body = Full::new(Bytes::from("Bad Gateway"));
-      Ok(hyper::Response::builder().status(502).body(body).unwrap())
+      Ok(error_response(502, "Bad Gateway"))
     }
   }
 }
@@ -508,7 +511,7 @@ where
 async fn handle_websocket_bridge<SV>(
   proxy_service: Arc<SV>,
   hyper_req: hyper::Request<hyper::body::Incoming>,
-) -> Result<hyper::Response<Full<Bytes>>, hyper::Error>
+) -> Result<hyper::Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>
 where
   SV: ProxyHttp + Send + Sync + 'static,
 {
@@ -536,16 +539,14 @@ where
   match proxy_service.request_filter(&mut session, &mut ctx).await {
     Ok(true) => {
       // request_filter handled everything, but this shouldn't happen for WebSocket
-      let body = Full::new(Bytes::from("Bad Request"));
-      return Ok(hyper::Response::builder().status(400).body(body).unwrap());
+      return Ok(error_response(400, "Bad Request"));
     }
     Ok(false) => {
       // Continue to upstream logic
     }
     Err(e) => {
       eprintln!("WebSocket request_filter error: {:?}", e);
-      let body = Full::new(Bytes::from("Internal Server Error"));
-      return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+      return Ok(error_response(500, "Internal Server Error"));
     }
   }
 
@@ -555,8 +556,7 @@ where
       Ok(peer) => peer,
       Err(e) => {
         eprintln!("WebSocket upstream_peer error: {:?}", e);
-        let body = Full::new(Bytes::from("Bad Gateway"));
-        return Ok(hyper::Response::builder().status(502).body(body).unwrap());
+        return Ok(error_response(502, "Bad Gateway"));
       }
     };
 
@@ -572,8 +572,7 @@ where
     .await
   {
     eprintln!("WebSocket upstream_request_filter error: {:?}", e);
-    let body = Full::new(Bytes::from("Bad Gateway"));
-    return Ok(hyper::Response::builder().status(502).body(body).unwrap());
+    return Ok(error_response(502, "Bad Gateway"));
   }
 
   // Handle WebSocket upgrade
@@ -599,8 +598,7 @@ where
       proxy_service
         .logging(&mut session, Some(&pingora_error), &mut ctx)
         .await;
-      let body = Full::new(Bytes::from("Bad Gateway"));
-      Ok(hyper::Response::builder().status(502).body(body).unwrap())
+      Ok(error_response(502, "Bad Gateway"))
     }
   }
 }
@@ -611,7 +609,7 @@ async fn handle_websocket_uds_upgrade(
   upstream_request: RequestHeader,
   client_parts: http::request::Parts,
 ) -> Result<
-  hyper::Response<Full<Bytes>>,
+  hyper::Response<BoxBody<Bytes, hyper::Error>>,
   Box<dyn std::error::Error + Send + Sync>,
 > {
   use http_body_util::Empty;
@@ -687,7 +685,7 @@ async fn handle_websocket_uds_upgrade(
   }
 
   // Create the final response
-  let res = res_builder.body(Full::new(Bytes::new())).unwrap();
+  let res = res_builder.body(Full::new(Bytes::new()).map_err(|never| match never {}).boxed()).unwrap();
 
   // Rebuild the client request for upgrade
   let client_req =
@@ -726,7 +724,7 @@ async fn handle_websocket_tcp_upgrade(
   upstream_request: RequestHeader,
   client_parts: http::request::Parts,
 ) -> Result<
-  hyper::Response<Full<Bytes>>,
+  hyper::Response<BoxBody<Bytes, hyper::Error>>,
   Box<dyn std::error::Error + Send + Sync>,
 > {
   use http_body_util::Empty;
@@ -802,7 +800,7 @@ async fn handle_websocket_tcp_upgrade(
   }
 
   // Create the final response
-  let res = res_builder.body(Full::new(Bytes::new())).unwrap();
+  let res = res_builder.body(Full::new(Bytes::new()).map_err(|never| match never {}).boxed()).unwrap();
 
   // Rebuild the client request for upgrade
   let client_req =

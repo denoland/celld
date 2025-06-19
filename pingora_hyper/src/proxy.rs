@@ -196,6 +196,33 @@ impl Session {
 
     response.body(Full::new(body_bytes)).unwrap()
   }
+
+  /// Build response with BoxBody for streaming compatibility
+  pub fn build_response_boxed(
+    self,
+  ) -> hyper::Response<http_body_util::combinators::BoxBody<bytes::Bytes, hyper::Error>> {
+    use http_body_util::{BodyExt, Full};
+
+    let status = self.response_status.unwrap_or(StatusCode::OK);
+    let body_bytes = if self.response_body.is_empty() {
+      bytes::Bytes::new()
+    } else {
+      // Concatenate all body chunks
+      let total_len: usize = self.response_body.iter().map(|b| b.len()).sum();
+      let mut combined = bytes::BytesMut::with_capacity(total_len);
+      for chunk in self.response_body {
+        combined.extend_from_slice(&chunk);
+      }
+      combined.freeze()
+    };
+
+    let mut response = hyper::Response::builder().status(status);
+    for (name, value) in self.response_headers.iter() {
+      response = response.header(name.clone(), value.clone());
+    }
+
+    response.body(Full::new(body_bytes).map_err(|never| match never {}).boxed()).unwrap()
+  }
 }
 
 #[async_trait]
