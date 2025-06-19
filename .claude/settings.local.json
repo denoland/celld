@@ -20,7 +20,9 @@
       "Bash(cargo clippy:*)",
       "Bash(deno test:*)",
       "Bash(grep:*)",
-      "Bash(deno lint:*)"
+      "Bash(deno lint:*)",
+      "Bash(rg:*)",
+      "Bash(cargo build:*)"
     ],
     "deny": []
   }
