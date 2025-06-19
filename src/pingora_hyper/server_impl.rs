@@ -418,10 +418,9 @@ where
     handle_uds_upstream(&upstream_peer, upstream_request.clone(), &body_bytes)
       .await
   } else {
-    // TCP connection (for future implementation)
-    eprintln!("TCP upstream not yet implemented");
-    let body = Full::new(Bytes::from("Service Unavailable"));
-    return Ok(hyper::Response::builder().status(503).body(body).unwrap());
+    // TCP connection
+    handle_tcp_upstream(&upstream_peer, upstream_request.clone(), &body_bytes)
+      .await
   };
 
   match upstream_response {
@@ -489,6 +488,72 @@ async fn handle_uds_upstream(
   tokio::spawn(async move {
     if let Err(e) = conn.await {
       eprintln!("UDS client connection error: {}", e);
+    }
+  });
+
+  // Send the request to the upstream server
+  let upstream_response = sender.send_request(upstream_req).await?;
+
+  // Convert the upstream response to our response format
+  let (parts, body) = upstream_response.into_parts();
+  let body_bytes = body.collect().await?.to_bytes();
+
+  // Build final response
+  let mut response_builder = hyper::Response::builder()
+    .status(parts.status)
+    .version(parts.version);
+
+  // Copy response headers
+  for (name, value) in parts.headers.iter() {
+    response_builder = response_builder.header(name, value);
+  }
+
+  Ok(response_builder.body(Full::new(body_bytes)).unwrap())
+}
+
+/// Handle upstream connection via TCP
+async fn handle_tcp_upstream(
+  upstream_peer: &HttpPeer,
+  upstream_request: RequestHeader,
+  body_bytes: &Bytes,
+) -> Result<
+  hyper::Response<Full<Bytes>>,
+  Box<dyn std::error::Error + Send + Sync>,
+> {
+  use hyper_util::rt::TokioIo;
+  use tokio::net::TcpStream;
+
+  // Connect to the TCP address
+  let tcp_stream = match TcpStream::connect(&upstream_peer.address).await {
+    Ok(stream) => stream,
+    Err(e) => {
+      eprintln!("Failed to connect to TCP {}: {}", upstream_peer.address, e);
+      return Err(e.into());
+    }
+  };
+
+  // Build the upstream HTTP request
+  let mut req_builder = hyper::Request::builder()
+    .method(upstream_request.method)
+    .uri(upstream_request.uri)
+    .version(upstream_request.version);
+
+  // Copy headers
+  for (name, value) in upstream_request.headers.iter() {
+    req_builder = req_builder.header(name, value);
+  }
+
+  // Create request with body (always use Full for consistency)
+  let upstream_req = req_builder.body(Full::new(body_bytes.clone())).unwrap();
+
+  // Create HTTP client for the TCP connection
+  let io = TokioIo::new(tcp_stream);
+  let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+
+  // Start a task to handle the HTTP connection
+  tokio::spawn(async move {
+    if let Err(e) = conn.await {
+      eprintln!("TCP client connection error: {}", e);
     }
   });
 
@@ -585,33 +650,31 @@ where
   }
 
   // Handle WebSocket upgrade
-  if upstream_peer.is_uds {
-    match handle_websocket_uds_upgrade(&upstream_peer, upstream_request, parts)
-      .await
-    {
-      Ok(response) => {
-        proxy_service.logging(&mut session, None, &mut ctx).await;
-        Ok(response)
-      }
-      Err(e) => {
-        eprintln!("WebSocket upgrade error: {:?}", e);
-        // Convert to Pingora Error for logging
-        use crate::pingora_hyper::error::{Error, ErrorType};
-        let pingora_error = Error::explain(
-          ErrorType::InternalError,
-          &format!("WebSocket upgrade error: {}", e),
-        );
-        proxy_service
-          .logging(&mut session, Some(&pingora_error), &mut ctx)
-          .await;
-        let body = Full::new(Bytes::from("Bad Gateway"));
-        Ok(hyper::Response::builder().status(502).body(body).unwrap())
-      }
-    }
+  let websocket_result = if upstream_peer.is_uds {
+    handle_websocket_uds_upgrade(&upstream_peer, upstream_request, parts).await
   } else {
-    eprintln!("TCP WebSocket upstream not yet implemented");
-    let body = Full::new(Bytes::from("Service Unavailable"));
-    Ok(hyper::Response::builder().status(503).body(body).unwrap())
+    handle_websocket_tcp_upgrade(&upstream_peer, upstream_request, parts).await
+  };
+
+  match websocket_result {
+    Ok(response) => {
+      proxy_service.logging(&mut session, None, &mut ctx).await;
+      Ok(response)
+    }
+    Err(e) => {
+      eprintln!("WebSocket upgrade error: {:?}", e);
+      // Convert to Pingora Error for logging
+      use crate::pingora_hyper::error::{Error, ErrorType};
+      let pingora_error = Error::explain(
+        ErrorType::InternalError,
+        &format!("WebSocket upgrade error: {}", e),
+      );
+      proxy_service
+        .logging(&mut session, Some(&pingora_error), &mut ctx)
+        .await;
+      let body = Full::new(Bytes::from("Bad Gateway"));
+      Ok(hyper::Response::builder().status(502).body(body).unwrap())
+    }
   }
 }
 
@@ -721,6 +784,121 @@ async fn handle_websocket_uds_upgrade(
             }
           }
           Err(e) => eprintln!("Error upgrading UDS connection: {}", e),
+        }
+      }
+      Err(e) => eprintln!("Error upgrading client connection: {}", e),
+    }
+  });
+
+  Ok(res)
+}
+
+/// Handle WebSocket upgrade over TCP
+async fn handle_websocket_tcp_upgrade(
+  upstream_peer: &HttpPeer,
+  upstream_request: RequestHeader,
+  client_parts: http::request::Parts,
+) -> Result<
+  hyper::Response<Full<Bytes>>,
+  Box<dyn std::error::Error + Send + Sync>,
+> {
+  use http_body_util::Empty;
+  use hyper::header::{CONNECTION, SEC_WEBSOCKET_KEY, UPGRADE};
+  use hyper_util::rt::TokioIo;
+  use tokio::net::TcpStream;
+
+  // Connect to the TCP address
+  let tcp_stream = match TcpStream::connect(&upstream_peer.address).await {
+    Ok(stream) => stream,
+    Err(e) => {
+      eprintln!("Failed to connect to TCP {}: {}", upstream_peer.address, e);
+      return Err(e.into());
+    }
+  };
+
+  // Build the upstream WebSocket upgrade request
+  let mut req_builder = hyper::Request::builder()
+    .method("GET")
+    .uri(upstream_request.uri.clone())
+    .version(hyper::Version::HTTP_11);
+
+  // Copy over headers required for the WebSocket upgrade
+  for (name, value) in upstream_request.headers.iter() {
+    if name == UPGRADE
+      || name == CONNECTION
+      || name == SEC_WEBSOCKET_KEY
+      || name.as_str().starts_with("sec-websocket-")
+    {
+      req_builder = req_builder.header(name, value);
+    }
+  }
+
+  // Build the upgrade request for the TCP socket
+  let tcp_req = req_builder.body(Empty::<Bytes>::new()).unwrap();
+
+  // Create a client for the TCP socket
+  let io = TokioIo::new(tcp_stream);
+  let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+
+  // Start a task to handle the HTTP connection
+  tokio::spawn(async move {
+    if let Err(e) = conn.with_upgrades().await {
+      eprintln!("TCP WebSocket client connection error: {}", e);
+    }
+  });
+
+  // Send the WebSocket upgrade request to the TCP server
+  let tcp_res = sender.send_request(tcp_req).await?;
+
+  // Check if the upgrade was successful
+  if tcp_res.status() != hyper::StatusCode::SWITCHING_PROTOCOLS {
+    return Err(
+      format!(
+        "TCP WebSocket upgrade failed with status: {}",
+        tcp_res.status()
+      )
+      .into(),
+    );
+  }
+
+  // Build the upgrade response for the client
+  let mut res_builder = hyper::Response::builder()
+    .status(hyper::StatusCode::SWITCHING_PROTOCOLS)
+    .header(UPGRADE, "websocket")
+    .header(CONNECTION, "upgrade");
+
+  // Copy relevant headers from the TCP server response
+  for (name, value) in tcp_res.headers() {
+    if name.as_str().starts_with("sec-websocket-") {
+      res_builder = res_builder.header(name, value);
+    }
+  }
+
+  // Create the final response
+  let res = res_builder.body(Full::new(Bytes::new())).unwrap();
+
+  // Rebuild the client request for upgrade
+  let client_req =
+    hyper::Request::from_parts(client_parts, Empty::<Bytes>::new());
+
+  // Handle the upgraded connection in a background task
+  tokio::spawn(async move {
+    match hyper::upgrade::on(client_req).await {
+      Ok(client_upgraded) => {
+        // Forward data between client and TCP upstream
+        match hyper::upgrade::on(tcp_res).await {
+          Ok(tcp_upgraded) => {
+            let mut client_io = TokioIo::new(client_upgraded);
+            let mut tcp_io = TokioIo::new(tcp_upgraded);
+
+            // Copy data between the two connections
+            if let Err(e) =
+              tokio::io::copy_bidirectional(&mut client_io, &mut tcp_io).await
+            {
+              eprintln!("Error in TCP WebSocket proxy: {}", e);
+            }
+          }
+          Err(e) => eprintln!("Error upgrading TCP connection: {}", e),
         }
       }
       Err(e) => eprintln!("Error upgrading client connection: {}", e),
