@@ -268,7 +268,6 @@ where
 pub struct ListeningService<T> {
   inner: T,
   tcp_addresses: Vec<String>,
-  listeners: Option<Vec<tokio::net::TcpListener>>,
 }
 
 impl<T> ListeningService<T> {
@@ -276,7 +275,6 @@ impl<T> ListeningService<T> {
     Self {
       inner,
       tcp_addresses: Vec::new(),
-      listeners: None,
     }
   }
 
