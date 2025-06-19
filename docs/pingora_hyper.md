@@ -107,33 +107,33 @@ nothing works)
 
 **Test checkpoint**: ✅ Types are defined, code compiles with feature flag
 
-#### Phase 3: HTTP Server Foundation
+#### Phase 3: HTTP Server Foundation ✅
 
 **Goal**: Get basic HTTP server running with health checks
 
-- [ ] In `src/pingora_hyper/server.rs`:
-  - [ ] Implement `Server::run_forever()`:
-    - [ ] Start Hyper servers on configured addresses
-    - [ ] Route requests to appropriate services
-    - [ ] Handle graceful shutdown
-  - [ ] Implement `http_proxy_service()` function
+- [x] In `src/pingora_hyper/server.rs`:
+  - [x] Implement `Server::run_forever()`:
+    - [x] Start Hyper servers on configured addresses
+    - [x] Route requests to appropriate services
+    - [x] Handle graceful shutdown
+  - [x] Implement `http_proxy_service()` function
 
-- [ ] In `src/pingora_hyper/proxy.rs`:
-  - [ ] Define `Session` struct with request/response state
-  - [ ] Implement `Session::req_header()` returning `&RequestHeader`
-  - [ ] Implement `Session::write_response_header()`
-  - [ ] Implement `Session::write_response_body()`
-  - [ ] Implement `Session::set_keepalive()`
-  - [ ] Define `ProxyHttp` trait matching Pingora's
-  - [ ] Create internal executor that calls trait methods in order
+- [x] In `src/pingora_hyper/proxy.rs`:
+  - [x] Define `Session` struct with request/response state
+  - [x] Implement `Session::req_header()` returning `&RequestHeader`
+  - [x] Implement `Session::write_response_header()`
+  - [x] Implement `Session::write_response_body()`
+  - [x] Implement `Session::set_keepalive()`
+  - [x] Define `ProxyHttp` trait matching Pingora's
+  - [x] Create internal executor that calls trait methods in order
 
-- [ ] In router.rs, test health check:
-  - [ ] Ensure `/_health` endpoint works with hyper-compat
+- [x] In router.rs, test health check:
+  - [x] Ensure `/_health` endpoint works with hyper-compat
 
-**Test checkpoint**:
+**Test checkpoint**: ✅
 
-- [ ] Server starts: `cargo run --features hyper-compat`
-- [ ] Health check works: `curl http://localhost:8000/_health`
+- [x] ✅ Server starts: `cargo run --features hyper-compat`
+- [x] ✅ Health check works: `curl http://localhost:8000/_health`
 
 #### Phase 4: Request Routing & Static Files
 

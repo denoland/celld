@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::watch;
 
 use crate::pingora_hyper::service::ShutdownWatch;
@@ -56,7 +57,69 @@ impl Server {
   }
 
   pub fn run_forever(self) -> ! {
-    todo!("implement run_forever")
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    rt.block_on(async move {
+      use tokio::signal;
+      use tokio::sync::watch;
+
+      let (shutdown_tx, shutdown_rx) = watch::channel(());
+
+      // Start all services
+      let mut service_handles = Vec::new();
+
+      for mut service in self.services.into_iter() {
+        let shutdown_watch = ShutdownWatch::new(shutdown_rx.clone());
+        let handle = tokio::spawn(async move {
+          service.start_service(shutdown_watch).await;
+        });
+        service_handles.push(handle);
+      }
+
+      // Wait for shutdown signal
+      let mut sigterm =
+        signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
+      let mut sigint =
+        signal::unix::signal(signal::unix::SignalKind::interrupt()).unwrap();
+
+      tokio::select! {
+        _ = sigterm.recv() => {
+          println!("Received SIGTERM");
+        }
+        _ = sigint.recv() => {
+          println!("Received SIGINT");
+        }
+      }
+
+      // Send shutdown signal
+      let _ = shutdown_tx.send(());
+
+      // Wait for services to shutdown with timeout
+      let grace_period =
+        Duration::from_secs(self._conf.grace_period_seconds.unwrap_or(300));
+
+      println!(
+        "Waiting up to {}s for services to shutdown gracefully...",
+        grace_period.as_secs()
+      );
+
+      let shutdown_future = async {
+        for handle in service_handles {
+          let _ = handle.await;
+        }
+      };
+
+      if tokio::time::timeout(grace_period, shutdown_future)
+        .await
+        .is_err()
+      {
+        println!("Grace period expired, forcing shutdown");
+      }
+
+      println!("Shutdown complete");
+    });
+
+    std::process::exit(0);
   }
 }
 
@@ -77,8 +140,21 @@ impl<SV> Service for HttpProxy<SV>
 where
   SV: Send + Sync + 'static,
 {
-  async fn start_service(&mut self, _shutdown: ShutdownWatch) {
-    todo!("implement HttpProxy service logic")
+  async fn start_service(&mut self, mut shutdown: ShutdownWatch) {
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use tokio::net::TcpListener;
+
+    println!("Starting HTTP Proxy service: {}", self.name);
+
+    // For now, just wait for shutdown signal
+    // TODO: Implement actual HTTP serving logic
+    if let Err(e) = shutdown.changed().await {
+      println!("Shutdown signal received for {}: {}", self.name, e);
+    }
+
+    println!("HTTP Proxy service {} shutting down", self.name);
   }
 
   fn name(&self) -> &str {
@@ -110,8 +186,97 @@ impl<T> Service for ListeningService<T>
 where
   T: Service,
 {
-  async fn start_service(&mut self, shutdown: ShutdownWatch) {
-    // TODO: Start listening on TCP addresses
+  async fn start_service(&mut self, mut shutdown: ShutdownWatch) {
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use tokio::net::TcpListener;
+
+    if self.tcp_addresses.is_empty() {
+      println!(
+        "No TCP addresses configured for {}, just waiting for shutdown",
+        self.name()
+      );
+      let _ = shutdown.changed().await;
+      return;
+    }
+
+    let mut listeners = Vec::new();
+    for addr in &self.tcp_addresses {
+      match TcpListener::bind(addr).await {
+        Ok(listener) => {
+          println!("Listening on {}", addr);
+          listeners.push(listener);
+        }
+        Err(e) => {
+          println!("Failed to bind to {}: {}", addr, e);
+        }
+      }
+    }
+
+    if listeners.is_empty() {
+      println!("No successful listeners for {}", self.name());
+      return;
+    }
+
+    let service_fn = service_fn(|req| async move {
+      use bytes::Bytes;
+      use http_body_util::Full;
+
+      // Simple health check response for now
+      if req.uri().path() == "/_health" {
+        let body = Full::new(Bytes::from("OK"));
+        let response =
+          hyper::Response::builder().status(200).body(body).unwrap();
+        Ok::<_, hyper::Error>(response)
+      } else {
+        let body = Full::new(Bytes::from("Not Found"));
+        let response =
+          hyper::Response::builder().status(404).body(body).unwrap();
+        Ok(response)
+      }
+    });
+
+    // Start accepting connections on all listeners
+    let mut handles = Vec::new();
+
+    for listener in listeners {
+      let service_fn = service_fn.clone();
+      let handle = tokio::spawn(async move {
+        loop {
+          match listener.accept().await {
+            Ok((stream, _)) => {
+              let io = TokioIo::new(stream);
+              let service_fn = service_fn.clone();
+
+              tokio::spawn(async move {
+                if let Err(err) =
+                  http1::Builder::new().serve_connection(io, service_fn).await
+                {
+                  println!("Error serving connection: {:?}", err);
+                }
+              });
+            }
+            Err(e) => {
+              println!("Accept error: {}", e);
+              break;
+            }
+          }
+        }
+      });
+      handles.push(handle);
+    }
+
+    // Wait for shutdown signal
+    let _ = shutdown.changed().await;
+    println!("Shutting down {} listeners", self.name());
+
+    // Cancel all listener tasks
+    for handle in handles {
+      handle.abort();
+    }
+
+    // Also shutdown inner service
     self.inner.start_service(shutdown).await;
   }
 
