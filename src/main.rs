@@ -715,7 +715,7 @@ mod tests {
       stmt
         .query_map([], |row| row.get::<_, String>(0))
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap()
     };
 

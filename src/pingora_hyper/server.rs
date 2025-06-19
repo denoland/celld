@@ -125,13 +125,19 @@ impl Server {
 
 /// The concrete type that holds the user defined HTTP proxy.
 pub struct HttpProxy<SV> {
-  inner: SV,
+  inner: Arc<SV>,
   name: String,
 }
 
-impl<SV> HttpProxy<SV> {
+impl<SV> HttpProxy<SV>
+where
+  SV: Send + Sync + 'static,
+{
   pub fn new(inner: SV, name: String) -> Self {
-    Self { inner, name }
+    Self {
+      inner: Arc::new(inner),
+      name,
+    }
   }
 }
 
@@ -141,15 +147,10 @@ where
   SV: Send + Sync + 'static,
 {
   async fn start_service(&mut self, mut shutdown: ShutdownWatch) {
-    use hyper::server::conn::http1;
-    use hyper::service::service_fn;
-    use hyper_util::rt::TokioIo;
-    use tokio::net::TcpListener;
-
     println!("Starting HTTP Proxy service: {}", self.name);
 
     // For now, just wait for shutdown signal
-    // TODO: Implement actual HTTP serving logic
+    // TODO: Implement actual HTTP serving logic with ProxyHttp
     if let Err(e) = shutdown.changed().await {
       println!("Shutdown signal received for {}: {}", self.name, e);
     }
@@ -219,22 +220,30 @@ where
       return;
     }
 
+    // For now, let's just keep the simple health check
+    // TODO: Implement proper ProxyHttp bridge
+
     let service_fn = service_fn(|req| async move {
       use bytes::Bytes;
       use http_body_util::Full;
+      use std::path::Path;
+      use tokio::fs;
 
-      // Simple health check response for now
-      if req.uri().path() == "/_health" {
+      let path = req.uri().path();
+
+      // Health check
+      if path == "/_health" {
         let body = Full::new(Bytes::from("OK"));
         let response =
           hyper::Response::builder().status(200).body(body).unwrap();
-        Ok::<_, hyper::Error>(response)
-      } else {
-        let body = Full::new(Bytes::from("Not Found"));
-        let response =
-          hyper::Response::builder().status(404).body(body).unwrap();
-        Ok(response)
+        return Ok::<_, hyper::Error>(response);
       }
+
+      // TODO: Bridge to actual ProxyHttp implementation
+      // For now, return a placeholder that shows we need to integrate the real router
+      let body = Full::new(Bytes::from("ProxyHttp bridge not implemented yet"));
+      let response = hyper::Response::builder().status(501).body(body).unwrap();
+      Ok(response)
     });
 
     // Start accepting connections on all listeners
