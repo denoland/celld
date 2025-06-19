@@ -206,29 +206,76 @@ from `router.rs` already handle all application logic.
 **Test checkpoints**:
 
 - [x] ✅ Code compiles with `cargo check --features hyper-compat`
-- [ ] Health check works via ProxyHttp bridge (runtime test pending)
-- [ ] Static file serving works (runtime test pending)
-- [ ] Cell routing works (runtime test pending)
+- [x] ✅ Static file serving works - `test_static_file_serving` passes!
+- [ ] Cell routing works - `basic_db` test currently fails (needs upstream
+      proxying)
 
-#### Phase 6: Upstream Connections (Unix Sockets)
+#### Phase 6: Upstream Connections (Unix Sockets) ✅
 
 **Goal**: Implement HttpPeer and upstream request proxying
 
-- [ ] In `src/pingora_hyper/proxy.rs`:
-  - [ ] Enhance `HttpPeer` with actual connection logic
-  - [ ] Implement Unix socket client support
-  - [ ] Add connection pooling for performance
+**Key implementation patterns from hyper-example.rs**:
 
-- [ ] In bridge implementation:
-  - [ ] When `upstream_peer()` returns a peer, make actual connection
-  - [ ] Forward modified request from `upstream_request_filter()`
-  - [ ] Stream response back through Session
+- Use `UnixStream::connect()` for Unix socket connections
+- Use `hyper::client::conn::http1::handshake()` for HTTP over Unix sockets
+- Handle request/response forwarding with proper header transformation
+- Use `tokio::io::copy_bidirectional()` for WebSocket upgrades
 
-**Test checkpoints**:
+- [x] In `src/pingora_hyper/server_impl.rs`:
+  - [x] Implement actual upstream connection in `proxy_http_bridge()`
+  - [x] Create Unix socket client when `HttpPeer.is_uds` is true
+  - [x] Forward request with modifications from `upstream_request_filter()`
+  - [x] Stream response back through Session
+  - [x] Handle error responses (502, 503, etc.)
 
-- [ ] `test_proxy_with_ephemeral_port` passes
-- [ ] `basic_db` test passes
-- [ ] `env_test` passes
+- [x] **Critical bug fix in router.rs**: Fixed `remove_cell_id_from_uri()`
+      function:
+  - [x] Function was returning empty paths instead of "/" for root paths
+  - [x] Added proper handling: when path becomes empty after prefix removal, use
+        "/"
+  - [x] This ensures `/cell/foo` correctly transforms to `/` when sent to Deno
+        process
+
+- [ ] Handle different response scenarios:
+  - [x] Regular HTTP responses (body streaming)
+  - [ ] WebSocket upgrades (bidirectional streaming) - **Phase 7**
+  - [x] Error responses (502, 503, etc.)
+
+**Test checkpoints**: ✅
+
+- [x] ✅ `test_proxy_with_ephemeral_port` passes (Unix socket proxying works!)
+- [x] ✅ Static file serving continues to work
+- [ ] `basic_db` test passes - **Next: needs more comprehensive testing**
+- [ ] `env_test` passes - **Next: needs testing**
+
+**Implementation Details**:
+
+The upstream connection implementation in `handle_uds_upstream()` follows these
+steps:
+
+1. **Connect**: Use `UnixStream::connect()` to connect to Deno process
+2. **Build Request**: Convert `RequestHeader` to `hyper::Request` with proper
+   method, URI, headers
+3. **HTTP Client**: Use `hyper::client::conn::http1::handshake()` for HTTP over
+   Unix socket
+4. **Send Request**: Forward the HTTP request to upstream
+5. **Stream Response**: Collect response body and headers, convert back to
+   `hyper::Response`
+
+The bridge properly handles:
+
+- Request body forwarding (empty and with content)
+- Header preservation
+- Status code forwarding
+- Error handling with appropriate HTTP status codes (502, 503)
+
+**Architecture Notes**:
+
+- ✅ **Separation of Concerns**: pingora_hyper contains no application logic
+- ✅ **URI Transformation**: Handled entirely in router.rs via
+  `upstream_request_filter()`
+- ✅ **Bridge Pattern**: Clean conversion between hyper and Pingora types
+- ✅ **Error Handling**: Proper Pingora Error types used for logging
 
 #### Phase 7: WebSocket Support
 
@@ -263,7 +310,8 @@ from `router.rs` already handle all application logic.
   - [ ] Create shutdown coordination:
     - [ ] Spawn each service with shutdown watch
     - [ ] Wait for all services on shutdown
-  - [ ] Handle graceful shutdown timeout
+  - [ ] Handle graceful shutdown timeout `pingora_config.grace_period_seconds`
+        (default 300 seconds)
 
 - [ ] Test each service starts:
   - [ ] ProcessReaper

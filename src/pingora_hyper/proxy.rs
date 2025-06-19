@@ -4,6 +4,7 @@ use http::{HeaderMap, Method, StatusCode, Uri, Version};
 use crate::pingora_hyper::error::{Error, Result};
 use crate::pingora_hyper::upstreams::peer::HttpPeer;
 
+#[derive(Clone)]
 pub struct RequestHeader {
   pub method: Method,
   pub uri: Uri,

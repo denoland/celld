@@ -904,6 +904,13 @@ fn remove_cell_id_from_uri(uri: http::Uri, cell_id: &str) -> http::Uri {
       .strip_prefix(&format!("/cell/{cell_id}"))
       .unwrap_or(path);
 
+    // Ensure path is not empty - if empty, use root path "/"
+    let modified_path = if modified_path.is_empty() {
+      "/"
+    } else {
+      modified_path
+    };
+
     let new_path_and_query = match maybe_query {
       Some(query) => format!("{modified_path}?{query}"),
       None => modified_path.to_string(),

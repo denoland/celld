@@ -6,6 +6,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 use crate::pingora_hyper::proxy::{ProxyHttp, RequestHeader, Session};
+use crate::pingora_hyper::upstreams::peer::HttpPeer;
 
 pub struct ShutdownWatch {
   receiver: watch::Receiver<()>,
@@ -352,8 +353,11 @@ where
   };
 
   // Create a Session with the request
-  let mut session = Session::new(req_header, body_bytes);
+  let mut session = Session::new(req_header, body_bytes.clone());
   let mut ctx = proxy_service.new_ctx();
+
+  // Store the original URI before request_filter potentially modifies it
+  let original_uri = session.req_header().uri.clone();
 
   // Execute ProxyHttp flow
   match proxy_service.request_filter(&mut session, &mut ctx).await {
@@ -372,7 +376,7 @@ where
   }
 
   // Get upstream peer
-  let _upstream_peer =
+  let upstream_peer =
     match proxy_service.upstream_peer(&mut session, &mut ctx).await {
       Ok(peer) => peer,
       Err(e) => {
@@ -382,8 +386,119 @@ where
       }
     };
 
-  // For now, just return the response that was built
-  // TODO: Implement actual upstream proxying
-  proxy_service.logging(&mut session, None, &mut ctx).await;
-  Ok(session.build_response())
+  // Create upstream request based on the original request
+  let mut upstream_request = session.req_header().clone();
+  // If the URI was lost during request_filter, restore the original
+  if upstream_request.uri.path().is_empty() {
+    upstream_request.uri = original_uri.clone();
+  }
+
+  // Apply upstream request filter
+  if let Err(e) = proxy_service
+    .upstream_request_filter(&mut session, &mut upstream_request, &mut ctx)
+    .await
+  {
+    eprintln!("upstream_request_filter error: {:?}", e);
+    let body = Full::new(Bytes::from("Bad Gateway"));
+    return Ok(hyper::Response::builder().status(502).body(body).unwrap());
+  }
+
+  // Handle upstream connection
+  let upstream_response = if upstream_peer.is_uds {
+    // Unix socket connection
+    handle_uds_upstream(&upstream_peer, upstream_request.clone(), &body_bytes)
+      .await
+  } else {
+    // TCP connection (for future implementation)
+    eprintln!("TCP upstream not yet implemented");
+    let body = Full::new(Bytes::from("Service Unavailable"));
+    return Ok(hyper::Response::builder().status(503).body(body).unwrap());
+  };
+
+  match upstream_response {
+    Ok(response) => {
+      proxy_service.logging(&mut session, None, &mut ctx).await;
+      Ok(response)
+    }
+    Err(e) => {
+      eprintln!("upstream connection error: {:?}", e);
+      // Convert to Pingora Error for logging
+      use crate::pingora_hyper::error::{Error, ErrorType};
+      let pingora_error = Error::explain(
+        ErrorType::InternalError,
+        &format!("Upstream error: {}", e),
+      );
+      proxy_service
+        .logging(&mut session, Some(&pingora_error), &mut ctx)
+        .await;
+      let body = Full::new(Bytes::from("Bad Gateway"));
+      Ok(hyper::Response::builder().status(502).body(body).unwrap())
+    }
+  }
+}
+
+/// Handle upstream connection via Unix domain socket
+async fn handle_uds_upstream(
+  upstream_peer: &HttpPeer,
+  upstream_request: RequestHeader,
+  body_bytes: &Bytes,
+) -> Result<
+  hyper::Response<Full<Bytes>>,
+  Box<dyn std::error::Error + Send + Sync>,
+> {
+  use hyper_util::rt::TokioIo;
+  use tokio::net::UnixStream;
+
+  // Connect to the Unix domain socket
+  let uds_stream = match UnixStream::connect(&upstream_peer.address).await {
+    Ok(stream) => stream,
+    Err(e) => {
+      eprintln!("Failed to connect to UDS {}: {}", upstream_peer.address, e);
+      return Err(e.into());
+    }
+  };
+
+  // Build the upstream HTTP request
+  let mut req_builder = hyper::Request::builder()
+    .method(upstream_request.method)
+    .uri(upstream_request.uri)
+    .version(upstream_request.version);
+
+  // Copy headers
+  for (name, value) in upstream_request.headers.iter() {
+    req_builder = req_builder.header(name, value);
+  }
+
+  // Create request with body (always use Full for consistency)
+  let upstream_req = req_builder.body(Full::new(body_bytes.clone())).unwrap();
+
+  // Create HTTP client for the UDS connection
+  let io = TokioIo::new(uds_stream);
+  let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+
+  // Start a task to handle the HTTP connection
+  tokio::spawn(async move {
+    if let Err(e) = conn.await {
+      eprintln!("UDS client connection error: {}", e);
+    }
+  });
+
+  // Send the request to the upstream server
+  let upstream_response = sender.send_request(upstream_req).await?;
+
+  // Convert the upstream response to our response format
+  let (parts, body) = upstream_response.into_parts();
+  let body_bytes = body.collect().await?.to_bytes();
+
+  // Build final response
+  let mut response_builder = hyper::Response::builder()
+    .status(parts.status)
+    .version(parts.version);
+
+  // Copy response headers
+  for (name, value) in parts.headers.iter() {
+    response_builder = response_builder.header(name, value);
+  }
+
+  Ok(response_builder.body(Full::new(body_bytes)).unwrap())
 }

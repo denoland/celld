@@ -22,7 +22,8 @@
       "Bash(grep:*)",
       "Bash(deno lint:*)",
       "Bash(rg:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(cargo run:*)"
     ],
     "deny": []
   }
