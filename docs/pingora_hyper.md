@@ -82,30 +82,30 @@ From code analysis:
 **Test checkpoint**: ✅ `cargo check --features hyper-compat` compiles (even if
 nothing works)
 
-#### Phase 2: Core Types Implementation
+#### Phase 2: Core Types Implementation ✅
 
 **Goal**: Implement basic types and server structure
 
-- [ ] In `src/pingora_hyper/error.rs`:
-  - [ ] Define `Error` enum with common cases
-  - [ ] Define `ErrorType` enum matching Pingora's
-  - [ ] Implement `Error::explain()` method
-  - [ ] Implement conversions to HTTP status codes
+- [x] In `src/pingora_hyper/error.rs`:
+  - [x] Define `Error` enum with common cases
+  - [x] Define `ErrorType` enum matching Pingora's
+  - [x] Implement `Error::explain()` method
+  - [x] Implement conversions to HTTP status codes
 
-- [ ] In `src/pingora_hyper/server.rs`:
-  - [ ] Define `Server` struct holding services and config
-  - [ ] Define `ServerConf` with `grace_period_seconds` field
-  - [ ] Implement `Server::new_with_opt_and_conf()`
-  - [ ] Implement `Server::add_service()` - just store in Vec
-  - [ ] Stub `Server::run_forever()` - panic with "not implemented"
+- [x] In `src/pingora_hyper/server.rs`:
+  - [x] Define `Server` struct holding services and config
+  - [x] Define `ServerConf` with `grace_period_seconds` field
+  - [x] Implement `Server::new_with_opt_and_conf()`
+  - [x] Implement `Server::add_service()` - just store in Vec
+  - [x] Stub `Server::run_forever()` - panic with "not implemented"
 
-- [ ] In `src/pingora_hyper/service.rs`:
-  - [ ] Define `BackgroundService` trait matching Pingora's
-  - [ ] Define `ShutdownWatch` wrapping `tokio::sync::watch::Receiver<()>`
-  - [ ] Implement `background_service()` helper function
-  - [ ] Implement `ShutdownWatch::changed()` method
+- [x] In `src/pingora_hyper/service.rs`:
+  - [x] Define `BackgroundService` trait matching Pingora's
+  - [x] Define `ShutdownWatch` wrapping `tokio::sync::watch::Receiver<()>`
+  - [x] Implement `background_service()` helper function
+  - [x] Implement `ShutdownWatch::changed()` method
 
-**Test checkpoint**: Types are defined, code compiles with feature flag
+**Test checkpoint**: ✅ Types are defined, code compiles with feature flag
 
 #### Phase 3: HTTP Server Foundation
 
