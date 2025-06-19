@@ -461,103 +461,131 @@ socket connections but uses `TcpStream::connect()` instead of
   connections
 - ✅ **Compatibility**: Full compatibility with existing Pingora API patterns
 
-#### Phase 10: Full Streaming Bridge Implementation (Critical) ✅ **COMPLETED**
+#### Phase 10: Full Streaming Bridge Implementation ⚠️ **MAJOR REFACTOR NEEDED**
 
-**Goal**: Implement complete streaming support in the pingora_hyper bridge for
-production readiness
+**Goal**: Replace `Response<Full<Bytes>>` with `Response<BoxBody<Bytes, hyper::Error>>` throughout
+the pingora_hyper bridge to enable true streaming without memory buffering.
 
-**✅ RESOLVED**: Streaming implementation complete - bridge now passes through
-responses directly without memory buffering, suitable for production use.
+**Critical Issue**: The current implementation still buffers all responses in memory despite having
+streaming infrastructure. The Session struct accumulates chunks in `Vec<bytes::Bytes>` and all
+functions return `Response<Full<Bytes>>` which requires complete buffering.
 
-**Design Principle**: The bridge should support full streaming capabilities
-regardless of current application usage. This ensures production readiness and
-future-proofs the implementation.
+**🚨 ARCHITECTURAL CHANGES REQUIRED**:
 
-**🔧 CURRENT PROGRESS**:
+1. **Response Type Migration**:
+   ```rust
+   // Current (buffering):
+   async fn proxy_http_bridge(...) -> Result<Response<Full<Bytes>>, hyper::Error>
+   
+   // Target (streaming):
+   async fn proxy_http_bridge(...) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>
+   ```
 
-- [x] **Direct Streaming Architecture**:
-  - [x] Use `http_body_util::StreamBody` for standard hyper streaming responses
-  - [x] Pass-through upstream `hyper::body::Incoming` directly without
-        intermediate buffering
-  - [x] Leverage futures::stream for creating streaming responses
-  - [x] Maintained compatibility with existing buffered response methods
+2. **Session Redesign** - Current blocking issues:
+   - `response_body: Vec<bytes::Bytes>` accumulates all chunks in memory
+   - `write_response_body()` pushes to Vec instead of streaming
+   - `build_response()` concatenates all chunks - defeats streaming purpose
+   - Need channel-based or callback-based streaming approach
 
-- [x] **Bridge Integration** (COMPLETED):
-  - [x] Created new streaming functions `handle_uds_upstream_streaming()` and
-        `handle_tcp_upstream_streaming()`
-  - [x] Updated bridge to use streaming functions instead of buffering functions
-  - [x] Added proper error handling for streaming operations
-  - [x] Maintained compatibility with existing Full<Bytes> response format
-        during transition
-  - [x] **CRITICAL ACHIEVEMENT**: Eliminated `body.collect().await` calls that
-        caused O(content_size) memory usage
+3. **Function Signature Updates** - All must return BoxBody:
+   - `proxy_http_bridge()` - main entry point
+   - `handle_websocket_bridge()` - WebSocket handling 
+   - `handle_uds_upstream_streaming()` - already returns Incoming, needs wrapping
+   - `handle_tcp_upstream_streaming()` - already returns Incoming, needs wrapping
+   - `convert_streaming_to_full()` - DELETE this function entirely!
 
-- [x] **Upstream Response Streaming** (COMPLETED):
-  - [x] **BREAKTHROUGH**: Direct pass-through of `hyper::body::Incoming` from
-        upstream to client
-  - [x] **MEMORY FIX**: No more `body.collect().await` - streaming bodies
-        forwarded immediately
-  - [x] **PRODUCTION READY**: O(buffer_size) memory usage instead of
-        O(content_size)
-  - [x] Support for real-time data streams (Server-Sent Events, streaming JSON,
-        large files)
-  - [x] Maintain response headers and status code while streaming body
+4. **BoxBody Integration**:
+   ```rust
+   use http_body_util::combinators::BoxBody;
+   use http_body_util::{BodyExt, Empty, Full, StreamBody};
+   
+   // Convert different body types to BoxBody:
+   Full::new(bytes).boxed()          // For buffered responses
+   Empty::new().boxed()              // For empty responses  
+   StreamBody::new(stream).boxed()   // For streaming responses
+   incoming_body.boxed()             // For upstream Incoming bodies
+   ```
 
-- [ ] **Request Body Streaming** (Future Enhancement):
-  - [ ] Replace `body.collect().await` in `proxy_http_bridge()` with on-demand
-        reading
-  - [ ] Implement `Session::read_request_body()` to provide chunks on demand
-  - [ ] Support streaming request bodies for large uploads
-  - [ ] Handle chunked transfer encoding properly
-  - **Note**: Request body buffering is non-critical for most use cases
+5. **Session Streaming Options**:
 
-**🏗️ ARCHITECTURE DECISIONS**:
+   **Option A - Channel-based** (Recommended):
+   ```rust
+   pub struct Session {
+     response_sender: Option<mpsc::Sender<Result<Bytes>>>,
+     response_builder: hyper::http::response::Builder,
+     // Remove response_body Vec!
+   }
+   
+   pub fn build_streaming_response(self) -> Response<BoxBody<Bytes, hyper::Error>> {
+     let (sender, receiver) = mpsc::channel(10);
+     self.response_sender = Some(sender);
+     let body = StreamBody::new(receiver).boxed();
+     self.response_builder.body(body).unwrap()
+   }
+   ```
 
-- **Direct Pass-through Streaming**: Use hyper's native streaming bodies
-  directly without intermediate channels
-- **StreamBody Integration**: Leverage `http_body_util::StreamBody` for standard
-  hyper streaming
-- **Zero-copy Forwarding**: Stream upstream response bodies directly to client
-  without buffering
-- **Dual Compatibility**: Session supports both streaming and legacy buffered
-  modes during transition
+   **Option B - Early Response Creation**:
+   ```rust
+   // Return response immediately when headers are written
+   // Use channel or callback for body chunks
+   ```
 
-**📊 MEMORY USAGE TARGET**:
+6. **Critical Code Locations**:
+   - `src/pingora_hyper/src/proxy.rs:104` - Remove `response_body: Vec<bytes::Bytes>`
+   - `src/pingora_hyper/src/proxy.rs:147` - Fix `write_response_body()` to stream
+   - `src/pingora_hyper/src/proxy.rs:174` - Replace `build_response()` method
+   - `src/pingora_hyper/src/server_impl.rs:12` - DELETE `convert_streaming_to_full()`
+   - `src/pingora_hyper/src/server_impl.rs:439` - Remove convert_streaming_to_full call
+   - `src/pingora_hyper/src/server_impl.rs:466` - Remove convert_streaming_to_full call
 
-- Current: O(content_size) - buffers entire responses/files via
-  `body.collect().await`
-- Target: O(buffer_size) - direct streaming pass-through, ~8KB hyper internal
-  buffers
+7. **Implementation Steps**:
+   1. Add BoxBody imports and dependencies
+   2. Create new streaming Session implementation (or enhance existing)
+   3. Update all function signatures to return BoxBody
+   4. Remove ALL Full<Bytes> conversions
+   5. Delete convert_streaming_to_full function
+   6. Test with large file transfers to verify no buffering
 
-**✅ Memory Usage Issues RESOLVED**:
+**📊 IMPACT ANALYSIS**:
 
-- ✅ **Proxy responses**: Now O(buffer_size) memory per concurrent request
-  (FIXED!)
-- ✅ **Streaming content**: Direct pass-through without accumulation (FIXED!)
-- ⚠️ **Large uploads**: Still O(request_size) memory per request (minor
-  limitation)
-- ⚠️ **Static files**: Application-level file reading (not bridge limitation)
+**Current State** (Despite streaming functions):
+- Memory: O(content_size) - Session buffers entire response
+- Latency: High - must receive entire response before sending
+- Throughout: Bottlenecked by memory allocation
+- Production Risk: OOM on large files/streams
 
-**✅ Achieved with Streaming**:
+**Target State** (With BoxBody):
+- Memory: O(buffer_size) - typically 8-64KB regardless of content
+- Latency: Low - first byte sent immediately  
+- Throughput: Limited only by network I/O
+- Production Ready: Safe for any content size
 
-- ✅ **All proxy operations**: O(buffer_size) memory - typically 8KB-64KB
-  regardless of content size
-- ✅ **Latency**: First bytes sent immediately, not after full content load
-- ✅ **Throughput**: Limited only by I/O bandwidth, not memory
-- ✅ **Production Ready**: Safe for large files and real-time streaming
+**⚠️ BREAKING CHANGES**:
+- All HTTP handlers must return BoxBody instead of Full
+- Session API will change significantly
+- Error handling may need updates for streaming errors
 
-**Benefits of Full Streaming Bridge**:
+**Benefits**:
+- True zero-copy streaming from upstream to client
+- Production-ready for large files and real-time streams
+- Maintains compatibility with ProxyHttp trait
+- Future-proof for HTTP/2 and HTTP/3
 
-- ✅ **Immediate Production Readiness**: Bridge can handle large files and
-  streaming responses safely
-- ✅ **Application Compatibility**: Current buffering-based app code continues
-  to work unchanged
-- ✅ **Future-Proof**: Application can be updated to use streaming incrementally
-- ✅ **Memory Safety**: Eliminates O(content_size) memory usage regardless of
-  application patterns
+**Risks**:
+- Complex refactoring of core bridge code
+- Potential for new edge cases with streaming
+- Need extensive testing with various content types
 
-**Implementation Complexity**: HIGH - Requires fundamental changes to Session
-and bridge architecture
+**Testing Requirements**:
+- Large file downloads (GB+ files)
+- Slow clients (backpressure handling)
+- Streaming responses (SSE, chunked JSON)
+- Error cases during streaming
+- WebSocket compatibility
+
+This is a critical architectural change but necessary for production readiness.
+The current "streaming" implementation is streaming in name only - it still
+buffers everything in memory through the Session struct.
 
 #### Phase 10.1: Router Compatibility (Final Cleanup) ⚠️ **IN PROGRESS**
 
