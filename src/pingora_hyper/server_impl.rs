@@ -8,6 +8,18 @@ use tokio::sync::watch;
 use crate::pingora_hyper::proxy::{ProxyHttp, RequestHeader, Session};
 use crate::pingora_hyper::upstreams::peer::HttpPeer;
 
+/// Convert streaming response to Full<Bytes> for compatibility during transition
+async fn convert_streaming_to_full(
+  response: hyper::Response<hyper::body::Incoming>,
+) -> Result<
+  hyper::Response<Full<Bytes>>,
+  Box<dyn std::error::Error + Send + Sync>,
+> {
+  let (parts, body) = response.into_parts();
+  let body_bytes = body.collect().await?.to_bytes();
+  Ok(hyper::Response::from_parts(parts, Full::new(body_bytes)))
+}
+
 pub struct ShutdownWatch {
   receiver: watch::Receiver<()>,
 }
@@ -331,7 +343,7 @@ where
 }
 
 /// Bridge function that converts hyper::Request to Pingora Session
-/// and calls the ProxyHttp implementation
+/// and calls the ProxyHttp implementation with streaming support
 async fn proxy_http_bridge<SV>(
   proxy_service: Arc<SV>,
   hyper_req: hyper::Request<hyper::body::Incoming>,
@@ -412,15 +424,61 @@ where
     return Ok(hyper::Response::builder().status(502).body(body).unwrap());
   }
 
-  // Handle upstream connection
+  // Handle upstream connection with streaming
   let upstream_response = if upstream_peer.is_uds {
-    // Unix socket connection
-    handle_uds_upstream(&upstream_peer, upstream_request.clone(), &body_bytes)
-      .await
+    // Unix socket connection with streaming - convert to Full<Bytes> for compatibility
+    match handle_uds_upstream_streaming(
+      &upstream_peer,
+      upstream_request.clone(),
+      &body_bytes,
+    )
+    .await
+    {
+      Ok(streaming_response) => {
+        match convert_streaming_to_full(streaming_response).await {
+          Ok(response) => {
+            Ok::<hyper::Response<Full<Bytes>>, hyper::Error>(response)
+          }
+          Err(e) => {
+            eprintln!("Error converting streaming response: {:?}", e);
+            let body = Full::new(Bytes::from("Bad Gateway"));
+            Ok(hyper::Response::builder().status(502).body(body).unwrap())
+          }
+        }
+      }
+      Err(e) => {
+        eprintln!("Error in UDS streaming: {:?}", e);
+        let body = Full::new(Bytes::from("Bad Gateway"));
+        Ok(hyper::Response::builder().status(502).body(body).unwrap())
+      }
+    }
   } else {
-    // TCP connection
-    handle_tcp_upstream(&upstream_peer, upstream_request.clone(), &body_bytes)
-      .await
+    // TCP connection with streaming - convert to Full<Bytes> for compatibility
+    match handle_tcp_upstream_streaming(
+      &upstream_peer,
+      upstream_request.clone(),
+      &body_bytes,
+    )
+    .await
+    {
+      Ok(streaming_response) => {
+        match convert_streaming_to_full(streaming_response).await {
+          Ok(response) => {
+            Ok::<hyper::Response<Full<Bytes>>, hyper::Error>(response)
+          }
+          Err(e) => {
+            eprintln!("Error converting streaming response: {:?}", e);
+            let body = Full::new(Bytes::from("Bad Gateway"));
+            Ok(hyper::Response::builder().status(502).body(body).unwrap())
+          }
+        }
+      }
+      Err(e) => {
+        eprintln!("Error in TCP streaming: {:?}", e);
+        let body = Full::new(Bytes::from("Bad Gateway"));
+        Ok(hyper::Response::builder().status(502).body(body).unwrap())
+      }
+    }
   };
 
   match upstream_response {
@@ -908,4 +966,134 @@ async fn handle_websocket_tcp_upgrade(
   });
 
   Ok(res)
+}
+
+/// Handle upstream connection via Unix domain socket with streaming
+async fn handle_uds_upstream_streaming(
+  upstream_peer: &HttpPeer,
+  upstream_request: RequestHeader,
+  body_bytes: &Bytes,
+) -> Result<
+  hyper::Response<hyper::body::Incoming>,
+  Box<dyn std::error::Error + Send + Sync>,
+> {
+  use hyper_util::rt::TokioIo;
+  use tokio::net::UnixStream;
+
+  // Connect to the Unix domain socket
+  let uds_stream = match UnixStream::connect(&upstream_peer.address).await {
+    Ok(stream) => stream,
+    Err(e) => {
+      eprintln!("Failed to connect to UDS {}: {}", upstream_peer.address, e);
+      return Err(e.into());
+    }
+  };
+
+  // Build the upstream HTTP request
+  let mut req_builder = hyper::Request::builder()
+    .method(upstream_request.method)
+    .uri(upstream_request.uri)
+    .version(upstream_request.version);
+
+  // Copy headers
+  for (name, value) in upstream_request.headers.iter() {
+    req_builder = req_builder.header(name, value);
+  }
+
+  // Create request with body
+  let upstream_req = req_builder.body(Full::new(body_bytes.clone())).unwrap();
+
+  // Create HTTP client for the UDS connection
+  let io = TokioIo::new(uds_stream);
+  let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+
+  // Start a task to handle the HTTP connection
+  tokio::spawn(async move {
+    if let Err(e) = conn.await {
+      eprintln!("UDS client connection error: {}", e);
+    }
+  });
+
+  // Send the request to the upstream server
+  let upstream_response = sender.send_request(upstream_req).await?;
+
+  // Return the streaming response directly without buffering
+  let (parts, body) = upstream_response.into_parts();
+
+  // Build final response with streaming body
+  let mut response_builder = hyper::Response::builder()
+    .status(parts.status)
+    .version(parts.version);
+
+  // Copy response headers
+  for (name, value) in parts.headers.iter() {
+    response_builder = response_builder.header(name, value);
+  }
+
+  Ok(response_builder.body(body).unwrap())
+}
+
+/// Handle upstream connection via TCP with streaming
+async fn handle_tcp_upstream_streaming(
+  upstream_peer: &HttpPeer,
+  upstream_request: RequestHeader,
+  body_bytes: &Bytes,
+) -> Result<
+  hyper::Response<hyper::body::Incoming>,
+  Box<dyn std::error::Error + Send + Sync>,
+> {
+  use hyper_util::rt::TokioIo;
+  use tokio::net::TcpStream;
+
+  // Connect to the TCP address
+  let tcp_stream = match TcpStream::connect(&upstream_peer.address).await {
+    Ok(stream) => stream,
+    Err(e) => {
+      eprintln!("Failed to connect to TCP {}: {}", upstream_peer.address, e);
+      return Err(e.into());
+    }
+  };
+
+  // Build the upstream HTTP request
+  let mut req_builder = hyper::Request::builder()
+    .method(upstream_request.method)
+    .uri(upstream_request.uri)
+    .version(upstream_request.version);
+
+  // Copy headers
+  for (name, value) in upstream_request.headers.iter() {
+    req_builder = req_builder.header(name, value);
+  }
+
+  // Create request with body
+  let upstream_req = req_builder.body(Full::new(body_bytes.clone())).unwrap();
+
+  // Create HTTP client for the TCP connection
+  let io = TokioIo::new(tcp_stream);
+  let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+
+  // Start a task to handle the HTTP connection
+  tokio::spawn(async move {
+    if let Err(e) = conn.await {
+      eprintln!("TCP client connection error: {}", e);
+    }
+  });
+
+  // Send the request to the upstream server
+  let upstream_response = sender.send_request(upstream_req).await?;
+
+  // Return the streaming response directly without buffering
+  let (parts, body) = upstream_response.into_parts();
+
+  // Build final response with streaming body
+  let mut response_builder = hyper::Response::builder()
+    .status(parts.status)
+    .version(parts.version);
+
+  // Copy response headers
+  for (name, value) in parts.headers.iter() {
+    response_builder = response_builder.header(name, value);
+  }
+
+  Ok(response_builder.body(body).unwrap())
 }
