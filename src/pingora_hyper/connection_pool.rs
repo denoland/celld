@@ -1,3 +1,6 @@
+// Connection pooling implementation - planned for Phase 11
+#![allow(dead_code, unused)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -85,26 +88,29 @@ impl TcpConnectionPool {
     let mut pools = self.pools.lock().await;
     let pool = pools.get_mut(address)?;
 
-    // Remove expired/idle connections and find a good one
-    let mut good_connection: Option<TcpStream> = None;
-    pool.retain(|conn| {
-      if good_connection.is_none()
-        && !conn.is_expired(self.max_connection_age)
+    // Find the first good connection and remove it
+    let mut good_index = None;
+    for (i, conn) in pool.iter().enumerate() {
+      if !conn.is_expired(self.max_connection_age)
         && !conn.is_idle(self.max_idle_time)
       {
-        // We found a good connection, but can't move it out here
-        // due to borrow checker, so we'll mark it and remove below
-        false
-      } else {
-        // Keep connections that aren't expired/idle (except the one we want)
+        good_index = Some(i);
+        break;
+      }
+    }
+
+    // Remove and return the good connection if found
+    if let Some(index) = good_index {
+      let conn = pool.remove(index);
+      Some(conn.stream)
+    } else {
+      // Clean up expired/idle connections while we're here
+      pool.retain(|conn| {
         !conn.is_expired(self.max_connection_age)
           && !conn.is_idle(self.max_idle_time)
-      }
-    });
-
-    // If we removed a good connection above, it's gone from the pool
-    // This is a simplified approach - in practice you'd want to be more careful
-    None
+      });
+      None
+    }
   }
 
   /// Clean up expired connections

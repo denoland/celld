@@ -67,6 +67,7 @@ pub trait Service: Sync + Send {
   fn name(&self) -> &str;
 
   /// The preferred number of threads to run this service
+  #[allow(dead_code)]
   fn threads(&self) -> Option<usize> {
     None
   }
@@ -501,140 +502,6 @@ where
       Ok(hyper::Response::builder().status(502).body(body).unwrap())
     }
   }
-}
-
-/// Handle upstream connection via Unix domain socket
-/// TODO: CRITICAL - This function needs streaming support for production use
-async fn handle_uds_upstream(
-  upstream_peer: &HttpPeer,
-  upstream_request: RequestHeader,
-  body_bytes: &Bytes,
-) -> Result<
-  hyper::Response<Full<Bytes>>,
-  Box<dyn std::error::Error + Send + Sync>,
-> {
-  use hyper_util::rt::TokioIo;
-  use tokio::net::UnixStream;
-
-  // Connect to the Unix domain socket
-  let uds_stream = match UnixStream::connect(&upstream_peer.address).await {
-    Ok(stream) => stream,
-    Err(e) => {
-      eprintln!("Failed to connect to UDS {}: {}", upstream_peer.address, e);
-      return Err(e.into());
-    }
-  };
-
-  // Build the upstream HTTP request
-  let mut req_builder = hyper::Request::builder()
-    .method(upstream_request.method)
-    .uri(upstream_request.uri)
-    .version(upstream_request.version);
-
-  // Copy headers
-  for (name, value) in upstream_request.headers.iter() {
-    req_builder = req_builder.header(name, value);
-  }
-
-  // Create request with body (always use Full for consistency)
-  let upstream_req = req_builder.body(Full::new(body_bytes.clone())).unwrap();
-
-  // Create HTTP client for the UDS connection
-  let io = TokioIo::new(uds_stream);
-  let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
-
-  // Start a task to handle the HTTP connection
-  tokio::spawn(async move {
-    if let Err(e) = conn.await {
-      eprintln!("UDS client connection error: {}", e);
-    }
-  });
-
-  // Send the request to the upstream server
-  let upstream_response = sender.send_request(upstream_req).await?;
-
-  // Convert the upstream response to our response format
-  let (parts, body) = upstream_response.into_parts();
-  let body_bytes = body.collect().await?.to_bytes(); // TODO: CRITICAL - Replace with streaming
-
-  // Build final response
-  let mut response_builder = hyper::Response::builder()
-    .status(parts.status)
-    .version(parts.version);
-
-  // Copy response headers
-  for (name, value) in parts.headers.iter() {
-    response_builder = response_builder.header(name, value);
-  }
-
-  Ok(response_builder.body(Full::new(body_bytes)).unwrap())
-}
-
-/// Handle upstream connection via TCP
-/// TODO: CRITICAL - This function needs streaming support for production use
-async fn handle_tcp_upstream(
-  upstream_peer: &HttpPeer,
-  upstream_request: RequestHeader,
-  body_bytes: &Bytes,
-) -> Result<
-  hyper::Response<Full<Bytes>>,
-  Box<dyn std::error::Error + Send + Sync>,
-> {
-  use hyper_util::rt::TokioIo;
-  use tokio::net::TcpStream;
-
-  // Connect to the TCP address
-  let tcp_stream = match TcpStream::connect(&upstream_peer.address).await {
-    Ok(stream) => stream,
-    Err(e) => {
-      eprintln!("Failed to connect to TCP {}: {}", upstream_peer.address, e);
-      return Err(e.into());
-    }
-  };
-
-  // Build the upstream HTTP request
-  let mut req_builder = hyper::Request::builder()
-    .method(upstream_request.method)
-    .uri(upstream_request.uri)
-    .version(upstream_request.version);
-
-  // Copy headers
-  for (name, value) in upstream_request.headers.iter() {
-    req_builder = req_builder.header(name, value);
-  }
-
-  // Create request with body (always use Full for consistency)
-  let upstream_req = req_builder.body(Full::new(body_bytes.clone())).unwrap();
-
-  // Create HTTP client for the TCP connection
-  let io = TokioIo::new(tcp_stream);
-  let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
-
-  // Start a task to handle the HTTP connection
-  tokio::spawn(async move {
-    if let Err(e) = conn.await {
-      eprintln!("TCP client connection error: {}", e);
-    }
-  });
-
-  // Send the request to the upstream server
-  let upstream_response = sender.send_request(upstream_req).await?;
-
-  // Convert the upstream response to our response format
-  let (parts, body) = upstream_response.into_parts();
-  let body_bytes = body.collect().await?.to_bytes(); // TODO: CRITICAL - Replace with streaming
-
-  // Build final response
-  let mut response_builder = hyper::Response::builder()
-    .status(parts.status)
-    .version(parts.version);
-
-  // Copy response headers
-  for (name, value) in parts.headers.iter() {
-    response_builder = response_builder.header(name, value);
-  }
-
-  Ok(response_builder.body(Full::new(body_bytes)).unwrap())
 }
 
 /// Handle WebSocket upgrade bridge - processes through ProxyHttp flow then upgrades

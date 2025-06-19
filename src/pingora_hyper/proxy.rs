@@ -55,6 +55,7 @@ impl From<&RequestHeader> for http::request::Parts {
 pub struct ResponseHeader {
   pub status: StatusCode,
   pub headers: HeaderMap,
+  #[allow(dead_code)]
   pub version: Version,
 }
 

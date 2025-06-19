@@ -7,6 +7,8 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, Box<Error>>;
 
 // Re-export ErrorType enum with the same values as Pingora
+// Note: Currently unused but kept for Pingora compatibility
+#[allow(unused_imports)]
 pub use self::ErrorType::*;
 
 #[derive(Debug, Error)]
