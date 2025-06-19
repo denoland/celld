@@ -15,7 +15,7 @@ impl HttpPeer {
     path: &str,
     _tls: bool,
     _sni: String,
-  ) -> Result<Self, Box<crate::pingora_hyper::error::Error>> {
+  ) -> Result<Self, Box<crate::error::Error>> {
     Ok(Self {
       address: path.to_string(),
       is_uds: true,

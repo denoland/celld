@@ -12,8 +12,7 @@ mod distributed_lock;
 mod heartbeat_service;
 mod node_state;
 mod peer_manager;
-#[cfg(feature = "hyper-compat")]
-mod pingora_hyper;
+mod pingora;
 mod process_reaper;
 mod router;
 mod sqlite_replica;
@@ -22,23 +21,14 @@ pub mod test_utils;
 
 use clap::{Arg, Command};
 
-#[cfg(not(feature = "hyper-compat"))]
-use pingora::prelude::*;
-#[cfg(not(feature = "hyper-compat"))]
-use pingora::server::configuration::ServerConf;
-#[cfg(not(feature = "hyper-compat"))]
-use pingora::services::background::background_service;
-
-#[cfg(feature = "hyper-compat")]
-use crate::pingora_hyper::prelude::*;
-#[cfg(feature = "hyper-compat")]
-use crate::pingora_hyper::server::configuration::ServerConf;
-#[cfg(feature = "hyper-compat")]
-use crate::pingora_hyper::services::background::background_service;
+use crate::pingora::prelude::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info};
+
+// Additional explicit imports for types that might not be in prelude
+use crate::pingora::server::configuration::ServerConf;
 
 use node_state::NodeState;
 use process_reaper::ProcessReaper;

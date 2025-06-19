@@ -54,7 +54,8 @@ pub enum ErrorType {
 }
 
 impl Error {
-  pub fn explain(error_type: ErrorType, message: &str) -> Box<Self> {
+  pub fn explain<S: AsRef<str>>(error_type: ErrorType, message: S) -> Box<Self> {
+    let message = message.as_ref();
     let error = match error_type {
       ErrorType::InternalError => Error::InternalError(message.to_string()),
       ErrorType::ConnectError => Error::ConnectionError(message.to_string()),
@@ -69,9 +70,9 @@ impl Error {
     Box::new(error)
   }
 
-  pub fn because<E: std::error::Error + Send + Sync + 'static>(
+  pub fn because<S: AsRef<str>, E: std::error::Error + Send + Sync + 'static>(
     error_type: ErrorType,
-    message: &str,
+    message: S,
     _cause: E,
   ) -> Box<Self> {
     // For now, we ignore the cause and just create an error with the message
@@ -117,26 +118,4 @@ impl fmt::Display for ErrorType {
   }
 }
 
-// Add conversion from CellManagerError
-impl From<crate::cell_manager::CellManagerError> for Box<Error> {
-  fn from(err: crate::cell_manager::CellManagerError) -> Self {
-    use crate::cell_manager::CellManagerError;
-
-    let error = match err {
-      CellManagerError::CellCreationInProgress => {
-        Error::ServiceUnavailable("Cell creation in progress".to_string())
-      }
-      CellManagerError::LockContention(_) => {
-        Error::ServiceUnavailable("Cell lock contention".to_string())
-      }
-      CellManagerError::S3(msg) => {
-        Error::InternalError(format!("S3 error: {}", msg))
-      }
-      CellManagerError::Serde(e) => {
-        Error::InternalError(format!("Serialization error: {}", e))
-      }
-      CellManagerError::Internal(e) => Error::InternalError(e.to_string()),
-    };
-    Box::new(error)
-  }
-}
+// Note: CellManagerError conversion handled in router.rs where both types are available

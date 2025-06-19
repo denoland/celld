@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use crate::pingora_hyper::server::{Service, ShutdownWatch};
+use crate::server::{Service, ShutdownWatch};
 
 #[async_trait]
 pub trait BackgroundService: Send + Sync {

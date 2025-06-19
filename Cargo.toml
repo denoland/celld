@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
-hyper-compat = ["hyper", "hyper-util", "tokio-tungstenite", "tower"]
+default = ["pingora_real", "hyper", "hyper-util"]
+hyper-compat = ["pingora_hyper_impl", "hyper", "hyper-util", "tokio-tungstenite", "tower"]
 
 [dependencies]
 anyhow = "1"
@@ -24,7 +24,6 @@ hyper = { version = "1", features = ["full"], optional = true }
 hyper-util = { version = "0.1", features = ["full"], optional = true }
 nix = { version = "0.30", features = ["process", "signal", "fs"] }
 once_cell = "1"
-pingora = { version = "0.5", features = ["proxy"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -43,6 +42,19 @@ if_chain = "1.0.2"
 dashmap = "6.1.0"
 flaky_test = "0.2.2"
 tokio-tungstenite = { version = "0.26", optional = true }
+
+# Conditional dependencies 
+[dependencies.pingora_real]
+package = "pingora"
+version = "0.5"
+features = ["proxy"] 
+default-features = false
+optional = true
+
+[dependencies.pingora_hyper_impl]
+package = "pingora_hyper"
+path = "./pingora_hyper"
+optional = true
 
 [dev-dependencies]
 futures-util = "0.3"

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 
-use crate::pingora_hyper::proxy::{ProxyHttp, RequestHeader, Session};
-use crate::pingora_hyper::upstreams::peer::HttpPeer;
+use crate::proxy::{ProxyHttp, RequestHeader, Session};
+use crate::upstreams::peer::HttpPeer;
 
 /// Convert streaming response to Full<Bytes> for compatibility during transition
 async fn convert_streaming_to_full(
@@ -29,9 +29,9 @@ impl ShutdownWatch {
     Self { receiver }
   }
 
-  pub async fn changed(&mut self) -> crate::pingora_hyper::error::Result<()> {
+  pub async fn changed(&mut self) -> crate::error::Result<()> {
     self.receiver.changed().await.map_err(|_| {
-      Box::new(crate::pingora_hyper::error::Error::InternalError(
+      Box::new(crate::error::Error::InternalError(
         "shutdown watch closed".to_string(),
       ))
     })
@@ -490,7 +490,7 @@ where
     Err(e) => {
       eprintln!("upstream connection error: {:?}", e);
       // Convert to Pingora Error for logging
-      use crate::pingora_hyper::error::{Error, ErrorType};
+      use crate::error::{Error, ErrorType};
       let pingora_error = Error::explain(
         ErrorType::InternalError,
         &format!("Upstream error: {}", e),
@@ -591,7 +591,7 @@ where
     Err(e) => {
       eprintln!("WebSocket upgrade error: {:?}", e);
       // Convert to Pingora Error for logging
-      use crate::pingora_hyper::error::{Error, ErrorType};
+      use crate::error::{Error, ErrorType};
       let pingora_error = Error::explain(
         ErrorType::InternalError,
         &format!("WebSocket upgrade error: {}", e),

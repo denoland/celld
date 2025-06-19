@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use http::{HeaderMap, Method, StatusCode, Uri, Version};
 
-use crate::pingora_hyper::error::{Error, Result};
-use crate::pingora_hyper::upstreams::peer::HttpPeer;
+use crate::error::{Error, Result};
+use crate::upstreams::peer::HttpPeer;
 
 #[derive(Clone)]
 pub struct RequestHeader {

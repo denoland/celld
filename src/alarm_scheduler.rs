@@ -1,14 +1,8 @@
 use crate::node_state::NodeState;
+use crate::pingora::server::ShutdownWatch;
+use crate::pingora::services::background::BackgroundService;
 
-#[cfg(feature = "hyper-compat")]
-use crate::pingora_hyper::server::ShutdownWatch;
-#[cfg(feature = "hyper-compat")]
-use crate::pingora_hyper::services::background::BackgroundService;
 use chrono::Utc;
-#[cfg(not(feature = "hyper-compat"))]
-use pingora::server::ShutdownWatch;
-#[cfg(not(feature = "hyper-compat"))]
-use pingora::services::background::BackgroundService;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info};
