@@ -170,7 +170,7 @@ export class Cell implements DbAccessor, TaskScheduler {
   // Track the currently scheduled global alarm time
   #currentGlobalAlarmTime: number | null = null;
 
-  async #handleAlarm(): Promise<void> {
+  #handleAlarm() {
     const currentTime = Date.now();
 
     // Clear our tracked alarm time since we're handling it now
@@ -189,7 +189,8 @@ export class Cell implements DbAccessor, TaskScheduler {
       try {
         switch (payload.kind) {
           case "user-defined-alarm": {
-            await this.#onAlarmCallback?.();
+            // Fire and forget - we don't await it on purpose
+            this.#onAlarmCallback?.();
             break;
           }
           case "resume-all-pending-workflow-runs": {
@@ -365,7 +366,7 @@ export class Cell implements DbAccessor, TaskScheduler {
       const url = new URL(req.url);
 
       if (req.method === "POST" && url.pathname === "/_internal/alarm") {
-        await this.#handleAlarm();
+        this.#handleAlarm();
         return new Response("OK", { status: 200 });
       }
 
@@ -482,7 +483,8 @@ export class Cell implements DbAccessor, TaskScheduler {
       hasCurrentGlobalAlarm: !!this.#currentGlobalAlarmTime,
       currentGlobalAlarmTime: this.#currentGlobalAlarmTime,
       taskScheduledTime: task.scheduledTimeUnixMs,
-      isEarlier: task.scheduledTimeUnixMs < (this.#currentGlobalAlarmTime || Infinity),
+      isEarlier:
+        task.scheduledTimeUnixMs < (this.#currentGlobalAlarmTime || Infinity),
       timestamp: new Date().toISOString(),
     });
 
