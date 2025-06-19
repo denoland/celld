@@ -67,7 +67,7 @@ impl BackgroundService for ControlSocketListener {
             let node_state = node_state.clone();
 
             async move {
-              info!("routed request: {:?}", req.uri().path());
+              info!("ControlSocketListener routed request: {:?}", req.uri().path());
               if req.uri().path() == "/_internal/alarms" {
                 info!("Handling internal alarms request");
                 match node_state.cell_manager.get_system_main_cell().await {
@@ -111,22 +111,24 @@ where
   B: hyper::body::Body<Error = E>,
   E: std::fmt::Debug,
 {
-  debug!(
+  info!(
     method = %req.method(),
     uri = %req.uri(),
     "locally_handle_internal_alarms: Entry with request details"
   );
-  
+
   let (parts, body) = req.into_parts();
-  
-  debug!("locally_handle_internal_alarms: About to collect request body");
+
+  info!("locally_handle_internal_alarms: About to collect request body");
   let req_body = match body.collect().await {
     Ok(body) => {
-      debug!("locally_handle_internal_alarms: Successfully collected request body");
+      info!(
+        "locally_handle_internal_alarms: Successfully collected request body"
+      );
       body
-    },
+    }
     Err(e) => {
-      error!(error = ?e, "locally_handle_internal_alarms: Failed to collect request body");
+      info!(error = ?e, "locally_handle_internal_alarms: Failed to collect request body");
       let res = hyper::Response::builder().status(500).body(empty())?;
       return Ok(res);
     }
@@ -219,53 +221,56 @@ where
       Ok(res)
     }
     hyper::Method::POST => {
-      debug!("locally_handle_internal_alarms: Handling POST request to set alarm");
-      
-      let data: SetAlarmRequest =
-        match serde_json::from_reader(req_body.aggregate().reader()) {
-          Ok(data) => {
-            debug!(?data, "locally_handle_internal_alarms: Successfully parsed SetAlarmRequest");
-            data
-          },
-          Err(e) => {
-            error!(error = ?e, "locally_handle_internal_alarms: Failed to parse request body as SetAlarmRequest");
-            let res = hyper::Response::builder().status(400).body(empty())?;
-            return Ok(res);
-          }
-        };
-      
-      debug!(
+      info!(
+        "locally_handle_internal_alarms: Handling POST request to set alarm"
+      );
+
+      let data: SetAlarmRequest = match serde_json::from_reader(
+        req_body.aggregate().reader(),
+      ) {
+        Ok(data) => {
+          info!(?data, "locally_handle_internal_alarms: Successfully parsed SetAlarmRequest");
+          data
+        }
+        Err(e) => {
+          info!(error = ?e, "locally_handle_internal_alarms: Failed to parse request body as SetAlarmRequest");
+          let res = hyper::Response::builder().status(400).body(empty())?;
+          return Ok(res);
+        }
+      };
+
+      info!(
         tenant = %data.tenant,
         cell_id = %data.cell_id,
         scheduled_time_unix_ms = data.scheduled_time_unix_ms,
-        "locally_handle_internal_alarms: About to call system_main_cell_handle.set_alarm"
+        "<<<<< locally_handle_internal_alarms: About to call system_main_cell_handle.set_alarm"
       );
-      
+
       match system_main_cell_handle
         .set_alarm(&data.tenant, &data.cell_id, data.scheduled_time_unix_ms)
         .await
       {
         Ok(()) => {
-          debug!(
+          info!(
             tenant = %data.tenant,
             cell_id = %data.cell_id,
             scheduled_time_unix_ms = data.scheduled_time_unix_ms,
-            "locally_handle_internal_alarms: Successfully set alarm"
+            "<<<<< locally_handle_internal_alarms: Successfully set alarm"
           );
-        },
+        }
         Err(e) => {
           error!(
             error = ?e,
             tenant = %data.tenant,
             cell_id = %data.cell_id,
-            "locally_handle_internal_alarms: Failed to set alarm"
+            "<<<<< locally_handle_internal_alarms: Failed to set alarm"
           );
           let res = hyper::Response::builder().status(500).body(empty())?;
           return Ok(res);
         }
       }
-      
-      debug!("locally_handle_internal_alarms: Returning 200 OK response");
+
+      info!("<<<<< locally_handle_internal_alarms: Returning 200 OK response");
       let res = hyper::Response::builder().status(200).body(empty())?;
       Ok(res)
     }

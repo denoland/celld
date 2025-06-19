@@ -58,6 +58,9 @@ const SERVER_STARTUP_WAIT_SECS: u64 = 2;
 /// tests, this value should be smaller than [`SERVER_STARTUP_WAIT_SECS`].
 const CELL_HEARTBEAT_INTERVAL_SECS: u64 = 1;
 
+/// Configure alarm scheduler to check alarms every second
+pub const CELL_ALARM_SCHEDULER_INTERVAL_SECS: u64 = 1;
+
 pub struct TestEnv {
   /// Celld servers
   servers: Vec<CapturedSubprocess>,
@@ -316,13 +319,15 @@ impl TestEnv {
             "CELL_HEARTBEAT_INTERVAL",
             CELL_HEARTBEAT_INTERVAL_SECS.to_string(),
           )
-          .env("CELL_GRACE_PERIOD_SECONDS", "5")
+          //.env("CELL_GRACE_PERIOD_SECONDS", "5")
           // Use a shorter staleness threshold for tests to detect failures faster
-          .env("CELL_STALENESS_THRESHOLD_SECS", "6")
-          .env("CELL_LOCK_GUARD_TTL_SECS", "6")
+          //.env("CELL_STALENESS_THRESHOLD_SECS", "6")
+          //.env("CELL_LOCK_GUARD_TTL_SECS", "6")
           .env("CELL_LOCK_GRACEFUL_SHUTDOWN_TIMEOUT_SECS", "2")
-          // Configure alarm scheduler to check alarms every second
-          .env("CELL_ALARM_SCHEDULER_INTERVAL_SECS", "1")
+          .env(
+            "CELL_ALARM_SCHEDULER_INTERVAL_SECS",
+            CELL_ALARM_SCHEDULER_INTERVAL_SECS.to_string(),
+          )
           .env("CELL_DENO_OUTPUT", "1");
 
         // Only set S3 env vars if MinIO is enabled

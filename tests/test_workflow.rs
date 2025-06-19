@@ -310,7 +310,8 @@ async fn test_sleep_workflow_single_node_no_s3() {
   // Copy directories
   std::fs::create_dir_all(&dst_data_path).unwrap();
   common::copy_directory_without_sqlite(&src_sdk_path, &dst_sdk_path).unwrap();
-  common::copy_directory_without_sqlite(&src_data_path, &dst_data_path).unwrap();
+  common::copy_directory_without_sqlite(&src_data_path, &dst_data_path)
+    .unwrap();
 
   info!("Starting celld in single-node mode without S3...");
 
@@ -324,6 +325,7 @@ async fn test_sleep_workflow_single_node_no_s3() {
     .env("CELL_GRACE_PERIOD_SECONDS", "5")
     .env("CELL_STALENESS_THRESHOLD_SECS", "6")
     .env("CELL_LOCK_GUARD_TTL_SECS", "6")
+    .env("CELL_LOCK_GRACEFUL_SHUTDOWN_TIMEOUT_SECS", "2")
     .env("CELL_ALARM_SCHEDULER_INTERVAL_SECS", "1") // Check alarms frequently
     .env("CELL_DENO_OUTPUT", "1")
     // Explicitly do NOT set any CELL_S3_* environment variables
@@ -369,12 +371,8 @@ async fn test_sleep_workflow_single_node_no_s3() {
   let sleep_ms = 5000;
 
   // Test WebSocket dispatch like cellverse with persistent connection
-  let (run_id, mut ws_connection) = dispatch_workflow_via_websocket_persistent(
-    &url,
-    sleep_ms,
-    500,
-  )
-  .await;
+  let (run_id, mut ws_connection) =
+    dispatch_workflow_via_websocket_persistent(&url, sleep_ms, 500).await;
 
   info!("Delay-sleep workflow dispatched, run_id: {}", run_id);
 
@@ -386,28 +384,34 @@ async fn test_sleep_workflow_single_node_no_s3() {
   let db_path = dst_data_path.join("_system/sqlite/main.db");
   info!("Checking global alarms table at: {:?}", db_path);
 
-  let alarm_count =  {
+  let alarm_count = {
     let conn = rusqlite::Connection::open(&db_path).unwrap();
-    let count = conn.query_row("SELECT COUNT(*) FROM global_alarms", [], |row| { row.get::<_, i32>(0) }).unwrap();
+    let count = conn
+      .query_row("SELECT COUNT(*) FROM global_alarms", [], |row| {
+        row.get::<_, i32>(0)
+      })
+      .unwrap();
     assert_eq!(count, 1, "Expected exactly 1 global alarm to be scheduled.");
   };
-
 
   // Wait for workflow to reach the sleep step, but don't poll for completion
   info!("Waiting for workflow to reach sleep step...");
   tokio::time::sleep(Duration::from_millis(sleep_ms + 4000)).await;
 
-
-  let alarm_count =  {
+  let alarm_count = {
     let conn = rusqlite::Connection::open(&db_path).unwrap();
-    let count = conn.query_row("SELECT COUNT(*) FROM global_alarms", [], |row| { row.get::<_, i32>(0) }).unwrap();
+    let count = conn
+      .query_row("SELECT COUNT(*) FROM global_alarms", [], |row| {
+        row.get::<_, i32>(0)
+      })
+      .unwrap();
     assert_eq!(count, 0, "Expected no global alarms after sleep step.");
   };
 
   // Clean up: close WebSocket connection and kill the celld process
   info!("Closing WebSocket connection...");
   ws_connection.close().await;
-  
+
   let _ = celld_process.kill();
   let _ = celld_process.wait().unwrap();
 }
@@ -472,8 +476,17 @@ async fn set_key_value(
 }
 
 struct WebSocketConnection {
-  sender: futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, tokio_tungstenite::tungstenite::protocol::Message>,
-  receiver: futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>,
+  sender: futures_util::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<
+      tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    tokio_tungstenite::tungstenite::protocol::Message,
+  >,
+  receiver: futures_util::stream::SplitStream<
+    tokio_tungstenite::WebSocketStream<
+      tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+  >,
 }
 
 impl WebSocketConnection {
@@ -488,13 +501,13 @@ async fn dispatch_workflow_via_websocket_persistent(
   sleep_duration_ms: u64,
   delay_ms: u64,
 ) -> (String, WebSocketConnection) {
-  use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
   use futures_util::{SinkExt, StreamExt};
-  
+  use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+
   // Convert HTTP URL to WebSocket URL and add proper host header
   let ws_url = base_url.replace("http://", "ws://");
   info!("Connecting to WebSocket: {}", ws_url);
-  
+
   // Create request with proper Host header for workflow.localhost
   let request = tokio_tungstenite::tungstenite::http::Request::builder()
     .uri(&ws_url)
@@ -502,26 +515,31 @@ async fn dispatch_workflow_via_websocket_persistent(
     .header("Connection", "Upgrade")
     .header("Upgrade", "websocket")
     .header("Sec-WebSocket-Version", "13")
-    .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
+    .header(
+      "Sec-WebSocket-Key",
+      tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+    )
     .body(())
     .unwrap();
-  
-  let (ws_stream, _) = connect_async(request).await.expect("Failed to connect to WebSocket");
+
+  let (ws_stream, _) = connect_async(request)
+    .await
+    .expect("Failed to connect to WebSocket");
   let (mut ws_sender, mut ws_receiver) = ws_stream.split();
-  
+
   // Send dispatch message
   let dispatch_message = json!({
     "type": "dispatch_delay_sleep",
     "sleepDurationMs": sleep_duration_ms,
     "delayMs": delay_ms
   });
-  
+
   info!("Sending WebSocket message: {}", dispatch_message);
   ws_sender
     .send(Message::Text(dispatch_message.to_string().into()))
     .await
     .expect("Failed to send WebSocket message");
-  
+
   // Wait for response with run_id
   while let Some(msg) = ws_receiver.next().await {
     match msg {
@@ -531,7 +549,13 @@ async fn dispatch_workflow_via_websocket_persistent(
         if response["type"] == "workflow_dispatched" {
           let run_id = response["runId"].as_str().unwrap().to_string();
           info!("Keeping WebSocket connection open like cellverse...");
-          return (run_id, WebSocketConnection { sender: ws_sender, receiver: ws_receiver });
+          return (
+            run_id,
+            WebSocketConnection {
+              sender: ws_sender,
+              receiver: ws_receiver,
+            },
+          );
         } else if response["type"] == "error" {
           panic!("WebSocket error: {}", response["message"]);
         }
@@ -545,7 +569,7 @@ async fn dispatch_workflow_via_websocket_persistent(
       _ => {} // Ignore other message types
     }
   }
-  
+
   panic!("Did not receive workflow_dispatched response");
 }
 

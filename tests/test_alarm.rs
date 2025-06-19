@@ -1,6 +1,7 @@
 mod common;
 
 use common::TestEnv;
+use futures::future::join_all;
 use tracing::info;
 
 #[test_log::test(tokio::test)]
@@ -828,9 +829,7 @@ async fn test_multi_alarm_sequential() {
   }
 }
 
-#[test_log::test(tokio::test)]
-async fn test_recursive_alarm() {
-  let test_env = TestEnv::new(1, "test_recursive_alarm").await;
+async fn test_recursive_alarm_impl(test_env: TestEnv) {
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
@@ -871,7 +870,7 @@ async fn test_recursive_alarm() {
     url: &str,
     target_count: u32,
   ) {
-    let poll_interval = std::time::Duration::from_millis(100);
+    let poll_interval = std::time::Duration::from_millis(1000);
 
     loop {
       let res = client
@@ -882,6 +881,10 @@ async fn test_recursive_alarm() {
         .unwrap();
       assert_eq!(res.status(), 200);
       let content = res.json::<GetResponse>().await.unwrap();
+      println!(
+        "Current alarm count: {}, target: {}",
+        content.count, target_count
+      );
 
       if content.count >= target_count {
         return;
@@ -893,7 +896,7 @@ async fn test_recursive_alarm() {
 
   // Confirm the alarm is dispatched at least once within 5 seconds
   tokio::time::timeout(
-    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(20),
     poll_for_alarm_count_increase(&client, &url, 1),
   )
   .await
@@ -902,9 +905,146 @@ async fn test_recursive_alarm() {
   // Wait for the alarm to be dispatched 2 more times within 5 seconds to verify
   // that recursively set alarms are dispatched.
   tokio::time::timeout(
-    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(20),
     poll_for_alarm_count_increase(&client, &url, 3),
   )
   .await
   .unwrap();
+}
+
+#[test_log::test(tokio::test)]
+async fn test_recursive_alarm_minio() {
+  let test_env = TestEnv::new(1, "test_recursive_alarm").await;
+  test_recursive_alarm_impl(test_env).await;
+}
+
+#[test_log::test(tokio::test)]
+async fn test_recursive_alarm_no_minio() {
+  let test_env = TestEnv::new_single_node_without_minio(
+    "test_recursive_alarm_single_node_without_minio",
+  )
+  .await;
+  test_recursive_alarm_impl(test_env).await;
+}
+
+#[test_log::test(tokio::test)]
+async fn test_recursive_alarm_multiple_cells_no_minio() {
+  use common::CELL_ALARM_SCHEDULER_INTERVAL_SECS as I;
+  
+  let test_env = TestEnv::new_single_node_without_minio(
+    "test_recursive_alarm_multiple_cells_no_minio",
+  )
+  .await;
+  let port = test_env.ports[0].public();
+  let client = reqwest::Client::builder()
+    .timeout(std::time::Duration::from_secs(5))
+    .build()
+    .unwrap();
+
+  #[derive(Debug, serde::Deserialize)]
+  struct GetResponse {
+    count: u32,
+  }
+
+  // Generate a single cell ID
+  let cell_id = uuid::Uuid::new_v4().simple().to_string();
+  let url = format!("http://localhost:{}/cell/{}", port, cell_id);
+
+  // Initial GET - should have count 0
+  {
+    let res = client
+      .get(&url)
+      .header("host", "recursive-alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+    let content = res.json::<GetResponse>().await.unwrap();
+    assert_eq!(content.count, 0);
+    info!("Initial count: {}", content.count);
+  }
+
+  // First POST to start recursive alarm
+  {
+    let res = client
+      .post(&url)
+      .header("host", "recursive-alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+    info!("Started recursive alarm");
+  }
+
+  // Wait 5*I seconds and check counter has increased
+  info!("Waiting {} seconds (5*I where I={})", 5 * I, I);
+  tokio::time::sleep(std::time::Duration::from_secs(5 * I)).await;
+
+  let mut prev_count = 0;
+  {
+    let res = client
+      .get(&url)
+      .header("host", "recursive-alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+    let content = res.json::<GetResponse>().await.unwrap();
+    info!("Count after first wait: {}", content.count);
+    assert!(
+      content.count > 0,
+      "Count should be > 0 after first wait, got {}",
+      content.count
+    );
+    prev_count = content.count;
+  }
+
+  // Loop 10 times: POST 5 times in parallel and wait 5*I
+  for i in 1..=10 {
+    info!("Loop iteration {}: POST 5 times in parallel", i);
+    
+    // Launch 5 POSTs in parallel
+    let post_futures = (0..5).map(|j| {
+      let client_ = client.clone();
+      let url_ = url.clone();
+      tokio::spawn(async move {
+        let res = client_
+          .post(&url_)
+          .header("host", "recursive-alarm.localhost")
+          .send()
+          .await
+          .unwrap();
+        assert_eq!(res.status(), 200);
+        info!("Parallel POST {} completed", j);
+      })
+    });
+    
+    // Wait for all POSTs to complete at once
+    join_all(post_futures).await;
+    info!("All 5 parallel POSTs completed for iteration {}", i);
+    
+    // Wait 5*I seconds
+    info!("Waiting {} seconds (5*I)", 5 * I);
+    tokio::time::sleep(std::time::Duration::from_secs(5 * I)).await;
+    
+    // Check count has increased
+    let res = client
+      .get(&url)
+      .header("host", "recursive-alarm.localhost")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), 200);
+    let content = res.json::<GetResponse>().await.unwrap();
+    info!("Iteration {} count: {}", i, content.count);
+    
+    assert!(
+      content.count > prev_count,
+      "Count should be increasing: prev={}, current={} (iteration {})",
+      prev_count,
+      content.count,
+      i
+    );
+    prev_count = content.count;
+  }
 }

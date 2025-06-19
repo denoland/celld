@@ -552,7 +552,7 @@ impl LockHandle {
   }
 
   pub async fn ping(&self) -> anyhow::Result<LockStateKind> {
-    info!(
+    debug!(
       descriptor = ?self.descriptor(),
       "Pinging lock state loop to check its status"
     );

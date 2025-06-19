@@ -373,7 +373,7 @@ fn set_alarm_handler(
   .prepare(
     "INSERT OR REPLACE INTO global_alarms (tenant, cell_id, scheduled_time_unix_ms) VALUES (?, ?, ?)",
   )?;
-  stmt.insert((tenant, cell_id, scheduled_time_unix_ms))?;
+  stmt.execute((tenant, cell_id, scheduled_time_unix_ms))?;
   Ok(())
 }
 

@@ -757,7 +757,7 @@ class WorkflowStepImpl implements WorkflowStep {
       });
 
       // Schedule the wake-up alarm
-      await this.#runtime.scheduleTask(scheduleTask);
+      this.#runtime.scheduleTask(scheduleTask);
     }
 
     console.log(`[DEBUG] Throwing WorkflowSuspendedError:`, {
