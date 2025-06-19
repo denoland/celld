@@ -145,7 +145,7 @@ nothing works)
   - [x] Implement proper error propagation
 
 - [x] ProxyHttp integration:
-  - [x] ✅ Proper separation of concerns established 
+  - [x] ✅ Proper separation of concerns established
   - [x] ✅ Application logic remains in router.rs (Proxy & InternalAPI)
   - [x] ✅ pingora_hyper only implements Pingora API using Hyper
   - [x] ✅ Ready for ProxyHttp bridge implementation
@@ -156,24 +156,66 @@ nothing works)
 - [x] ✅ Server architecture supports ProxyHttp integration
 - [x] ✅ No application logic duplicated in compatibility layer
 
-**Note**: Static file serving and cell routing will work automatically once the ProxyHttp bridge is implemented, since the existing `Proxy` and `InternalAPI` from `router.rs` already handle all application logic.
+**Note**: Static file serving and cell routing will work automatically once the
+ProxyHttp bridge is implemented, since the existing `Proxy` and `InternalAPI`
+from `router.rs` already handle all application logic.
 
-#### Phase 5: Upstream Connections (Unix Sockets)
+#### Phase 5: ProxyHttp Bridge Implementation (Revised Approach)
+
+**Goal**: Create a clean bridge between hyper and ProxyHttp trait
+
+**Architectural Changes**:
+
+1. **Move HTTP serving into HttpProxy**: Instead of having `ListeningService`
+   handle HTTP logic, move it into `HttpProxy::start_service()`. This allows
+   proper integration with the ProxyHttp trait.
+
+2. **Concrete Session type**: Create a `HyperSession` struct that implements
+   Pingora's Session interface but internally works with hyper types. This
+   avoids complex trait object issues.
+
+3. **Separation of concerns**:
+   - `ListeningService`: Manages TCP listeners and passes them to inner service
+   - `HttpProxy`: Handles HTTP server logic and ProxyHttp bridging
+   - `HyperSession`: Bridges between hyper requests/responses and Pingora
+     Session API
+
+**Implementation tasks**:
+
+- [ ] Refactor `HttpProxy::start_service()` to:
+  - [ ] Accept TCP listeners from `ListeningService`
+  - [ ] Create hyper HTTP server
+  - [ ] Handle incoming requests with ProxyHttp bridge
+
+- [ ] Create `HyperSession` struct:
+  - [ ] Store hyper request parts and body
+  - [ ] Build response incrementally
+  - [ ] Implement all Session methods
+
+- [ ] Implement bridge flow:
+  - [ ] Convert hyper::Request → HyperSession
+  - [ ] Call ProxyHttp methods in sequence
+  - [ ] Convert HyperSession → hyper::Response
+
+**Test checkpoints**:
+
+- [ ] Health check works via ProxyHttp bridge
+- [ ] Static file serving works
+- [ ] Cell routing works
+
+#### Phase 6: Upstream Connections (Unix Sockets)
 
 **Goal**: Implement HttpPeer and upstream request proxying
 
 - [ ] In `src/pingora_hyper/proxy.rs`:
-  - [ ] Define `HttpPeer` struct with address and peer type
-  - [ ] Implement `HttpPeer::new()` for TCP peers
-  - [ ] Implement `HttpPeer::new_uds()` for Unix socket peers
-  - [ ] Implement connection logic in proxy executor:
-    - [ ] Create Hyper client with Unix socket connector
-    - [ ] Forward request to upstream
-    - [ ] Stream response back
+  - [ ] Enhance `HttpPeer` with actual connection logic
+  - [ ] Implement Unix socket client support
+  - [ ] Add connection pooling for performance
 
-- [ ] Session additions:
-  - [ ] Implement `Session::req_header_mut()`
-  - [ ] Implement `upstream_request_filter` call
+- [ ] In bridge implementation:
+  - [ ] When `upstream_peer()` returns a peer, make actual connection
+  - [ ] Forward modified request from `upstream_request_filter()`
+  - [ ] Stream response back through Session
 
 **Test checkpoints**:
 
@@ -181,7 +223,7 @@ nothing works)
 - [ ] `basic_db` test passes
 - [ ] `env_test` passes
 
-#### Phase 6: WebSocket Support
+#### Phase 7: WebSocket Support
 
 **Goal**: Implement WebSocket upgrade handling
 
@@ -205,7 +247,7 @@ nothing works)
 - [ ] `test_websocket_broadcast` passes
 - [ ] `test_separate_isolates_per_cell` passes
 
-#### Phase 7: Background Services
+#### Phase 8: Background Services
 
 **Goal**: Implement background service management
 
@@ -224,7 +266,7 @@ nothing works)
 
 **Test checkpoint**: All background services start and shutdown cleanly
 
-#### Phase 8: Advanced Features
+#### Phase 9: Advanced Features
 
 **Goal**: Complete remaining functionality
 
@@ -253,7 +295,7 @@ nothing works)
 - [ ] `test_concurrent_takeover_locking` passes
 - [ ] `test_restore_coordination` passes
 
-#### Phase 9: Cleanup & Optimization
+#### Phase 10: Cleanup & Optimization
 
 **Goal**: Remove Pingora dependency and optimize
 
