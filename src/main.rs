@@ -30,11 +30,11 @@ use pingora::server::configuration::ServerConf;
 use pingora::services::background::background_service;
 
 #[cfg(feature = "hyper-compat")]
-use crate::pingora_hyper::server::ServerConf;
+use crate::pingora_hyper::prelude::*;
 #[cfg(feature = "hyper-compat")]
-use crate::pingora_hyper::service::background_service;
+use crate::pingora_hyper::server::configuration::ServerConf;
 #[cfg(feature = "hyper-compat")]
-use crate::pingora_hyper::{self as pingora, prelude::*};
+use crate::pingora_hyper::services::background::background_service;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

@@ -1,9 +1,29 @@
 use async_trait::async_trait;
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 
-use crate::pingora_hyper::service::ShutdownWatch;
+use crate::pingora_hyper::proxy::{ProxyHttp, RequestHeader, Session};
+
+pub struct ShutdownWatch {
+  receiver: watch::Receiver<()>,
+}
+
+impl ShutdownWatch {
+  pub fn new(receiver: watch::Receiver<()>) -> Self {
+    Self { receiver }
+  }
+
+  pub async fn changed(&mut self) -> crate::pingora_hyper::error::Result<()> {
+    self.receiver.changed().await.map_err(|_| {
+      Box::new(crate::pingora_hyper::error::Error::InternalError(
+        "shutdown watch closed".to_string(),
+      ))
+    })
+  }
+}
 
 #[derive(Clone)]
 pub struct ServerConf {
@@ -131,7 +151,7 @@ pub struct HttpProxy<SV> {
 
 impl<SV> HttpProxy<SV>
 where
-  SV: Send + Sync + 'static,
+  SV: ProxyHttp + Send + Sync + 'static,
 {
   pub fn new(inner: SV, name: String) -> Self {
     Self {
@@ -144,7 +164,7 @@ where
 #[async_trait]
 impl<SV> Service for HttpProxy<SV>
 where
-  SV: Send + Sync + 'static,
+  SV: ProxyHttp + Send + Sync + 'static,
 {
   async fn start_service(&mut self, mut shutdown: ShutdownWatch) {
     println!("Starting HTTP Proxy service: {}", self.name);
@@ -163,87 +183,29 @@ where
   }
 }
 
-/// A listening service that can be configured with TCP addresses
-pub struct ListeningService<T> {
-  inner: T,
-  tcp_addresses: Vec<String>,
-}
-
-impl<T> ListeningService<T> {
-  pub fn new(inner: T) -> Self {
-    Self {
-      inner,
-      tcp_addresses: Vec::new(),
-    }
-  }
-
-  pub fn add_tcp(&mut self, addr: &str) {
-    self.tcp_addresses.push(addr.to_string());
-  }
-}
-
-#[async_trait]
-impl<T> Service for ListeningService<T>
+impl<SV> HttpProxy<SV>
 where
-  T: Service,
+  SV: ProxyHttp + Send + Sync + 'static,
 {
-  async fn start_service(&mut self, mut shutdown: ShutdownWatch) {
+  /// Start serving HTTP requests on the given listeners
+  pub async fn serve_listeners(
+    &self,
+    listeners: Vec<tokio::net::TcpListener>,
+    mut shutdown: ShutdownWatch,
+  ) {
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
-    use tokio::net::TcpListener;
-
-    if self.tcp_addresses.is_empty() {
-      println!(
-        "No TCP addresses configured for {}, just waiting for shutdown",
-        self.name()
-      );
-      let _ = shutdown.changed().await;
-      return;
-    }
-
-    let mut listeners = Vec::new();
-    for addr in &self.tcp_addresses {
-      match TcpListener::bind(addr).await {
-        Ok(listener) => {
-          println!("Listening on {}", addr);
-          listeners.push(listener);
-        }
-        Err(e) => {
-          println!("Failed to bind to {}: {}", addr, e);
-        }
-      }
-    }
 
     if listeners.is_empty() {
-      println!("No successful listeners for {}", self.name());
+      println!("No listeners provided to HttpProxy");
       return;
     }
 
-    // For now, let's just keep the simple health check
-    // TODO: Implement proper ProxyHttp bridge
-
-    let service_fn = service_fn(|req| async move {
-      use bytes::Bytes;
-      use http_body_util::Full;
-      use std::path::Path;
-      use tokio::fs;
-
-      let path = req.uri().path();
-
-      // Health check
-      if path == "/_health" {
-        let body = Full::new(Bytes::from("OK"));
-        let response =
-          hyper::Response::builder().status(200).body(body).unwrap();
-        return Ok::<_, hyper::Error>(response);
-      }
-
-      // TODO: Bridge to actual ProxyHttp implementation
-      // For now, return a placeholder that shows we need to integrate the real router
-      let body = Full::new(Bytes::from("ProxyHttp bridge not implemented yet"));
-      let response = hyper::Response::builder().status(501).body(body).unwrap();
-      Ok(response)
+    let proxy_service = self.inner.clone();
+    let service_fn = service_fn(move |req| {
+      let proxy_service = proxy_service.clone();
+      async move { proxy_http_bridge(proxy_service, req).await }
     });
 
     // Start accepting connections on all listeners
@@ -278,15 +240,75 @@ where
 
     // Wait for shutdown signal
     let _ = shutdown.changed().await;
-    println!("Shutting down {} listeners", self.name());
+    println!("Shutting down HTTP proxy listeners");
 
     // Cancel all listener tasks
     for handle in handles {
       handle.abort();
     }
+  }
+}
 
-    // Also shutdown inner service
-    self.inner.start_service(shutdown).await;
+/// A listening service that can be configured with TCP addresses
+pub struct ListeningService<T> {
+  inner: T,
+  tcp_addresses: Vec<String>,
+  listeners: Option<Vec<tokio::net::TcpListener>>,
+}
+
+impl<T> ListeningService<T> {
+  pub fn new(inner: T) -> Self {
+    Self {
+      inner,
+      tcp_addresses: Vec::new(),
+      listeners: None,
+    }
+  }
+
+  pub fn add_tcp(&mut self, addr: &str) {
+    self.tcp_addresses.push(addr.to_string());
+  }
+}
+
+#[async_trait]
+impl<SV> Service for ListeningService<HttpProxy<SV>>
+where
+  SV: ProxyHttp + Send + Sync + 'static,
+{
+  async fn start_service(&mut self, shutdown: ShutdownWatch) {
+    use tokio::net::TcpListener;
+
+    if self.tcp_addresses.is_empty() {
+      println!(
+        "No TCP addresses configured for {}, just waiting for shutdown",
+        self.name()
+      );
+      self.inner.start_service(shutdown).await;
+      return;
+    }
+
+    // Create listeners
+    let mut listeners = Vec::new();
+    for addr in &self.tcp_addresses {
+      match TcpListener::bind(addr).await {
+        Ok(listener) => {
+          println!("Listening on {}", addr);
+          listeners.push(listener);
+        }
+        Err(e) => {
+          println!("Failed to bind to {}: {}", addr, e);
+        }
+      }
+    }
+
+    if listeners.is_empty() {
+      println!("No successful listeners for {}", self.name());
+      self.inner.start_service(shutdown).await;
+      return;
+    }
+
+    // Pass listeners to HttpProxy for serving
+    self.inner.serve_listeners(listeners, shutdown).await;
   }
 
   fn name(&self) -> &str {
@@ -295,12 +317,73 @@ where
 }
 
 pub fn http_proxy_service<SV>(
-  conf: &Arc<ServerConf>,
+  _conf: &Arc<ServerConf>,
   inner: SV,
 ) -> ListeningService<HttpProxy<SV>>
 where
-  SV: Send + Sync + 'static,
+  SV: ProxyHttp + Send + Sync + 'static,
 {
   let proxy = HttpProxy::new(inner, "HTTP Proxy Service".to_string());
   ListeningService::new(proxy)
+}
+
+/// Bridge function that converts hyper::Request to Pingora Session
+/// and calls the ProxyHttp implementation
+async fn proxy_http_bridge<SV>(
+  proxy_service: Arc<SV>,
+  hyper_req: hyper::Request<hyper::body::Incoming>,
+) -> Result<hyper::Response<Full<Bytes>>, hyper::Error>
+where
+  SV: ProxyHttp + Send + Sync + 'static,
+{
+  // Convert hyper::Request to Pingora RequestHeader
+  let (parts, body) = hyper_req.into_parts();
+  let req_header = RequestHeader {
+    method: parts.method,
+    uri: parts.uri,
+    version: parts.version,
+    headers: parts.headers,
+  };
+
+  // Read the body
+  let body_bytes = match body.collect().await {
+    Ok(collected) => collected.to_bytes(),
+    Err(_) => Bytes::new(),
+  };
+
+  // Create a Session with the request
+  let mut session = Session::new(req_header, body_bytes);
+  let mut ctx = proxy_service.new_ctx();
+
+  // Execute ProxyHttp flow
+  match proxy_service.request_filter(&mut session, &mut ctx).await {
+    Ok(true) => {
+      // request_filter handled everything, return the response
+      return Ok(session.build_response());
+    }
+    Ok(false) => {
+      // Continue to upstream logic
+    }
+    Err(e) => {
+      eprintln!("request_filter error: {:?}", e);
+      let body = Full::new(Bytes::from("Internal Server Error"));
+      return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+    }
+  }
+
+  // Get upstream peer
+  let _upstream_peer =
+    match proxy_service.upstream_peer(&mut session, &mut ctx).await {
+      Ok(peer) => peer,
+      Err(e) => {
+        eprintln!("upstream_peer error: {:?}", e);
+        let body = Full::new(Bytes::from("Bad Gateway"));
+        return Ok(hyper::Response::builder().status(502).body(body).unwrap());
+      }
+    };
+
+  // For now, just return the response that was built
+  // TODO: Implement actual upstream proxying
+  proxy_service.logging(&mut session, None, &mut ctx).await;
+  Ok(session.build_response())
 }

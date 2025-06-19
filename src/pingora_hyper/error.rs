@@ -3,7 +3,11 @@ use std::fmt;
 use http::StatusCode;
 use thiserror::Error;
 
-pub type Result<T> = std::result::Result<T, Error>;
+// Pingora uses Box<Error> for its Result type
+pub type Result<T> = std::result::Result<T, Box<Error>>;
+
+// Re-export ErrorType enum with the same values as Pingora
+pub use self::ErrorType::*;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -30,6 +34,9 @@ pub enum Error {
 
   #[error("Service unavailable: {0}")]
   ServiceUnavailable(String),
+
+  #[error("Invalid header")]
+  InvalidHeader,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -41,11 +48,32 @@ pub enum ErrorType {
   TimeoutError,
   BadRequest,
   ServiceUnavailable,
+  HTTPStatus(u16),
 }
 
 impl Error {
-  pub fn explain(&self) -> String {
-    self.to_string()
+  pub fn explain(error_type: ErrorType, message: &str) -> Box<Self> {
+    let error = match error_type {
+      ErrorType::InternalError => Error::InternalError(message.to_string()),
+      ErrorType::ConnectError => Error::ConnectionError(message.to_string()),
+      ErrorType::BadRequest => Error::BadRequest(message.to_string()),
+      ErrorType::ServiceUnavailable => {
+        Error::ServiceUnavailable(message.to_string())
+      }
+      ErrorType::TimeoutError => Error::TimeoutError,
+      ErrorType::HTTPStatus(_) => Error::InternalError(message.to_string()),
+      _ => Error::InternalError(format!("{}: {}", error_type, message)),
+    };
+    Box::new(error)
+  }
+
+  pub fn because<E: std::error::Error + Send + Sync + 'static>(
+    error_type: ErrorType,
+    message: &str,
+    _cause: E,
+  ) -> Box<Self> {
+    // For now, we ignore the cause and just create an error with the message
+    Self::explain(error_type, message)
   }
 
   pub fn error_type(&self) -> ErrorType {
@@ -58,6 +86,7 @@ impl Error {
       Error::TimeoutError => ErrorType::TimeoutError,
       Error::BadRequest(_) => ErrorType::BadRequest,
       Error::ServiceUnavailable(_) => ErrorType::ServiceUnavailable,
+      Error::InvalidHeader => ErrorType::BadRequest,
     }
   }
 
@@ -81,6 +110,31 @@ impl fmt::Display for ErrorType {
       ErrorType::TimeoutError => write!(f, "TimeoutError"),
       ErrorType::BadRequest => write!(f, "BadRequest"),
       ErrorType::ServiceUnavailable => write!(f, "ServiceUnavailable"),
+      ErrorType::HTTPStatus(code) => write!(f, "HTTPStatus({})", code),
     }
+  }
+}
+
+// Add conversion from CellManagerError
+impl From<crate::cell_manager::CellManagerError> for Box<Error> {
+  fn from(err: crate::cell_manager::CellManagerError) -> Self {
+    use crate::cell_manager::CellManagerError;
+
+    let error = match err {
+      CellManagerError::CellCreationInProgress => {
+        Error::ServiceUnavailable("Cell creation in progress".to_string())
+      }
+      CellManagerError::LockContention(_) => {
+        Error::ServiceUnavailable("Cell lock contention".to_string())
+      }
+      CellManagerError::S3(msg) => {
+        Error::InternalError(format!("S3 error: {}", msg))
+      }
+      CellManagerError::Serde(e) => {
+        Error::InternalError(format!("Serialization error: {}", e))
+      }
+      CellManagerError::Internal(e) => Error::InternalError(e.to_string()),
+    };
+    Box::new(error)
   }
 }

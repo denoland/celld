@@ -160,7 +160,7 @@ nothing works)
 ProxyHttp bridge is implemented, since the existing `Proxy` and `InternalAPI`
 from `router.rs` already handle all application logic.
 
-#### Phase 5: ProxyHttp Bridge Implementation (Revised Approach)
+#### Phase 5: ProxyHttp Bridge Implementation (Revised Approach) ✅
 
 **Goal**: Create a clean bridge between hyper and ProxyHttp trait
 
@@ -182,26 +182,33 @@ from `router.rs` already handle all application logic.
 
 **Implementation tasks**:
 
-- [ ] Refactor `HttpProxy::start_service()` to:
-  - [ ] Accept TCP listeners from `ListeningService`
-  - [ ] Create hyper HTTP server
-  - [ ] Handle incoming requests with ProxyHttp bridge
+- [x] Refactor `HttpProxy::start_service()` to:
+  - [x] Accept TCP listeners from `ListeningService`
+  - [x] Create hyper HTTP server
+  - [x] Handle incoming requests with ProxyHttp bridge
 
-- [ ] Create `HyperSession` struct:
-  - [ ] Store hyper request parts and body
-  - [ ] Build response incrementally
-  - [ ] Implement all Session methods
+- [x] Create `Session` struct (not HyperSession):
+  - [x] Store hyper request parts and body
+  - [x] Build response incrementally
+  - [x] Implement all Session methods
 
-- [ ] Implement bridge flow:
-  - [ ] Convert hyper::Request → HyperSession
-  - [ ] Call ProxyHttp methods in sequence
-  - [ ] Convert HyperSession → hyper::Response
+- [x] Implement bridge flow:
+  - [x] Convert hyper::Request → Session
+  - [x] Call ProxyHttp methods in sequence
+  - [x] Convert Session → hyper::Response
+
+- [x] Fix all type compatibility issues:
+  - [x] Create proper module structure matching Pingora's
+  - [x] Add conditional imports throughout codebase
+  - [x] Implement error conversions
+  - [x] Match method signatures exactly
 
 **Test checkpoints**:
 
-- [ ] Health check works via ProxyHttp bridge
-- [ ] Static file serving works
-- [ ] Cell routing works
+- [x] ✅ Code compiles with `cargo check --features hyper-compat`
+- [ ] Health check works via ProxyHttp bridge (runtime test pending)
+- [ ] Static file serving works (runtime test pending)
+- [ ] Cell routing works (runtime test pending)
 
 #### Phase 6: Upstream Connections (Unix Sockets)
 

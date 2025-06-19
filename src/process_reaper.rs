@@ -1,5 +1,7 @@
 #[cfg(feature = "hyper-compat")]
-use crate::pingora_hyper::service::{BackgroundService, ShutdownWatch};
+use crate::pingora_hyper::server::ShutdownWatch;
+#[cfg(feature = "hyper-compat")]
+use crate::pingora_hyper::services::background::BackgroundService;
 use crate::NodeState;
 #[cfg(not(feature = "hyper-compat"))]
 use pingora::server::ShutdownWatch;

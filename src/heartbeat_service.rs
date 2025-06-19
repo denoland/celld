@@ -1,7 +1,9 @@
 use crate::cell_manager::{SYSTEM_CELL_ID, SYSTEM_TENANT};
 use crate::node_state::NodeState;
 #[cfg(feature = "hyper-compat")]
-use crate::pingora_hyper::service::{BackgroundService, ShutdownWatch};
+use crate::pingora_hyper::server::ShutdownWatch;
+#[cfg(feature = "hyper-compat")]
+use crate::pingora_hyper::services::background::BackgroundService;
 #[cfg(not(feature = "hyper-compat"))]
 use pingora::{server::ShutdownWatch, services::background::BackgroundService};
 use std::sync::Arc;

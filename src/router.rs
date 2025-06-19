@@ -1,7 +1,24 @@
 use http_body_util::BodyExt;
+#[cfg(not(feature = "hyper-compat"))]
 use pingora::http::StatusCode;
+#[cfg(not(feature = "hyper-compat"))]
 use pingora::prelude::*;
+#[cfg(not(feature = "hyper-compat"))]
 use pingora::upstreams::peer::HttpPeer;
+
+#[cfg(feature = "hyper-compat")]
+use crate::pingora_hyper::http::StatusCode;
+#[cfg(feature = "hyper-compat")]
+use crate::pingora_hyper::prelude::*;
+#[cfg(feature = "hyper-compat")]
+use crate::pingora_hyper::upstreams::peer::HttpPeer;
+
+// Type aliases for conditional compilation
+#[cfg(not(feature = "hyper-compat"))]
+type PingoraError = pingora::Error;
+#[cfg(feature = "hyper-compat")]
+type PingoraError = crate::pingora_hyper::error::Error;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, error, info, trace};
@@ -143,8 +160,7 @@ impl ProxyHttp for InternalAPI {
     if path == "/_health" {
       let response = format!("{} OK\n", self.node_state.config.node_name);
       let content_length = response.len();
-      let mut resp =
-        pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
+      let mut resp = ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
       resp
         .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
         .unwrap();
@@ -190,8 +206,7 @@ impl ProxyHttp for InternalAPI {
       );
 
       let content_length = response.len();
-      let mut resp =
-        pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
+      let mut resp = ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
       resp
         .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
         .unwrap();
@@ -211,8 +226,7 @@ impl ProxyHttp for InternalAPI {
           "/_internal/mesh/owner should be followed by `{{tenant}}/{{cell_id}}`"
         );
         let resp =
-          pingora::http::ResponseHeader::build(StatusCode::BAD_REQUEST, None)
-            .unwrap();
+          ResponseHeader::build(StatusCode::BAD_REQUEST, None).unwrap();
 
         write_response_close_conn(session, resp, "Bad Request".into()).await?;
         return Ok(true);
@@ -228,8 +242,7 @@ impl ProxyHttp for InternalAPI {
           "/_internal/mesh/owner should be followed by `{{tenant}}/{{cell_id}}`"
         );
         let resp =
-          pingora::http::ResponseHeader::build(StatusCode::BAD_REQUEST, None)
-            .unwrap();
+          ResponseHeader::build(StatusCode::BAD_REQUEST, None).unwrap();
 
         write_response_close_conn(session, resp, "Bad Request".into()).await?;
         return Ok(true);
@@ -252,8 +265,7 @@ impl ProxyHttp for InternalAPI {
       .unwrap();
 
       let content_length = response.len();
-      let mut resp =
-        pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
+      let mut resp = ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
       resp
         .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
         .unwrap();
@@ -270,17 +282,15 @@ impl ProxyHttp for InternalAPI {
         self.node_state.cell_manager.get_system_main_cell().await
       else {
         error!("System main cell not found; most likely the system main cell is running on another node");
-        let resp = pingora::http::ResponseHeader::build(
-          StatusCode::INTERNAL_SERVER_ERROR,
-          Some(0),
-        )
-        .unwrap();
+        let resp =
+          ResponseHeader::build(StatusCode::INTERNAL_SERVER_ERROR, Some(0))
+            .unwrap();
         session.set_keepalive(None);
         session.write_response_header(Box::new(resp), true).await?;
         return Ok(true);
       };
 
-      let parts = session.req_header().as_ref().clone();
+      let parts: http::request::Parts = session.req_header().into();
       let req_body = session
         .read_request_body()
         .await?
@@ -301,11 +311,9 @@ impl ProxyHttp for InternalAPI {
         }
         Err(e) => {
           error!(error = ?e, "Error handling alarms");
-          let resp = pingora::http::ResponseHeader::build(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Some(0),
-          )
-          .unwrap();
+          let resp =
+            ResponseHeader::build(StatusCode::INTERNAL_SERVER_ERROR, Some(0))
+              .unwrap();
           session.set_keepalive(None);
           session.write_response_header(Box::new(resp), true).await?;
           return Ok(true);
@@ -319,11 +327,9 @@ impl ProxyHttp for InternalAPI {
     {
       let Some(req_body) = session.read_request_body().await? else {
         error!("Error reading request body of dispatch_alarm endpoint");
-        let resp = pingora::http::ResponseHeader::build(
-          StatusCode::INTERNAL_SERVER_ERROR,
-          Some(0),
-        )
-        .unwrap();
+        let resp =
+          ResponseHeader::build(StatusCode::INTERNAL_SERVER_ERROR, Some(0))
+            .unwrap();
         session.set_keepalive(None);
         session.write_response_header(Box::new(resp), true).await?;
         return Ok(true);
@@ -332,11 +338,9 @@ impl ProxyHttp for InternalAPI {
         Ok(dispatch_alarm) => dispatch_alarm,
         Err(e) => {
           error!(error = ?e, "Error deserializing dispatch alarm");
-          let resp = pingora::http::ResponseHeader::build(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Some(0),
-          )
-          .unwrap();
+          let resp =
+            ResponseHeader::build(StatusCode::INTERNAL_SERVER_ERROR, Some(0))
+              .unwrap();
           session.set_keepalive(None);
           session.write_response_header(Box::new(resp), true).await?;
           return Ok(true);
@@ -352,7 +356,7 @@ impl ProxyHttp for InternalAPI {
             StatusCode::INTERNAL_SERVER_ERROR
           }
         };
-      let resp = pingora::http::ResponseHeader::build(status, Some(0)).unwrap();
+      let resp = ResponseHeader::build(status, Some(0)).unwrap();
       session.set_keepalive(None);
       session.write_response_header(Box::new(resp), true).await?;
       return Ok(true);
@@ -362,8 +366,7 @@ impl ProxyHttp for InternalAPI {
     let response = "Not Found";
     let content_length = response.len();
     let mut resp =
-      pingora::http::ResponseHeader::build(StatusCode::NOT_FOUND, Some(2))
-        .unwrap();
+      ResponseHeader::build(StatusCode::NOT_FOUND, Some(2)).unwrap();
     resp
       .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
       .unwrap();
@@ -381,9 +384,9 @@ impl ProxyHttp for InternalAPI {
     &self,
     _session: &mut Session,
     _ctx: &mut Self::CTX,
-  ) -> pingora::Result<Box<HttpPeer>> {
+  ) -> Result<Box<HttpPeer>> {
     // This should not be called because request_filter always returns true
-    Err(pingora::Error::explain(
+    Err(PingoraError::explain(
       ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
       "Internal control plane does not support proxying",
     ))
@@ -395,9 +398,9 @@ impl ProxyHttp for InternalAPI {
 /// write_response_header.
 async fn write_response_close_conn(
   session: &mut Session,
-  header: pingora::http::ResponseHeader,
+  header: ResponseHeader,
   body: bytes::Bytes,
-) -> pingora::Result<()> {
+) -> Result<()> {
   session.set_keepalive(None);
   session
     .write_response_header(Box::new(header), false)
@@ -412,13 +415,13 @@ async fn serve_static_file(
   file_path: &std::path::Path,
   status: StatusCode,
   is_head_request: bool,
-) -> pingora::Result<()> {
+) -> Result<()> {
   // Try to read the file
   let file = match std::fs::read(file_path) {
     Ok(file) => file,
     Err(e) => {
       error!("Failed to read file {}: {}", file_path.display(), e);
-      return Err(pingora::Error::explain(
+      return Err(PingoraError::explain(
         ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
         "Failed to read file",
       ));
@@ -449,7 +452,7 @@ async fn serve_static_file(
   let content_length = file.len();
 
   // Build and send response
-  let mut resp = pingora::http::ResponseHeader::build(status, Some(2))?;
+  let mut resp = ResponseHeader::build(status, Some(2))?;
   resp
     .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())?;
   resp.insert_header(http::header::CONTENT_TYPE, content_type)?;
@@ -480,7 +483,7 @@ impl ProxyHttp for Proxy {
   async fn logging(
     &self,
     _session: &mut Session,
-    _e: Option<&pingora::Error>,
+    _e: Option<&PingoraError>,
     ctx: &mut Self::CTX,
   ) {
     if let Some(process_key) = &ctx.cell_key {
@@ -504,7 +507,7 @@ impl ProxyHttp for Proxy {
       if let Some(header_value) = req_header.headers.get(http::header::HOST) {
         header_value.to_str().map_err(|_| {
           error!("Host header contains invalid characters");
-          pingora::Error::explain(
+          PingoraError::explain(
             ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
             "Invalid Host header encoding",
           )
@@ -523,7 +526,7 @@ impl ProxyHttp for Proxy {
 
       // Validate host format briefly (prevent directory traversal)
       if tenant.contains('/') || tenant.contains("..") {
-        return Err(pingora::Error::explain(
+        return Err(PingoraError::explain(
           ErrorType::HTTPStatus(StatusCode::BAD_REQUEST.into()),
           "Invalid Host header",
         ));
@@ -547,8 +550,7 @@ impl ProxyHttp for Proxy {
     if path == "/_health" {
       let response = format!("{} OK\n", self.node_state.config.node_name);
       let content_length = response.len();
-      let mut resp =
-        pingora::http::ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
+      let mut resp = ResponseHeader::build(StatusCode::OK, Some(2)).unwrap();
       resp
         .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
         .unwrap();
@@ -565,8 +567,7 @@ impl ProxyHttp for Proxy {
       let response = "Mesh endpoints have moved to the internal API";
       let content_length = response.len();
       let mut resp =
-        pingora::http::ResponseHeader::build(StatusCode::NOT_FOUND, Some(2))
-          .unwrap();
+        ResponseHeader::build(StatusCode::NOT_FOUND, Some(2)).unwrap();
       resp
         .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
         .unwrap();
@@ -598,7 +599,7 @@ impl ProxyHttp for Proxy {
             .await
           {
             error!(error = ?e, "Error responding to internal endpoint request with 403");
-            return Err(pingora::Error::explain(
+            return Err(PingoraError::explain(
               ErrorType::HTTPStatus(StatusCode::FORBIDDEN.into()),
               "Requests to internal endpoints are forbidden",
             ));
@@ -650,7 +651,7 @@ impl ProxyHttp for Proxy {
         // This shouldn't happen as we already checked for /cell/* paths above
         Ok(false)
       }
-      StaticFileDecision::HandleAsGeneric404 => Err(pingora::Error::explain(
+      StaticFileDecision::HandleAsGeneric404 => Err(PingoraError::explain(
         ErrorType::HTTPStatus(StatusCode::NOT_FOUND.into()),
         "Not found",
       )),
@@ -662,7 +663,7 @@ impl ProxyHttp for Proxy {
     &self,
     session: &mut Session,
     ctx: &mut Self::CTX,
-  ) -> pingora::Result<Box<HttpPeer>> {
+  ) -> Result<Box<HttpPeer>> {
     // Start timing the request path
     let request_start = std::time::Instant::now();
 
@@ -698,7 +699,7 @@ impl ProxyHttp for Proxy {
             "Forwarding request to primary active owner"
         );
         let sni = ctx.tenant.clone();
-        let peer = HttpPeer::new(primary_owner_addr, false, sni);
+        let peer = HttpPeer::new(primary_owner_addr.to_string(), false, sni);
         ctx.upstream_peer_kind = Some(UpstreamPeerKind::RemoteHTTP);
         return Ok(Box::new(peer));
       } else {
@@ -710,7 +711,7 @@ impl ProxyHttp for Proxy {
             cell_id = %cell_id,
             "No active owner found for cell, cannot forward request."
         );
-        return Err(pingora::Error::explain(
+        return Err(PingoraError::explain(
           ErrorType::HTTPStatus(StatusCode::SERVICE_UNAVAILABLE.into()),
           "No available upstream node for the requested cell",
         ));
@@ -783,7 +784,7 @@ impl ProxyHttp for Proxy {
     }
 
     let Some(socket_path) = socket_path else {
-      return Err(pingora::Error::explain(
+      return Err(PingoraError::explain(
         ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
         "Failed to get or spawn process",
       ));
@@ -799,7 +800,7 @@ impl ProxyHttp for Proxy {
       Some(s) => s.to_string(),
       None => {
         error!("Invalid UTF-8 in socket path: {:?}", socket_path);
-        return Err(pingora::Error::explain(
+        return Err(PingoraError::explain(
           ErrorType::HTTPStatus(StatusCode::INTERNAL_SERVER_ERROR.into()),
           "Invalid backend path encoding",
         ));
@@ -837,7 +838,7 @@ impl ProxyHttp for Proxy {
       }
       Err(e) => {
         error!("Failed to create HTTP peer: {:?}", e);
-        Err(pingora::Error::because(
+        Err(PingoraError::because(
           ErrorType::HTTPStatus(StatusCode::SERVICE_UNAVAILABLE.into()),
           "Failed to connect to upstream application",
           e,
@@ -851,7 +852,7 @@ impl ProxyHttp for Proxy {
     _session: &mut Session,
     upstream_request: &mut RequestHeader,
     ctx: &mut Self::CTX,
-  ) -> pingora::Result<()> {
+  ) -> Result<()> {
     match ctx.upstream_peer_kind {
       Some(UpstreamPeerKind::LocalUDS) => {
         let cell_id = ctx
