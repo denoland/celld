@@ -7,8 +7,9 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["pingora_real", "hyper", "hyper-util"]
+default = ["hyper-compat"]
 hyper-compat = ["pingora_hyper_impl", "hyper", "hyper-util", "tokio-tungstenite", "tower"]
+pingora-only = ["pingora_real", "hyper", "hyper-util"]
 
 [dependencies]
 anyhow = "1"
