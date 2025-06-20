@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use http_body_util::{BodyExt, Full};
 use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -10,14 +10,18 @@ use crate::proxy::{ProxyHttp, RequestHeader, Session};
 use crate::upstreams::peer::HttpPeer;
 
 /// Helper function to create error responses with BoxBody
-fn error_response(status: u16, message: &str) -> hyper::Response<BoxBody<Bytes, hyper::Error>> {
-  let body = Full::new(Bytes::from(message.to_string())).map_err(|never| match never {}).boxed();
+fn error_response(
+  status: u16,
+  message: &str,
+) -> hyper::Response<BoxBody<Bytes, hyper::Error>> {
+  let body = Full::new(Bytes::from(message.to_string()))
+    .map_err(|never| match never {})
+    .boxed();
   hyper::Response::builder()
     .status(status)
     .body(body)
     .unwrap()
 }
-
 
 pub struct ShutdownWatch {
   receiver: watch::Receiver<()>,
@@ -420,7 +424,12 @@ where
       Ok(Some(chunk)) => {
         let end_of_stream = false; // We'll know it's the end when we get None
         if let Err(e) = proxy_service
-          .request_body_filter(&mut session, &mut Some(chunk.clone()), end_of_stream, &mut ctx)
+          .request_body_filter(
+            &mut session,
+            &mut Some(chunk.clone()),
+            end_of_stream,
+            &mut ctx,
+          )
           .await
         {
           eprintln!("request_body_filter error: {:?}", e);
@@ -472,17 +481,17 @@ where
         // Convert Incoming body to BoxBody for streaming
         let (parts, body) = streaming_response.into_parts();
         let boxed_body = body.boxed();
-        
+
         let mut response_builder = hyper::Response::builder()
           .status(parts.status)
           .version(parts.version);
-        
+
         for (name, value) in parts.headers.iter() {
           response_builder = response_builder.header(name, value);
         }
-        
+
         Ok::<hyper::Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>(
-          response_builder.body(boxed_body).unwrap()
+          response_builder.body(boxed_body).unwrap(),
         )
       }
       Err(e) => {
@@ -503,17 +512,17 @@ where
         // Convert Incoming body to BoxBody for streaming
         let (parts, body) = streaming_response.into_parts();
         let boxed_body = body.boxed();
-        
+
         let mut response_builder = hyper::Response::builder()
           .status(parts.status)
           .version(parts.version);
-        
+
         for (name, value) in parts.headers.iter() {
           response_builder = response_builder.header(name, value);
         }
-        
+
         Ok::<hyper::Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>(
-          response_builder.body(boxed_body).unwrap()
+          response_builder.body(boxed_body).unwrap(),
         )
       }
       Err(e) => {
@@ -573,7 +582,12 @@ where
       Ok(Some(chunk)) => {
         let end_of_stream = false;
         if let Err(e) = proxy_service
-          .request_body_filter(&mut session, &mut Some(chunk.clone()), end_of_stream, &mut ctx)
+          .request_body_filter(
+            &mut session,
+            &mut Some(chunk.clone()),
+            end_of_stream,
+            &mut ctx,
+          )
           .await
         {
           eprintln!("WebSocket request_body_filter error: {:?}", e);
@@ -587,7 +601,10 @@ where
           .request_body_filter(&mut session, &mut None, true, &mut ctx)
           .await
         {
-          eprintln!("WebSocket request_body_filter error on end of stream: {:?}", e);
+          eprintln!(
+            "WebSocket request_body_filter error on end of stream: {:?}",
+            e
+          );
           return Ok(error_response(500, "Internal Server Error"));
         }
         break;
@@ -749,7 +766,13 @@ async fn handle_websocket_uds_upgrade(
   }
 
   // Create the final response
-  let res = res_builder.body(Full::new(Bytes::new()).map_err(|never| match never {}).boxed()).unwrap();
+  let res = res_builder
+    .body(
+      Full::new(Bytes::new())
+        .map_err(|never| match never {})
+        .boxed(),
+    )
+    .unwrap();
 
   // Rebuild the client request for upgrade
   let client_req =
@@ -864,7 +887,13 @@ async fn handle_websocket_tcp_upgrade(
   }
 
   // Create the final response
-  let res = res_builder.body(Full::new(Bytes::new()).map_err(|never| match never {}).boxed()).unwrap();
+  let res = res_builder
+    .body(
+      Full::new(Bytes::new())
+        .map_err(|never| match never {})
+        .boxed(),
+    )
+    .unwrap();
 
   // Rebuild the client request for upgrade
   let client_req =

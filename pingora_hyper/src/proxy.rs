@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use http::{HeaderMap, Method, StatusCode, Uri, Version};
-use hyper::body::Incoming;
 use http_body_util::BodyExt;
+use hyper::body::Incoming;
 
 use crate::error::{Error, Result};
 use crate::upstreams::peer::HttpPeer;
@@ -229,7 +229,9 @@ impl Session {
   /// Build response with BoxBody for streaming compatibility
   pub fn build_response_boxed(
     self,
-  ) -> hyper::Response<http_body_util::combinators::BoxBody<bytes::Bytes, hyper::Error>> {
+  ) -> hyper::Response<
+    http_body_util::combinators::BoxBody<bytes::Bytes, hyper::Error>,
+  > {
     use http_body_util::{BodyExt, Full};
 
     let status = self.response_status.unwrap_or(StatusCode::OK);
@@ -250,7 +252,13 @@ impl Session {
       response = response.header(name.clone(), value.clone());
     }
 
-    response.body(Full::new(body_bytes).map_err(|never| match never {}).boxed()).unwrap()
+    response
+      .body(
+        Full::new(body_bytes)
+          .map_err(|never| match never {})
+          .boxed(),
+      )
+      .unwrap()
   }
 }
 

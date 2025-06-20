@@ -19,50 +19,52 @@ pub use server_impl::{
   ShutdownWatch,
 };
 
-// Re-export Pingora-compatible types 
+// Re-export Pingora-compatible types
 pub use error::{Error, ErrorType, Result};
 
 // Main prelude that provides the same API as Pingora's prelude
 pub mod prelude {
   // Re-export all the main types that applications expect
   pub use crate::error::{Error, ErrorType, Result};
-  pub use crate::proxy::{ProxyHttp, RequestHeader, ResponseHeader, Session};
-  pub use crate::server_impl::{http_proxy_service, Server, ServerConf};
-  pub use crate::upstreams::peer::HttpPeer;
   pub use crate::http::StatusCode;
+  pub use crate::proxy::{ProxyHttp, RequestHeader, ResponseHeader, Session};
   pub use crate::server::ShutdownWatch;
-  pub use crate::services::background::{BackgroundService, background_service};
+  pub use crate::server_impl::{http_proxy_service, Server, ServerConf};
+  pub use crate::services::background::{
+    background_service, BackgroundService,
+  };
+  pub use crate::upstreams::peer::HttpPeer;
 }
 
 // Compatibility module that can be used as a drop-in replacement for pingora
 // when hyper-compat feature is enabled
 pub mod pingora {
   pub use crate::prelude::*;
-  
+
   pub mod prelude {
     pub use crate::prelude::*;
   }
-  
+
   pub mod http {
     pub use crate::http::*;
     pub use crate::proxy::ResponseHeader;
   }
-  
+
   pub mod upstreams {
     pub mod peer {
       pub use crate::upstreams::peer::*;
     }
   }
-  
+
   pub mod server {
     pub use crate::server::*;
     pub use crate::server_impl::*;
-    
+
     pub mod configuration {
       pub use crate::server::configuration::*;
     }
   }
-  
+
   pub mod services {
     pub mod background {
       pub use crate::services::background::*;

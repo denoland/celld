@@ -54,7 +54,10 @@ pub enum ErrorType {
 }
 
 impl Error {
-  pub fn explain<S: AsRef<str>>(error_type: ErrorType, message: S) -> Box<Self> {
+  pub fn explain<S: AsRef<str>>(
+    error_type: ErrorType,
+    message: S,
+  ) -> Box<Self> {
     let message = message.as_ref();
     let error = match error_type {
       ErrorType::InternalError => Error::InternalError(message.to_string()),
@@ -70,7 +73,10 @@ impl Error {
     Box::new(error)
   }
 
-  pub fn because<S: AsRef<str>, E: std::error::Error + Send + Sync + 'static>(
+  pub fn because<
+    S: AsRef<str>,
+    E: std::error::Error + Send + Sync + 'static,
+  >(
     error_type: ErrorType,
     message: S,
     _cause: E,
