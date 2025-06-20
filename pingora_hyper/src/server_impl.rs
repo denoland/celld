@@ -543,7 +543,7 @@ where
       use crate::error::{Error, ErrorType};
       let pingora_error = Error::explain(
         ErrorType::InternalError,
-        &format!("Upstream error: {}", e),
+        format!("Upstream error: {}", e),
       );
       proxy_service
         .logging(&mut session, Some(&pingora_error), &mut ctx)
@@ -674,7 +674,7 @@ where
       use crate::error::{Error, ErrorType};
       let pingora_error = Error::explain(
         ErrorType::InternalError,
-        &format!("WebSocket upgrade error: {}", e),
+        format!("WebSocket upgrade error: {}", e),
       );
       proxy_service
         .logging(&mut session, Some(&pingora_error), &mut ctx)
