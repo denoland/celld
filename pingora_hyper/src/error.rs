@@ -39,6 +39,9 @@ pub enum Error {
 
   #[error("Invalid header")]
   InvalidHeader,
+
+  #[error("HTTP Status {0}")]
+  HttpStatus(u16),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -67,7 +70,7 @@ impl Error {
         Error::ServiceUnavailable(message.to_string())
       }
       ErrorType::TimeoutError => Error::TimeoutError,
-      ErrorType::HTTPStatus(_) => Error::InternalError(message.to_string()),
+      ErrorType::HTTPStatus(code) => Error::HttpStatus(code),
       _ => Error::InternalError(format!("{}: {}", error_type, message)),
     };
     Box::new(error)
@@ -96,6 +99,7 @@ impl Error {
       Error::BadRequest(_) => ErrorType::BadRequest,
       Error::ServiceUnavailable(_) => ErrorType::ServiceUnavailable,
       Error::InvalidHeader => ErrorType::BadRequest,
+      Error::HttpStatus(code) => ErrorType::HTTPStatus(*code),
     }
   }
 
@@ -104,6 +108,9 @@ impl Error {
       Error::BadRequest(_) => StatusCode::BAD_REQUEST,
       Error::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
       Error::TimeoutError => StatusCode::GATEWAY_TIMEOUT,
+      Error::HttpStatus(code) => {
+        StatusCode::from_u16(*code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+      }
       _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
   }

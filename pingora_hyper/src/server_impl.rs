@@ -5,6 +5,7 @@ use http_body_util::{BodyExt, Full};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
+use tracing::{debug, error, warn};
 
 use crate::proxy::{ProxyHttp, RequestHeader, Session};
 use crate::upstreams::peer::HttpPeer;
@@ -386,8 +387,10 @@ where
       // Continue to upstream logic
     }
     Err(e) => {
-      eprintln!("request_filter error: {:?}", e);
-      return Ok(error_response(500, "Internal Server Error"));
+      debug!("request_filter error: {:?}", e);
+      let status_code = e.to_status_code();
+      let message = format!("{}", e);
+      return Ok(error_response(status_code.as_u16(), &message));
     }
   }
 
@@ -396,8 +399,10 @@ where
     match proxy_service.upstream_peer(&mut session, &mut ctx).await {
       Ok(peer) => peer,
       Err(e) => {
-        eprintln!("upstream_peer error: {:?}", e);
-        return Ok(error_response(502, "Bad Gateway"));
+        debug!("upstream_peer error: {:?}", e);
+        let status_code = e.to_status_code();
+        let message = format!("{}", e);
+        return Ok(error_response(status_code.as_u16(), &message));
       }
     };
 
@@ -413,8 +418,10 @@ where
     .upstream_request_filter(&mut session, &mut upstream_request, &mut ctx)
     .await
   {
-    eprintln!("upstream_request_filter error: {:?}", e);
-    return Ok(error_response(502, "Bad Gateway"));
+    debug!("upstream_request_filter error: {:?}", e);
+    let status_code = e.to_status_code();
+    let message = format!("{}", e);
+    return Ok(error_response(status_code.as_u16(), &message));
   }
 
   // Process request body through filters and collect for upstream
@@ -432,7 +439,7 @@ where
           )
           .await
         {
-          eprintln!("request_body_filter error: {:?}", e);
+          warn!("request_body_filter error: {:?}", e);
           return Ok(error_response(500, "Internal Server Error"));
         }
         request_body_chunks.push(chunk);
@@ -443,13 +450,13 @@ where
           .request_body_filter(&mut session, &mut None, true, &mut ctx)
           .await
         {
-          eprintln!("request_body_filter error on end of stream: {:?}", e);
+          warn!("request_body_filter error on end of stream: {:?}", e);
           return Ok(error_response(500, "Internal Server Error"));
         }
         break;
       }
       Err(e) => {
-        eprintln!("Error reading request body: {:?}", e);
+        error!("Error reading request body: {:?}", e);
         return Ok(error_response(400, "Bad Request"));
       }
     }
@@ -495,7 +502,7 @@ where
         )
       }
       Err(e) => {
-        eprintln!("Error in UDS streaming: {:?}", e);
+        error!("Error in UDS streaming: {:?}", e);
         Ok(error_response(502, "Bad Gateway"))
       }
     }
@@ -526,7 +533,7 @@ where
         )
       }
       Err(e) => {
-        eprintln!("Error in TCP streaming: {:?}", e);
+        error!("Error in TCP streaming: {:?}", e);
         Ok(error_response(502, "Bad Gateway"))
       }
     }
@@ -538,7 +545,7 @@ where
       Ok(response)
     }
     Err(e) => {
-      eprintln!("upstream connection error: {:?}", e);
+      error!("upstream connection error: {:?}", e);
       // Convert to Pingora Error for logging
       use crate::error::{Error, ErrorType};
       let pingora_error = Error::explain(
@@ -590,7 +597,7 @@ where
           )
           .await
         {
-          eprintln!("WebSocket request_body_filter error: {:?}", e);
+          warn!("WebSocket request_body_filter error: {:?}", e);
           return Ok(error_response(500, "Internal Server Error"));
         }
         request_body_chunks.push(chunk);
@@ -601,7 +608,7 @@ where
           .request_body_filter(&mut session, &mut None, true, &mut ctx)
           .await
         {
-          eprintln!(
+          warn!(
             "WebSocket request_body_filter error on end of stream: {:?}",
             e
           );
@@ -610,7 +617,7 @@ where
         break;
       }
       Err(e) => {
-        eprintln!("WebSocket error reading request body: {:?}", e);
+        error!("WebSocket error reading request body: {:?}", e);
         return Ok(error_response(400, "Bad Request"));
       }
     }
@@ -626,7 +633,7 @@ where
       // Continue to upstream logic
     }
     Err(e) => {
-      eprintln!("WebSocket request_filter error: {:?}", e);
+      debug!("WebSocket request_filter error: {:?}", e);
       return Ok(error_response(500, "Internal Server Error"));
     }
   }
@@ -636,7 +643,7 @@ where
     match proxy_service.upstream_peer(&mut session, &mut ctx).await {
       Ok(peer) => peer,
       Err(e) => {
-        eprintln!("WebSocket upstream_peer error: {:?}", e);
+        debug!("WebSocket upstream_peer error: {:?}", e);
         return Ok(error_response(502, "Bad Gateway"));
       }
     };
@@ -652,7 +659,7 @@ where
     .upstream_request_filter(&mut session, &mut upstream_request, &mut ctx)
     .await
   {
-    eprintln!("WebSocket upstream_request_filter error: {:?}", e);
+    debug!("WebSocket upstream_request_filter error: {:?}", e);
     return Ok(error_response(502, "Bad Gateway"));
   }
 
@@ -669,7 +676,7 @@ where
       Ok(response)
     }
     Err(e) => {
-      eprintln!("WebSocket upgrade error: {:?}", e);
+      error!("WebSocket upgrade error: {:?}", e);
       // Convert to Pingora Error for logging
       use crate::error::{Error, ErrorType};
       let pingora_error = Error::explain(
@@ -702,7 +709,7 @@ async fn handle_websocket_uds_upgrade(
   let uds_stream = match UnixStream::connect(&upstream_peer.address).await {
     Ok(stream) => stream,
     Err(e) => {
-      eprintln!("Failed to connect to UDS {}: {}", upstream_peer.address, e);
+      error!("Failed to connect to UDS {}: {}", upstream_peer.address, e);
       return Err(e.into());
     }
   };
@@ -734,7 +741,7 @@ async fn handle_websocket_uds_upgrade(
   // Start a task to handle the HTTP connection
   tokio::spawn(async move {
     if let Err(e) = conn.with_upgrades().await {
-      eprintln!("UDS WebSocket client connection error: {}", e);
+      warn!("UDS WebSocket client connection error: {}", e);
     }
   });
 
@@ -792,13 +799,13 @@ async fn handle_websocket_uds_upgrade(
             if let Err(e) =
               tokio::io::copy_bidirectional(&mut client_io, &mut uds_io).await
             {
-              eprintln!("Error in WebSocket proxy: {}", e);
+              warn!("Error in WebSocket proxy: {}", e);
             }
           }
-          Err(e) => eprintln!("Error upgrading UDS connection: {}", e),
+          Err(e) => warn!("Error upgrading UDS connection: {}", e),
         }
       }
-      Err(e) => eprintln!("Error upgrading client connection: {}", e),
+      Err(e) => warn!("Error upgrading client connection: {}", e),
     }
   });
 
@@ -823,7 +830,7 @@ async fn handle_websocket_tcp_upgrade(
   let tcp_stream = match TcpStream::connect(&upstream_peer.address).await {
     Ok(stream) => stream,
     Err(e) => {
-      eprintln!("Failed to connect to TCP {}: {}", upstream_peer.address, e);
+      error!("Failed to connect to TCP {}: {}", upstream_peer.address, e);
       return Err(e.into());
     }
   };
@@ -855,7 +862,7 @@ async fn handle_websocket_tcp_upgrade(
   // Start a task to handle the HTTP connection
   tokio::spawn(async move {
     if let Err(e) = conn.with_upgrades().await {
-      eprintln!("TCP WebSocket client connection error: {}", e);
+      warn!("TCP WebSocket client connection error: {}", e);
     }
   });
 
@@ -913,13 +920,13 @@ async fn handle_websocket_tcp_upgrade(
             if let Err(e) =
               tokio::io::copy_bidirectional(&mut client_io, &mut tcp_io).await
             {
-              eprintln!("Error in TCP WebSocket proxy: {}", e);
+              warn!("Error in TCP WebSocket proxy: {}", e);
             }
           }
-          Err(e) => eprintln!("Error upgrading TCP connection: {}", e),
+          Err(e) => warn!("Error upgrading TCP connection: {}", e),
         }
       }
-      Err(e) => eprintln!("Error upgrading client connection: {}", e),
+      Err(e) => warn!("Error upgrading client connection: {}", e),
     }
   });
 
@@ -942,7 +949,7 @@ async fn handle_uds_upstream_streaming(
   let uds_stream = match UnixStream::connect(&upstream_peer.address).await {
     Ok(stream) => stream,
     Err(e) => {
-      eprintln!("Failed to connect to UDS {}: {}", upstream_peer.address, e);
+      error!("Failed to connect to UDS {}: {}", upstream_peer.address, e);
       return Err(e.into());
     }
   };
@@ -968,7 +975,7 @@ async fn handle_uds_upstream_streaming(
   // Start a task to handle the HTTP connection
   tokio::spawn(async move {
     if let Err(e) = conn.await {
-      eprintln!("UDS client connection error: {}", e);
+      warn!("UDS client connection error: {}", e);
     }
   });
 
@@ -1007,7 +1014,7 @@ async fn handle_tcp_upstream_streaming(
   let tcp_stream = match TcpStream::connect(&upstream_peer.address).await {
     Ok(stream) => stream,
     Err(e) => {
-      eprintln!("Failed to connect to TCP {}: {}", upstream_peer.address, e);
+      error!("Failed to connect to TCP {}: {}", upstream_peer.address, e);
       return Err(e.into());
     }
   };
@@ -1033,7 +1040,7 @@ async fn handle_tcp_upstream_streaming(
   // Start a task to handle the HTTP connection
   tokio::spawn(async move {
     if let Err(e) = conn.await {
-      eprintln!("TCP client connection error: {}", e);
+      warn!("TCP client connection error: {}", e);
     }
   });
 
