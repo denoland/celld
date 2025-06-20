@@ -118,6 +118,24 @@ impl Session {
     }
   }
 
+  /// Create a new Session for WebSocket that doesn't consume the body
+  pub fn new_websocket(req_header: RequestHeader) -> Self {
+    Self {
+      req_header,
+      request_body: None, // WebSocket upgrades have no body
+      response_status: None,
+      response_headers: HeaderMap::new(),
+      response_body: Vec::new(),
+      _keepalive: None,
+    }
+  }
+
+  /// Check if this session is for a WebSocket upgrade
+  pub fn is_websocket(&self) -> bool {
+    self.request_body.is_none()
+      && self.req_header.headers.get("sec-websocket-key").is_some()
+  }
+
   pub fn req_header(&self) -> &RequestHeader {
     &self.req_header
   }
@@ -170,6 +188,11 @@ impl Session {
   /// Returns Some(bytes) for each chunk, None when complete
   /// This matches Pingora's streaming interface
   pub async fn read_request_body(&mut self) -> Result<Option<bytes::Bytes>> {
+    if self.is_websocket() {
+      // WebSocket upgrades have no body
+      return Ok(None);
+    }
+
     loop {
       if let Some(body) = &mut self.request_body {
         match body.frame().await {

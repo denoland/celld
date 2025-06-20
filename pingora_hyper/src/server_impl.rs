@@ -354,14 +354,11 @@ async fn proxy_http_bridge<SV>(
 where
   SV: ProxyHttp + Send + Sync + 'static,
 {
-  // Check if this is a WebSocket upgrade request early
+  // Check if this is a WebSocket upgrade request
   let is_websocket = hyper_req.headers().get("sec-websocket-key").is_some();
 
-  // For WebSocket upgrades to UDS peers, use special handling
-  // For TCP peers, use regular HTTP proxy (WebSocket headers will be preserved)
   if is_websocket {
-    // We'll check peer type during regular processing and handle WebSocket upgrade there
-    // For now, continue with regular HTTP proxy logic which preserves WebSocket headers
+    return handle_websocket_with_proxyhttp(proxy_service, hyper_req).await;
   }
   // Convert hyper::Request to Pingora RequestHeader
   let (parts, body) = hyper_req.into_parts();
@@ -407,38 +404,6 @@ where
         return Ok(error_response(status_code.as_u16(), &message));
       }
     };
-
-  // For WebSocket upgrades to UDS peers, handle specially
-  if is_websocket && upstream_peer.is_uds {
-    debug!("WebSocket request to UDS peer, handling upgrade");
-    let parts: http::request::Parts = session.req_header().clone().into();
-    match handle_websocket_uds_upgrade(
-      &upstream_peer,
-      session.req_header().clone(),
-      parts,
-    )
-    .await
-    {
-      Ok(response) => {
-        proxy_service.logging(&mut session, None, &mut ctx).await;
-        return Ok(response);
-      }
-      Err(e) => {
-        error!("WebSocket UDS upgrade error: {:?}", e);
-        let pingora_error = crate::error::Error::explain(
-          crate::error::ErrorType::InternalError,
-          format!("WebSocket upgrade error: {}", e),
-        );
-        proxy_service
-          .logging(&mut session, Some(&pingora_error), &mut ctx)
-          .await;
-        return Ok(error_response(502, "WebSocket upgrade failed"));
-      }
-    }
-  }
-
-  // For WebSocket requests to TCP peers, continue with regular HTTP proxy
-  // The WebSocket headers will be preserved and the remote celld will handle the upgrade
 
   // Create upstream request based on the original request
   let mut upstream_request = session.req_header().clone();
@@ -594,13 +559,94 @@ where
   }
 }
 
-// WebSocket bridge function removed - WebSocket handling is now done inline in proxy_http_bridge
+async fn handle_websocket_with_proxyhttp<SV>(
+  proxy_service: Arc<SV>,
+  hyper_req: hyper::Request<hyper::body::Incoming>,
+) -> Result<hyper::Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>
+where
+  SV: ProxyHttp + Send + Sync + 'static,
+{
+  // Create RequestHeader without consuming the request
+  let req_header = RequestHeader {
+    method: hyper_req.method().clone(),
+    uri: hyper_req.uri().clone(),
+    version: hyper_req.version(),
+    headers: hyper_req.headers().clone(),
+  };
+
+  // Create WebSocket session
+  let mut session = Session::new_websocket(req_header);
+  let mut ctx = proxy_service.new_ctx();
+  let original_uri = session.req_header().uri.clone();
+
+  // Run through ProxyHttp filters
+  match proxy_service.request_filter(&mut session, &mut ctx).await {
+    Ok(true) => {
+      // request_filter handled everything
+      return Ok(session.build_response_boxed());
+    }
+    Ok(false) => {
+      // Continue to upstream
+    }
+    Err(e) => {
+      debug!("WebSocket request_filter error: {:?}", e);
+      let status_code = e.to_status_code();
+      return Ok(error_response(status_code.as_u16(), &format!("{}", e)));
+    }
+  }
+
+  // Get upstream peer
+  let upstream_peer =
+    match proxy_service.upstream_peer(&mut session, &mut ctx).await {
+      Ok(peer) => peer,
+      Err(e) => {
+        debug!("WebSocket upstream_peer error: {:?}", e);
+        let status_code = e.to_status_code();
+        return Ok(error_response(status_code.as_u16(), &format!("{}", e)));
+      }
+    };
+
+  // Create upstream request
+  let mut upstream_request = session.req_header().clone();
+  if upstream_request.uri.path().is_empty() {
+    upstream_request.uri = original_uri;
+  }
+
+  // Apply upstream request filter
+  if let Err(e) = proxy_service
+    .upstream_request_filter(&mut session, &mut upstream_request, &mut ctx)
+    .await
+  {
+    debug!("WebSocket upstream_request_filter error: {:?}", e);
+    let status_code = e.to_status_code();
+    return Ok(error_response(status_code.as_u16(), &format!("{}", e)));
+  }
+
+  // Call logging
+  proxy_service.logging(&mut session, None, &mut ctx).await;
+
+  // Now handle the WebSocket upgrade with the ORIGINAL request
+  match if upstream_peer.is_uds {
+    handle_websocket_uds_upgrade(&upstream_peer, upstream_request, hyper_req)
+      .await
+  } else {
+    // For TCP peers, use regular TCP WebSocket upgrade
+    handle_websocket_tcp_upgrade(&upstream_peer, upstream_request, hyper_req)
+      .await
+  } {
+    Ok(response) => Ok(response),
+    Err(e) => {
+      error!("WebSocket upgrade error: {:?}", e);
+      Ok(error_response(502, "WebSocket upgrade failed"))
+    }
+  }
+}
 
 /// Handle WebSocket upgrade over Unix domain socket
 async fn handle_websocket_uds_upgrade(
   upstream_peer: &HttpPeer,
   upstream_request: RequestHeader,
-  client_parts: http::request::Parts,
+  client_req: hyper::Request<hyper::body::Incoming>, // Original request with upgrade capability
 ) -> Result<
   hyper::Response<BoxBody<Bytes, hyper::Error>>,
   Box<dyn std::error::Error + Send + Sync>,
@@ -620,9 +666,16 @@ async fn handle_websocket_uds_upgrade(
   };
 
   // Build the upstream WebSocket upgrade request
+  // For UDS, use just the path and query, not the full URI
+  let path_and_query = upstream_request
+    .uri
+    .path_and_query()
+    .map(|pq| pq.as_str())
+    .unwrap_or("/");
+
   let mut req_builder = hyper::Request::builder()
     .method("GET")
-    .uri(upstream_request.uri.clone())
+    .uri(path_and_query) // Just path for UDS, not full URI
     .version(hyper::Version::HTTP_11);
 
   // Copy over headers required for the WebSocket upgrade
@@ -686,11 +739,8 @@ async fn handle_websocket_uds_upgrade(
     )
     .unwrap();
 
-  // Rebuild the client request for upgrade
-  let client_req =
-    hyper::Request::from_parts(client_parts, Empty::<Bytes>::new());
-
   // Handle the upgraded connection in a background task
+  // Use the original client_req which preserves the upgrade state
   tokio::spawn(async move {
     debug!("Starting WebSocket upgrade handling for UDS connection");
 
@@ -732,7 +782,7 @@ async fn handle_websocket_uds_upgrade(
 async fn handle_websocket_tcp_upgrade(
   upstream_peer: &HttpPeer,
   upstream_request: RequestHeader,
-  client_parts: http::request::Parts,
+  client_req: hyper::Request<hyper::body::Incoming>, // Original request with upgrade capability
 ) -> Result<
   hyper::Response<BoxBody<Bytes, hyper::Error>>,
   Box<dyn std::error::Error + Send + Sync>,
@@ -818,11 +868,8 @@ async fn handle_websocket_tcp_upgrade(
     )
     .unwrap();
 
-  // Rebuild the client request for upgrade
-  let client_req =
-    hyper::Request::from_parts(client_parts, Empty::<Bytes>::new());
-
   // Handle the upgraded connections in a background task
+  // Use the original client_req which preserves the upgrade state
   tokio::spawn(async move {
     debug!("Starting TCP WebSocket proxy between client and remote celld");
 
