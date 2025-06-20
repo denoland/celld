@@ -154,7 +154,7 @@ fn start_server(config: config::Config) -> Server {
         staleness_threshold: node_state.config.staleness_threshold,
       },
     );
-    s.threads = Some(2);
+    s.threads = Some(1);
     s
   });
 
@@ -167,7 +167,7 @@ fn start_server(config: config::Config) -> Server {
         interval: node_state.config.alarm_scheduler_interval,
       },
     );
-    s.threads = Some(1);
+    s.threads = Some(2);
     s
   });
 
@@ -179,7 +179,7 @@ fn start_server(config: config::Config) -> Server {
         node_state: node_state.clone(),
       },
     );
-    s.threads = Some(1);
+    s.threads = Some(2);
     s
   });
 
