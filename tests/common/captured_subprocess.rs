@@ -130,7 +130,7 @@ impl Drop for CapturedSubprocess {
       }
     }
 
-    if std::thread::panicking() && self.stdout_relay_handle.is_some() {
+    if std::thread::panicking() {
       #[allow(clippy::print_stdout)]
       {
         println!(
