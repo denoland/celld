@@ -32,7 +32,7 @@ impl BackgroundService for HeartbeatService {
 
     loop {
       tokio::select! {
-        _ = interval_timer.tick() => {
+        _ = tokio::time::sleep(interval) => {
           // Send heartbeat to S3
           match cluster_membership.heartbeat().await {
             Ok(_) => debug!("Sent heartbeat to S3 successfully"),
