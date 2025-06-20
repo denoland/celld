@@ -5,6 +5,11 @@ use serde_json::Value;
 use std::time::Duration;
 use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::protocol::Message;
+
+type WebSocketStream = tokio_tungstenite::WebSocketStream<
+  tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+>;
+
 use tracing::{info, warn};
 use url::Url;
 use uuid::Uuid;
@@ -932,9 +937,7 @@ async fn test_restore_single() {
 
 /// Helper function to read a message of a specific type from a WebSocket stream
 async fn read_message_of_type(
-  stream: &mut tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-  >,
+  stream: &mut WebSocketStream,
   msg_type: &str,
   timeout_ms: u64,
 ) -> Value {
@@ -970,9 +973,7 @@ async fn connect_to_cell(
   port: u16,
   cell_id: &str,
 ) -> (
-  tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-  >,
+  WebSocketStream,
   String, // username
 ) {
   // Use the hostname directly with the test port

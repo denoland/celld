@@ -291,6 +291,10 @@ mod tests {
   use std::time::Duration;
   use tokio_tungstenite::tungstenite::protocol::Message;
 
+  type WebSocketStream = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+  >;
+
   // inspired by https://github.com/cloudflare/pingora/blob/caa6a0/pingora-core/tests/utils/mod.rs
   pub static TEST_SERVER: Lazy<std::thread::JoinHandle<()>> = Lazy::new(|| {
     let _ = tracing_subscriber::fmt::try_init();
@@ -429,9 +433,7 @@ mod tests {
   async fn connect_to_cell(
     cell_id: &str,
   ) -> (
-    tokio_tungstenite::WebSocketStream<
-      tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    WebSocketStream,
     String, // username
   ) {
     // Create URL with proper host header in the URL

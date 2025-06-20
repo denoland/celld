@@ -275,8 +275,7 @@ impl ProxyHttp for InternalAPI {
         return Ok(true);
       };
 
-      let parts: http::request::Parts =
-        session.req_header().as_ref().clone().into();
+      let parts: http::request::Parts = session.req_header().as_ref().clone();
       let req_body = session
         .read_request_body()
         .await?
