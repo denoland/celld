@@ -2,7 +2,7 @@ use std::{path::Path, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use tokio::net::TcpStream;
-use tracing::{error, info};
+use tracing::{debug, error};
 
 use crate::node_state::NodeState;
 
@@ -102,7 +102,10 @@ impl AlarmProcessor {
       (),
     )?;
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<AlarmProcessRequest>(100);
+    const CAPACITY: usize = 100;
+
+    let (tx, mut rx) =
+      tokio::sync::mpsc::channel::<AlarmProcessRequest>(CAPACITY);
     let self_message_tx = tx.clone();
     let (abort_handle_tx, abort_handle_rx) = std::sync::mpsc::channel();
 
@@ -119,7 +122,7 @@ impl AlarmProcessor {
       let handle = local.spawn_local(async move {
         while let Some(request) = rx.recv().await {
           let kind = request.kind();
-          tracing::debug!(?kind, "AlarmProcessor received request");
+          debug!(?kind, n_msg = rx.len(), "AlarmProcessor received request");
 
           // NOTE: it is important to keep message handlers non-async.
           //
@@ -187,7 +190,7 @@ impl AlarmProcessor {
             }
           }
 
-          tracing::debug!(?kind, "AlarmProcessor processed request");
+          debug!(?kind, "AlarmProcessor processed request");
         }
       });
 
@@ -502,6 +505,8 @@ fn dispatch_alarms_handler(
 
   // Spawn a task to dispatch alarms in the background.
   tokio::task::spawn_local(async move {
+    debug!(current_timestamp = ?current_timestamp, "Dispatching alarms");
+
     let futs = alarms.into_iter().map(|alarm| {
       use futures::{FutureExt as _, TryFutureExt as _};
       if node_state
@@ -525,6 +530,11 @@ fn dispatch_alarms_handler(
       .flatten()
       .collect();
 
+    debug!(
+      current_timestamp = ?current_timestamp,
+      "Dispatch future completed"
+    );
+
     // Send a message to the message box to notify that the requested dispatch
     // is completed.
     let _ = self_message_tx
@@ -533,6 +543,11 @@ fn dispatch_alarms_handler(
         dispatched_alarms,
       })
       .await;
+
+    debug!(
+      current_timestamp = ?current_timestamp,
+      "Dispatch tokio task completed"
+    );
   });
 }
 

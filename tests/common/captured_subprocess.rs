@@ -52,6 +52,10 @@ impl CapturedSubprocess {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
           let line = line.unwrap();
+          #[allow(clippy::print_stdout)]
+          {
+            println!("{line}");
+          }
           let mut lock = captured_stdout.lock().unwrap();
           lock.push_str(&line);
           lock.push('\n');
@@ -67,6 +71,10 @@ impl CapturedSubprocess {
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
           let line = line.unwrap();
+          #[allow(clippy::print_stderr)]
+          {
+            eprintln!("{line}");
+          }
           let mut lock = captured_stderr.lock().unwrap();
           lock.push_str(&line);
           lock.push('\n');

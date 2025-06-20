@@ -930,7 +930,7 @@ async fn test_recursive_alarm_no_minio() {
 #[test_log::test(tokio::test)]
 async fn test_recursive_alarm_multiple_cells_no_minio() {
   use common::CELL_ALARM_SCHEDULER_INTERVAL_SECS as I;
-  
+
   let test_env = TestEnv::new_single_node_without_minio(
     "test_recursive_alarm_multiple_cells_no_minio",
   )
@@ -1002,7 +1002,7 @@ async fn test_recursive_alarm_multiple_cells_no_minio() {
   // Loop 10 times: POST 5 times in parallel and wait 5*I
   for i in 1..=10 {
     info!("Loop iteration {}: POST 5 times in parallel", i);
-    
+
     // Launch 5 POSTs in parallel
     let post_futures = (0..5).map(|j| {
       let client_ = client.clone();
@@ -1018,15 +1018,15 @@ async fn test_recursive_alarm_multiple_cells_no_minio() {
         info!("Parallel POST {} completed", j);
       })
     });
-    
+
     // Wait for all POSTs to complete at once
     join_all(post_futures).await;
     info!("All 5 parallel POSTs completed for iteration {}", i);
-    
+
     // Wait 5*I seconds
     info!("Waiting {} seconds (5*I)", 5 * I);
     tokio::time::sleep(std::time::Duration::from_secs(5 * I)).await;
-    
+
     // Check count has increased
     let res = client
       .get(&url)
@@ -1037,7 +1037,7 @@ async fn test_recursive_alarm_multiple_cells_no_minio() {
     assert_eq!(res.status(), 200);
     let content = res.json::<GetResponse>().await.unwrap();
     info!("Iteration {} count: {}", i, content.count);
-    
+
     assert!(
       content.count > prev_count,
       "Count should be increasing: prev={}, current={} (iteration {})",

@@ -5,7 +5,7 @@ use pingora::server::ShutdownWatch;
 use pingora::services::background::BackgroundService;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 pub struct AlarmScheduler {
   pub node_state: Arc<NodeState>,
@@ -29,14 +29,21 @@ impl BackgroundService for AlarmScheduler {
             break;
         }
         _ = interval.tick() => {
+          debug!("Alarm scheduler ticked");
+
           let Some(system_main_cell_handle) = self.node_state.cell_manager.get_system_main_cell().await else {
             // System main cell not found, indicating that its owner is not self now.
+            debug!("System main cell not found, indicating that its owner is not self now.");
             continue;
           };
+
+          debug!("AlarmScheduler dispatching alarms");
 
           if let Err(e) = system_main_cell_handle.dispatch_alarms(self.node_state.clone(), Utc::now(), 100).await {
             error!(error = ?e, "Error dispatching due alarms");
           }
+
+          debug!("AlarmScheduler dispatched alarms");
         }
       }
     }

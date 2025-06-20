@@ -199,6 +199,13 @@ fn start_server(config: config::Config) -> Server {
 fn main() {
   tracing_subscriber::fmt::init();
 
+  // use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+  //tracing_subscriber::registry()
+  //  // .with(console_subscriber::spawn())
+  //  .with(tracing_subscriber::fmt::layer())
+  //  .init();
+
   // see benchmark_deno_startup.sh
   if std::env::var("BENCHMARK_DENO_STARTUP").is_ok() {
     let iterations = 100;

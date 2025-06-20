@@ -522,6 +522,18 @@ impl LockHandle {
   ) -> Self {
     let (tx, rx) = mpsc::unbounded_channel();
 
+    let task_name = format!("lock_state_loop_{}", lock_descriptor.lock_key);
+    // tokio::task::Builder::new()
+    //   .name(&task_name)
+    //   .spawn({
+    //     let descriptor = lock_descriptor.clone();
+    //     let lock_manager = lock_manager.clone();
+    //     let tx = tx.clone();
+
+    //     lock_state_loop(descriptor, lock_manager, global_ttl, local_ttl, tx, rx)
+    //   })
+    //   .unwrap();
+
     tokio::spawn({
       let descriptor = lock_descriptor.clone();
       let lock_manager = lock_manager.clone();
@@ -715,6 +727,25 @@ impl LockHandle {
   }
 }
 
+struct PrintOnFirstPoll {
+  lock_key: String,
+  printed: bool,
+}
+
+impl std::future::Future for PrintOnFirstPoll {
+  type Output = ();
+
+  fn poll(
+    self: std::pin::Pin<&mut Self>,
+    _cx: &mut std::task::Context<'_>,
+  ) -> std::task::Poll<Self::Output> {
+    if !self.printed {
+      info!(lock_key = self.lock_key, "PrintOnFirstPoll");
+    }
+    std::task::Poll::Pending
+  }
+}
+
 async fn lock_state_loop(
   descriptor: LockDescriptor,
   lock_manager: Arc<dyn DistributedLock>,
@@ -723,6 +754,9 @@ async fn lock_state_loop(
   request_tx: mpsc::UnboundedSender<LockStateRequest>,
   mut request_rx: mpsc::UnboundedReceiver<LockStateRequest>,
 ) {
+  let flavor = tokio::runtime::Handle::current().runtime_flavor();
+  info!(flavor = ?flavor, "Lock state loop flavor");
+
   let mut state = LockState::Init {
     descriptor,
     lock_manager,
@@ -739,8 +773,22 @@ async fn lock_state_loop(
   let release_cancel_token = tokio_util::sync::CancellationToken::new();
 
   loop {
+    if state.descriptor().lock_key == "_system/main" {
+      warn!(descriptor = ?state.descriptor(), request_rx_len = request_rx.len(), "Lock state loop iteration for _system/main");
+    }
+
+    let print_on_first_poll = PrintOnFirstPoll {
+      lock_key: state.descriptor().lock_key.clone(),
+      printed: false,
+    };
+    let print_on_first_poll = std::pin::pin!(print_on_first_poll);
+
     tokio::select! {
       biased;
+
+      _ = print_on_first_poll => {
+        // noop
+      }
 
       _ = &mut global_ttl_expiry_timer, if !release_cancel_token.is_cancelled() => {
         // Global TTL expired; cancel the ongoing graceful release process to
@@ -773,14 +821,20 @@ async fn lock_state_loop(
       }
 
       _ = global_ttl_renewal_interval.tick() => {
-        debug!(descriptor = ?state.descriptor(), "Renewing TTL");
+        if state.descriptor().lock_key == "_system/main" {
+          warn!(descriptor = ?state.descriptor(), "Renewing TTL for _system/main");
+        }
 
         // Renew the TTL using the lock manager
         match tokio::time::timeout_at(
           local_ttl_expiry_timer.deadline(),
           state.renew_ttl(global_ttl, local_ttl, &mut global_ttl_expiry_timer, &mut local_ttl_expiry_timer),
         ).await {
-          Ok(Ok(_)) => {},
+          Ok(Ok(_)) => {
+            if state.descriptor().lock_key == "_system/main" {
+              warn!(descriptor = ?state.descriptor(), "Renewed TTL for _system/main");
+            }
+          },
           Ok(Err(e)) => {
             error!(error = ?e, descriptor = ?state.descriptor(), "Failed to renew TTL");
           }
@@ -792,7 +846,11 @@ async fn lock_state_loop(
 
       req = request_rx.recv() => {
         let kind = req.as_ref().map(|r| r.kind()).unwrap_or("None");
-        debug!(descriptor = ?state.descriptor(), ?kind, "Received request in lock state loop");
+        if state.descriptor().lock_key == "_system/main" {
+          warn!(descriptor = ?state.descriptor(), ?kind, "Received request in lock state loop");
+        } else {
+          debug!(descriptor = ?state.descriptor(), ?kind, "Received request in lock state loop");
+        }
 
         // NOTE: it is important to keep message handlers non-async.
         //
@@ -836,10 +894,12 @@ async fn lock_state_loop(
           }
           Some(LockStateRequest::ReleaseCompleted(req)) => {
             handle_release_completed(req, &mut state);
+            debug!(descriptor = ?state.descriptor(), "Release completed");
             return;
           }
           None => {
             // LockHandle was dropped; at this point, the state must be `Released`
+            debug!(descriptor = ?state.descriptor(), "LockHandle was dropped");
             if !matches!(state, LockState::Released { .. }) {
               error!("LockHandle was dropped while in unexpected state");
             }
@@ -847,7 +907,11 @@ async fn lock_state_loop(
           }
         }
 
-        debug!(descriptor = ?state.descriptor(), ?kind, "Handled request in lock state loop");
+        if state.descriptor().lock_key == "_system/main" {
+          warn!(descriptor = ?state.descriptor(), ?kind, "Handled request in lock state loop");
+        } else {
+          debug!(descriptor = ?state.descriptor(), ?kind, "Handled request in lock state loop");
+        }
       }
     }
   }
@@ -1086,14 +1150,17 @@ fn handle_dispatch_alarms(req: DispatchAlarmsRequest, state: &mut LockState) {
       tokio::spawn({
         let alarm_processor_handle = alarm_processor.handle();
         async move {
+          debug!(now = ?req.now, "handle_dispatch_alarms making a request to alarm processor");
           match alarm_processor_handle
             .dispatch(req.node_state, req.now, req.limit)
             .await
           {
             Ok(_) => {
+              debug!(now = ?req.now, "handle_dispatch_alarms alarm processor dispatch completed successfully");
               let _ = req.res_chan.send(Ok(()));
             }
             Err(e) => {
+              debug!(now = ?req.now, error = ?e, "handle_dispatch_alarms alarm processor dispatch failed");
               let _ = req.res_chan.send(Err(e.into()));
             }
           }
