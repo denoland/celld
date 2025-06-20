@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "pingora_hyper"]
+
 [package]
 name = "celld"
 version = "0.1.0"
