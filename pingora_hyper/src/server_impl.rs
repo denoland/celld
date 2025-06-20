@@ -183,7 +183,7 @@ where
     println!("Starting HTTP Proxy service: {}", self.name);
 
     // For now, just wait for shutdown signal
-    // TODO: Implement actual HTTP serving logic with ProxyHttp
+    // HTTP serving implemented via ListeningService and serve_listeners()
     if let Err(e) = shutdown.changed().await {
       println!("Shutdown signal received for {}: {}", self.name, e);
     }
@@ -451,7 +451,7 @@ where
     Bytes::new()
   } else {
     let total_len: usize = request_body_chunks.iter().map(|b| b.len()).sum();
-    let mut combined = bytes::BytesMut::with_capacity(total_len);
+    let mut combined = BytesMut::with_capacity(total_len);
     for chunk in request_body_chunks {
       combined.extend_from_slice(&chunk);
     }

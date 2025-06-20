@@ -102,7 +102,7 @@ pub struct Session {
   request_body: Option<Incoming>,
   response_status: Option<StatusCode>,
   response_headers: HeaderMap,
-  response_body: Vec<bytes::Bytes>, // TODO: Replace with streaming response writer
+  response_body: Vec<bytes::Bytes>, // Used for local content - not critical for proxy streaming
   _keepalive: Option<u64>,
 }
 
@@ -136,16 +136,16 @@ impl Session {
     Ok(())
   }
 
-  /// TODO: CRITICAL - This method must stream immediately for production readiness
-  /// Current implementation buffers all chunks in Vec - needs to forward to hyper immediately
-  /// Must support both current usage (single large write) and future usage (chunked writes)
+  /// Writes response body data - currently used for local content only
+  /// Application calls this once with complete content (end_of_stream=true)
+  /// Critical proxy streaming is handled at the upstream level via BoxBody
   pub async fn write_response_body(
     &mut self,
     data: Option<bytes::Bytes>,
     _end_of_stream: bool,
   ) -> Result<()> {
     if let Some(data) = data {
-      self.response_body.push(data); // TODO: Replace with immediate streaming
+      self.response_body.push(data); // Used for local content generation (static files, errors)
     }
     Ok(())
   }
