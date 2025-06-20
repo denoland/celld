@@ -20,13 +20,14 @@ hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 nix = { version = "0.30", features = ["process", "signal", "fs"] }
 once_cell = "1"
-pingora = { version = "0.5", features = ["proxy"], default-features = false }
+# pingora = { version = "0.5", features = ["proxy"], default-features = false }
+pingora = { path = "/home/yusuke/Repo/github.com/cloudflare/pingora/pingora", features = ["proxy"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 tempfile = "3.19.1"
 thiserror = "2"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "tracing"] }
 tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = "0.3"
@@ -37,6 +38,7 @@ serde_qs = "0.15.0"
 if_chain = "1.0.2"
 dashmap = "6.1.0"
 flaky_test = "0.2.2"
+console-subscriber = "0.4.1"
 
 [dev-dependencies]
 tokio-tungstenite = "0.26"
