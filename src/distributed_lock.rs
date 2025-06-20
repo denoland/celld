@@ -523,24 +523,24 @@ impl LockHandle {
     let (tx, rx) = mpsc::unbounded_channel();
 
     let task_name = format!("lock_state_loop_{}", lock_descriptor.lock_key);
-    // tokio::task::Builder::new()
-    //   .name(&task_name)
-    //   .spawn({
-    //     let descriptor = lock_descriptor.clone();
-    //     let lock_manager = lock_manager.clone();
-    //     let tx = tx.clone();
+    tokio::task::Builder::new()
+      .name(&task_name)
+      .spawn({
+        let descriptor = lock_descriptor.clone();
+        let lock_manager = lock_manager.clone();
+        let tx = tx.clone();
 
-    //     lock_state_loop(descriptor, lock_manager, global_ttl, local_ttl, tx, rx)
-    //   })
-    //   .unwrap();
+        lock_state_loop(descriptor, lock_manager, global_ttl, local_ttl, tx, rx)
+      })
+      .unwrap();
 
-    tokio::spawn({
-      let descriptor = lock_descriptor.clone();
-      let lock_manager = lock_manager.clone();
-      let tx = tx.clone();
+    // tokio::spawn({
+    //   let descriptor = lock_descriptor.clone();
+    //   let lock_manager = lock_manager.clone();
+    //   let tx = tx.clone();
 
-      lock_state_loop(descriptor, lock_manager, global_ttl, local_ttl, tx, rx)
-    });
+    //   lock_state_loop(descriptor, lock_manager, global_ttl, local_ttl, tx, rx)
+    // });
 
     Self {
       tx,

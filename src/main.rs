@@ -154,7 +154,7 @@ fn start_server(config: config::Config) -> Server {
         staleness_threshold: node_state.config.staleness_threshold,
       },
     );
-    s.threads = Some(2);
+    s.threads = Some(1);
     s
   });
 
@@ -197,14 +197,14 @@ fn start_server(config: config::Config) -> Server {
 }
 
 fn main() {
-  tracing_subscriber::fmt::init();
+  // tracing_subscriber::fmt::init();
 
-  // use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+  use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-  //tracing_subscriber::registry()
-  //  // .with(console_subscriber::spawn())
-  //  .with(tracing_subscriber::fmt::layer())
-  //  .init();
+  tracing_subscriber::registry()
+    .with(console_subscriber::spawn())
+    .with(tracing_subscriber::fmt::layer())
+    .init();
 
   // see benchmark_deno_startup.sh
   if std::env::var("BENCHMARK_DENO_STARTUP").is_ok() {
