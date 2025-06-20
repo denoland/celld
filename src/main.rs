@@ -114,7 +114,7 @@ fn start_server(config: config::Config) -> Server {
 
   // Create an HTTP proxy service with our app
   let mut proxy_service = http_proxy_service(&pingora_config2, app);
-  proxy_service.threads = Some(2);
+  proxy_service.threads = Some(1);
 
   // Configure the proxy service to listen on the specified address
   proxy_service.add_tcp(&node_state.config.listen_addr.to_string());
@@ -126,7 +126,7 @@ fn start_server(config: config::Config) -> Server {
 
   // Create an HTTP service for the internal API
   let mut internal_service = http_proxy_service(&pingora_config2, internal_api);
-  internal_service.threads = Some(2);
+  internal_service.threads = Some(1);
 
   // Configure the internal service to listen on the internal address
   internal_service.add_tcp(&node_state.config.internal_listen_addr.to_string());
@@ -140,7 +140,7 @@ fn start_server(config: config::Config) -> Server {
         DEFAULT_REAPER_INTERVAL,
       ),
     );
-    s.threads = Some(2);
+    s.threads = Some(1);
     s
   });
 
@@ -154,7 +154,7 @@ fn start_server(config: config::Config) -> Server {
         staleness_threshold: node_state.config.staleness_threshold,
       },
     );
-    s.threads = Some(1);
+    s.threads = Some(2);
     s
   });
 
