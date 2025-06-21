@@ -634,8 +634,6 @@ async fn handle_websocket_uds_upgrade(
     .unwrap();
 
   tokio::spawn(async move {
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
     if let Ok(client_upgraded) = hyper::upgrade::on(client_req).await {
       if let Ok(uds_upgraded) = hyper::upgrade::on(uds_res).await {
         let mut client_io = TokioIo::new(client_upgraded);
@@ -719,8 +717,6 @@ async fn handle_websocket_tcp_upgrade(
     .unwrap();
 
   tokio::spawn(async move {
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
     if let Ok(client_upgraded) = hyper::upgrade::on(client_req).await {
       if let Ok(tcp_upgraded) = hyper::upgrade::on(tcp_res).await {
         let mut client_io = TokioIo::new(client_upgraded);
