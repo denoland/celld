@@ -566,7 +566,6 @@ async fn handle_websocket_with_proxyhttp<SV>(
 where
   SV: ProxyHttp + Send + Sync + 'static,
 {
-  // Create RequestHeader without consuming the request
   let req_header = RequestHeader {
     method: hyper_req.method().clone(),
     uri: hyper_req.uri().clone(),
@@ -574,63 +573,47 @@ where
     headers: hyper_req.headers().clone(),
   };
 
-  // Create WebSocket session
   let mut session = Session::new_websocket(req_header);
   let mut ctx = proxy_service.new_ctx();
   let original_uri = session.req_header().uri.clone();
 
-  // Run through ProxyHttp filters
   match proxy_service.request_filter(&mut session, &mut ctx).await {
-    Ok(true) => {
-      // request_filter handled everything
-      return Ok(session.build_response_boxed());
-    }
-    Ok(false) => {
-      // Continue to upstream
-    }
+    Ok(true) => return Ok(session.build_response_boxed()),
+    Ok(false) => {}
     Err(e) => {
-      debug!("WebSocket request_filter error: {:?}", e);
       let status_code = e.to_status_code();
       return Ok(error_response(status_code.as_u16(), &format!("{}", e)));
     }
   }
 
-  // Get upstream peer
   let upstream_peer =
     match proxy_service.upstream_peer(&mut session, &mut ctx).await {
       Ok(peer) => peer,
       Err(e) => {
-        debug!("WebSocket upstream_peer error: {:?}", e);
         let status_code = e.to_status_code();
         return Ok(error_response(status_code.as_u16(), &format!("{}", e)));
       }
     };
 
-  // Create upstream request
   let mut upstream_request = session.req_header().clone();
   if upstream_request.uri.path().is_empty() {
     upstream_request.uri = original_uri;
   }
 
-  // Apply upstream request filter
   if let Err(e) = proxy_service
     .upstream_request_filter(&mut session, &mut upstream_request, &mut ctx)
     .await
   {
-    debug!("WebSocket upstream_request_filter error: {:?}", e);
     let status_code = e.to_status_code();
     return Ok(error_response(status_code.as_u16(), &format!("{}", e)));
   }
 
-  // Call logging
   proxy_service.logging(&mut session, None, &mut ctx).await;
 
-  // Now handle the WebSocket upgrade with the ORIGINAL request
   match if upstream_peer.is_uds {
     handle_websocket_uds_upgrade(&upstream_peer, upstream_request, hyper_req)
       .await
   } else {
-    // For TCP peers, use regular TCP WebSocket upgrade
     handle_websocket_tcp_upgrade(&upstream_peer, upstream_request, hyper_req)
       .await
   } {
@@ -665,8 +648,6 @@ async fn handle_websocket_uds_upgrade(
     }
   };
 
-  // Build the upstream WebSocket upgrade request
-  // For UDS, use just the path and query, not the full URI
   let path_and_query = upstream_request
     .uri
     .path_and_query()
@@ -675,10 +656,9 @@ async fn handle_websocket_uds_upgrade(
 
   let mut req_builder = hyper::Request::builder()
     .method("GET")
-    .uri(path_and_query) // Just path for UDS, not full URI
+    .uri(path_and_query)
     .version(hyper::Version::HTTP_11);
 
-  // Copy over headers required for the WebSocket upgrade
   for (name, value) in upstream_request.headers.iter() {
     if name == UPGRADE
       || name == CONNECTION
@@ -689,24 +669,18 @@ async fn handle_websocket_uds_upgrade(
     }
   }
 
-  // Build the upgrade request for the UDS socket
   let uds_req = req_builder.body(Empty::<Bytes>::new()).unwrap();
 
-  // Create a client for the UDS socket
   let io = TokioIo::new(uds_stream);
   let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
 
   // Start a task to handle the HTTP connection
   tokio::spawn(async move {
-    if let Err(e) = conn.with_upgrades().await {
-      warn!("UDS WebSocket client connection error: {}", e);
-    }
+    let _ = conn.with_upgrades().await;
   });
 
-  // Send the WebSocket upgrade request to the UDS server
   let uds_res = sender.send_request(uds_req).await?;
 
-  // Check if the upgrade was successful
   if uds_res.status() != hyper::StatusCode::SWITCHING_PROTOCOLS {
     return Err(
       format!(
@@ -739,39 +713,20 @@ async fn handle_websocket_uds_upgrade(
     )
     .unwrap();
 
-  // Handle the upgraded connection in a background task
-  // Use the original client_req which preserves the upgrade state
   tokio::spawn(async move {
-    debug!("Starting WebSocket upgrade handling for UDS connection");
-
-    // Add a small delay to ensure the upgrade response is fully sent first
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
     match hyper::upgrade::on(client_req).await {
-      Ok(client_upgraded) => {
-        debug!("Client WebSocket upgrade successful");
-        // Forward data between client and UDS
-        match hyper::upgrade::on(uds_res).await {
-          Ok(uds_upgraded) => {
-            debug!(
-              "UDS WebSocket upgrade successful, starting bidirectional copy"
-            );
-            let mut client_io = TokioIo::new(client_upgraded);
-            let mut uds_io = TokioIo::new(uds_upgraded);
-
-            // Copy data between the two connections
-            if let Err(e) =
-              tokio::io::copy_bidirectional(&mut client_io, &mut uds_io).await
-            {
-              warn!("Error in WebSocket proxy: {}", e);
-            } else {
-              debug!("WebSocket bidirectional copy completed successfully");
-            }
-          }
-          Err(e) => warn!("Error upgrading UDS connection: {}", e),
+      Ok(client_upgraded) => match hyper::upgrade::on(uds_res).await {
+        Ok(uds_upgraded) => {
+          let mut client_io = TokioIo::new(client_upgraded);
+          let mut uds_io = TokioIo::new(uds_upgraded);
+          let _ =
+            tokio::io::copy_bidirectional(&mut client_io, &mut uds_io).await;
         }
-      }
-      Err(e) => warn!("Error upgrading client connection: {}", e),
+        Err(_) => {}
+      },
+      Err(_) => {}
     }
   });
 
@@ -791,12 +746,6 @@ async fn handle_websocket_tcp_upgrade(
   use hyper_util::rt::TokioIo;
   use tokio::net::TcpStream;
 
-  debug!(
-    "Connecting to remote celld at {} for WebSocket forwarding",
-    upstream_peer.address
-  );
-
-  // Connect to the remote celld
   let tcp_stream = match TcpStream::connect(&upstream_peer.address).await {
     Ok(stream) => stream,
     Err(e) => {
@@ -808,37 +757,25 @@ async fn handle_websocket_tcp_upgrade(
     }
   };
 
-  // Build the WebSocket request to send to remote celld
-  // This preserves ALL original headers, including Host and WebSocket headers
   let mut req_builder = hyper::Request::builder()
     .method(upstream_request.method.clone())
     .uri(upstream_request.uri.clone())
     .version(upstream_request.version);
 
-  // Copy ALL headers to preserve the original WebSocket request
   for (name, value) in upstream_request.headers.iter() {
     req_builder = req_builder.header(name, value);
   }
 
   let tcp_req = req_builder.body(Empty::<Bytes>::new()).unwrap();
 
-  // Create HTTP client for the remote celld
   let io = TokioIo::new(tcp_stream);
   let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
 
-  // Start a task to handle the HTTP connection with upgrade support
   tokio::spawn(async move {
-    if let Err(e) = conn.with_upgrades().await {
-      warn!("Remote celld connection error: {}", e);
-    }
+    let _ = conn.with_upgrades().await;
   });
 
-  // Send the WebSocket request to the remote celld
   let tcp_res = sender.send_request(tcp_req).await?;
-
-  debug!("Remote celld responded with status: {}", tcp_res.status());
-
-  // Check if the remote celld accepted the WebSocket upgrade
   if tcp_res.status() != hyper::StatusCode::SWITCHING_PROTOCOLS {
     return Err(
       format!(
@@ -849,17 +786,14 @@ async fn handle_websocket_tcp_upgrade(
     );
   }
 
-  // Forward the upgrade response to the client
   let mut res_builder = hyper::Response::builder()
     .status(tcp_res.status())
     .version(tcp_res.version());
 
-  // Copy ALL response headers from remote celld
   for (name, value) in tcp_res.headers() {
     res_builder = res_builder.header(name, value);
   }
 
-  // Create the response
   let res = res_builder
     .body(
       http_body_util::Full::new(bytes::Bytes::new())
@@ -868,36 +802,20 @@ async fn handle_websocket_tcp_upgrade(
     )
     .unwrap();
 
-  // Handle the upgraded connections in a background task
-  // Use the original client_req which preserves the upgrade state
   tokio::spawn(async move {
-    debug!("Starting TCP WebSocket proxy between client and remote celld");
-
-    // Small delay to ensure response is sent
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
     match hyper::upgrade::on(client_req).await {
-      Ok(client_upgraded) => {
-        debug!("Client WebSocket upgrade successful");
-        match hyper::upgrade::on(tcp_res).await {
-          Ok(tcp_upgraded) => {
-            debug!("Remote celld WebSocket upgrade successful, starting bidirectional copy");
-            let mut client_io = TokioIo::new(client_upgraded);
-            let mut tcp_io = TokioIo::new(tcp_upgraded);
-
-            // Proxy data between client and remote celld
-            if let Err(e) =
-              tokio::io::copy_bidirectional(&mut client_io, &mut tcp_io).await
-            {
-              warn!("Error in TCP WebSocket proxy: {}", e);
-            } else {
-              debug!("TCP WebSocket bidirectional copy completed successfully");
-            }
-          }
-          Err(e) => warn!("Error upgrading remote celld connection: {}", e),
+      Ok(client_upgraded) => match hyper::upgrade::on(tcp_res).await {
+        Ok(tcp_upgraded) => {
+          let mut client_io = TokioIo::new(client_upgraded);
+          let mut tcp_io = TokioIo::new(tcp_upgraded);
+          let _ =
+            tokio::io::copy_bidirectional(&mut client_io, &mut tcp_io).await;
         }
-      }
-      Err(e) => warn!("Error upgrading client connection: {}", e),
+        Err(_) => {}
+      },
+      Err(_) => {}
     }
   });
 
