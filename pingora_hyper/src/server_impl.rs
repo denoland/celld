@@ -7,8 +7,8 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{debug, error, warn};
 
+use crate::peer::HttpPeer;
 use crate::proxy::{ProxyHttp, RequestHeader, Session};
-use crate::upstreams::peer::HttpPeer;
 
 /// Helper function to create error responses with BoxBody
 fn error_response(
@@ -354,29 +354,19 @@ async fn proxy_http_bridge<SV>(
 where
   SV: ProxyHttp + Send + Sync + 'static,
 {
-  // Create session with the full request (lazy body consumption)
   let mut session = Session::new(hyper_req);
   let mut ctx = proxy_service.new_ctx();
-
-  // Store the original URI before request_filter potentially modifies it
   let original_uri = session.req_header().uri.clone();
 
-  // Execute ProxyHttp flow
   match proxy_service.request_filter(&mut session, &mut ctx).await {
-    Ok(true) => {
-      // request_filter handled everything, return the response
-      return Ok(session.build_response_boxed());
-    }
-    Ok(false) => {
-      // Continue to upstream logic
-    }
+    Ok(true) => return Ok(session.build_response_boxed()),
+    Ok(false) => {}
     Err(e) => {
       debug!("request_filter error: {:?}", e);
       return Ok(error_response(e.to_status_code().as_u16(), &e.to_string()));
     }
   }
 
-  // Get upstream peer
   let upstream_peer =
     match proxy_service.upstream_peer(&mut session, &mut ctx).await {
       Ok(peer) => peer,
@@ -386,14 +376,10 @@ where
       }
     };
 
-  // Create upstream request based on the original request
   let mut upstream_request = session.req_header().clone();
-  // If the URI was lost during request_filter, restore the original
   if upstream_request.uri.path().is_empty() {
     upstream_request.uri = original_uri.clone();
   }
-
-  // Apply upstream request filter
   if let Err(e) = proxy_service
     .upstream_request_filter(&mut session, &mut upstream_request, &mut ctx)
     .await
@@ -402,14 +388,9 @@ where
     return Ok(error_response(e.to_status_code().as_u16(), &e.to_string()));
   }
 
-  // Check if this is a WebSocket upgrade
   if session.is_websocket() {
-    // Extract the original request for upgrade
     if let Some(upgrade_req) = session.take_upgrade_request() {
-      // Log before upgrade
       proxy_service.logging(&mut session, None, &mut ctx).await;
-
-      // Handle the upgrade with the preserved request
       match if upstream_peer.is_uds {
         handle_websocket_uds_upgrade(
           &upstream_peer,
@@ -437,12 +418,11 @@ where
     }
   }
 
-  // Process request body through filters and collect for upstream
   let mut request_body_chunks = Vec::new();
   loop {
     match session.read_request_body().await {
       Ok(Some(chunk)) => {
-        let end_of_stream = false; // We'll know it's the end when we get None
+        let end_of_stream = false;
         if let Err(e) = proxy_service
           .request_body_filter(
             &mut session,
@@ -458,7 +438,6 @@ where
         request_body_chunks.push(chunk);
       }
       Ok(None) => {
-        // End of stream, call filter one last time
         if let Err(e) = proxy_service
           .request_body_filter(&mut session, &mut None, true, &mut ctx)
           .await
@@ -475,7 +454,6 @@ where
     }
   }
 
-  // Combine all chunks for upstream forwarding
   let body_bytes = if request_body_chunks.is_empty() {
     Bytes::new()
   } else {
@@ -487,9 +465,7 @@ where
     combined.freeze()
   };
 
-  // Handle upstream connection with streaming - now returns BoxBody directly
   let upstream_response = if upstream_peer.is_uds {
-    // Unix socket connection with streaming
     match handle_uds_upstream_streaming(
       &upstream_peer,
       upstream_request.clone(),
@@ -498,7 +474,6 @@ where
     .await
     {
       Ok(streaming_response) => {
-        // Convert Incoming body to BoxBody for streaming
         let (parts, body) = streaming_response.into_parts();
         let boxed_body = body.boxed();
 
@@ -520,7 +495,6 @@ where
       }
     }
   } else {
-    // TCP connection with streaming
     match handle_tcp_upstream_streaming(
       &upstream_peer,
       upstream_request.clone(),
@@ -529,7 +503,6 @@ where
     .await
     {
       Ok(streaming_response) => {
-        // Convert Incoming body to BoxBody for streaming
         let (parts, body) = streaming_response.into_parts();
         let boxed_body = body.boxed();
 
@@ -559,7 +532,6 @@ where
     }
     Err(e) => {
       error!("upstream connection error: {:?}", e);
-      // Convert to Pingora Error for logging
       use crate::error::{Error, ErrorType};
       let pingora_error = Error::explain(
         ErrorType::InternalError,

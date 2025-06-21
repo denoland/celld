@@ -3,7 +3,7 @@ use http::{HeaderMap, Method, StatusCode, Uri, Version};
 use http_body_util::BodyExt;
 
 use crate::error::{Error, Result};
-use crate::upstreams::peer::HttpPeer;
+use crate::peer::HttpPeer;
 
 enum SessionBody {
   /// Original request, not yet consumed
