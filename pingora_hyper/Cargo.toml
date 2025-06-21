@@ -3,13 +3,6 @@ name = "pingora_hyper"
 version = "0.1.0"
 edition = "2021"
 
-[features]
-default = []
-# Enable full hyper-based compatibility layer
-hyper-compat = []
-# Use only original Pingora implementation (mutually exclusive with hyper-compat)
-pingora-only = []
-
 [dependencies]
 async-trait = "0.1"
 bytes = "1"

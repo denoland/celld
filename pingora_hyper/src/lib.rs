@@ -1,8 +1,3 @@
-// Unified Pingora compatibility layer
-
-#[cfg(all(feature = "hyper-compat", feature = "pingora-only"))]
-compile_error!("Cannot enable both hyper-compat and pingora-only features");
-
 pub mod error;
 pub mod http;
 pub mod proxy;

@@ -372,9 +372,7 @@ where
     }
     Err(e) => {
       debug!("request_filter error: {:?}", e);
-      let status_code = e.to_status_code();
-      let message = format!("{}", e);
-      return Ok(error_response(status_code.as_u16(), &message));
+      return Ok(error_response(e.to_status_code().as_u16(), &e.to_string()));
     }
   }
 
@@ -384,9 +382,7 @@ where
       Ok(peer) => peer,
       Err(e) => {
         debug!("upstream_peer error: {:?}", e);
-        let status_code = e.to_status_code();
-        let message = format!("{}", e);
-        return Ok(error_response(status_code.as_u16(), &message));
+        return Ok(error_response(e.to_status_code().as_u16(), &e.to_string()));
       }
     };
 
@@ -403,9 +399,7 @@ where
     .await
   {
     debug!("upstream_request_filter error: {:?}", e);
-    let status_code = e.to_status_code();
-    let message = format!("{}", e);
-    return Ok(error_response(status_code.as_u16(), &message));
+    return Ok(error_response(e.to_status_code().as_u16(), &e.to_string()));
   }
 
   // Check if this is a WebSocket upgrade

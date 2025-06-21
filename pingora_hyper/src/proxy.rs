@@ -89,13 +89,10 @@ impl ResponseHeader {
     K: TryInto<http::header::HeaderName>,
     V: TryInto<http::header::HeaderValue>,
   {
-    match (name.try_into(), value.try_into()) {
-      (Ok(name), Ok(value)) => {
-        self.headers.insert(name, value);
-        Ok(())
-      }
-      _ => Err(Box::new(Error::InvalidHeader)),
-    }
+    let name = name.try_into().map_err(|_| Error::InvalidHeader)?;
+    let value = value.try_into().map_err(|_| Error::InvalidHeader)?;
+    self.headers.insert(name, value);
+    Ok(())
   }
 }
 
@@ -122,7 +119,6 @@ pub struct Session {
 
 impl Session {
   pub fn new(req: hyper::Request<hyper::body::Incoming>) -> Self {
-    // Extract headers without consuming the request
     let req_header = RequestHeader {
       method: req.method().clone(),
       uri: req.uri().clone(),
@@ -130,8 +126,6 @@ impl Session {
       headers: req.headers().clone(),
     };
 
-    // Determine WebSocket status immediately to preserve the original
-    // request for upgrade while allowing normal ProxyHttp processing
     let request_body = if req.headers().get("sec-websocket-key").is_some() {
       SessionBody::WebSocket(Some(req))
     } else {
@@ -211,52 +205,41 @@ impl Session {
     Ok(())
   }
 
-  /// Read next chunk of request body
-  /// Returns Some(bytes) for each chunk, None when complete
-  /// This matches Pingora's streaming interface
   pub async fn read_request_body(&mut self) -> Result<Option<bytes::Bytes>> {
     match &mut self.request_body {
-      SessionBody::WebSocket(_) => {
-        // WebSocket requests have no body to read
-        Ok(None)
-      }
+      SessionBody::WebSocket(_) => Ok(None),
       SessionBody::Original(req_opt) => {
         if let Some(req) = req_opt.take() {
-          // Regular request - extract body for streaming
           let (_parts, body) = req.into_parts();
           self.request_body = SessionBody::Streaming(Some(body));
-          // Recursively call to start reading
           Box::pin(self.read_request_body()).await
         } else {
-          Ok(None) // Already consumed
+          Ok(None)
         }
       }
-      SessionBody::Streaming(body_opt) => {
-        loop {
-          if let Some(body) = body_opt {
-            match body.frame().await {
-              Some(Ok(frame)) => {
-                if let Ok(data) = frame.into_data() {
-                  return Ok(Some(data));
-                }
-                // Non-data frame (trailers, etc.), continue to next frame
-              }
-              Some(Err(_e)) => {
-                *body_opt = None;
-                return Err(Box::new(Error::InternalError(
-                  "Error reading request body".to_string(),
-                )));
-              }
-              None => {
-                *body_opt = None;
-                return Ok(None);
+      SessionBody::Streaming(body_opt) => loop {
+        if let Some(body) = body_opt {
+          match body.frame().await {
+            Some(Ok(frame)) => {
+              if let Ok(data) = frame.into_data() {
+                return Ok(Some(data));
               }
             }
-          } else {
-            return Ok(None);
+            Some(Err(_e)) => {
+              *body_opt = None;
+              return Err(Box::new(Error::InternalError(
+                "Error reading request body".to_string(),
+              )));
+            }
+            None => {
+              *body_opt = None;
+              return Ok(None);
+            }
           }
+        } else {
+          return Ok(None);
         }
-      }
+      },
     }
   }
 
