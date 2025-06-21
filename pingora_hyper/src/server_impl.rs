@@ -716,17 +716,13 @@ async fn handle_websocket_uds_upgrade(
   tokio::spawn(async move {
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-    match hyper::upgrade::on(client_req).await {
-      Ok(client_upgraded) => match hyper::upgrade::on(uds_res).await {
-        Ok(uds_upgraded) => {
-          let mut client_io = TokioIo::new(client_upgraded);
-          let mut uds_io = TokioIo::new(uds_upgraded);
-          let _ =
-            tokio::io::copy_bidirectional(&mut client_io, &mut uds_io).await;
-        }
-        Err(_) => {}
-      },
-      Err(_) => {}
+    if let Ok(client_upgraded) = hyper::upgrade::on(client_req).await {
+      if let Ok(uds_upgraded) = hyper::upgrade::on(uds_res).await {
+        let mut client_io = TokioIo::new(client_upgraded);
+        let mut uds_io = TokioIo::new(uds_upgraded);
+        let _ =
+          tokio::io::copy_bidirectional(&mut client_io, &mut uds_io).await;
+      }
     }
   });
 
@@ -805,17 +801,13 @@ async fn handle_websocket_tcp_upgrade(
   tokio::spawn(async move {
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-    match hyper::upgrade::on(client_req).await {
-      Ok(client_upgraded) => match hyper::upgrade::on(tcp_res).await {
-        Ok(tcp_upgraded) => {
-          let mut client_io = TokioIo::new(client_upgraded);
-          let mut tcp_io = TokioIo::new(tcp_upgraded);
-          let _ =
-            tokio::io::copy_bidirectional(&mut client_io, &mut tcp_io).await;
-        }
-        Err(_) => {}
-      },
-      Err(_) => {}
+    if let Ok(client_upgraded) = hyper::upgrade::on(client_req).await {
+      if let Ok(tcp_upgraded) = hyper::upgrade::on(tcp_res).await {
+        let mut client_io = TokioIo::new(client_upgraded);
+        let mut tcp_io = TokioIo::new(tcp_upgraded);
+        let _ =
+          tokio::io::copy_bidirectional(&mut client_io, &mut tcp_io).await;
+      }
     }
   });
 
