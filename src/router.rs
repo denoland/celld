@@ -746,37 +746,9 @@ impl ProxyHttp for Proxy {
           tokio::time::sleep(RETRY_INTERVAL).await;
           continue;
         }
-        Err(error @ CellManagerError::LockContention(_)) => {
-          debug!(
-            ?error,
-            "Lock is held by another node that is responsible for this cell"
-          );
-          // TODO: forward the request to the lock holder?
-          return Err(Error::explain(
-            ErrorType::InternalError,
-            error.to_string(),
-          ));
-        }
-        Err(error @ CellManagerError::S3(_)) => {
-          debug!(?error, "S3 operation failed");
-          return Err(Error::explain(
-            ErrorType::InternalError,
-            error.to_string(),
-          ));
-        }
-        Err(error @ CellManagerError::Serde(_)) => {
-          debug!(?error, "Failed to serialize or deserialize lock data");
-          return Err(Error::explain(
-            ErrorType::InternalError,
-            error.to_string(),
-          ));
-        }
-        Err(error @ CellManagerError::Internal(_)) => {
-          error!(?error, "Error getting or spawning process");
-          return Err(Error::explain(
-            ErrorType::InternalError,
-            error.to_string(),
-          ));
+        Err(error) => {
+          debug!(?error, "Cell manager error");
+          return Err(error.into());
         }
       }
     }
