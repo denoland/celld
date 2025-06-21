@@ -354,23 +354,8 @@ async fn proxy_http_bridge<SV>(
 where
   SV: ProxyHttp + Send + Sync + 'static,
 {
-  // Check if this is a WebSocket upgrade request
-  let is_websocket = hyper_req.headers().get("sec-websocket-key").is_some();
-
-  if is_websocket {
-    return handle_websocket_with_proxyhttp(proxy_service, hyper_req).await;
-  }
-  // Convert hyper::Request to Pingora RequestHeader
-  let (parts, body) = hyper_req.into_parts();
-  let req_header = RequestHeader {
-    method: parts.method,
-    uri: parts.uri,
-    version: parts.version,
-    headers: parts.headers,
-  };
-
-  // Create a Session with the streaming request body
-  let mut session = Session::new(req_header, body);
+  // Create session with the full request (lazy body consumption)
+  let mut session = Session::new(hyper_req);
   let mut ctx = proxy_service.new_ctx();
 
   // Store the original URI before request_filter potentially modifies it
@@ -421,6 +406,41 @@ where
     let status_code = e.to_status_code();
     let message = format!("{}", e);
     return Ok(error_response(status_code.as_u16(), &message));
+  }
+
+  // Check if this is a WebSocket upgrade
+  if session.is_websocket() {
+    // Extract the original request for upgrade
+    if let Some(upgrade_req) = session.take_upgrade_request() {
+      // Log before upgrade
+      proxy_service.logging(&mut session, None, &mut ctx).await;
+
+      // Handle the upgrade with the preserved request
+      match if upstream_peer.is_uds {
+        handle_websocket_uds_upgrade(
+          &upstream_peer,
+          upstream_request,
+          upgrade_req,
+        )
+        .await
+      } else {
+        handle_websocket_tcp_upgrade(
+          &upstream_peer,
+          upstream_request,
+          upgrade_req,
+        )
+        .await
+      } {
+        Ok(response) => return Ok(response),
+        Err(e) => {
+          error!("WebSocket upgrade error: {:?}", e);
+          return Ok(error_response(502, "WebSocket upgrade failed"));
+        }
+      }
+    } else {
+      error!("Failed to extract WebSocket upgrade request");
+      return Ok(error_response(500, "Internal Server Error"));
+    }
   }
 
   // Process request body through filters and collect for upstream
@@ -555,72 +575,6 @@ where
         .logging(&mut session, Some(&pingora_error), &mut ctx)
         .await;
       Ok(error_response(502, "Bad Gateway"))
-    }
-  }
-}
-
-async fn handle_websocket_with_proxyhttp<SV>(
-  proxy_service: Arc<SV>,
-  hyper_req: hyper::Request<hyper::body::Incoming>,
-) -> Result<hyper::Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>
-where
-  SV: ProxyHttp + Send + Sync + 'static,
-{
-  let req_header = RequestHeader {
-    method: hyper_req.method().clone(),
-    uri: hyper_req.uri().clone(),
-    version: hyper_req.version(),
-    headers: hyper_req.headers().clone(),
-  };
-
-  let mut session = Session::new_websocket(req_header);
-  let mut ctx = proxy_service.new_ctx();
-  let original_uri = session.req_header().uri.clone();
-
-  match proxy_service.request_filter(&mut session, &mut ctx).await {
-    Ok(true) => return Ok(session.build_response_boxed()),
-    Ok(false) => {}
-    Err(e) => {
-      let status_code = e.to_status_code();
-      return Ok(error_response(status_code.as_u16(), &format!("{}", e)));
-    }
-  }
-
-  let upstream_peer =
-    match proxy_service.upstream_peer(&mut session, &mut ctx).await {
-      Ok(peer) => peer,
-      Err(e) => {
-        let status_code = e.to_status_code();
-        return Ok(error_response(status_code.as_u16(), &format!("{}", e)));
-      }
-    };
-
-  let mut upstream_request = session.req_header().clone();
-  if upstream_request.uri.path().is_empty() {
-    upstream_request.uri = original_uri;
-  }
-
-  if let Err(e) = proxy_service
-    .upstream_request_filter(&mut session, &mut upstream_request, &mut ctx)
-    .await
-  {
-    let status_code = e.to_status_code();
-    return Ok(error_response(status_code.as_u16(), &format!("{}", e)));
-  }
-
-  proxy_service.logging(&mut session, None, &mut ctx).await;
-
-  match if upstream_peer.is_uds {
-    handle_websocket_uds_upgrade(&upstream_peer, upstream_request, hyper_req)
-      .await
-  } else {
-    handle_websocket_tcp_upgrade(&upstream_peer, upstream_request, hyper_req)
-      .await
-  } {
-    Ok(response) => Ok(response),
-    Err(e) => {
-      error!("WebSocket upgrade error: {:?}", e);
-      Ok(error_response(502, "WebSocket upgrade failed"))
     }
   }
 }

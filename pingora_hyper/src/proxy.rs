@@ -1,10 +1,24 @@
 use async_trait::async_trait;
 use http::{HeaderMap, Method, StatusCode, Uri, Version};
 use http_body_util::BodyExt;
-use hyper::body::Incoming;
 
 use crate::error::{Error, Result};
 use crate::upstreams::peer::HttpPeer;
+
+enum SessionBody {
+  /// Original request, not yet consumed
+  Original(Option<hyper::Request<hyper::body::Incoming>>),
+  /// Body extracted for streaming
+  Streaming(Option<hyper::body::Incoming>),
+  /// WebSocket mode - original request preserved for upgrade
+  WebSocket(Option<hyper::Request<hyper::body::Incoming>>),
+}
+
+impl SessionBody {
+  fn is_websocket(&self) -> bool {
+    matches!(self, SessionBody::WebSocket(_))
+  }
+}
 
 #[derive(Clone)]
 pub struct RequestHeader {
@@ -96,10 +110,10 @@ impl From<http::response::Parts> for ResponseHeader {
 }
 
 /// A concrete Session type for the hyper compatibility layer
-/// Now supports streaming request bodies via hyper::body::Incoming
+/// Now supports lazy body consumption and WebSocket upgrades
 pub struct Session {
   req_header: RequestHeader,
-  request_body: Option<Incoming>,
+  request_body: SessionBody,
   response_status: Option<StatusCode>,
   response_headers: HeaderMap,
   response_body: Vec<bytes::Bytes>, // Used for local content - not critical for proxy streaming
@@ -107,22 +121,26 @@ pub struct Session {
 }
 
 impl Session {
-  pub fn new(req_header: RequestHeader, body: Incoming) -> Self {
-    Self {
-      req_header,
-      request_body: Some(body),
-      response_status: None,
-      response_headers: HeaderMap::new(),
-      response_body: Vec::new(),
-      _keepalive: None,
-    }
-  }
+  pub fn new(req: hyper::Request<hyper::body::Incoming>) -> Self {
+    // Extract headers without consuming the request
+    let req_header = RequestHeader {
+      method: req.method().clone(),
+      uri: req.uri().clone(),
+      version: req.version(),
+      headers: req.headers().clone(),
+    };
 
-  /// Create a new Session for WebSocket that doesn't consume the body
-  pub fn new_websocket(req_header: RequestHeader) -> Self {
+    // Determine WebSocket status immediately to preserve the original
+    // request for upgrade while allowing normal ProxyHttp processing
+    let request_body = if req.headers().get("sec-websocket-key").is_some() {
+      SessionBody::WebSocket(Some(req))
+    } else {
+      SessionBody::Original(Some(req))
+    };
+
     Self {
       req_header,
-      request_body: None, // WebSocket upgrades have no body
+      request_body,
       response_status: None,
       response_headers: HeaderMap::new(),
       response_body: Vec::new(),
@@ -132,8 +150,17 @@ impl Session {
 
   /// Check if this session is for a WebSocket upgrade
   pub fn is_websocket(&self) -> bool {
-    self.request_body.is_none()
-      && self.req_header.headers.get("sec-websocket-key").is_some()
+    self.request_body.is_websocket()
+  }
+
+  /// Take the original request for upgrade (only valid for WebSocket)
+  pub fn take_upgrade_request(
+    &mut self,
+  ) -> Option<hyper::Request<hyper::body::Incoming>> {
+    match &mut self.request_body {
+      SessionBody::WebSocket(req_opt) => req_opt.take(),
+      _ => None,
+    }
   }
 
   pub fn req_header(&self) -> &RequestHeader {
@@ -188,36 +215,47 @@ impl Session {
   /// Returns Some(bytes) for each chunk, None when complete
   /// This matches Pingora's streaming interface
   pub async fn read_request_body(&mut self) -> Result<Option<bytes::Bytes>> {
-    if self.is_websocket() {
-      // WebSocket upgrades have no body
-      return Ok(None);
-    }
-
-    loop {
-      if let Some(body) = &mut self.request_body {
-        match body.frame().await {
-          Some(Ok(frame)) => {
-            if let Ok(data) = frame.into_data() {
-              return Ok(Some(data));
+    match &mut self.request_body {
+      SessionBody::WebSocket(_) => {
+        // WebSocket requests have no body to read
+        Ok(None)
+      }
+      SessionBody::Original(req_opt) => {
+        if let Some(req) = req_opt.take() {
+          // Regular request - extract body for streaming
+          let (_parts, body) = req.into_parts();
+          self.request_body = SessionBody::Streaming(Some(body));
+          // Recursively call to start reading
+          Box::pin(self.read_request_body()).await
+        } else {
+          Ok(None) // Already consumed
+        }
+      }
+      SessionBody::Streaming(body_opt) => {
+        loop {
+          if let Some(body) = body_opt {
+            match body.frame().await {
+              Some(Ok(frame)) => {
+                if let Ok(data) = frame.into_data() {
+                  return Ok(Some(data));
+                }
+                // Non-data frame (trailers, etc.), continue to next frame
+              }
+              Some(Err(_e)) => {
+                *body_opt = None;
+                return Err(Box::new(Error::InternalError(
+                  "Error reading request body".to_string(),
+                )));
+              }
+              None => {
+                *body_opt = None;
+                return Ok(None);
+              }
             }
-            // Non-data frame (trailers, etc.), continue to next frame
-          }
-          Some(Err(_e)) => {
-            // Error reading frame, mark body as consumed
-            self.request_body = None;
-            return Err(Box::new(Error::InternalError(
-              "Error reading request body".to_string(),
-            )));
-          }
-          None => {
-            // End of stream
-            self.request_body = None;
+          } else {
             return Ok(None);
           }
         }
-      } else {
-        // Body already consumed
-        return Ok(None);
       }
     }
   }
