@@ -243,59 +243,44 @@ impl Session {
     }
   }
 
-  /// Build the final hyper response from accumulated state
+  fn build_body_bytes(&self) -> bytes::Bytes {
+    if self.response_body.is_empty() {
+      bytes::Bytes::new()
+    } else {
+      let total_len: usize = self.response_body.iter().map(|b| b.len()).sum();
+      let mut combined = bytes::BytesMut::with_capacity(total_len);
+      for chunk in &self.response_body {
+        combined.extend_from_slice(chunk);
+      }
+      combined.freeze()
+    }
+  }
+
   pub fn build_response(
     self,
   ) -> hyper::Response<http_body_util::Full<bytes::Bytes>> {
     use http_body_util::Full;
-
     let status = self.response_status.unwrap_or(StatusCode::OK);
-    let body_bytes = if self.response_body.is_empty() {
-      bytes::Bytes::new()
-    } else {
-      // Concatenate all body chunks
-      let total_len: usize = self.response_body.iter().map(|b| b.len()).sum();
-      let mut combined = bytes::BytesMut::with_capacity(total_len);
-      for chunk in self.response_body {
-        combined.extend_from_slice(&chunk);
-      }
-      combined.freeze()
-    };
-
+    let body_bytes = self.build_body_bytes();
     let mut response = hyper::Response::builder().status(status);
     for (name, value) in self.response_headers.iter() {
       response = response.header(name.clone(), value.clone());
     }
-
     response.body(Full::new(body_bytes)).unwrap()
   }
 
-  /// Build response with BoxBody for streaming compatibility
   pub fn build_response_boxed(
     self,
   ) -> hyper::Response<
     http_body_util::combinators::BoxBody<bytes::Bytes, hyper::Error>,
   > {
     use http_body_util::{BodyExt, Full};
-
     let status = self.response_status.unwrap_or(StatusCode::OK);
-    let body_bytes = if self.response_body.is_empty() {
-      bytes::Bytes::new()
-    } else {
-      // Concatenate all body chunks
-      let total_len: usize = self.response_body.iter().map(|b| b.len()).sum();
-      let mut combined = bytes::BytesMut::with_capacity(total_len);
-      for chunk in self.response_body {
-        combined.extend_from_slice(&chunk);
-      }
-      combined.freeze()
-    };
-
+    let body_bytes = self.build_body_bytes();
     let mut response = hyper::Response::builder().status(status);
     for (name, value) in self.response_headers.iter() {
       response = response.header(name.clone(), value.clone());
     }
-
     response
       .body(
         Full::new(body_bytes)

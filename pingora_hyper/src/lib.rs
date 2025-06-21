@@ -3,7 +3,6 @@ pub mod error;
 pub mod http;
 pub mod peer;
 pub mod proxy;
-pub mod server;
 mod server_impl;
 
 // Re-export core types
@@ -34,9 +33,7 @@ pub mod pingora {
   }
 
   pub mod server {
-    pub use crate::server::*;
     pub use crate::server_impl::*;
-
     pub mod configuration {
       pub use crate::server_impl::ServerConf;
     }
