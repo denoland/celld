@@ -114,6 +114,7 @@ fn start_server(config: config::Config) -> Server {
 
   // Create an HTTP proxy service with our app
   let mut proxy_service = http_proxy_service(&pingora_config2, app);
+  proxy_service.threads = Some(1);
 
   // Configure the proxy service to listen on the specified address
   proxy_service.add_tcp(&node_state.config.listen_addr.to_string());
@@ -125,45 +126,62 @@ fn start_server(config: config::Config) -> Server {
 
   // Create an HTTP service for the internal API
   let mut internal_service = http_proxy_service(&pingora_config2, internal_api);
+  internal_service.threads = Some(1);
 
   // Configure the internal service to listen on the internal address
   internal_service.add_tcp(&node_state.config.internal_listen_addr.to_string());
 
-  server.add_service(background_service(
-    "process_reaper",
-    ProcessReaper::new(
-      node_state.clone(),
-      DEFAULT_IDLE_TIMEOUT,
-      DEFAULT_REAPER_INTERVAL,
-    ),
-  ));
+  server.add_service({
+    let mut s = background_service(
+      "process_reaper",
+      ProcessReaper::new(
+        node_state.clone(),
+        DEFAULT_IDLE_TIMEOUT,
+        DEFAULT_REAPER_INTERVAL,
+      ),
+    );
+    s.threads = Some(1);
+    s
+  });
 
   // Add a background service for S3 heartbeat and peer discovery
-  server.add_service(background_service(
-    "s3_heartbeat",
-    heartbeat_service::HeartbeatService {
-      node_state: node_state.clone(),
-      interval: node_state.config.heartbeat_interval,
-      staleness_threshold: node_state.config.staleness_threshold,
-    },
-  ));
+  server.add_service({
+    let mut s = background_service(
+      "s3_heartbeat",
+      heartbeat_service::HeartbeatService {
+        node_state: node_state.clone(),
+        interval: node_state.config.heartbeat_interval,
+        staleness_threshold: node_state.config.staleness_threshold,
+      },
+    );
+    s.threads = Some(2);
+    s
+  });
 
   // Add a background service for alarm scheduler
-  server.add_service(background_service(
-    "alarm_scheduler",
-    alarm_scheduler::AlarmScheduler {
-      node_state: node_state.clone(),
-      interval: node_state.config.alarm_scheduler_interval,
-    },
-  ));
+  server.add_service({
+    let mut s = background_service(
+      "alarm_scheduler",
+      alarm_scheduler::AlarmScheduler {
+        node_state: node_state.clone(),
+        interval: node_state.config.alarm_scheduler_interval,
+      },
+    );
+    s.threads = Some(1);
+    s
+  });
 
   // Add a background service for control socket listener
-  server.add_service(background_service(
-    "control_socket_listener",
-    control_socket_listener::ControlSocketListener {
-      node_state: node_state.clone(),
-    },
-  ));
+  server.add_service({
+    let mut s = background_service(
+      "control_socket_listener",
+      control_socket_listener::ControlSocketListener {
+        node_state: node_state.clone(),
+      },
+    );
+    s.threads = Some(1);
+    s
+  });
 
   // Add the public proxy service to the server
   server.add_service(proxy_service);
