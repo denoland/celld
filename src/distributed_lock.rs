@@ -250,50 +250,55 @@ impl LockState {
         };
 
         // Spawn a task to release the lock.
-        tokio::spawn({
-          let descriptor = descriptor.clone();
-          let lock_manager = lock_manager.clone();
-          let self_request_tx = self_request_tx.clone();
+        let task_name = format!("lock_release_{}", descriptor.lock_key);
+        tokio::task::Builder::new()
+          .name(&task_name)
+          .spawn({
+            let descriptor = descriptor.clone();
+            let lock_manager = lock_manager.clone();
+            let self_request_tx = self_request_tx.clone();
 
-          async move {
-            tokio::select! {
-              biased;
+            async move {
+              tokio::select! {
+                biased;
 
-              _ = release_cancel_token.cancelled() => {
-                warn!(?descriptor, "Lock release cancelled");
-                let _ = self_request_tx.send(LockStateRequest::ReleaseCompleted(
-                  ReleaseCompletedMessage {
-                    is_gracefully_shut_down: false,
-                    res_chan,
-                  },
-                ));
-              }
+                _ = release_cancel_token.cancelled() => {
+                  warn!(?descriptor, "Lock release cancelled");
+                  let _ = self_request_tx.send(LockStateRequest::ReleaseCompleted(
+                    ReleaseCompletedMessage {
+                      is_gracefully_shut_down: false,
+                      res_chan,
+                    },
+                  ));
+                }
 
-              res = lock_manager.release(&descriptor) => {
-                match res {
-                  Ok(_) => {
-                    debug!(?descriptor, "Lock release completed");
-                    let _ = self_request_tx.send(LockStateRequest::ReleaseCompleted(
-                      ReleaseCompletedMessage {
-                        is_gracefully_shut_down: true,
-                        res_chan,
-                      },
-                    ));
-                  }
-                  Err(e) => {
-                    error!(?descriptor, error = ?e, "Failed to release lock");
-                    let _ = self_request_tx.send(LockStateRequest::ReleaseCompleted(
-                      ReleaseCompletedMessage {
-                        is_gracefully_shut_down: false,
-                        res_chan,
-                      },
-                    ));
+                res = lock_manager.release(&descriptor) => {
+                  match res {
+                    Ok(_) => {
+                      debug!(?descriptor, "Lock release completed");
+                      let _ = self_request_tx.send(LockStateRequest::ReleaseCompleted(
+                        ReleaseCompletedMessage {
+                          is_gracefully_shut_down: true,
+                          res_chan,
+                        },
+                      ));
+                    }
+                    Err(e) => {
+                      error!(?descriptor, error = ?e, "Failed to release lock");
+                      let _ = self_request_tx.send(LockStateRequest::ReleaseCompleted(
+                        ReleaseCompletedMessage {
+                          is_gracefully_shut_down: false,
+                          res_chan,
+                        },
+                      ));
+                    }
                   }
                 }
               }
             }
           }
-        });
+        )
+        .unwrap();
       }
       LockState::Active {
         descriptor,
@@ -323,71 +328,76 @@ impl LockState {
         };
 
         // Spawn a task to release the lock.
-        tokio::spawn({
-          // A future to shutdown the protected resource (i.e. Deno and then
-          // Litestream) gracefully, then release the lock.
-          // The release order matters. Deno process and Litestream replication
-          // must be stopped *before* other nodes detect the lock as released.
-          let release_fut = {
-            let descriptor = descriptor.clone();
-            let lock_manager = lock_manager.clone();
+        let task_name = format!("lock_release_active_{}", descriptor.lock_key);
+        tokio::task::Builder::new()
+          .name(&task_name)
+          .spawn({
+            // A future to shutdown the protected resource (i.e. Deno and then
+            // Litestream) gracefully, then release the lock.
+            // The release order matters. Deno process and Litestream replication
+            // must be stopped *before* other nodes detect the lock as released.
+            let release_fut = {
+              let descriptor = descriptor.clone();
+              let lock_manager = lock_manager.clone();
+
+              async move {
+                protected_resource.terminate().await;
+                debug!(?descriptor, "protected resource gracefully terminated");
+                lock_manager.release(&descriptor).await
+              }
+            };
+
+            let self_request_tx = self_request_tx.clone();
 
             async move {
-              protected_resource.terminate().await;
-              debug!(?descriptor, "protected resource gracefully terminated");
-              lock_manager.release(&descriptor).await
-            }
-          };
+              tokio::select! {
+                biased;
 
-          let self_request_tx = self_request_tx.clone();
+                _ = release_cancel_token.cancelled() => {
+                  error!(
+                    ?descriptor,
+                    "Timed out while gracefully terminating protected resource"
+                  );
 
-          async move {
-            tokio::select! {
-              biased;
+                  let _ = self_request_tx.send(LockStateRequest::ReleaseCompleted(
+                    ReleaseCompletedMessage {
+                      is_gracefully_shut_down: false,
+                      res_chan,
+                    },
+                  ));
 
-              _ = release_cancel_token.cancelled() => {
-                error!(
-                  ?descriptor,
-                  "Timed out while gracefully terminating protected resource"
-                );
+                  // When the release is cancelled, `release_fut` is dropped,
+                  // killing the protected resources forcibly. This ensures that
+                  // another node in the cluster can acquire the lock safely.
+                }
 
-                let _ = self_request_tx.send(LockStateRequest::ReleaseCompleted(
-                  ReleaseCompletedMessage {
-                    is_gracefully_shut_down: false,
-                    res_chan,
-                  },
-                ));
-
-                // When the release is cancelled, `release_fut` is dropped,
-                // killing the protected resources forcibly. This ensures that
-                // another node in the cluster can acquire the lock safely.
-              }
-
-              res = release_fut => {
-                match res {
-                  Ok(_) => {
-                    debug!(?descriptor, "Lock release completed");
-                    let _ = self_request_tx.send(LockStateRequest::ReleaseCompleted(
-                      ReleaseCompletedMessage {
-                        is_gracefully_shut_down: true,
-                        res_chan,
-                      },
-                    ));
-                  }
-                  Err(e) => {
-                    error!(?descriptor, error = ?e, "Failed to release lock");
-                    let _ = self_request_tx.send(LockStateRequest::ReleaseCompleted(
-                      ReleaseCompletedMessage {
-                        is_gracefully_shut_down: false,
-                        res_chan,
-                      },
-                    ));
+                res = release_fut => {
+                  match res {
+                    Ok(_) => {
+                      debug!(?descriptor, "Lock release completed");
+                      let _ = self_request_tx.send(LockStateRequest::ReleaseCompleted(
+                        ReleaseCompletedMessage {
+                          is_gracefully_shut_down: true,
+                          res_chan,
+                        },
+                      ));
+                    }
+                    Err(e) => {
+                      error!(?descriptor, error = ?e, "Failed to release lock");
+                      let _ = self_request_tx.send(LockStateRequest::ReleaseCompleted(
+                        ReleaseCompletedMessage {
+                          is_gracefully_shut_down: false,
+                          res_chan,
+                        },
+                      ));
+                    }
                   }
                 }
               }
             }
           }
-        });
+        )
+        .unwrap();
       }
       LockState::Releasing { .. } => {
         // Lock is already being released. Let the requester know about it.
@@ -533,14 +543,6 @@ impl LockHandle {
         lock_state_loop(descriptor, lock_manager, global_ttl, local_ttl, tx, rx)
       })
       .unwrap();
-
-    // tokio::spawn({
-    //   let descriptor = lock_descriptor.clone();
-    //   let lock_manager = lock_manager.clone();
-    //   let tx = tx.clone();
-
-    //   lock_state_loop(descriptor, lock_manager, global_ttl, local_ttl, tx, rx)
-    // });
 
     Self {
       tx,
@@ -1020,19 +1022,23 @@ fn handle_get_alarm(req: GetAlarmRequest, state: &mut LockState) {
         return;
       };
 
-      tokio::spawn({
-        let alarm_processor_handle = alarm_processor.handle();
-        async move {
-          let maybe_alarm = alarm_processor_handle
-            .get(req.tenant, req.cell_id)
-            .await
-            .ok();
-          let _ =
-            req.res_chan.send(maybe_alarm.map(|alarm| GetAlarmResponse {
-              scheduled_time_unix_ms: alarm.scheduled_time_unix_ms,
-            }));
-        }
-      });
+      let task_name = format!("get_alarm_{}_{}", req.tenant, req.cell_id);
+      tokio::task::Builder::new()
+        .name(&task_name)
+        .spawn({
+          let alarm_processor_handle = alarm_processor.handle();
+          async move {
+            let maybe_alarm = alarm_processor_handle
+              .get(req.tenant, req.cell_id)
+              .await
+              .ok();
+            let _ =
+              req.res_chan.send(maybe_alarm.map(|alarm| GetAlarmResponse {
+                scheduled_time_unix_ms: alarm.scheduled_time_unix_ms,
+              }));
+          }
+        })
+        .unwrap();
     }
     LockState::Releasing { .. } => {
       let _ = req.res_chan.send(None);
@@ -1060,18 +1066,22 @@ fn handle_delete_alarm(req: DeleteAlarmRequest, state: &mut LockState) {
         return;
       };
 
-      tokio::spawn({
-        let alarm_processor_handle = alarm_processor.handle();
-        async move {
-          if let Err(e) =
-            alarm_processor_handle.delete(req.tenant, req.cell_id).await
-          {
-            let _ = req.res_chan.send(Err(e.into()));
-          } else {
-            let _ = req.res_chan.send(Ok(()));
+      let task_name = format!("delete_alarm_{}_{}", req.tenant, req.cell_id);
+      tokio::task::Builder::new()
+        .name(&task_name)
+        .spawn({
+          let alarm_processor_handle = alarm_processor.handle();
+          async move {
+            if let Err(e) =
+              alarm_processor_handle.delete(req.tenant, req.cell_id).await
+            {
+              let _ = req.res_chan.send(Err(e.into()));
+            } else {
+              let _ = req.res_chan.send(Ok(()));
+            }
           }
-        }
-      });
+        })
+        .unwrap();
     }
     LockState::Releasing { .. } => {
       let _ = req
@@ -1103,19 +1113,23 @@ fn handle_set_alarm(req: SetAlarmRequest, state: &mut LockState) {
         return;
       };
 
-      tokio::spawn({
-        let alarm_processor_handle = alarm_processor.handle();
-        async move {
-          if let Err(e) = alarm_processor_handle
-            .set(req.tenant, req.cell_id, req.scheduled_time_unix_ms)
-            .await
-          {
-            let _ = req.res_chan.send(Err(e.into()));
-          } else {
-            let _ = req.res_chan.send(Ok(()));
+      let task_name = format!("set_alarm_{}_{}", req.tenant, req.cell_id);
+      tokio::task::Builder::new()
+        .name(&task_name)
+        .spawn({
+          let alarm_processor_handle = alarm_processor.handle();
+          async move {
+            if let Err(e) = alarm_processor_handle
+              .set(req.tenant, req.cell_id, req.scheduled_time_unix_ms)
+              .await
+            {
+              let _ = req.res_chan.send(Err(e.into()));
+            } else {
+              let _ = req.res_chan.send(Ok(()));
+            }
           }
-        }
-      });
+        })
+        .unwrap();
     }
     LockState::Releasing { .. } => {
       let _ = req
@@ -1147,25 +1161,29 @@ fn handle_dispatch_alarms(req: DispatchAlarmsRequest, state: &mut LockState) {
         return;
       };
 
-      tokio::spawn({
-        let alarm_processor_handle = alarm_processor.handle();
-        async move {
-          debug!(now = ?req.now, "handle_dispatch_alarms making a request to alarm processor");
-          match alarm_processor_handle
-            .dispatch(req.node_state, req.now, req.limit)
-            .await
-          {
-            Ok(_) => {
-              debug!(now = ?req.now, "handle_dispatch_alarms alarm processor dispatch completed successfully");
-              let _ = req.res_chan.send(Ok(()));
-            }
-            Err(e) => {
-              debug!(now = ?req.now, error = ?e, "handle_dispatch_alarms alarm processor dispatch failed");
-              let _ = req.res_chan.send(Err(e.into()));
+      let task_name = "dispatch_alarms".to_string();
+      tokio::task::Builder::new()
+        .name(&task_name)
+        .spawn({
+          let alarm_processor_handle = alarm_processor.handle();
+          async move {
+            debug!(now = ?req.now, "handle_dispatch_alarms making a request to alarm processor");
+            match alarm_processor_handle
+              .dispatch(req.node_state, req.now, req.limit)
+              .await
+            {
+              Ok(_) => {
+                debug!(now = ?req.now, "handle_dispatch_alarms alarm processor dispatch completed successfully");
+                let _ = req.res_chan.send(Ok(()));
+              }
+              Err(e) => {
+                debug!(now = ?req.now, error = ?e, "handle_dispatch_alarms alarm processor dispatch failed");
+                let _ = req.res_chan.send(Err(e.into()));
+              }
             }
           }
-        }
-      });
+        })
+        .unwrap();
     }
     LockState::Releasing { .. } => {
       let _ = req
@@ -2075,17 +2093,21 @@ mod tests {
     for node_id in &node_ids {
       let lock_manager_ = lock_manager.clone();
       let node_id = node_id.clone();
-      let handle = tokio::spawn(async move {
-        lock_manager_
-          .try_acquire(
-            lock_name,
-            &node_id,
-            global_ttl,
-            local_ttl,
-            lock_manager_.clone(),
-          )
-          .await
-      });
+      let task_name = format!("test_acquire_{:?}", node_id);
+      let handle = tokio::task::Builder::new()
+        .name(&task_name)
+        .spawn(async move {
+          lock_manager_
+            .try_acquire(
+              lock_name,
+              &node_id,
+              global_ttl,
+              local_ttl,
+              lock_manager_.clone(),
+            )
+            .await
+        })
+        .unwrap();
       handles.push(handle);
     }
 

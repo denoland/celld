@@ -1,5 +1,6 @@
 use crate::cell_manager::{SYSTEM_CELL_ID, SYSTEM_TENANT};
 use crate::node_state::NodeState;
+use futures::FutureExt;
 use pingora::{server::ShutdownWatch, services::background::BackgroundService};
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,11 +29,36 @@ impl BackgroundService for HeartbeatService {
     let interval = self.interval;
 
     let mut interval_timer = tokio::time::interval(interval);
+    interval_timer
+      .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     info!(?interval, staleness_threshold = ?self.staleness_threshold, "Heartbeat service started");
 
+    enum Event {
+      IntervalTimerTick,
+      ShutdownChanged,
+    }
+
+    use std::task::Poll;
+
     loop {
-      tokio::select! {
-        _ = tokio::time::sleep(interval) => {
+      use std::future::Future;
+      // Simulate tokio::select!
+      let event = std::future::poll_fn(|cx| {
+        if let Poll::Ready(_) = interval_timer.poll_tick(cx) {
+          return Poll::Ready(Event::IntervalTimerTick);
+        }
+
+        let mut shutdown_changed = std::pin::pin!(shutdown.changed());
+        if let Poll::Ready(_) = shutdown_changed.poll(cx) {
+          return Poll::Ready(Event::ShutdownChanged);
+        }
+
+        Poll::Pending
+      })
+      .await;
+
+      match event {
+        Event::IntervalTimerTick => {
           // Send heartbeat to S3
           match cluster_membership.heartbeat().await {
             Ok(_) => debug!("Sent heartbeat to S3 successfully"),
@@ -45,7 +71,7 @@ impl BackgroundService for HeartbeatService {
               debug!("Found {} active peers in cluster", active_peers.len());
               // Update the peer manager with active peers
               peer_manager.update_peers(active_peers);
-            },
+            }
             Err(e) => {
               error!(error = ?e, "Failed to get active peers from S3");
               continue;
@@ -59,7 +85,10 @@ impl BackgroundService for HeartbeatService {
             let peer_manager = self.node_state.peer_manager.clone();
             async move {
               if peer_manager.is_local_owner(SYSTEM_TENANT, SYSTEM_CELL_ID) {
-                if let Err(e) = cell_manager.ensure_system_main_cell_spawned(self.node_state.clone()).await {
+                if let Err(e) = cell_manager
+                  .ensure_system_main_cell_spawned(self.node_state.clone())
+                  .await
+                {
                   error!(
                     error = ?e,
                     "Failed to ensure system main cell is spawned"
@@ -71,21 +100,28 @@ impl BackgroundService for HeartbeatService {
 
           // Terminate cells that are no longer owned by this node so that new
           // owner nodes can take over without waiting for TTL expiration.
-          let cell_termination_fut = self.node_state.cell_manager.terminate_unowned_cells(&peer_manager);
+          let cell_termination_fut = self
+            .node_state
+            .cell_manager
+            .terminate_unowned_cells(&peer_manager);
 
           // System cell creation and/or cell termination may take a while,
           // blocking the next heartbeat. We need to make sure to give up these
           // tasks and proceed to the next heartbeat so that this node is not
           // considered as stale by other nodes.
           let timeout = std::cmp::max(
-            self.staleness_threshold.saturating_sub(Duration::from_secs(5)),
+            self
+              .staleness_threshold
+              .saturating_sub(Duration::from_secs(5)),
             Duration::from_secs(3),
           );
 
-          let (system_main_cell_creation_res, cell_termination_res) = futures::future::join(
-            tokio::time::timeout(timeout, system_main_cell_creation_fut),
-            tokio::time::timeout(timeout, cell_termination_fut),
-          ).await;
+          let (system_main_cell_creation_res, cell_termination_res) =
+            futures::future::join(
+              tokio::time::timeout(timeout, system_main_cell_creation_fut),
+              tokio::time::timeout(timeout, cell_termination_fut),
+            )
+            .await;
 
           if let Err(e) = system_main_cell_creation_res {
             error!(error = ?e, ?timeout, "Failed to ensure system main cell is spawned because of timeout");
@@ -95,8 +131,7 @@ impl BackgroundService for HeartbeatService {
             error!(error = ?e, ?timeout, "Failed to terminate unowned cells because of timeout");
           }
         }
-
-        _ = shutdown.changed() => {
+        Event::ShutdownChanged => {
           // Shutdown triggered, unregister node from S3
           info!("Shutting down heartbeat service, unregistering from cluster");
           if let Err(e) = cluster_membership.unregister().await {

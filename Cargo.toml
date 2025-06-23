@@ -53,3 +53,6 @@ fake = "4"
 print_stdout = "deny"
 print_stderr = "deny"
 dbg_macro = "warn"
+
+[patch.crates-io]
+tokio = { path = "/home/yusuke/Repo/github.com/tokio-rs/tokio/tokio" }
