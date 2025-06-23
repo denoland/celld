@@ -199,11 +199,16 @@ fn start_server(config: config::Config) -> Server {
 fn main() {
   // tracing_subscriber::fmt::init();
 
-  use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+  use tracing_subscriber::{
+    layer::SubscriberExt, util::SubscriberInitExt, Layer,
+  };
 
   tracing_subscriber::registry()
     .with(console_subscriber::spawn())
-    .with(tracing_subscriber::fmt::layer())
+    .with(
+      tracing_subscriber::fmt::layer()
+        .with_filter(tracing_subscriber::EnvFilter::from_default_env()),
+    )
     .init();
 
   // see benchmark_deno_startup.sh

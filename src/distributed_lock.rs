@@ -729,25 +729,6 @@ impl LockHandle {
   }
 }
 
-struct PrintOnFirstPoll {
-  lock_key: String,
-  printed: bool,
-}
-
-impl std::future::Future for PrintOnFirstPoll {
-  type Output = ();
-
-  fn poll(
-    self: std::pin::Pin<&mut Self>,
-    _cx: &mut std::task::Context<'_>,
-  ) -> std::task::Poll<Self::Output> {
-    if !self.printed {
-      info!(lock_key = self.lock_key, "PrintOnFirstPoll");
-    }
-    std::task::Poll::Pending
-  }
-}
-
 async fn lock_state_loop(
   descriptor: LockDescriptor,
   lock_manager: Arc<dyn DistributedLock>,
@@ -779,18 +760,8 @@ async fn lock_state_loop(
       warn!(descriptor = ?state.descriptor(), request_rx_len = request_rx.len(), "Lock state loop iteration for _system/main");
     }
 
-    let print_on_first_poll = PrintOnFirstPoll {
-      lock_key: state.descriptor().lock_key.clone(),
-      printed: false,
-    };
-    let print_on_first_poll = std::pin::pin!(print_on_first_poll);
-
     tokio::select! {
       biased;
-
-      _ = print_on_first_poll => {
-        // noop
-      }
 
       _ = &mut global_ttl_expiry_timer, if !release_cancel_token.is_cancelled() => {
         // Global TTL expired; cancel the ongoing graceful release process to

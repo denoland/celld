@@ -28,9 +28,13 @@ impl BackgroundService for HeartbeatService {
     let peer_manager = self.node_state.peer_manager.clone();
     let interval = self.interval;
 
+    let mut interval_timer = tokio::time::interval(interval);
+    interval_timer
+      .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     info!(?interval, staleness_threshold = ?self.staleness_threshold, "Heartbeat service started");
 
-    let mut timer = std::pin::pin!(tokio::time::sleep(interval));
+    let mut interval_timer_with_sleep =
+      std::pin::pin!(tokio::time::sleep(interval));
 
     enum Event {
       IntervalTimerTick,
@@ -44,15 +48,29 @@ impl BackgroundService for HeartbeatService {
 
       // Simulate tokio::select!
       let event = std::future::poll_fn(|cx| {
-        if let Poll::Ready(_) = std::pin::Pin::new(&mut timer).poll(cx) {
-          timer.as_mut().reset(tokio::time::Instant::now() + interval);
+        tracing::trace!("🎃🎃 Heartbeat service polled inteval={:?}", interval);
+
+        if let Poll::Ready(_) = interval_timer.poll_tick(cx) {
+          tracing::trace!("🎃🎃 IntervalTimer ticked");
           return Poll::Ready(Event::IntervalTimerTick);
         }
+
+        // if let Poll::Ready(_) =
+        //   std::pin::Pin::new(&mut interval_timer_with_sleep).poll(cx)
+        // {
+        //   tracing::trace!("🎃🎃 IntervalTimer with sleep ticked");
+        //   interval_timer_with_sleep
+        //     .as_mut()
+        //     .reset(tokio::time::Instant::now() + interval);
+        //   return Poll::Ready(Event::IntervalTimerTick);
+        // }
 
         let mut shutdown_changed = std::pin::pin!(shutdown.changed());
         if let Poll::Ready(_) = shutdown_changed.poll(cx) {
           return Poll::Ready(Event::ShutdownChanged);
         }
+
+        // tracing::trace!("🎃🎃 Heartbeat service pending");
 
         Poll::Pending
       })
