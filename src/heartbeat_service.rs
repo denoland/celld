@@ -28,10 +28,9 @@ impl BackgroundService for HeartbeatService {
     let peer_manager = self.node_state.peer_manager.clone();
     let interval = self.interval;
 
-    let mut interval_timer = tokio::time::interval(interval);
-    interval_timer
-      .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     info!(?interval, staleness_threshold = ?self.staleness_threshold, "Heartbeat service started");
+
+    let mut timer = std::pin::pin!(tokio::time::sleep(interval));
 
     enum Event {
       IntervalTimerTick,
@@ -42,9 +41,11 @@ impl BackgroundService for HeartbeatService {
 
     loop {
       use std::future::Future;
+
       // Simulate tokio::select!
       let event = std::future::poll_fn(|cx| {
-        if let Poll::Ready(_) = interval_timer.poll_tick(cx) {
+        if let Poll::Ready(_) = std::pin::Pin::new(&mut timer).poll(cx) {
+          timer.as_mut().reset(tokio::time::Instant::now() + interval);
           return Poll::Ready(Event::IntervalTimerTick);
         }
 
