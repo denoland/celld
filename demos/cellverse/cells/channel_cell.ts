@@ -1,38 +1,531 @@
-import { cell, define, dispatch } from "@ry/cells";
+import { cell } from "@ry/cells";
 import { z } from "npm:zod";
 import { extractBearerToken, verifyJWT } from "./utils.ts";
 
 const FRONTEND_URL = Deno.env.get("FRONTEND_URL");
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
 
-// Define Zod schema for bot structured responses
-const BotActionSchema = z.discriminatedUnion("action", [
-  z.object({
-    action: z.literal("respond"),
-    message: z.string(),
-  }),
+// Helper functions for common operations
+function broadcastMessage(cell: any, message: any) {
+  cell.broadcast(JSON.stringify({
+    type: "message",
+    message,
+  }));
+}
+
+// Multi-stage reasoning workflow with tool invocation
+const ReasoningStepActionSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("store_memory"),
     key: z.string(),
     value: z.string(),
-    response: z.string().optional(),
+    finished: z.boolean().optional(),
   }),
   z.object({
     action: z.literal("read_memories"),
     filter: z.string().optional(),
-    response: z.string().optional(),
+    finished: z.boolean().optional(),
   }),
   z.object({
-    action: z.literal("set_alarm"),
-    message: z.string(),
+    action: z.literal("sleep"),
     delaySeconds: z.number(),
+    finished: z.boolean().optional(),
   }),
   z.object({
-    action: z.literal("start_reasoning"),
+    action: z.literal("think"),
+    thought: z.string(),
+    finished: z.boolean().optional(),
+  }),
+  z.object({
+    action: z.literal("respond"),
+    message: z.string(),
+    finished: z.boolean().optional(),
   }),
 ]);
 
-type BotAction = z.infer<typeof BotActionSchema>;
+type ReasoningStepAction = z.infer<typeof ReasoningStepActionSchema>;
+
+interface StepCompleteResult {
+  session: {
+    originalMessages: { role: "user" | "assistant"; content: string }[];
+    stepHistory: Array<{
+      step: number;
+      thought?: string;
+      toolsUsed: Array<{
+        tool: string;
+        input: any;
+        output: any;
+      }>;
+    }>;
+    memories: Array<{ key: string; value: string }>;
+    currentStepIndex: number;
+  };
+  finished: boolean;
+  alarm?: {
+    message: string;
+    delaySeconds: number;
+  };
+}
+
+interface ReasoningContext {
+  originalMessages: { role: "user" | "assistant"; content: string }[];
+  stepHistory: Array<{
+    step: number;
+    thought?: string;
+    toolsUsed: Array<{
+      tool: string;
+      input: any;
+      output: any;
+    }>;
+  }>;
+  memories: Array<{ key: string; value: string }>;
+}
+
+// Session class to track reasoning context across workflow steps
+class ReasoningSession {
+  constructor(
+    public originalMessages: { role: "user" | "assistant"; content: string }[],
+    public stepHistory: Array<{
+      step: number;
+      thought?: string;
+      toolsUsed: Array<{
+        tool: string;
+        input: any;
+        output: any;
+      }>;
+    }> = [],
+    public memories: Array<{ key: string; value: string }> = [],
+    public currentStepIndex: number = 0,
+  ) {}
+
+  addStep(stepInfo: {
+    step: number;
+    thought?: string;
+    toolsUsed: Array<{
+      tool: string;
+      input: any;
+      output: any;
+    }>;
+  }) {
+    this.stepHistory.push(stepInfo);
+    this.currentStepIndex++;
+  }
+
+  updateMemories(memories: Array<{ key: string; value: string }>) {
+    this.memories = memories;
+  }
+
+  toJSON() {
+    return {
+      originalMessages: this.originalMessages,
+      stepHistory: this.stepHistory,
+      memories: this.memories,
+      currentStepIndex: this.currentStepIndex,
+    };
+  }
+
+  static fromJSON(data: any) {
+    return new ReasoningSession(
+      data.originalMessages,
+      data.stepHistory,
+      data.memories,
+      data.currentStepIndex,
+    );
+  }
+}
+
+// Step execution logic
+async function executeReasoningStep(
+  stepResult: ReasoningStepAction,
+  stepIndex: number,
+  context: ReasoningContext,
+  cell: any,
+): Promise<{
+  finished: boolean;
+  alarm?: { message: string; delaySeconds: number };
+  sleepDuration?: number;
+  stepInfo: {
+    step: number;
+    thought?: string;
+    toolsUsed: Array<{ tool: string; input: any; output: any }>;
+  };
+  memories: Array<{ key: string; value: string }>;
+}> {
+  const currentStep = {
+    step: stepIndex + 1,
+    thought: undefined as string | undefined,
+    toolsUsed: [] as Array<{ tool: string; input: any; output: any }>,
+  };
+
+  switch (stepResult.action) {
+    case "store_memory": {
+      storeMemory(cell.db, stepResult.key, stepResult.value);
+
+      currentStep.toolsUsed.push({
+        tool: "store_memory",
+        input: { key: stepResult.key, value: stepResult.value },
+        output: "stored",
+      });
+
+      const systemResult = insertMessage(
+        cell.db,
+        null,
+        "system",
+        `Stored memory: ${stepResult.key}`,
+        "system",
+        "store_memory",
+      );
+
+      broadcastMessage(cell, systemResult);
+
+      context.stepHistory.push(currentStep);
+      return {
+        finished: stepResult.finished || false,
+        stepInfo: currentStep,
+        memories: context.memories,
+      };
+    }
+
+    case "read_memories": {
+      const memories = getMemories(cell.db, stepResult.filter);
+
+      const memoryData = memories.map((mem: any) => ({
+        key: mem.key,
+        value: mem.value,
+      }));
+
+      context.memories = memoryData;
+
+      currentStep.toolsUsed.push({
+        tool: "read_memories",
+        input: { filter: stepResult.filter },
+        output: `Found ${memories.length} memories`,
+      });
+
+      const systemResult = insertMessage(
+        cell.db,
+        null,
+        "system",
+        `Retrieved ${memories.length} memories`,
+        "system",
+        "read_memories",
+      );
+
+      broadcastMessage(cell, systemResult);
+
+      context.stepHistory.push(currentStep);
+      return {
+        finished: stepResult.finished || false,
+        stepInfo: currentStep,
+        memories: context.memories,
+      };
+    }
+
+    case "sleep": {
+      // Store the sleep details in context for the reasoning workflow to handle
+      currentStep.toolsUsed.push({
+        tool: "sleep",
+        input: {
+          delaySeconds: stepResult.delaySeconds,
+        },
+        output: "sleep_scheduled",
+      });
+
+      context.stepHistory.push(currentStep);
+
+      // Return the sleep details so the reasoning workflow can handle it
+      return {
+        finished: stepResult.finished || false,
+        sleepDuration: stepResult.delaySeconds,
+        stepInfo: currentStep,
+        memories: context.memories,
+      };
+    }
+
+    case "think": {
+      currentStep.thought = stepResult.thought;
+
+      const thinkingResult = insertMessage(
+        cell.db,
+        null,
+        "bot",
+        stepResult.thought,
+        "bot",
+        "thinking",
+      );
+
+      broadcastMessage(cell, thinkingResult);
+
+      context.stepHistory.push(currentStep);
+      return {
+        finished: stepResult.finished || false,
+        stepInfo: currentStep,
+        memories: context.memories,
+      };
+    }
+
+    case "respond": {
+      const aiResult = insertMessage(
+        cell.db,
+        null,
+        "bot",
+        stepResult.message,
+        "bot",
+        "respond",
+      );
+
+      broadcastMessage(cell, aiResult);
+
+      return {
+        finished: stepResult.finished !== false,
+        stepInfo: currentStep,
+        memories: context.memories,
+      };
+    }
+
+    default: {
+      throw new Error(`Unknown action: ${stepResult satisfies never}`);
+    }
+  }
+}
+
+// Authentication helper functions
+async function verifyTokenAndOwnership(token: string, channelId: string) {
+  if (!token) {
+    return { error: "Unauthorized", status: 401 };
+  }
+
+  const user = verifyJWT(token);
+  if (!user || user.exp < Date.now()) {
+    return { error: "Invalid or expired token", status: 401 };
+  }
+
+  try {
+    const registryResponse = await fetch(
+      `${FRONTEND_URL}/cell/registry/get/${channelId}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    );
+
+    if (!registryResponse.ok) {
+      return { error: "Failed to get channel info", status: 500 };
+    }
+
+    const channelData = await registryResponse.json();
+
+    if (channelData.creator_github_id !== user.github_id) {
+      return {
+        error: "Only the channel owner can perform this action",
+        status: 403,
+      };
+    }
+
+    return { user, channelData };
+  } catch (error) {
+    console.error("Error verifying ownership:", error);
+    return { error: "Internal server error", status: 500 };
+  }
+}
+
+function authenticateWebSocketUser(token: string) {
+  const user = verifyJWT(token);
+  if (!user || user.exp < Date.now()) {
+    return null;
+  }
+  return user;
+}
+
+// System prompt construction
+function buildReasoningSystemPrompt(
+  channelId: string,
+  allowedSteps: number,
+  db: any,
+) {
+  let p = `You are a bot in the "${
+    channelId.replace("channel-", "")
+  }" channel.`;
+
+  const personalityConfig = getChannelConfig(db, "personality");
+
+  if (personalityConfig && personalityConfig.value) {
+    p = personalityConfig.value as string;
+  }
+
+  p += `\n\nYou are solving a complex problem through multi-stage reasoning.
+At each step, you can use different tools to gather information or store insights.
+You will have ${allowedSteps} steps to solve the problem.
+
+Available tools at each step:
+1. store_memory: Store important insights or facts for later use
+2. read_memories: Retrieve previously stored memories
+3. sleep: Pause execution for a specified number of seconds (use with finished=false, then use respond afterwards)
+4. think: Continue reasoning without using tools
+5. respond: Provide your final answer (ends the reasoning)
+
+You must respond with a JSON object matching one of these schemas:
+{"action": "store_memory", "key": "memory_key", "value": "memory_value", "finished": false }
+{"action": "read_memories", "filter": "optional_search_term", "finished": false}
+{"action": "sleep", "delaySeconds": 60, "finished": false }
+{"action": "think", "thought": "your reasoning here", "finished": false}
+{"action": "respond", "message": "your final answer", "finished": true }
+
+The "finished" field indicates if this is your final step/response. Typically
+this will be an action sending a response, but any action potentially be the
+last, for example "store_memory" might be the last step if you are storing a
+final insight for later.
+
+Use tools strategically to gather context and build understanding before responding.
+Store important information about users, topics, or insights that might be useful later.
+For delayed messages like "say X in Y seconds", use sleep(Y, finished=false) followed by respond(X, finished=true).`;
+
+  return p;
+}
+
+// Database helper functions
+function insertMessage(
+  db: any,
+  githubId: string | null,
+  username: string,
+  content: string,
+  messageType: "user" | "bot" | "system" = "user",
+  messageCategory?: string,
+) {
+  try {
+    console.log(
+      `Inserting message from ${username} (${messageType}/${messageCategory}): ${
+        content.substring(0, 50)
+      }...`,
+    );
+
+    // First try with RETURNING (SQLite 3.35+)
+    try {
+      return db.prepare(
+        `INSERT INTO messages (github_id, username, content, message_type, message_category)
+         VALUES (?, ?, ?, ?, ?) RETURNING *`,
+      ).get(githubId, username, content, messageType, messageCategory || null);
+    } catch (returnError) {
+      console.log(
+        `RETURNING syntax failed, trying fallback approach:`,
+        returnError,
+      );
+
+      // Fallback for older SQLite versions
+      const insertStmt = db.prepare(
+        `INSERT INTO messages (github_id, username, content, message_type, message_category)
+         VALUES (?, ?, ?, ?, ?)`,
+      );
+      const result = insertStmt.run(
+        githubId,
+        username,
+        content,
+        messageType,
+        messageCategory || null,
+      );
+
+      // Get the inserted row
+      const selectStmt = db.prepare(`SELECT * FROM messages WHERE id = ?`);
+      return selectStmt.get(result.lastInsertRowid);
+    }
+  } catch (error) {
+    console.error(`Error inserting message from ${username}:`, error);
+    console.error(
+      `Database object:`,
+      typeof db,
+      db ? "exists" : "null/undefined",
+    );
+    throw error;
+  }
+}
+
+function getRecentMessages(db: any, limit = 50) {
+  return db.prepare(
+    `SELECT * FROM messages ORDER BY id DESC LIMIT ?`,
+  ).all(limit).reverse();
+}
+
+function getRecentMessagesInTimeframe(db: any, since: string, limit = 100) {
+  return db.prepare(
+    `SELECT username, content, message_type, timestamp, message_category
+     FROM messages
+     WHERE timestamp >= ?
+     ORDER BY id DESC
+     LIMIT ?`,
+  ).all(since, limit).reverse() as {
+    username: string;
+    content: string;
+    message_type: "user" | "bot" | "system";
+    timestamp: string;
+    message_category?: string;
+  }[];
+}
+
+function storeMemory(db: any, key: string, value: string) {
+  try {
+    return db.prepare(
+      `INSERT OR REPLACE INTO memories (key, value, updated_at)
+       VALUES (?, ?, CURRENT_TIMESTAMP)`,
+    ).run(key, value);
+  } catch (error) {
+    console.error(`Error storing memory "${key}":`, error);
+    throw error;
+  }
+}
+
+function getMemories(db: any, filter?: string, limit = 10) {
+  try {
+    if (filter) {
+      return db.prepare(
+        `SELECT key, value FROM memories
+         WHERE key LIKE ? OR value LIKE ?
+         ORDER BY updated_at DESC`,
+      ).all(`%${filter}%`, `%${filter}%`);
+    }
+    return db.prepare(
+      `SELECT key, value FROM memories
+       ORDER BY updated_at DESC LIMIT ?`,
+    ).all(limit);
+  } catch (error) {
+    console.error(`Error getting memories with filter "${filter}":`, error);
+    return [];
+  }
+}
+
+function getAllMemories(db: any) {
+  return db.prepare(
+    `SELECT id, key, value, created_at, updated_at
+     FROM memories
+     ORDER BY updated_at DESC`,
+  ).all();
+}
+
+function deleteMemory(db: any, memoryId: string) {
+  return db.prepare(`DELETE FROM memories WHERE id = ?`).run(memoryId);
+}
+
+function getChannelConfig(db: any, key: string) {
+  try {
+    console.log(`Getting channel config for key: ${key}`);
+    const stmt = db.prepare(`SELECT value FROM channel_config WHERE key = ?`);
+    const result = stmt.get(key);
+    console.log(`Channel config result for ${key}:`, result);
+    return result;
+  } catch (error) {
+    console.error(`Error getting channel config for key "${key}":`, error);
+    console.error(`Error details:`, String(error));
+    return null;
+  }
+}
+
+function setChannelConfig(db: any, key: string, value: string) {
+  return db.prepare(
+    `INSERT OR REPLACE INTO channel_config (key, value) VALUES (?, ?)`,
+  ).run(key, value);
+}
+
+// Multi-stage reasoning now handles all bot interactions
 
 if (cell.id.startsWith("channel-")) {
   // Initialize DB schema for channels
@@ -43,7 +536,8 @@ if (cell.id.startsWith("channel-")) {
       username TEXT NOT NULL,
       timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       content TEXT NOT NULL,
-      message_type TEXT NOT NULL DEFAULT 'user' CHECK (message_type IN ('user', 'bot', 'system'))
+      message_type TEXT NOT NULL DEFAULT 'user' CHECK (message_type IN ('user', 'bot', 'system')),
+      message_category TEXT
     )
   `);
 
@@ -65,162 +559,191 @@ if (cell.id.startsWith("channel-")) {
     )
   `);
 
-  // Create queued_messages table for delayed responses
-  cell.db.exec(`
-    CREATE TABLE IF NOT EXISTS queued_messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      message TEXT NOT NULL,
-      scheduled_time_unix_ms INTEGER NOT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
+  // Delayed messages are now handled through workflows with step.sleep
 
-    CREATE INDEX IF NOT EXISTS idx_queued_messages_scheduled_time_unix_ms ON queued_messages (scheduled_time_unix_ms);
-  `);
-
-  // Defining workflow
-  const ReasoningActionSchema = z.discriminatedUnion("action", [
-    z.object({
-      action: z.literal("conclusion"),
-      message: z.string(),
-    }),
-    z.object({
-      action: z.literal("step"),
-      message: z.string(),
-    }),
-  ]);
-
-  const reasoningWorkflow = define<{
+  const reasoningWorkflow = cell.workflow.define<{
     messages: {
       role: "user" | "assistant";
       content: string;
     }[];
     allowedSteps: number;
-  }>({
-    event: "reasoning",
+  }, void>({
+    name: "reasoning",
     handler: async ({ input, step }) => {
-      const systemPrompt = await step.run("construct-system-prompt", () => {
-        let p = `You are a bot in the "${
-          cell.id.replace("channel-", "")
-        }" channel.`;
+      // Initialize session
+      let sessionData = new ReasoningSession(input.messages).toJSON();
 
-        const personalityConfig = cell.db.prepare(
-          `SELECT value FROM channel_config WHERE key = 'personality'`,
-        ).get();
-
-        if (personalityConfig && personalityConfig.value) {
-          p = personalityConfig.value as string;
-        }
-
-        p += `\n\nYou are solving a complex problem.
-You will solve it step-by-step, only giving one step at a time unless told otherwise.
-You will have ${input.allowedSteps} steps to solve the problem. You may not need to use all of them.
-You must respond with a JSON object matching one of these schemas:
-1. To respond with a conclusion:
-{"action": "conclusion", "message": "your conclusion here"}
-2. To respond with a step if you need to think more:
-{"action": "step", "message": "your thinking here"}
-`;
-
-        return p;
-      });
-
-      const reasoningMessages: {
-        role: "assistant";
-        content: string;
-      }[] = [];
-
+      // Execute steps, passing session through each one
       for (let i = 0; i < input.allowedSteps; i++) {
-        const result = await step.run(
-          `reasoning-step-${i}`,
-          async () => {
-            const isLastStep = i === input.allowedSteps - 1;
-            const userMessage = isLastStep
-              ? `What is the final answer? Make sure to respond with a JSON object matching: {"action": "conclusion", "message": "your conclusion here"}`
-              : `What is the next step? You have ${
-                input.allowedSteps - i
-              } steps left. Make sure to respond with a JSON object matching: {"action": "step", "message": "your thinking here"}`;
+        const stepResult = await step.run(`complete-step-${i}`, async () => {
+          const session = ReasoningSession.fromJSON(sessionData);
 
-            const response = await fetch(
-              "https://api.openai.com/v1/chat/completions",
-              {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "Authorization": `Bearer ${OPENAI_API_KEY}`,
-                },
-                body: JSON.stringify({
-                  model: "gpt-4o-mini",
-                  messages: [
-                    { role: "system", content: systemPrompt },
-                    ...input.messages,
-                    ...reasoningMessages,
-                    {
-                      role: "user",
-                      content: userMessage,
-                    },
-                  ],
-                }),
+          // Build system prompt
+          const systemPrompt = buildReasoningSystemPrompt(
+            cell.id,
+            input.allowedSteps,
+            cell.db,
+          );
+
+          // Build context from session history
+          let contextMessage = "Previous reasoning steps:\n";
+          session.stepHistory.forEach((stepInfo, idx) => {
+            contextMessage += `\nStep ${idx + 1}:`;
+            if (stepInfo.thought) {
+              contextMessage += `\n  Thought: ${stepInfo.thought}`;
+            }
+            stepInfo.toolsUsed.forEach((tool) => {
+              contextMessage += `\n  Used ${tool.tool}: ${
+                JSON.stringify(tool.input)
+              } → ${JSON.stringify(tool.output)}`;
+            });
+          });
+
+          if (session.memories.length > 0) {
+            contextMessage += "\n\nAvailable memories:";
+            session.memories.forEach((mem) => {
+              contextMessage += `\n  ${mem.key}: ${mem.value}`;
+            });
+          }
+
+          const isLastStep = i === input.allowedSteps - 1;
+          const stepPrompt = isLastStep
+            ? "This is your last step. You must provide your final response."
+            : `Step ${
+              i + 1
+            } of ${input.allowedSteps}. What tool would you like to use or what would you like to think about?`;
+
+          // Call OpenAI with full context
+          const response = await fetch(
+            "https://api.openai.com/v1/chat/completions",
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${OPENAI_API_KEY}`,
               },
-            );
+              body: JSON.stringify({
+                model: "gpt-4o-mini",
+                messages: [
+                  { role: "system", content: systemPrompt },
+                  ...input.messages,
+                  { role: "user", content: contextMessage },
+                  { role: "user", content: stepPrompt },
+                ],
+                response_format: { type: "json_object" },
+              }),
+            },
+          );
 
-            if (!response.ok) {
-              throw new Error(`OpenAI API error: ${await response.text()}`);
-            }
+          if (!response.ok) {
+            throw new Error(`OpenAI API error: ${await response.text()}`);
+          }
 
-            const aiData = await response.json();
-            const aiResponse = aiData.choices[0].message.content;
+          const aiData = await response.json();
+          const aiResponse = aiData.choices[0].message.content;
+          const parsedResponse = JSON.parse(aiResponse);
+          const validatedAction = ReasoningStepActionSchema.parse(
+            parsedResponse,
+          );
 
-            const parsedResponse = JSON.parse(aiResponse);
-            const validatedAction = ReasoningActionSchema.parse(parsedResponse);
+          // Execute the action
+          const executionResult = await executeReasoningStep(
+            validatedAction,
+            i,
+            {
+              originalMessages: session.originalMessages,
+              stepHistory: session.stepHistory,
+              memories: session.memories,
+            },
+            cell,
+          );
 
-            // Store and broadcast the response
-            const aiResult = cell.db.prepare(
-              `INSERT INTO messages (github_id, username, content, message_type)
-                   VALUES (?, ?, ?, ?) RETURNING *`,
-            ).get(null, "bot", validatedAction.message, "bot");
+          // Update session with results
+          session.addStep(executionResult.stepInfo);
+          if (executionResult.memories) {
+            session.updateMemories(executionResult.memories);
+          }
 
-            cell.broadcast(JSON.stringify({
-              type: "message",
-              message: aiResult,
-            }));
+          // Return complete state as JSON-serializable object
+          const result: any = {
+            session: session.toJSON(),
+            finished: executionResult.finished,
+          };
 
-            switch (validatedAction.action) {
-              case "conclusion": {
-                return {
-                  isConcluded: true,
-                  messageToAdd: null,
-                };
-              }
-              case "step": {
-                reasoningMessages.push({
-                  role: "assistant",
-                  content: validatedAction.message,
-                });
+          if (executionResult.alarm) {
+            result.alarm = executionResult.alarm;
+          }
 
-                return {
-                  isConcluded: false,
-                  messageToAdd: validatedAction.message,
-                };
-              }
-              default: {
-                // TODO: This should be unretriable error, because it's just an implementation error
-                throw new Error(
-                  `Unknown action: ${validatedAction satisfies never}`,
-                );
-              }
-            }
-          },
-        );
+          if (executionResult.sleepDuration) {
+            result.sleepDuration = executionResult.sleepDuration;
+          }
 
-        if (result.isConcluded) {
-          break;
+          return result;
+        });
+
+        // Cast stepResult to any for type safety
+        const typedStepResult = stepResult as any;
+
+        // Update sessionData for next iteration
+        sessionData = typedStepResult.session;
+
+        // Handle alarm if present (legacy support)
+        if (typedStepResult.alarm) {
+          await step.sleep(
+            `alarm-${i}`,
+            typedStepResult.alarm.delaySeconds * 1000,
+          );
+
+          // Send delayed message
+          const delayedResult = insertMessage(
+            cell.db,
+            null,
+            "bot",
+            typedStepResult.alarm.message,
+            "bot",
+            "respond",
+          );
+          broadcastMessage(cell, delayedResult);
+          console.log(
+            `[ReasoningWorkflow] Sent delayed message: "${typedStepResult.alarm.message}"`,
+          );
+
+          // After sending the delayed message, update the session to record what happened
+          const session = ReasoningSession.fromJSON(sessionData);
+          session.addStep({
+            step: i + 1,
+            thought:
+              `[System: Delivered scheduled message: "${typedStepResult.alarm.message}"]`,
+            toolsUsed: [],
+          });
+          sessionData = session.toJSON();
         }
 
-        if (result.messageToAdd) {
-          reasoningMessages.push({
-            role: "assistant",
-            content: result.messageToAdd,
+        // Handle sleep if present
+        if (typedStepResult.sleepDuration) {
+          await step.sleep(
+            `sleep-${i}`,
+            typedStepResult.sleepDuration * 1000,
+          );
+
+          console.log(
+            `[ReasoningWorkflow] Completed sleep for ${typedStepResult.sleepDuration} seconds`,
+          );
+
+          // After sleeping, update the session to record what happened
+          const session = ReasoningSession.fromJSON(sessionData);
+          session.addStep({
+            step: i + 1,
+            thought:
+              `[System: Completed sleep for ${typedStepResult.sleepDuration} seconds]`,
+            toolsUsed: [],
           });
+          sessionData = session.toJSON();
+        }
+
+        // Check if finished
+        if (typedStepResult.finished) {
+          break;
         }
       }
     },
@@ -235,9 +758,7 @@ You must respond with a JSON object matching one of these schemas:
     if (path === "/set-personality" && req.method === "POST") {
       const body = await req.json();
       if (body.personality) {
-        cell.db.prepare(
-          `INSERT OR REPLACE INTO channel_config (key, value) VALUES ('personality', ?)`,
-        ).run(body.personality);
+        setChannelConfig(cell.db, "personality", body.personality);
         return new Response(JSON.stringify({ success: true }), {
           headers: { "Content-Type": "application/json" },
         });
@@ -281,11 +802,7 @@ You must respond with a JSON object matching one of these schemas:
         }
 
         // Get memories
-        const memories = cell.db.prepare(
-          `SELECT id, key, value, created_at, updated_at
-           FROM memories
-           ORDER BY updated_at DESC`,
-        ).all();
+        const memories = getAllMemories(cell.db);
 
         return new Response(JSON.stringify({ memories }), {
           headers: { "Content-Type": "application/json" },
@@ -334,9 +851,7 @@ You must respond with a JSON object matching one of these schemas:
         }
 
         // Delete memory
-        const result = cell.db.prepare(
-          `DELETE FROM memories WHERE id = ?`,
-        ).run(memoryId);
+        const result = deleteMemory(cell.db, memoryId);
 
         if (result.changes === 0) {
           return new Response("Memory not found", { status: 404 });
@@ -370,8 +885,8 @@ You must respond with a JSON object matching one of these schemas:
 
     // Handle authentication
     if (data.type === "auth") {
-      const user = verifyJWT(data.token);
-      if (!user || user.exp < Date.now()) {
+      const user = authenticateWebSocketUser(data.token);
+      if (!user) {
         socket.send(JSON.stringify({
           type: "error",
           message: "Invalid token",
@@ -383,9 +898,7 @@ You must respond with a JSON object matching one of these schemas:
       authenticatedSockets.set(id, user);
 
       // Send recent message history
-      const messages = cell.db.prepare(
-        `SELECT * FROM messages ORDER BY id DESC LIMIT 50`,
-      ).all().reverse();
+      const messages = getRecentMessages(cell.db, 50);
 
       socket.send(JSON.stringify({
         type: "history",
@@ -415,11 +928,8 @@ You must respond with a JSON object matching one of these schemas:
     // Handle chat message
     if (data.type === "message") {
       // Store message
-      const stmt = cell.db.prepare(
-        `INSERT INTO messages (github_id, username, content, message_type)
-         VALUES (?, ?, ?, ?) RETURNING *`,
-      );
-      const result = stmt.get(
+      const result = insertMessage(
+        cell.db,
         user.github_id,
         user.username,
         data.content,
@@ -427,33 +937,41 @@ You must respond with a JSON object matching one of these schemas:
       );
 
       // Broadcast to all connected users
-      cell.broadcast(JSON.stringify({
-        type: "message",
-        message: result,
-      }));
+      broadcastMessage(cell, result);
 
       try {
         // Get 1 hour of message history for context
         const oneHourAgo = new Date(
           Date.now() - 60 * 60 * 1000,
         ).toISOString();
-        const recentMessages = cell.db.prepare(
-          `SELECT username, content, message_type, timestamp
-             FROM messages
-             WHERE timestamp >= ?
-             ORDER BY id DESC
-             LIMIT 100`,
-        ).all(oneHourAgo).reverse() as {
-          username: string;
-          content: string;
-          message_type: "user" | "bot" | "system";
-          timestamp: string;
-        }[];
+        const recentMessages = getRecentMessagesInTimeframe(
+          cell.db,
+          oneHourAgo,
+          100,
+        );
 
-        // Build conversation history
-        const messages = recentMessages.filter((msg) =>
-          msg.message_type !== "system"
-        )
+        console.log(
+          `Found ${recentMessages.length} recent messages in timeframe`,
+        );
+        console.log(
+          "Recent messages sample:",
+          recentMessages.slice(-5).map((m) => ({
+            type: m.message_type,
+            category: m.message_category,
+            content: m.content.substring(0, 30),
+          })),
+        );
+
+        // Build conversation history - exclude thinking, tool usage, and system status messages
+        const messages = recentMessages.filter((msg) => {
+          // Include user messages and bot responses
+          if (msg.message_type === "user") return true;
+          if (
+            msg.message_type === "bot" && msg.message_category === "respond"
+          ) return true;
+          // Exclude everything else (thinking, tool usage, system messages)
+          return false;
+        })
           .map((msg) => ({
             role: msg.message_type === "bot" ? "assistant" : "user",
             content: msg.message_type === "bot"
@@ -461,220 +979,40 @@ You must respond with a JSON object matching one of these schemas:
               : `${msg.username}: ${msg.content}`,
           } as const));
 
+        console.log(`Filtered to ${messages.length} messages for AI context`);
+        console.log(
+          "Messages being sent to AI:",
+          messages.map((m) => ({
+            role: m.role,
+            content: m.content.substring(0, 50),
+          })),
+        );
+
         // Add the current message
         messages.push({
           role: "user",
           content: `${user.username}: ${data.content}`,
         });
 
-        // Get channel personality from local config
-        let systemPrompt = `You are a bot in the "${
-          cell.id.replace("channel-", "")
-        }" channel.`;
-
-        const personalityConfig = cell.db.prepare(
-          `SELECT value FROM channel_config WHERE key = 'personality'`,
-        ).get();
-
-        if (personalityConfig && personalityConfig.value) {
-          systemPrompt = personalityConfig.value as string;
-        }
-
-        // Add structured response instructions
-        systemPrompt +=
-          `\n\nYou must respond with a JSON object matching one of these schemas:
-
-1. To respond to a message:
-{"action": "respond", "message": "your response here"}
-
-2. To store a memory for later:
-{"action": "store_memory", "key": "memory_key", "value": "memory_value", "response": "optional message to user"}
-
-3. To read memories:
-{"action": "read_memories", "filter": "optional_search_term", "response": "optional message to user"}
-
-4. To set an alarm (when a user asks for a delayed response):
-{"action": "set_alarm", "message": "your response here", "delaySeconds": <the number of seconds to delay the response>}
-
-5. To start reasoning (when a user asks you to think deeply about something, or you think you need to think deeply to give a good response):
-{"action": "start_reasoning"}
-
-You should store memories about users, topics, or anything worth remembering.
-Respond naturally while occasionally storing or retrieving memories.`;
-
-        // Call OpenAI API with structured output
-        const response = await fetch(
-          "https://api.openai.com/v1/chat/completions",
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${OPENAI_API_KEY}`,
-            },
-            body: JSON.stringify({
-              model: "gpt-4o-mini",
-              messages: [
-                {
-                  role: "system",
-                  content: systemPrompt,
-                },
-                ...messages,
-              ],
-              temperature: 0.8,
-              max_tokens: 300,
-              response_format: { type: "json_object" },
-            }),
-          },
+        // Always start with multi-stage reasoning workflow
+        // Send system message to let users know the bot is processing
+        const systemMessage = `Bot is thinking...`;
+        const systemResult = insertMessage(
+          cell.db,
+          null,
+          "system",
+          systemMessage,
+          "system",
+          "system_status",
         );
 
-        if (response.ok) {
-          const aiData = await response.json();
-          const aiResponse = aiData.choices[0].message.content;
+        broadcastMessage(cell, systemResult);
 
-          // Parse and validate the structured response
-          const parsedResponse = JSON.parse(aiResponse);
-          const validatedAction = BotActionSchema.parse(parsedResponse);
-
-          // Handle different bot actions
-          switch (validatedAction.action) {
-            case "respond": {
-              // Store and broadcast the response
-              const aiResult = cell.db.prepare(
-                `INSERT INTO messages (github_id, username, content, message_type)
-                   VALUES (?, ?, ?, ?) RETURNING *`,
-              ).get(null, "bot", validatedAction.message, "bot");
-
-              cell.broadcast(JSON.stringify({
-                type: "message",
-                message: aiResult,
-              }));
-              break;
-            }
-
-            case "store_memory": {
-              // Store the memory
-              cell.db.prepare(
-                `INSERT OR REPLACE INTO memories (key, value, updated_at)
-                   VALUES (?, ?, CURRENT_TIMESTAMP)`,
-              ).run(validatedAction.key, validatedAction.value);
-
-              // Send optional response
-              if (validatedAction.response) {
-                const aiResult = cell.db.prepare(
-                  `INSERT INTO messages (github_id, username, content, message_type)
-                     VALUES (?, ?, ?, ?) RETURNING *`,
-                ).get(null, "bot", validatedAction.response, "bot");
-
-                cell.broadcast(JSON.stringify({
-                  type: "message",
-                  message: aiResult,
-                }));
-              }
-              break;
-            }
-
-            case "read_memories": {
-              // Read memories with optional filter
-              const memories = validatedAction.filter
-                ? cell.db.prepare(
-                  `SELECT key, value FROM memories
-                       WHERE key LIKE ? OR value LIKE ?
-                       ORDER BY updated_at DESC`,
-                ).all(
-                  `%${validatedAction.filter}%`,
-                  `%${validatedAction.filter}%`,
-                )
-                : cell.db.prepare(
-                  `SELECT key, value FROM memories
-                       ORDER BY updated_at DESC LIMIT 10`,
-                ).all();
-
-              // Format memories response
-              let memoryResponse = "📚 My memories:\n";
-              if (memories.length === 0) {
-                memoryResponse = "I don't have any memories yet.";
-              } else {
-                memories.forEach((mem: any) => {
-                  memoryResponse += `\n• ${mem.key}: ${mem.value}`;
-                });
-              }
-
-              if (validatedAction.response) {
-                memoryResponse = validatedAction.response + "\n\n" +
-                  memoryResponse;
-              }
-
-              const aiResult = cell.db.prepare(
-                `INSERT INTO messages (github_id, username, content, message_type)
-                   VALUES (?, ?, ?, ?) RETURNING *`,
-              ).get(null, "bot", memoryResponse, "bot");
-
-              cell.broadcast(JSON.stringify({
-                type: "message",
-                message: aiResult,
-              }));
-              break;
-            }
-
-            case "set_alarm": {
-              const scheduledTimeUnixMs = Date.now() +
-                validatedAction.delaySeconds * 1000;
-
-              // Store the message in the database
-              cell.db.prepare(
-                `INSERT INTO queued_messages (message, scheduled_time_unix_ms)
-                   VALUES (?, ?)`,
-              ).run(validatedAction.message, scheduledTimeUnixMs);
-
-              // Set an alarm
-              await cell.setAlarm(scheduledTimeUnixMs);
-
-              // Send system message about the scheduled message
-              const systemMessage =
-                `📅 Message scheduled for delivery in ${validatedAction.delaySeconds} seconds`;
-              const systemResult = cell.db.prepare(
-                `INSERT INTO messages (github_id, username, content, message_type)
-                   VALUES (?, ?, ?, ?) RETURNING *`,
-              ).get(null, "system", systemMessage, "system");
-
-              cell.broadcast(JSON.stringify({
-                type: "message",
-                message: systemResult,
-              }));
-
-              break;
-            }
-
-            case "start_reasoning": {
-              // Send system message to let the user know we're thinking
-              const systemMessage = `🤔 Bot is thinking...`;
-              const systemResult = cell.db.prepare(
-                `INSERT INTO messages (github_id, username, content, message_type)
-                 VALUES (?, ?, ?, ?) RETURNING *`,
-              ).get(null, "system", systemMessage, "system");
-
-              cell.broadcast(JSON.stringify({
-                type: "message",
-                message: systemResult,
-              }));
-
-              // Start reasoning
-              dispatch(reasoningWorkflow, {
-                messages,
-                allowedSteps: 5,
-              });
-              break;
-            }
-
-            default: {
-              throw new Error(
-                `Unknown action: ${validatedAction satisfies never}`,
-              );
-            }
-          }
-        } else {
-          console.error("OpenAI API error:", await response.text());
-        }
+        // Start reasoning workflow for every message
+        cell.workflow.dispatch(reasoningWorkflow, {
+          messages,
+          allowedSteps: 3,
+        });
       } catch (error) {
         console.error("Error calling OpenAI:", error);
       }
@@ -685,23 +1023,5 @@ Respond naturally while occasionally storing or retrieving memories.`;
     authenticatedSockets.delete(id);
   });
 
-  cell.alarm(() => {
-    const messages = cell.db.prepare(
-      `DELETE FROM queued_messages WHERE scheduled_time_unix_ms <= ? RETURNING *`,
-    ).all(Date.now()) as {
-      message: string;
-    }[];
-
-    for (const { message } of messages) {
-      const aiResult = cell.db.prepare(
-        `INSERT INTO messages (github_id, username, content, message_type)
-         VALUES (?, ?, ?, ?) RETURNING *`,
-      ).get(null, "bot", message, "bot");
-
-      cell.broadcast(JSON.stringify({
-        type: "message",
-        message: aiResult,
-      }));
-    }
-  });
+  // Alarm handling is now done through workflows with step.sleep
 }

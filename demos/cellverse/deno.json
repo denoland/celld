@@ -1,5 +1,5 @@
 {
   "imports": {
-    "@ry/cells": "jsr:@ry/cells@^0.3.0"
+    "@ry/cells": "../../sdk/mod.ts"
   }
 }

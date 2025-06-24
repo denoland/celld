@@ -1,8 +1,22 @@
-/* App container */
+/* Reset and App container */
+* {
+  box-sizing: border-box;
+}
+
 .app-container {
   min-height: 100vh;
-  background: linear-gradient(135deg, #1a1a2e 0%, #0f0f23 100%);
-  color: #ffffff;
+  background: rgb(38, 38, 36);
+  color: rgb(236, 236, 234);
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Helvetica,
+    Arial,
+    sans-serif;
+  margin: 0;
+  padding: 0;
+  position: relative;
 }
 
 /* Header styles */
@@ -10,19 +24,21 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 1.5rem 2rem;
-  background: rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(10px);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 6px 24px;
+  background: rgb(38, 38, 36);
+  border-bottom: 1px solid rgb(66, 66, 64);
+  height: 40px;
+  margin: 0;
+  position: sticky;
+  top: 0;
+  z-index: 100;
 }
 
 .header h1 {
   margin: 0;
-  font-size: 2rem;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  font-size: 24px;
+  color: rgb(236, 236, 234);
+  font-weight: 600;
 }
 
 /* Login page styles */
@@ -31,35 +47,32 @@
   align-items: center;
   justify-content: center;
   min-height: calc(100vh - 100px);
-  padding: 2rem;
+  padding: 24px;
 }
 
 .login-card {
-  background: rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 16px;
-  padding: 3rem;
+  background: rgb(48, 48, 46);
+  border: 1px solid rgb(66, 66, 64);
+  border-radius: 12px;
+  padding: 48px;
   max-width: 400px;
   width: 100%;
   text-align: center;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
 .login-card h2 {
-  margin: 0 0 1rem 0;
-  font-size: 2.5rem;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  margin: 0 0 16px 0;
+  font-size: 28px;
+  color: rgb(236, 236, 234);
+  font-weight: 600;
 }
 
 .login-card p {
-  color: rgba(255, 255, 255, 0.8);
-  font-size: 1.1rem;
-  margin-bottom: 2rem;
-  line-height: 1.6;
+  color: rgb(166, 166, 164);
+  font-size: 15px;
+  margin-bottom: 32px;
+  line-height: 1.5;
 }
 
 /* GitHub login button */
@@ -80,8 +93,6 @@
 
 .github-login-btn:hover {
   background: #2f363d;
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
 }
 
 .github-login-btn svg {
@@ -97,47 +108,48 @@
 }
 
 .user-avatar {
-  width: 40px;
-  height: 40px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.2);
+  border: 1px solid rgb(66, 66, 64);
 }
 
 .user-name {
-  color: rgba(255, 255, 255, 0.9);
+  color: rgb(236, 236, 234);
   font-weight: 500;
+  font-size: 15px;
 }
 
 /* Logout button */
 .logout-btn {
-  background: rgba(255, 255, 255, 0.1);
-  color: white;
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgb(48, 48, 46);
+  color: rgb(236, 236, 234);
+  border: 1px solid rgb(66, 66, 64);
   padding: 8px 16px;
   border-radius: 6px;
   cursor: pointer;
-  transition: all 0.3s ease;
-  font-size: 14px;
+  transition: all 0.2s ease;
+  font-size: 13px;
 }
 
 .logout-btn:hover {
-  background: rgba(255, 255, 255, 0.2);
-  border-color: rgba(255, 255, 255, 0.3);
+  background: rgb(55, 55, 52);
+  border-color: rgb(86, 86, 84);
 }
 
 /* Main content area */
 .main-content {
-  padding: 2rem;
-  max-width: 1200px;
-  margin: 0 auto;
+  padding: 0;
+  max-width: none;
+  margin: 0;
 }
 
 /* Channels container */
 .channels-container {
-  background: rgba(255, 255, 255, 0.05);
+  background: rgb(48, 48, 46);
   border-radius: 12px;
-  padding: 2rem;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 24px;
+  border: 1px solid rgb(66, 66, 64);
 }
 
 /* Channels header */
@@ -145,77 +157,79 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 1.5rem;
+  margin-bottom: 24px;
 }
 
 .channels-header h2 {
   margin: 0;
-  color: rgba(255, 255, 255, 0.9);
-  font-size: 1.75rem;
+  color: rgb(236, 236, 234);
+  font-size: 20px;
+  font-weight: 600;
 }
 
 /* Create channel button */
 .create-channel-btn {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
+  background: rgb(236, 236, 234);
+  color: rgb(38, 38, 36);
   border: none;
   padding: 10px 20px;
   border-radius: 8px;
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: all 0.2s ease;
   font-weight: 500;
+  font-size: 13px;
 }
 
 .create-channel-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+  background: rgb(216, 216, 214);
 }
 
 /* Create channel form */
 .create-channel-form {
   display: flex;
   gap: 12px;
-  margin-bottom: 1.5rem;
-  padding: 1rem;
-  background: rgba(255, 255, 255, 0.03);
+  margin-bottom: 24px;
+  padding: 16px;
+  background: rgb(55, 55, 52);
   border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgb(66, 66, 64);
 }
 
 .create-channel-form input {
   flex: 1;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  color: white;
+  background: rgb(38, 38, 36);
+  border: 1px solid rgb(66, 66, 64);
+  color: rgb(236, 236, 234);
   padding: 10px 16px;
   border-radius: 6px;
-  font-size: 16px;
-  transition: all 0.3s ease;
+  font-size: 15px;
+  transition: all 0.2s ease;
 }
 
 .create-channel-form input:focus {
   outline: none;
-  border-color: #667eea;
-  background: rgba(255, 255, 255, 0.15);
+  border-color: rgb(86, 86, 84);
+  background: rgb(48, 48, 46);
 }
 
 .create-channel-form input::placeholder {
-  color: rgba(255, 255, 255, 0.5);
+  color: rgb(136, 136, 134);
 }
 
 .create-channel-form button {
-  background: #667eea;
-  color: white;
+  background: rgb(236, 236, 234);
+  color: rgb(38, 38, 36);
   border: none;
   padding: 10px 24px;
   border-radius: 6px;
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: all 0.2s ease;
   font-weight: 500;
+  font-size: 13px;
 }
 
 .create-channel-form button:hover:not(:disabled) {
-  background: #764ba2;
+  background: rgb(216, 216, 214);
 }
 
 .create-channel-form button:disabled {
@@ -235,29 +249,28 @@
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 1.25rem;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 10px;
-  transition: all 0.3s ease;
+  padding: 12px;
+  background: rgb(38, 38, 36);
+  border: 1px solid rgb(66, 66, 64);
+  border-radius: 8px;
+  transition: all 0.2s ease;
 }
 
 .channel-item:hover {
-  background: rgba(255, 255, 255, 0.05);
-  border-color: rgba(255, 255, 255, 0.2);
-  transform: translateY(-2px);
+  background: rgb(48, 48, 46);
+  border-color: rgb(86, 86, 84);
 }
 
 .channel-icon {
-  width: 48px;
-  height: 48px;
-  background: rgba(102, 126, 234, 0.2);
-  border-radius: 12px;
+  width: 40px;
+  height: 40px;
+  background: rgb(55, 55, 52);
+  border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 24px;
-  color: #667eea;
+  font-size: 20px;
+  color: rgb(166, 166, 164);
   font-weight: bold;
 }
 
@@ -267,20 +280,21 @@
 
 .channel-info h3 {
   margin: 0 0 4px 0;
-  color: rgba(255, 255, 255, 0.9);
-  font-size: 1.1rem;
+  color: rgb(236, 236, 234);
+  font-size: 15px;
+  font-weight: 600;
 }
 
 .channel-info .channel-date {
-  margin: 0 0 0.5rem 0;
-  color: rgba(255, 255, 255, 0.5);
-  font-size: 0.9rem;
+  margin: 0 0 8px 0;
+  color: rgb(136, 136, 134);
+  font-size: 13px;
 }
 
 .channel-info .channel-personality {
   margin: 0;
-  color: rgba(255, 255, 255, 0.6);
-  font-size: 0.85rem;
+  color: rgb(166, 166, 164);
+  font-size: 13px;
   font-style: italic;
   line-height: 1.4;
   overflow: hidden;
@@ -298,39 +312,39 @@
 
 /* Join channel button */
 .join-channel-btn {
-  background: rgba(102, 126, 234, 0.2);
-  color: #667eea;
-  border: 1px solid #667eea;
+  background: rgb(236, 236, 234);
+  color: rgb(38, 38, 36);
+  border: none;
   padding: 8px 20px;
   border-radius: 6px;
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: all 0.2s ease;
   font-weight: 500;
+  font-size: 13px;
 }
 
 .join-channel-btn:hover {
-  background: #667eea;
-  color: white;
+  background: rgb(216, 216, 214);
 }
 
 /* Info channel button */
 .info-channel-btn {
-  background: rgba(59, 130, 246, 0.1);
-  color: #3b82f6;
-  border: 1px solid rgba(59, 130, 246, 0.3);
+  background: rgb(48, 48, 46);
+  color: rgb(166, 166, 164);
+  border: 1px solid rgb(66, 66, 64);
   padding: 8px 12px;
   border-radius: 6px;
   cursor: pointer;
-  transition: all 0.3s ease;
-  font-size: 16px;
+  transition: all 0.2s ease;
+  font-size: 13px;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
 .info-channel-btn:hover {
-  background: rgba(59, 130, 246, 0.2);
-  border-color: rgba(59, 130, 246, 0.5);
+  background: rgb(55, 55, 52);
+  border-color: rgb(86, 86, 84);
 }
 
 /* Memory channel button */
@@ -434,14 +448,9 @@
 .chat-container {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 200px);
-  max-width: 1000px;
-  margin: 0 auto;
-  background: rgba(255, 255, 255, 0.02);
-  border-radius: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  height: calc(100vh - 40px);
+  background: rgb(38, 38, 36);
   overflow: hidden;
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
 }
 
 /* Chat header */
@@ -449,10 +458,10 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 1.25rem 1.5rem;
-  background: rgba(255, 255, 255, 0.05);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  backdrop-filter: blur(10px);
+  padding: 12px 24px;
+  background: rgb(38, 38, 36);
+  border-bottom: 1px solid rgb(66, 66, 64);
+  flex-shrink: 0;
 }
 
 .chat-header-info {
@@ -463,49 +472,48 @@
 
 .chat-header h2 {
   margin: 0;
-  color: rgba(255, 255, 255, 0.9);
-  font-size: 1.25rem;
+  color: rgb(236, 236, 234);
+  font-size: 18px;
   font-weight: 600;
 }
 
 .connection-status {
-  font-size: 0.85rem;
-  color: #4ade80;
-  padding: 4px 12px;
-  background: rgba(74, 222, 128, 0.1);
-  border: 1px solid rgba(74, 222, 128, 0.2);
-  border-radius: 20px;
+  font-size: 12px;
+  color: white;
+  padding: 2px 8px;
+  background: rgb(46, 125, 50);
+  border-radius: 10px;
   font-weight: 500;
 }
 
 .close-chat-btn {
-  background: rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.8);
-  border: none;
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
+  background: rgb(38, 38, 36);
+  color: rgb(166, 166, 164);
+  border: 1px solid rgb(66, 66, 64);
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
   cursor: pointer;
-  transition: all 0.3s ease;
-  font-size: 20px;
+  transition: all 0.2s ease;
+  font-size: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
 .close-chat-btn:hover {
-  background: rgba(239, 68, 68, 0.2);
-  color: #ef4444;
+  background: rgb(55, 55, 52);
+  color: rgb(236, 236, 234);
 }
 
 /* Messages container */
 .messages-container {
   flex: 1;
-  padding: 1.5rem;
+  padding: 24px 24px 12px 24px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 12px;
 }
 
 .no-messages {
@@ -540,13 +548,8 @@
 
 /* Message styles */
 .message {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 16px;
-  padding: 0.75rem 1rem;
-  max-width: 65%;
-  animation: messageSlide 0.3s ease;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  padding: 8px 0;
+  animation: messageSlide 0.2s ease;
 }
 
 @keyframes messageSlide {
@@ -561,101 +564,92 @@
 }
 
 .message.own-message {
-  align-self: flex-end;
-  background: linear-gradient(
-    135deg,
-    rgba(102, 126, 234, 0.15) 0%,
-    rgba(118, 75, 162, 0.15) 100%
-  );
-  border-color: rgba(102, 126, 234, 0.2);
+  /* No special styling for own messages in Discord style */
 }
 
 .message.llm-message {
-  background: rgba(168, 85, 247, 0.1);
-  border-color: rgba(168, 85, 247, 0.3);
+  /* No special background for LLM messages */
 }
 
 .message.system-message {
-  align-self: center;
-  background: rgba(255, 193, 7, 0.1);
-  border-color: rgba(255, 193, 7, 0.3);
-  max-width: 80%;
-  text-align: center;
-  font-style: italic;
+  padding: 4px 0;
+  opacity: 0.7;
 }
 
 .message-header {
   display: flex;
-  justify-content: space-between;
   align-items: baseline;
-  margin-bottom: 0.25rem;
-  gap: 12px;
+  margin-bottom: 4px;
+  gap: 8px;
 }
 
 .message-author {
   font-weight: 600;
-  color: rgba(255, 255, 255, 0.9);
-  font-size: 0.875rem;
+  color: rgb(236, 236, 234);
+  font-size: 14px;
 }
 
 .message-time {
-  font-size: 0.75rem;
-  color: rgba(255, 255, 255, 0.4);
+  font-size: 12px;
+  color: rgb(136, 136, 134);
   white-space: nowrap;
 }
 
 .message-content {
-  color: rgba(255, 255, 255, 0.85);
+  color: rgb(236, 236, 234);
   line-height: 1.5;
-  font-size: 0.95rem;
+  font-size: 15px;
   word-wrap: break-word;
+  margin-left: 0;
 }
 
 /* Message input form */
 .message-input-form {
   display: flex;
   gap: 12px;
-  padding: 1.25rem 1.5rem;
-  background: rgba(255, 255, 255, 0.03);
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-  backdrop-filter: blur(10px);
+  padding: 16px 24px;
+  background: rgb(48, 48, 46);
+  border-top: 1px solid rgb(66, 66, 64);
+  flex-shrink: 0;
 }
 
 .message-input-form input {
   flex: 1;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  color: white;
+  background: rgb(38, 38, 36);
+  border: 1px solid rgb(66, 66, 64);
+  color: rgb(236, 236, 234);
   padding: 12px 16px;
-  border-radius: 8px;
-  font-size: 16px;
-  transition: all 0.3s ease;
+  border-radius: 20px;
+  font-size: 15px;
+  transition: all 0.2s ease;
+  height: 44px;
+  box-sizing: border-box;
 }
 
 .message-input-form input:focus {
   outline: none;
-  border-color: #667eea;
-  background: rgba(255, 255, 255, 0.15);
+  border-color: rgb(86, 86, 84);
+  background: rgb(48, 48, 46);
 }
 
 .message-input-form input::placeholder {
-  color: rgba(255, 255, 255, 0.5);
+  color: rgb(136, 136, 134);
 }
 
 .message-input-form button {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
+  background: rgb(236, 236, 234);
+  color: rgb(38, 38, 36);
   border: none;
   padding: 12px 24px;
   border-radius: 8px;
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: all 0.2s ease;
   font-weight: 500;
+  font-size: 13px;
 }
 
 .message-input-form button:hover:not(:disabled) {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+  background: rgb(216, 216, 214);
 }
 
 .message-input-form button:disabled {
@@ -949,23 +943,24 @@
 }
 
 .memory-view-btn {
-  background: rgba(102, 126, 234, 0.1);
-  border: 1px solid rgba(102, 126, 234, 0.3);
-  color: #667eea;
-  padding: 0.5rem 1rem;
+  background: rgb(48, 48, 46);
+  border: 1px solid rgb(66, 66, 64);
+  color: rgb(166, 166, 164);
+  padding: 8px 16px;
   border-radius: 6px;
   cursor: pointer;
-  font-size: 0.875rem;
+  font-size: 13px;
   font-weight: 500;
   transition: all 0.2s ease;
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 8px;
 }
 
 .memory-view-btn:hover {
-  background: rgba(102, 126, 234, 0.2);
-  border-color: rgba(102, 126, 234, 0.5);
+  background: rgb(55, 55, 52);
+  border-color: rgb(86, 86, 84);
+  color: rgb(236, 236, 234);
 }
 
 /* Memory header actions */
@@ -1013,4 +1008,60 @@
 .memory-channel-btn:hover {
   background: rgba(102, 126, 234, 0.2);
   border-color: rgba(102, 126, 234, 0.5);
+}
+
+/* Message content wrapper for positioning thinking toggle */
+.message-content-wrapper {
+  position: relative;
+}
+
+/* Thinking toggle button - positioned in bottom right of message */
+.thinking-toggle-btn {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  background: rgba(0, 0, 0, 0.5);
+  border: none;
+  color: rgb(166, 166, 164);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 3px 6px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+  font-family: monospace;
+  line-height: 1;
+  opacity: 0.8;
+  z-index: 10;
+  border: 1px solid rgba(66, 66, 64, 0.5);
+}
+
+.thinking-toggle-btn:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.7);
+  color: rgb(236, 236, 234);
+  border-color: rgba(86, 86, 84, 0.8);
+}
+
+/* Expanded thinking content */
+.thinking-content-expanded {
+  color: rgb(136, 136, 134);
+  font-size: 13px;
+  line-height: 1.4;
+  border-left: 3px solid rgb(66, 66, 64);
+  padding-left: 12px;
+  margin-left: 8px;
+  margin-top: 8px;
+  margin-bottom: 8px;
+  opacity: 0.8;
+  white-space: pre-wrap;
+  font-style: italic;
+}
+
+.thinking-item {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.thinking-item:last-child {
+  margin-bottom: 0;
 }
