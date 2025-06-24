@@ -145,8 +145,11 @@ impl ProxyHttp for InternalAPI {
     if path == "/_health" {
       let response = format!("{} OK\n", self.node_state.config.node_name);
       let content_length = response.len();
-      let mut resp =
-        ResponseHeader::build(StatusCode::OK, Some(content_length)).unwrap();
+      let mut resp = ResponseHeader::build(
+        StatusCode::OK,
+        Some(content_length.try_into().unwrap()),
+      )
+      .unwrap();
       resp
         .insert_header(http::header::CONTENT_LENGTH, content_length.to_string())
         .unwrap();
