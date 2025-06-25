@@ -1,6 +1,6 @@
 use std::{
   io::{BufRead as _, BufReader},
-  process::{Child, Command},
+  process::{Child, Command, Stdio},
   sync::{Arc, Mutex},
   thread::JoinHandle,
 };
@@ -13,6 +13,7 @@ pub struct CapturedSubprocess {
   captured_stderr: Arc<Mutex<String>>,
   stdout_relay_handle: Option<JoinHandle<()>>,
   stderr_relay_handle: Option<JoinHandle<()>>,
+  stream_output: bool,
 }
 
 impl CapturedSubprocess {
@@ -22,6 +23,24 @@ impl CapturedSubprocess {
     setup_cmd: impl FnOnce(&mut Command),
   ) -> Self {
     setup_cmd(&mut cmd);
+
+    // Check if output streaming is enabled via env var
+    if std::env::var("STREAM_OUTPUT").is_ok() {
+      // Stream directly to console without buffering
+      cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+      let child = cmd.spawn().unwrap();
+      return Self {
+        process_name,
+        child,
+        captured_stdout: Arc::new(Mutex::new(String::new())),
+        captured_stderr: Arc::new(Mutex::new(String::new())),
+        stdout_relay_handle: None,
+        stderr_relay_handle: None,
+        stream_output: true,
+      };
+    }
+
+    // Default behavior: capture output for buffering
     cmd
       .stdout(std::process::Stdio::piped())
       .stderr(std::process::Stdio::piped());
@@ -64,6 +83,7 @@ impl CapturedSubprocess {
       captured_stderr,
       stdout_relay_handle: Some(stdout_relay_handle),
       stderr_relay_handle: Some(stderr_relay_handle),
+      stream_output: false,
     }
   }
 
@@ -113,7 +133,7 @@ impl Drop for CapturedSubprocess {
       }
     }
 
-    if std::thread::panicking() {
+    if std::thread::panicking() && !self.stream_output {
       #[allow(clippy::print_stdout)]
       {
         println!(
