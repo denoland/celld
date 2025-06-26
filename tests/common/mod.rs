@@ -402,66 +402,63 @@ impl TestEnv {
     const MAX_ATTEMPTS: usize = 15;
     const RETRY_DELAY_MS: u64 = 1000;
 
+    let expected_peer_count = self.ports.len();
+
     for attempt in 1..=MAX_ATTEMPTS {
       if attempt > 1 {
         tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
       }
 
-      let mut all_peers = Vec::new();
-      let mut first_node_peers: Option<HashSet<String>> = None;
-      let mut all_nodes_agree = true;
+      #[derive(Debug, serde::Deserialize)]
+      struct MeshPeerResponse {
+        count: usize,
+        // There are other fields in actual response, but we omit them as they
+        // are not relevant here
+      }
 
-      for port in &self.ports {
-        let peers_url = format!(
-          "http://localhost:{}/_internal/mesh/peers",
-          port.internal()
+      let futs = self.ports.iter().map(|port| async move {
+        let url =
+          format!("http://localhost:{}/_internal/mesh/peers", port.internal());
+        let Ok(res) = reqwest::get(&url).await else {
+          warn!(
+            port = port.internal(),
+            "Failed to connect to mesh peers endpoint"
+          );
+          return false;
+        };
+
+        let Ok(body) = res.json::<MeshPeerResponse>().await.inspect_err(|e| {
+          warn!(
+            port = port.internal(),
+            error = ?e,
+            "Failed to parse mesh peers endpoint response"
+          );
+        }) else {
+          return false;
+        };
+
+        body.count == expected_peer_count
+      });
+
+      let settled =
+        futures::future::join_all(futs).await.into_iter().all(|x| x);
+
+      if settled {
+        info!(
+          "Cluster has settled - all nodes see {} peers",
+          expected_peer_count
         );
-        let Ok(peers_response) = reqwest::get(&peers_url).await else {
-          all_nodes_agree = false;
-          break;
-        };
-        let Ok(peers_text) = peers_response.text().await else {
-          all_nodes_agree = false;
-          break;
-        };
-        let Ok(peers_value) = serde_json::from_str::<serde_json::Value>(&peers_text) else {
-          all_nodes_agree = false;
-          break;
-        };
-        let Some(peers) = peers_value["peers"].as_array() else {
-          all_nodes_agree = false;
-          break;
-        };
-        all_peers.push(peers.clone());
-      }
-
-      if !all_nodes_agree || all_peers.len() != self.ports.len() {
-        info!(attempt, "Not all nodes are ready yet");
-        continue;
-      }
-
-      if let Some(first_peers) = all_peers.get(0) {
-        let first_node_peers_set = first_peers.iter().map(|p| p["node_id"].as_str().unwrap().to_string()).collect::<HashSet<String>>();
-        for other_peers in all_peers.iter().skip(1) {
-          let other_node_peers_set = other_peers.iter().map(|p| p["node_id"].as_str().unwrap().to_string()).collect::<HashSet<String>>();
-          if other_node_peers_set != first_node_peers_set {
-            all_nodes_agree = false;
-            break;
-          }
-        }
-      } else {
-        all_nodes_agree = false;
-      }
-
-      if all_nodes_agree {
-        info!("Cluster has settled");
         return;
-      } else {
-        info!(attempt, "Cluster has not settled yet");
       }
+
+      info!(
+        attempt,
+        expected = expected_peer_count,
+        "Cluster has not settled yet"
+      );
     }
 
-    panic!("Cluster did not settle in time");
+    panic!("Cluster did not settle after {} attempts", MAX_ATTEMPTS);
   }
 }
 
