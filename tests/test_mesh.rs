@@ -255,8 +255,8 @@ async fn test_mesh_cell_isolation() {
 /// another node automatically takes over responsibility for the cell (Durability Test 2)
 #[test_log::test(tokio::test)]
 async fn test_node_failure_takeover() {
-  // Setup three nodes in the mesh with auto-allocated ports
   let mut test_env = TestEnv::new(3, "test_node_failure_takeover").await;
+  test_env.wait_for_cluster_settle().await;
 
   // Use unique cell ID to avoid conflicts with other tests
   let test_cell_id = format!("failover-test-{}", Uuid::new_v4().simple());
@@ -419,8 +419,8 @@ async fn test_node_failure_takeover() {
 /// Tests concurrent takeover attempts to verify only one node succeeds via locking
 #[test_log::test(tokio::test)]
 async fn test_concurrent_takeover_locking() {
-  // Setup three celld nodes in the mesh with auto-allocated ports
   let mut test_env = TestEnv::new(3, "test_concurrent_takeover_locking").await;
+  test_env.wait_for_cluster_settle().await;
 
   // Use unique cell ID to avoid conflicts with other tests
   let test_cell_id = format!("takeover-lock-test-{}", Uuid::new_v4().simple());

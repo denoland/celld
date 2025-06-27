@@ -396,6 +396,70 @@ impl TestEnv {
       }
     }
   }
+
+  #[allow(dead_code)]
+  pub async fn wait_for_cluster_settle(&self) {
+    const MAX_ATTEMPTS: usize = 15;
+    const RETRY_DELAY_MS: u64 = 1000;
+
+    let expected_peer_count = self.ports.len();
+
+    for attempt in 1..=MAX_ATTEMPTS {
+      if attempt > 1 {
+        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+      }
+
+      #[derive(Debug, serde::Deserialize)]
+      struct MeshPeerResponse {
+        count: usize,
+        // There are other fields in actual response, but we omit them as they
+        // are not relevant here
+      }
+
+      let futs = self.ports.iter().map(|port| async move {
+        let url =
+          format!("http://localhost:{}/_internal/mesh/peers", port.internal());
+        let Ok(res) = reqwest::get(&url).await else {
+          warn!(
+            port = port.internal(),
+            "Failed to connect to mesh peers endpoint"
+          );
+          return false;
+        };
+
+        let Ok(body) = res.json::<MeshPeerResponse>().await.inspect_err(|e| {
+          warn!(
+            port = port.internal(),
+            error = ?e,
+            "Failed to parse mesh peers endpoint response"
+          );
+        }) else {
+          return false;
+        };
+
+        body.count == expected_peer_count
+      });
+
+      let settled =
+        futures::future::join_all(futs).await.into_iter().all(|x| x);
+
+      if settled {
+        info!(
+          "Cluster has settled - all nodes see {} peers",
+          expected_peer_count
+        );
+        return;
+      }
+
+      info!(
+        attempt,
+        expected = expected_peer_count,
+        "Cluster has not settled yet"
+      );
+    }
+
+    panic!("Cluster did not settle after {} attempts", MAX_ATTEMPTS);
+  }
 }
 
 impl Drop for TestEnv {
