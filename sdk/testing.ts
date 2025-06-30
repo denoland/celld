@@ -15,7 +15,7 @@ import {
 /**
  * Test environment for workflows
  */
-export interface TestEnvironment {
+export interface TestEnvironment extends Disposable {
   db: DatabaseSync;
   mockStep: <T extends Voidable<JSONValue>>(
     stepName: string,
@@ -154,6 +154,9 @@ export function createTestEnvironment(): TestEnvironment {
       };
     },
     close: () => {
+      db.close();
+    },
+    [Symbol.dispose]: () => {
       db.close();
     },
   };

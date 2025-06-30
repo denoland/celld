@@ -43,7 +43,7 @@ const userWorkflow = cell.workflow.define<
 
 // Test using Deno.test
 Deno.test("emailWorkflow sends email and logs result", async () => {
-  const env = createTestEnvironment();
+  using env = createTestEnvironment();
 
   // Mock the email sending step
   env.mockStep("send-email", () => "msg-12345");
@@ -66,13 +66,11 @@ Deno.test("emailWorkflow sends email and logs result", async () => {
   // Verify the result
   assertEquals(result.messageId, "msg-12345");
   assertEquals(loggedMessageId, "msg-12345");
-
-  env.close();
 });
 
 // Test with database access
 Deno.test("workflow with database operations", async () => {
-  const env = createTestEnvironment();
+  using env = createTestEnvironment();
 
   // Initialize database tables
   env.db.exec(`
@@ -95,6 +93,4 @@ Deno.test("workflow with database operations", async () => {
     result.userId,
   );
   assertExists(user);
-
-  env.close();
 });
