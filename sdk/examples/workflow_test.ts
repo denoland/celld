@@ -1,5 +1,6 @@
 import { createTestEnvironment } from "../testing.ts";
 import { cell } from "../cell.ts";
+import { assertEquals, assertExists } from "jsr:@std/assert";
 
 // Example workflow definition
 const emailWorkflow = cell.workflow.define<
@@ -63,17 +64,8 @@ Deno.test("emailWorkflow sends email and logs result", async () => {
   const result = await waitForCompletion();
 
   // Verify the result
-  if (result.messageId !== "msg-12345") {
-    throw new Error(
-      `Expected messageId to be msg-12345, got ${result.messageId}`,
-    );
-  }
-
-  if (loggedMessageId !== "msg-12345") {
-    throw new Error(
-      `Expected logged message ID to be msg-12345, got ${loggedMessageId}`,
-    );
-  }
+  assertEquals(result.messageId, "msg-12345");
+  assertEquals(loggedMessageId, "msg-12345");
 
   env.close();
 });
@@ -102,9 +94,7 @@ Deno.test("workflow with database operations", async () => {
   const user = env.db.prepare("SELECT * FROM users WHERE id = ?").get(
     result.userId,
   );
-  if (!user) {
-    throw new Error("User was not created in database");
-  }
+  assertExists(user);
 
   env.close();
 });
