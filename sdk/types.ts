@@ -121,3 +121,9 @@ export type WorkflowCtx<Input = void> = {
 export interface RequestContext {
   db: DatabaseSync;
 }
+
+export type WorkflowHandler = (
+  ctx: WorkflowCtx<JSONValue>
+) => Promise<Voidable<JSONValue>>;
+
+export type WorkflowRegistry = Map<string, WorkflowHandler>;

@@ -1,4 +1,3 @@
-import { TestEnvironment } from "../testing.ts";
 import { cell } from "../cell.ts";
 import { assertEquals, assertExists } from "jsr:@std/assert";
 
@@ -43,7 +42,7 @@ const userWorkflow = cell.workflow.define<
 
 // Test using Deno.test
 Deno.test("emailWorkflow sends email and logs result", async () => {
-  using env = new TestEnvironment();
+  using env = cell.workflow.createTestEnvironment();
 
   // Mock the email sending step
   env.mockStep("send-email", () => "msg-12345");
@@ -70,7 +69,7 @@ Deno.test("emailWorkflow sends email and logs result", async () => {
 
 // Test with database access
 Deno.test("workflow with database operations", async () => {
-  using env = new TestEnvironment();
+  using env = cell.workflow.createTestEnvironment();
 
   // Initialize database tables
   env.db.exec(`

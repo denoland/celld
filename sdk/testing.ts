@@ -9,7 +9,9 @@ import {
   type TaskScheduler,
   type Unvoidable,
   type Voidable,
+  type WorkflowCtx,
   type WorkflowDef,
+  type WorkflowRegistry,
   type WorkflowRunId,
 } from "./types.ts";
 
@@ -26,7 +28,7 @@ export class TestEnvironment implements Disposable {
     WorkflowDef<JSONValue, Voidable<JSONValue>>
   >();
 
-  constructor() {
+  constructor(workflowRegistry?: WorkflowRegistry) {
     // Create in-memory database
     this.#db = new DatabaseSync(":memory:");
 
@@ -43,6 +45,17 @@ export class TestEnvironment implements Disposable {
 
     // Initialize tables by calling listRuns
     this.#runtime.listRuns();
+
+    // Register workflows from the provided registry
+    if (workflowRegistry) {
+      for (const [name, handler] of workflowRegistry) {
+        // Define a workflow that wraps the handler
+        this.#runtime.define<JSONValue, Voidable<JSONValue>>({
+          name,
+          handler: (ctx: WorkflowCtx<JSONValue>) => handler(ctx),
+        });
+      }
+    }
   }
 
   /**

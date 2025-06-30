@@ -17,6 +17,7 @@ import {
   type WorkflowStep,
 } from "./types.ts";
 import { logger } from "./logger.ts";
+import { TestEnvironment } from "./testing.ts";
 
 class WorkflowSuspendedError extends Error {
   constructor(public reason: string, public metadata?: unknown) {
@@ -466,6 +467,22 @@ export class WorkflowRuntime {
       throw new Error(`Workflow ${workflow.name} not found`);
     }
     return runId;
+  }
+
+  /**
+   * Get a copy of all registered workflows for testing purposes.
+   * @returns A new Map containing all registered workflow handlers
+   */
+  getWorkflowRegistry(): Map<string, (ctx: WorkflowCtx<JSONValue>) => Promise<Voidable<JSONValue>>> {
+    return new Map(this.#workflows);
+  }
+
+  /**
+   * Create a test environment with access to all registered workflows.
+   * @returns A new TestEnvironment instance
+   */
+  createTestEnvironment(): TestEnvironment {
+    return new TestEnvironment(this.getWorkflowRegistry());
   }
 }
 
