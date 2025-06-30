@@ -114,5 +114,10 @@ export interface WorkflowDef<
 
 export type WorkflowCtx<Input = void> = {
   step: WorkflowStep;
+  db: DatabaseSync;
   attempt: number;
 } & (Input extends void ? Record<PropertyKey, never> : { input: Input });
+
+export interface RequestContext {
+  db: DatabaseSync;
+}

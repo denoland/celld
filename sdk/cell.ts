@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import {
   type DbAccessor,
+  type RequestContext,
   type ScheduledTaskId,
   scheduledTaskId,
   type Task,
@@ -21,8 +22,14 @@ export class Cell implements DbAccessor, TaskScheduler {
   #dbPath: string;
   #dbInstance: DatabaseSync | null = null;
   #workflow: WorkflowRuntime | null = null;
+  #onInitCallback:
+    | ((db: DatabaseSync) => Promise<void> | void)
+    | null = null;
   #onRequestCallback:
-    | ((req: Request) => Promise<Response> | Response | void)
+    | ((
+      req: Request,
+      ctx: RequestContext,
+    ) => Promise<Response> | Response | void)
     | null = null;
   #onConnectCallback:
     | ((socket: WebSocket, id: string) => Promise<void> | void)
@@ -97,13 +104,42 @@ export class Cell implements DbAccessor, TaskScheduler {
     return this.sockets.values();
   }
 
-  request(cb: (req: Request) => Promise<Response> | Response | void): void {
+  init(cb: (db: DatabaseSync) => Promise<void> | void): void {
+    if (this.#onInitCallback) {
+      throw new Error(
+        `Init callback already registered for cell ${this.id}`,
+      );
+    }
+    this.#onInitCallback = cb;
+
+    // If database already exists, call the init callback immediately
+    if (this.#dbInstance) {
+      const result = cb(this.#dbInstance);
+      if (result instanceof Promise) {
+        throw new Error(
+          "Init callback cannot be async when database already exists. Use synchronous initialization.",
+        );
+      }
+    }
+  }
+
+  request(
+    cb:
+      | ((
+        req: Request,
+        ctx: RequestContext,
+      ) => Promise<Response> | Response | void)
+      | ((req: Request) => Promise<Response> | Response | void),
+  ): void {
     if (this.#onRequestCallback) {
       throw new Error(
         `Handler for request already registered for cell ${this.id}`,
       );
     }
-    this.#onRequestCallback = cb;
+    this.#onRequestCallback = cb as (
+      req: Request,
+      ctx: RequestContext,
+    ) => Promise<Response> | Response | void;
   }
 
   alarm(cb: () => Promise<void> | void): void {
@@ -309,6 +345,17 @@ export class Cell implements DbAccessor, TaskScheduler {
   get db(): DatabaseSync {
     if (!this.#dbInstance) {
       this.#dbInstance = new DatabaseSync(this.#dbPath);
+      // Call init callback if provided
+      if (this.#onInitCallback) {
+        const result = this.#onInitCallback(this.#dbInstance);
+        if (result instanceof Promise) {
+          // For now, we'll handle this synchronously
+          // In a real implementation, we might want to handle this differently
+          throw new Error(
+            "Init callback cannot be async when accessing db through getter. Use cell.init() before accessing cell.db",
+          );
+        }
+      }
     }
     return this.#dbInstance;
   }
@@ -375,7 +422,10 @@ export class Cell implements DbAccessor, TaskScheduler {
           req.url.replace(/^http\+unix:/, "http:"),
           req,
         );
-        const result = this.#onRequestCallback(modifiedReq);
+        const ctx: RequestContext = {
+          db: this.db,
+        };
+        const result = this.#onRequestCallback(modifiedReq, ctx);
         if (result instanceof Promise) {
           return await result;
         }
@@ -397,15 +447,18 @@ export class Cell implements DbAccessor, TaskScheduler {
   }
 
   #setupTables(): void {
+    // This will create the database and call init callback if provided
+    const db = this.db;
+
     // Ensure `scheduled_tasks` table exists.
-    this.db.exec(`
+    db.exec(`
       CREATE TABLE IF NOT EXISTS scheduled_tasks (
         id TEXT PRIMARY KEY NOT NULL,
         scheduled_time_unix_ms INTEGER NOT NULL,
         payload TEXT NOT NULL
       )
     `);
-    this.db.exec(`
+    db.exec(`
       CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_schedule_time ON scheduled_tasks (scheduled_time_unix_ms)
     `);
   }

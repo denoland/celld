@@ -229,7 +229,12 @@ export class WorkflowRuntime {
     WorkflowRuntime.#runningWorkflows++;
     try {
       // Execute the workflow handler
-      const output = await handler({ input: inputData, step, attempt: 1 });
+      const output = await handler({
+        input: inputData,
+        step,
+        db: this.#dbAccessor.db,
+        attempt: 1,
+      });
 
       logger().debug(
         `Workflow run ${runId} (${workflowName.toString()}) completed`,
@@ -442,7 +447,9 @@ export class WorkflowRuntime {
     ) => {
       if (ctx.input === null || ctx.input === undefined) {
         return await config.handler(
-          { step: ctx.step, attempt: ctx.attempt } as WorkflowCtx<Input>,
+          { step: ctx.step, db: ctx.db, attempt: ctx.attempt } as WorkflowCtx<
+            Input
+          >,
         );
       } else {
         return await config.handler(
