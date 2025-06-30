@@ -160,15 +160,15 @@ impl S3Config {
 
     match self.path.as_deref() {
       // No base prefix, or empty base prefix
-      None | Some("") => format!("{}/", subpath),
+      None | Some("") => format!("{subpath}/"),
       // Base prefix exists
       Some(base) => {
         // Use format! which is efficient for joining parts.
         // Check if base already ends with '/', format accordingly.
         if base.ends_with('/') {
-          format!("{}{}/", base, subpath) // e.g., "base/subpath/"
+          format!("{base}{subpath}/") // e.g., "base/subpath/"
         } else {
-          format!("{}/{}/", base, subpath) // e.g., "base/subpath/"
+          format!("{base}/{subpath}/") // e.g., "base/subpath/"
         }
       }
     }
@@ -186,7 +186,7 @@ impl Config {
       });
 
     let node_name = var("CELL_NODE_NAME")
-      .unwrap_or_else(|_| format!("celld({})", advertise_addr));
+      .unwrap_or_else(|_| format!("celld({advertise_addr})"));
 
     // Get listen_addr with fallback to advertise_addr port
     let listen_addr = var("LISTEN_ADDR")

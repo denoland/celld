@@ -986,7 +986,7 @@ mod tests {
           format!("?{}", query.replace("&", "").replace("=", "eq"))
         };
 
-        format!("{}://example.{}{}{}", scheme, domain, path, query_part)
+        format!("{scheme}://example.{domain}{path}{query_part}")
           .parse::<http::Uri>()
           .ok()
       },

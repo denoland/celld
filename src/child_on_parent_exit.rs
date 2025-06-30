@@ -299,8 +299,7 @@ mod tests {
 
     assert!(
       elapsed < Duration::from_secs(5),
-      "process did not exit in time: {:?}",
-      elapsed
+      "process did not exit in time: {elapsed:?}"
     );
   }
 
@@ -316,8 +315,7 @@ mod tests {
 
     assert!(
       elapsed < Duration::from_secs(1),
-      "wait took too long for quick process: {:?}",
-      elapsed
+      "wait took too long for quick process: {elapsed:?}"
     );
   }
 

@@ -163,7 +163,7 @@ impl SqliteReplica {
     let db_path = Path::new(data_dir)
       .join(tenant)
       .join("sqlite")
-      .join(format!("{}.db", cell_id));
+      .join(format!("{cell_id}.db"));
 
     let data_dir = Path::new(data_dir).to_path_buf();
 
@@ -173,7 +173,7 @@ impl SqliteReplica {
       .context("Failed to create sqlite directory")?;
 
     // Create a unique config file name for this replica
-    let config_file = config_dir.join(format!("{}.yml", cell_id));
+    let config_file = config_dir.join(format!("{cell_id}.yml"));
 
     // Create SqliteReplica instance (without running restore yet)
     let replica = Self {
@@ -410,9 +410,8 @@ impl SqliteReplica {
 
     // Create parent directory if needed
     if let Some(parent) = self.config_path.parent() {
-      fs::create_dir_all(parent).with_context(|| {
-        format!("Failed to create config dir: {:?}", parent)
-      })?;
+      fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create config dir: {parent:?}"))?;
     }
 
     assert!(!self.tenant.contains('/'));
@@ -613,7 +612,7 @@ pub mod tests {
       endpoint: Some(minio.endpoint.clone()),
       region: "us-east-1".to_string(),
       bucket: test_name.to_string(),
-      path: Some(format!("celld-test-{}", test_name)),
+      path: Some(format!("celld-test-{test_name}")),
       access_key_id: Some(minio.access_key_id.clone()),
       secret_access_key: Some(minio.secret_access_key.clone()),
     }
@@ -663,7 +662,7 @@ pub mod tests {
     let config_path = data_dir
       .join("test-tenant")
       .join("sqlite")
-      .join(format!("{}.yml", cell_id));
+      .join(format!("{cell_id}.yml"));
     assert!(config_path.exists(), "Config file should exist");
 
     // On first run, restore should return false (no restoration)
@@ -696,8 +695,7 @@ pub mod tests {
     let start_result = replica.start_replication().await;
     assert!(
       start_result.is_ok(),
-      "Should start Litestream: {:?}",
-      start_result
+      "Should start Litestream: {start_result:?}"
     );
 
     // Give the replication process time to run and create snapshots
@@ -708,8 +706,7 @@ pub mod tests {
     let shutdown_result = replica.shutdown().await;
     assert!(
       shutdown_result.is_ok(),
-      "Shutdown should succeed: {:?}",
-      shutdown_result
+      "Shutdown should succeed: {shutdown_result:?}"
     );
 
     // Check MinIO to ensure data was replicated

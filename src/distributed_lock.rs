@@ -1282,8 +1282,7 @@ impl DistributedLock for S3DistributedLock {
                 Err(e) => {
                   warn!(error = ?e, lock_key, "Failed to read existing lock object body");
                   return Err(LockAcquireError::S3Error(format!(
-                    "Failed to read lock body for key '{}': {:?}",
-                    lock_key, e
+                    "Failed to read lock body for key '{lock_key}': {e:?}"
                   )));
                 }
               };
@@ -1315,16 +1314,14 @@ impl DistributedLock for S3DistributedLock {
                     if del_err.code() != Some("NoSuchKey") {
                       warn!(error = ?del_err, lock_key, "Failed to delete expired lock, acquisition fails");
                       return Err(LockAcquireError::S3Error(format!(
-                        "Failed to delete expired lock for key '{}': {:?}",
-                        lock_key, del_err
+                        "Failed to delete expired lock for key '{lock_key}': {del_err:?}"
                       )));
                     } else {
                       warn!(lock_key, "Expired lock was already deleted, proceeding to retry put");
                     }
                   } else {
                     return Err(LockAcquireError::S3Error(format!(
-                      "Failed to delete expired lock for key '{}' (SDK Error): {:?}",
-                      lock_key, e
+                      "Failed to delete expired lock for key '{lock_key}' (SDK Error): {e:?}"
                     )));
                   }
                 }
@@ -1371,13 +1368,11 @@ impl DistributedLock for S3DistributedLock {
                       return Err(LockAcquireError::LockHeld(None));
                     }
                     Err(LockAcquireError::S3Error(format!(
-                      "Retry put failed for key '{}': {:?}",
-                      lock_key, retry_put_err
+                      "Retry put failed for key '{lock_key}': {retry_put_err:?}"
                     )))
                   }
                   Err(e) => Err(LockAcquireError::S3Error(format!(
-                    "Retry put failed for key '{}' (SDK Error): {:?}",
-                    lock_key, e
+                    "Retry put failed for key '{lock_key}' (SDK Error): {e:?}"
                   ))),
                 }
               } else {
@@ -1426,36 +1421,31 @@ impl DistributedLock for S3DistributedLock {
                       return Err(LockAcquireError::LockHeld(None));
                     }
                     Err(LockAcquireError::S3Error(format!(
-                      "Retry put failed after NoSuchKey for key '{}': {:?}",
-                      lock_key, retry_put_err
+                      "Retry put failed after NoSuchKey for key '{lock_key}': {retry_put_err:?}"
                     )))
                   }
                   Err(e) => Err(LockAcquireError::S3Error(format!(
-                    "Retry put failed after NoSuchKey for key '{}' (SDK Error): {:?}",
-                    lock_key, e
+                    "Retry put failed after NoSuchKey for key '{lock_key}' (SDK Error): {e:?}"
                   ))),
                 }
               } else {
                 warn!(error = ?get_err, lock_key, "Failed to get existing lock details");
                 Err(LockAcquireError::S3Error(format!(
-                  "Failed to get lock for key '{}': {:?}",
-                  lock_key, get_err
+                  "Failed to get lock for key '{lock_key}': {get_err:?}"
                 )))
               }
             }
             Err(e) => {
               warn!(error = ?e, lock_key, "SDK error during get existing lock details");
               Err(LockAcquireError::S3Error(format!(
-                "SDK error getting lock for key '{}': {:?}",
-                lock_key, e
+                "SDK error getting lock for key '{lock_key}': {e:?}"
               )))
             }
           }
         } else {
           warn!(error = ?raw_err, lock_key, ?node_id, "Unhandled S3 PutObject error during lock acquisition");
           Err(LockAcquireError::S3Error(format!(
-            "Unhandled S3 PutObject error for key '{}': {:?}",
-            lock_key, raw_err
+            "Unhandled S3 PutObject error for key '{lock_key}': {raw_err:?}"
           )))
         }
       }
@@ -1465,8 +1455,7 @@ impl DistributedLock for S3DistributedLock {
           .source()
           .map_or_else(|| "Unknown source".to_string(), |s| s.to_string());
         Err(LockAcquireError::S3Error(format!(
-          "SDK Error for key '{}': {} (Source: {})",
-          lock_key, e, source_msg
+          "SDK Error for key '{lock_key}': {e} (Source: {source_msg})"
         )))
       }
     }
@@ -1497,14 +1486,16 @@ impl DistributedLock for S3DistributedLock {
         } else {
           warn!(error = ?del_err, lock_key = %lock_descriptor.lock_key, node_id = ?lock_descriptor.node_id, "Failed to release S3 lock (Service Error)");
           Err(del_err).with_context(|| {
-            format!("Failed to release S3 lock: {}", lock_descriptor.lock_key)
+            let lock_key = &lock_descriptor.lock_key;
+            format!("Failed to release S3 lock: {lock_key}")
           })
         }
       }
       Err(e) => {
         warn!(error = ?e, lock_key = %lock_descriptor.lock_key, node_id = ?lock_descriptor.node_id, "Failed to release S3 lock (SDK Error)");
         Err(e).with_context(|| {
-          format!("SDK Error releasing S3 lock: {}", lock_descriptor.lock_key)
+          let lock_key = &lock_descriptor.lock_key;
+          format!("SDK Error releasing S3 lock: {lock_key}")
         })
       }
     }
@@ -1539,8 +1530,7 @@ impl DistributedLock for S3DistributedLock {
           Err(e) => {
             warn!(error = ?e, lock_key, "Failed to read existing lock object body during renewal");
             return Err(LockAcquireError::S3Error(format!(
-              "Failed to read lock body for key '{}' during renewal: {:?}",
-              lock_key, e
+              "Failed to read lock body for key '{lock_key}' during renewal: {e:?}"
             )));
           }
         };
@@ -1625,22 +1615,19 @@ impl DistributedLock for S3DistributedLock {
                 "Failed to renew lock: object was modified between read and update"
               );
               return Err(LockAcquireError::S3Error(format!(
-                "Lock object for key '{}' was modified between ownership check and renewal",
-                lock_key
+                "Lock object for key '{lock_key}' was modified between ownership check and renewal"
               )));
             }
 
             warn!(error = ?err, lock_key, ?node_id, "Failed to update lock object during renewal");
             Err(LockAcquireError::S3Error(format!(
-              "Failed to update lock object for key '{}' during renewal: {:?}",
-              lock_key, err
+              "Failed to update lock object for key '{lock_key}' during renewal: {err:?}"
             )))
           }
           Err(e) => {
             warn!(error = ?e, lock_key, ?node_id, "Failed to update lock object during renewal");
             Err(LockAcquireError::S3Error(format!(
-              "Failed to update lock object for key '{}' during renewal: {:?}",
-              lock_key, e
+              "Failed to update lock object for key '{lock_key}' during renewal: {e:?}"
             )))
           }
         }
@@ -1650,22 +1637,19 @@ impl DistributedLock for S3DistributedLock {
         if get_err.code() == Some("NoSuchKey") {
           warn!(lock_key, ?node_id, "Cannot renew lock: lock does not exist");
           Err(LockAcquireError::S3Error(format!(
-            "Cannot renew lock for key '{}': lock does not exist",
-            lock_key
+            "Cannot renew lock for key '{lock_key}': lock does not exist"
           )))
         } else {
           warn!(error = ?get_err, lock_key, ?node_id, "Failed to get lock during renewal");
           Err(LockAcquireError::S3Error(format!(
-            "Failed to get lock for key '{}' during renewal: {:?}",
-            lock_key, get_err
+            "Failed to get lock for key '{lock_key}' during renewal: {get_err:?}"
           )))
         }
       }
       Err(e) => {
         warn!(error = ?e, lock_key, ?node_id, "SDK error during lock renewal");
         Err(LockAcquireError::S3Error(format!(
-          "SDK error during renewal of lock for key '{}': {:?}",
-          lock_key, e
+          "SDK error during renewal of lock for key '{lock_key}': {e:?}"
         )))
       }
     }
@@ -1728,7 +1712,8 @@ mod tests {
       .create_bucket(&bucket)
       .expect("Failed to create bucket");
 
-    let endpoint_url = format!("http://127.0.0.1:{}", minio.port);
+    let port = minio.port;
+    let endpoint_url = format!("http://127.0.0.1:{port}");
 
     // Create credentials from MinIO server
     let credentials = Credentials::new(
@@ -1855,10 +1840,7 @@ mod tests {
       Err(LockAcquireError::LockHeld(Some(info))) => {
         assert_eq!(info.node_id, node_a);
       }
-      _ => panic!(
-        "Node B should have failed with LockHeld, got {:?}",
-        handle_b
-      ),
+      _ => panic!("Node B should have failed with LockHeld, got {handle_b:?}"),
     }
 
     handle_a.release().await;
@@ -1977,8 +1959,7 @@ mod tests {
 
     assert!(
       result.is_ok(),
-      "Releasing a non-existent lock should succeed, got {:?}",
-      result
+      "Releasing a non-existent lock should succeed, got {result:?}"
     );
   }
 
@@ -2029,10 +2010,10 @@ mod tests {
           held_count += 1;
         }
         Ok(Err(e)) => {
-          panic!("Unexpected lock acquisition error: {:?}", e);
+          panic!("Unexpected lock acquisition error: {e:?}");
         }
         Err(e) => {
-          panic!("Join error: {:?}", e);
+          panic!("Join error: {e:?}");
         }
       }
     }
@@ -2147,7 +2128,7 @@ mod tests {
           "Error should indicate the real lock owner"
         );
       }
-      other => panic!("Expected LockHeld error, got {:?}", other),
+      other => panic!("Expected LockHeld error, got {other:?}"),
     }
 
     handle.release().await;
@@ -2164,12 +2145,12 @@ mod tests {
         Ok(agg) => {
           match serde_json::from_slice::<LockInfo>(&agg.into_bytes()) {
             Ok(info) => Ok(info),
-            Err(e) => Err(format!("Failed to deserialize lock info: {}", e)),
+            Err(e) => Err(format!("Failed to deserialize lock info: {e}")),
           }
         }
-        Err(e) => Err(format!("Failed to read lock body: {}", e)),
+        Err(e) => Err(format!("Failed to read lock body: {e}")),
       },
-      Err(e) => Err(format!("Failed to get lock object: {}", e)),
+      Err(e) => Err(format!("Failed to get lock object: {e}")),
     }
   }
 }
