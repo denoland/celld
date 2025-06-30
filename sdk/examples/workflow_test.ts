@@ -8,13 +8,13 @@ const emailWorkflow = cell.workflow.define<
 >({
   name: "send-email",
   handler: async ({ input, step }) => {
-    const messageId = await step.run("send-email", async () => {
+    const messageId = await step.run("send-email", () => {
       // In production, this would actually send an email
       console.log(`Sending email to ${input.email}: ${input.subject}`);
       return `msg-${crypto.randomUUID()}`;
     });
 
-    await step.run("log-email", async () => {
+    await step.run("log-email", () => {
       console.log(`Email sent with ID: ${messageId}`);
       return null;
     });
