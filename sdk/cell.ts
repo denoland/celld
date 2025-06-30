@@ -13,13 +13,14 @@ import { logger, setup as setupLogger } from "./logger.ts";
 
 // Create a Cell class to track sockets and provide broadcast functionality
 export class Cell implements DbAccessor, TaskScheduler {
-  tenant: string;
-  id: string;
-  ctlClient: Deno.HttpClient;
-  sockets: Map<string, WebSocket>;
+  sockets: Map<string, WebSocket> = new Map();
 
+  #initialized = false;
+  #tenant: string | undefined;
+  #id: string | undefined;
+  #ctlClient: Deno.HttpClient | undefined;
   #server: Deno.HttpServer | null = null;
-  #dbPath: string;
+  #dbPath: string | undefined;
   #dbInstance: DatabaseSync | null = null;
   #workflow: WorkflowRuntime | null = null;
   #onInitCallback:
@@ -51,35 +52,105 @@ export class Cell implements DbAccessor, TaskScheduler {
     | (() => Promise<void> | void)
     | null = null;
 
-  static #defaultTenant: string;
-  static #defaultId: string;
-  static #defaultDbPath: string;
-  static #defaultCtlSockPath: string;
+  static #defaultTenant: string | undefined;
+  static #defaultId: string | undefined;
+  static #defaultDbPath: string | undefined;
+  static #defaultCtlSockPath: string | undefined;
   static {
-    this.#defaultTenant = Deno.env.get("X-Tenant")!;
-    this.#defaultId = Deno.env.get("X-Cell-Id")!;
-    this.#defaultDbPath = `./sqlite/${this.#defaultId}.db`;
-    this.#defaultCtlSockPath = Deno.env.get("CELL_CONTROL_SOCKET")!;
+    Cell.#defaultTenant = Deno.env.get("X-Tenant");
+    Cell.#defaultId = Deno.env.get("X-Cell-Id");
+    Cell.#defaultDbPath = Cell.#defaultId
+      ? `./sqlite/${Cell.#defaultId}.db`
+      : undefined;
+    Cell.#defaultCtlSockPath = Deno.env.get("CELL_CONTROL_SOCKET");
   }
 
-  constructor(args?: {
-    tenant?: string;
-    id?: string;
-    dbPath?: string;
-    ctlSockPath?: string;
-  }) {
-    this.tenant = args?.tenant ?? Cell.#defaultTenant;
-    this.id = args?.id ?? Cell.#defaultId;
-    setupLogger(this.tenant, this.id, "DEBUG");
-    this.#dbPath = args?.dbPath ?? Cell.#defaultDbPath;
-    const ctlSockPath = args?.ctlSockPath ?? Cell.#defaultCtlSockPath;
-    this.ctlClient = Deno.createHttpClient({
+  get tenant(): string {
+    this.#ensureInitialized();
+    return this.#tenant!;
+  }
+
+  get id(): string {
+    this.#ensureInitialized();
+    return this.#id!;
+  }
+
+  get ctlClient(): Deno.HttpClient {
+    this.#ensureInitialized();
+    return this.#ctlClient!;
+  }
+
+  get db(): DatabaseSync {
+    this.#ensureInitialized();
+
+    if (this.#dbInstance) {
+      return this.#dbInstance;
+    }
+
+    this.#dbInstance = new DatabaseSync(this.#dbPath!);
+    // Call init callback if provided
+    if (this.#onInitCallback) {
+      const result = this.#onInitCallback(this.#dbInstance);
+      if (result instanceof Promise) {
+        // For now, we'll handle this synchronously
+        // In a real implementation, we might want to handle this differently
+        throw new Error(
+          "Init callback cannot be async when accessing db through getter. Use cell.init() before accessing cell.db",
+        );
+      }
+    }
+    return this.#dbInstance;
+  }
+
+  get workflow(): WorkflowRuntime {
+    // We intentionally don't call #ensureInitialized() here because we want to
+    // allow the test environment to obtain a WorkflowRuntime instance without
+    // requiring setup that is not relevant in the workflow test.
+
+    if (!this.#workflow) {
+      this.#workflow = new WorkflowRuntime(this, this);
+    }
+    return this.#workflow;
+  }
+
+  #ensureInitialized(): void {
+    if (this.#initialized) {
+      return;
+    }
+
+    this.#initialize();
+    this.#initialized = true;
+  }
+
+  #initialize(): void {
+    if (!Cell.#defaultTenant) {
+      throw new Error("X-Tenant env var is required");
+    }
+    this.#tenant = Cell.#defaultTenant;
+
+    if (!Cell.#defaultId) {
+      throw new Error("X-Cell-Id env var is required");
+    }
+    this.#id = Cell.#defaultId;
+
+    setupLogger(this.#tenant, this.#id, "DEBUG");
+
+    if (!Cell.#defaultDbPath) {
+      throw new Error("X-Cell-Id env var is required");
+    }
+    this.#dbPath = Cell.#defaultDbPath;
+
+    const ctlSockPath = Cell.#defaultCtlSockPath;
+    if (!ctlSockPath) {
+      throw new Error("CELL_CONTROL_SOCKET env var is required");
+    }
+    this.#ctlClient = Deno.createHttpClient({
       proxy: {
         transport: "unix",
         path: ctlSockPath,
       },
     });
-    this.sockets = new Map<string, WebSocket>();
+
     this.#setupServer();
     this.#setupTables();
   }
@@ -340,31 +411,6 @@ export class Cell implements DbAccessor, TaskScheduler {
       );
     }
     this.#onErrorCallback = cb;
-  }
-
-  get db(): DatabaseSync {
-    if (!this.#dbInstance) {
-      this.#dbInstance = new DatabaseSync(this.#dbPath);
-      // Call init callback if provided
-      if (this.#onInitCallback) {
-        const result = this.#onInitCallback(this.#dbInstance);
-        if (result instanceof Promise) {
-          // For now, we'll handle this synchronously
-          // In a real implementation, we might want to handle this differently
-          throw new Error(
-            "Init callback cannot be async when accessing db through getter. Use cell.init() before accessing cell.db",
-          );
-        }
-      }
-    }
-    return this.#dbInstance;
-  }
-
-  get workflow(): WorkflowRuntime {
-    if (!this.#workflow) {
-      this.#workflow = new WorkflowRuntime(this, this);
-    }
-    return this.#workflow;
   }
 
   #setupServer(): void {
