@@ -11,7 +11,7 @@ async fn test_reliable_workflow_in_single_node_cluster() {
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
-  let url = format!("http://localhost:{}/cell/{}", port, cell_id);
+  let url = format!("http://localhost:{port}/cell/{cell_id}");
   let client = reqwest::Client::new();
 
   let run_id = dispatch_workflow(
@@ -33,7 +33,7 @@ async fn test_reliable_workflow_in_single_node_cluster() {
 
   // Get logs
   let res = client
-    .get(format!("{}/logs", url))
+    .get(format!("{url}/logs"))
     .header("host", "workflow.localhost")
     .send()
     .await
@@ -64,7 +64,7 @@ async fn test_flaky_workflow_in_single_node_cluster() {
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
-  let url = format!("http://localhost:{}/cell/{}", port, cell_id);
+  let url = format!("http://localhost:{port}/cell/{cell_id}");
   let client = reqwest::Client::new();
 
   let run_id = dispatch_workflow(&client, &url, "flaky", json!({})).await;
@@ -112,8 +112,7 @@ async fn test_workflow_automatic_resume_after_node_failure() {
     let public_port = port.public();
     let internal_port = port.internal();
     let owner_url = format!(
-      "http://localhost:{}/_internal/mesh/owner/workflow.localhost/{}",
-      internal_port, cell_id
+      "http://localhost:{internal_port}/_internal/mesh/owner/workflow.localhost/{cell_id}"
     );
     let owner_resp = client
       .get(&owner_url)
@@ -153,7 +152,7 @@ async fn test_workflow_automatic_resume_after_node_failure() {
   info!("Secondary owners are on ports: {:?}", secondary_owners);
 
   let primary_url =
-    format!("http://localhost:{}/cell/{}", primary_owner_port, cell_id);
+    format!("http://localhost:{primary_owner_port}/cell/{cell_id}");
 
   // Dispatch the flaky workflow on primary node
   let run_id =
@@ -215,7 +214,7 @@ async fn test_invoke_workflow() {
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
-  let url = format!("http://localhost:{}/cell/{}", port, cell_id);
+  let url = format!("http://localhost:{port}/cell/{cell_id}");
   let client = reqwest::Client::new();
 
   // Scenario 1: Invoked workflow completes without shutdown
@@ -234,7 +233,7 @@ async fn test_sleep_workflow() {
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
-  let url = format!("http://localhost:{}/cell/{}", port, cell_id);
+  let url = format!("http://localhost:{port}/cell/{cell_id}");
   let client = reqwest::Client::new();
 
   let start_time = std::time::Instant::now();
@@ -264,7 +263,7 @@ async fn test_sleep_workflow() {
 
   // Get logs to verify the workflow steps
   let res = client
-    .get(format!("{}/logs", url))
+    .get(format!("{url}/logs"))
     .header("host", "workflow.localhost")
     .send()
     .await
@@ -294,7 +293,7 @@ async fn dispatch_workflow(
   payload: serde_json::Value,
 ) -> String {
   let res = client
-    .post(format!("{}/{}", url, endpoint))
+    .post(format!("{url}/{endpoint}"))
     .header("host", "workflow.localhost")
     .json(&payload)
     .send()
@@ -312,7 +311,7 @@ async fn wait_for_workflow_completion(
 ) -> bool {
   for _ in 0..max_attempts {
     let res = client
-      .get(format!("{}/run-progress", url))
+      .get(format!("{url}/run-progress"))
       .header("host", "workflow.localhost")
       .query(&[("id", run_id)])
       .send()
@@ -336,7 +335,7 @@ async fn set_key_value(
   value: i32,
 ) {
   let res = client
-    .post(format!("{}/kv", url))
+    .post(format!("{url}/kv"))
     .header("host", "workflow.localhost")
     .json(&json!({ "key": key, "value": value }))
     .send()
@@ -354,7 +353,7 @@ async fn wait_for_workflow_step_count(
 ) -> Option<serde_json::Value> {
   for _ in 0..max_attempts {
     let res = client
-      .get(format!("{}/run-progress", url))
+      .get(format!("{url}/run-progress"))
       .header("host", "workflow.localhost")
       .query(&[("id", run_id)])
       .send()

@@ -65,7 +65,7 @@ impl MinioTestServer {
       tempdir,
       port,
       process,
-      endpoint: format!("http://127.0.0.1:{}", port),
+      endpoint: format!("http://127.0.0.1:{port}"),
     }
   }
 
@@ -81,7 +81,7 @@ impl MinioTestServer {
       .env("MC_HOST_minio", &mc_env)
       .args([
         "mb",
-        &format!("minio/{}", bucket_name),
+        &format!("minio/{bucket_name}"),
         "--ignore-existing", // Don't fail if bucket already exists
       ])
       .stdout(std::process::Stdio::null())
@@ -110,7 +110,7 @@ impl MinioTestServer {
 
     let output = Command::new("mc")
       .env("MC_HOST_minio", &mc_env)
-      .args(["ls", "--recursive", &format!("minio/{}", bucket)])
+      .args(["ls", "--recursive", &format!("minio/{bucket}")])
       .output()
       .expect("Failed to list MinIO bucket contents");
 
@@ -137,7 +137,7 @@ impl MinioTestServer {
         "rm",
         "--recursive",
         "--force",
-        &format!("minio/{}/{}", bucket_name, prefix),
+        &format!("minio/{bucket_name}/{prefix}"),
       ])
       .spawn()?
       .wait()?;

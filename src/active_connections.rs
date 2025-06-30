@@ -63,7 +63,7 @@ mod linux {
   /// Collects socket inodes currently open in `/proc/<pid>/fd`
   fn list_socket_inodes(pid: u32) -> io::Result<HashSet<u64>> {
     let mut inodes = HashSet::new();
-    let fd_path = format!("/proc/{}/fd", pid);
+    let fd_path = format!("/proc/{pid}/fd");
     for entry in fs::read_dir(fd_path)? {
       let path = entry?.path();
       if let Ok(target) = fs::read_link(&path) {
@@ -214,7 +214,7 @@ mod tests {
     if e.kind() == std::io::ErrorKind::NotFound {
       panic!("netcat (nc) command not found. Please install netcat to run this test.");
     }
-    panic!("could not spawn nc: {}", e);
+    panic!("could not spawn nc: {e}");
   }
 
   #[test_log::test]

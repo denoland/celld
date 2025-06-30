@@ -8,7 +8,7 @@ async fn test_hono() {
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
-  let url = format!("http://localhost:{}/cell/{}", port, cell_id);
+  let url = format!("http://localhost:{port}/cell/{cell_id}");
 
   let client = reqwest::Client::new();
 

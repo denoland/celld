@@ -155,5 +155,5 @@ impl PeerManager {
 pub struct CellHashKey(String);
 
 fn cell_hash_key(tenant: &str, cell_id: &str) -> CellHashKey {
-  CellHashKey(format!("{}/{}", tenant, cell_id))
+  CellHashKey(format!("{tenant}/{cell_id}"))
 }

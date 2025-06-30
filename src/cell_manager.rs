@@ -272,7 +272,7 @@ impl CellManager {
     node_state: Arc<NodeState>,
   ) -> Result<(), CellManagerError> {
     let cell_key = CellKey::new(SYSTEM_TENANT, SYSTEM_CELL_ID);
-    let lock_name = format!("{}/{}", SYSTEM_TENANT, SYSTEM_CELL_ID);
+    let lock_name = format!("{SYSTEM_TENANT}/{SYSTEM_CELL_ID}");
     let node_id = node_state.peer_manager.get_local_node_id();
     let lock_handle = node_state
       .distributed_lock
@@ -319,7 +319,7 @@ impl CellManager {
       warn!("Failed to create sqlite directory: {}", e);
     });
 
-    let db_path = sqlite_dir.join(format!("{}.db", SYSTEM_CELL_ID));
+    let db_path = sqlite_dir.join(format!("{SYSTEM_CELL_ID}.db"));
 
     let replica = self
       .setup_sqlite_replica(
@@ -481,7 +481,7 @@ impl CellManager {
 
     // Acquire a lock on the cell to declare ownership of the combination of
     // tenant and cellId.
-    let lock_name = format!("{}/{}", host, cell_id);
+    let lock_name = format!("{host}/{cell_id}");
     let node_id = node_state.peer_manager.get_local_node_id();
     let lock_handle = node_state
       .distributed_lock
@@ -529,7 +529,7 @@ impl CellManager {
     let serve_socket_name = {
       let uuid_string = Uuid::new_v4().to_string();
       let first_segment: &str = &uuid_string[0..8];
-      format!("{}.sock", first_segment)
+      format!("{first_segment}.sock")
     };
     let serve_socket_path = socket_tempdir.path().join(serve_socket_name);
 
@@ -540,7 +540,7 @@ impl CellManager {
     });
 
     // Configure SQLite replication if S3 is configured
-    let db_path = sqlite_dir.join(format!("{}.db", cell_id));
+    let db_path = sqlite_dir.join(format!("{cell_id}.db"));
 
     let replica = self
       .setup_sqlite_replica(
@@ -1008,10 +1008,7 @@ fn spawn_deno_process(
 
   // Spawn with ChildOnParentExit for automatic termination when parent exits
   ChildOnParentExit::spawn(cmd).with_context(|| {
-    format!(
-      "Failed to spawn Deno process for {} with parent-exit guard",
-      host
-    )
+    format!("Failed to spawn Deno process for {host} with parent-exit guard")
   })
 }
 

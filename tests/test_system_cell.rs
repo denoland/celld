@@ -37,8 +37,7 @@ async fn test_system_main_cell_relocation() {
 
   // Verify the initial node owns the system main cell
   let initial_owner_url = format!(
-    "http://localhost:{}/_internal/mesh/owner/{}/{}",
-    initial_internal_port, SYSTEM_TENANT, SYSTEM_CELL_ID
+    "http://localhost:{initial_internal_port}/_internal/mesh/owner/{SYSTEM_TENANT}/{SYSTEM_CELL_ID}"
   );
 
   let initial_resp = client
@@ -55,13 +54,13 @@ async fn test_system_main_cell_relocation() {
     "Initial node should own the system main cell"
   );
   let initial_owner = initial_resp["owner"].as_str().unwrap();
-  info!("Initial system main cell owner: {}", initial_owner);
+  info!("Initial system main cell owner: {initial_owner}");
 
   let test_cell_id = uuid::Uuid::new_v4().simple().to_string();
 
   // Set a new alarm to save something to the system main cell's DB
   let test_cell_url =
-    format!("http://localhost:{}/cell/{}", initial_port, test_cell_id);
+    format!("http://localhost:{initial_port}/cell/{test_cell_id}");
 
   let res = client
     .post(&test_cell_url)
@@ -87,8 +86,7 @@ async fn test_system_main_cell_relocation() {
 
   // Check who owns the system main cell now from the second node's perspective
   let owner_check_url = format!(
-    "http://localhost:{}/_internal/mesh/owner/{}/{}",
-    second_internal_port, SYSTEM_TENANT, SYSTEM_CELL_ID
+    "http://localhost:{second_internal_port}/_internal/mesh/owner/{SYSTEM_TENANT}/{SYSTEM_CELL_ID}"
   );
 
   let owner_resp = client
@@ -101,10 +99,7 @@ async fn test_system_main_cell_relocation() {
     .unwrap();
 
   let current_owner = owner_resp["owner"].as_str().unwrap();
-  info!(
-    "System main cell owner after adding second node: {}",
-    current_owner
-  );
+  info!("System main cell owner after adding second node: {current_owner}");
 
   assert!(owner_resp["is_local"].as_bool().unwrap());
 
@@ -184,8 +179,7 @@ async fn test_system_main_cell_relocation_with_existing_db() {
 
   // Verify the initial node owns the system main cell
   let initial_owner_url = format!(
-    "http://localhost:{}/_internal/mesh/owner/{}/{}",
-    initial_internal_port, SYSTEM_TENANT, SYSTEM_CELL_ID
+    "http://localhost:{initial_internal_port}/_internal/mesh/owner/{SYSTEM_TENANT}/{SYSTEM_CELL_ID}"
   );
 
   let initial_resp = client
@@ -202,12 +196,12 @@ async fn test_system_main_cell_relocation_with_existing_db() {
     "Initial node should own the system main cell"
   );
   let initial_owner = initial_resp["owner"].as_str().unwrap();
-  info!("Initial system main cell owner: {}", initial_owner);
+  info!("Initial system main cell owner: {initial_owner}");
 
   // Get the alarm, which should not exist yet
   let test_cell_id = uuid::Uuid::new_v4().simple().to_string();
   let test_cell_initial_node_url =
-    format!("http://localhost:{}/cell/{}", initial_port, test_cell_id);
+    format!("http://localhost:{initial_port}/cell/{test_cell_id}");
   let res = client
     .get(&test_cell_initial_node_url)
     .header("host", "alarm.localhost")
@@ -234,8 +228,7 @@ async fn test_system_main_cell_relocation_with_existing_db() {
 
   // Check who owns the system main cell now from the second node's perspective
   let owner_check_url = format!(
-    "http://localhost:{}/_internal/mesh/owner/{}/{}",
-    second_internal_port, SYSTEM_TENANT, SYSTEM_CELL_ID
+    "http://localhost:{second_internal_port}/_internal/mesh/owner/{SYSTEM_TENANT}/{SYSTEM_CELL_ID}"
   );
 
   let owner_resp = client
@@ -248,10 +241,7 @@ async fn test_system_main_cell_relocation_with_existing_db() {
     .unwrap();
 
   let current_owner = owner_resp["owner"].as_str().unwrap();
-  info!(
-    "System main cell owner after adding second node: {}",
-    current_owner
-  );
+  info!("System main cell owner after adding second node: {current_owner}");
 
   assert!(owner_resp["is_local"].as_bool().unwrap());
 
@@ -281,7 +271,7 @@ async fn test_system_main_cell_relocation_with_existing_db() {
 
   // Set a new alarm to save something to the system main cell's DB on the second node
   let test_cell_second_node_url =
-    format!("http://localhost:{}/cell/{}", second_port, test_cell_id);
+    format!("http://localhost:{second_port}/cell/{test_cell_id}");
 
   let res = client
     .post(&test_cell_second_node_url)
