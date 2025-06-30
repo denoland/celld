@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { WorkflowRuntime } from "./workflow.ts";
 import { ulid } from "jsr:@std/ulid@1/ulid";
+import { delay } from "jsr:@std/async@1/delay";
 import {
   type DbAccessor,
   type JSONValue,
@@ -189,7 +190,7 @@ export class TestEnvironment implements Disposable {
         return progress.outputData as TOutput;
       }
 
-      await new Promise((resolve) => setTimeout(resolve, INTERVAL_MS));
+      await delay(INTERVAL_MS);
     }
 
     throw new Error("Workflow did not complete within timeout");
