@@ -23,6 +23,23 @@ const emailWorkflow = cell.workflow.define<
   },
 });
 
+const userWorkflow = cell.workflow.define<
+  { email: string },
+  { userId: number }
+>({
+  name: "create-user",
+  handler: async ({ input, step, db }) => {
+    const userId = await step.run("insert-user", () => {
+      const result = db.prepare(
+        "INSERT INTO users (email) VALUES (?) RETURNING id",
+      ).get(input.email) as { id: number };
+      return result.id;
+    });
+
+    return { userId };
+  },
+});
+
 // Test using Deno.test
 Deno.test("emailWorkflow sends email and logs result", async () => {
   const env = createTestEnvironment();
@@ -73,23 +90,6 @@ Deno.test("workflow with database operations", async () => {
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
-
-  const userWorkflow = cell.workflow.define<
-    { email: string },
-    { userId: number }
-  >({
-    name: "create-user",
-    handler: async ({ input, step, db }) => {
-      const userId = await step.run("insert-user", () => {
-        const result = db.prepare(
-          "INSERT INTO users (email) VALUES (?) RETURNING id",
-        ).get(input.email) as { id: number };
-        return result.id;
-      });
-
-      return { userId };
-    },
-  });
 
   // Run the workflow
   const { waitForCompletion } = await env.runWorkflow(userWorkflow, {
