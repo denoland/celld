@@ -102,7 +102,7 @@ Deno.test("workflow can invoke another workflow", async () => {
     number
   >({
     name: "multiply",
-    handler: async ({ input }) => {
+    handler: ({ input }) => {
       return input.a * input.b;
     },
   });
@@ -180,5 +180,8 @@ Deno.test("workflow with sleep step", async () => {
   // Verify the results
   assertEquals(result.processedMessage, "Processed: HELLO WORLD");
   // Verify that the sleep actually happened (duration should be at least the sleep time)
-  assert(result.duration >= 100, `Expected duration >= 100ms, got ${result.duration}ms`);
+  assert(
+    result.duration >= 100,
+    `Expected duration >= 100ms, got ${result.duration}ms`,
+  );
 });

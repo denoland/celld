@@ -339,7 +339,7 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
     }
   }
 
-  async #handleAlarm(): Promise<void> {
+  #handleAlarm(): void {
     // Clear our tracked alarm time since we're handling it now
     this.#currentGlobalAlarmTime = null;
 
@@ -464,7 +464,7 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
       const url = new URL(req.url);
 
       if (req.method === "POST" && url.pathname === "/_internal/alarm") {
-        await this.#handleAlarm();
+        this.#handleAlarm();
         return new Response("OK", { status: 200 });
       }
 
