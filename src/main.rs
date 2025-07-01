@@ -749,6 +749,14 @@ mod tests {
       .send()
       .await
       .unwrap();
+
+    // Trigger workflow table creation by calling getRunProgress
+    c.get("http://127.0.0.1:6146/cell/tables/run-progress?id=dummy")
+      .header("Host", "workflow.localhost")
+      .send()
+      .await
+      .unwrap();
+
     let workflow_tables =
       get_tables("data/workflow.localhost/sqlite/tables.db");
     assert_eq!(
@@ -758,8 +766,7 @@ mod tests {
         "logs",
         "scheduled_tasks",
         "workflow_runs",
-        "workflow_steps",
-        "workflows"
+        "workflow_steps"
       ]
     );
   }
