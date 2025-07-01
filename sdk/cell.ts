@@ -5,6 +5,7 @@ import {
   type ScheduledTaskId,
   scheduledTaskId,
   type Task,
+  type TaskProcessor,
   type TaskScheduler,
 } from "./types.ts";
 import { WorkflowRuntime } from "./workflow.ts";
@@ -12,7 +13,7 @@ import { ulid } from "jsr:@std/ulid@^1.0.0/ulid";
 import { logger, setup as setupLogger } from "./logger.ts";
 
 // Create a Cell class to track sockets and provide broadcast functionality
-export class Cell implements DbAccessor, TaskScheduler {
+export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
   sockets: Map<string, WebSocket> = new Map();
 
   #initialized = false;
@@ -277,18 +278,15 @@ export class Cell implements DbAccessor, TaskScheduler {
   // Track the currently scheduled global alarm time
   #currentGlobalAlarmTime: number | null = null;
 
-  async #handleAlarm(): Promise<void> {
-    const currentTime = Date.now();
-
-    // Clear our tracked alarm time since we're handling it now
-    this.#currentGlobalAlarmTime = null;
+  processDueTasks(currentTime?: number): void {
+    const now = currentTime ?? Date.now();
 
     // Retrieve ALL tasks that are due now or overdue
     const dueTasks = this.db.prepare(`
       SELECT id, payload FROM scheduled_tasks
       WHERE scheduled_time_unix_ms <= ?
       ORDER BY scheduled_time_unix_ms ASC
-    `).all(currentTime);
+    `).all(now);
 
     // Dispatch the associated operations based on the task kind
     for (const task of dueTasks) {
@@ -296,7 +294,7 @@ export class Cell implements DbAccessor, TaskScheduler {
       try {
         switch (payload.kind) {
           case "user-defined-alarm": {
-            await this.#onAlarmCallback?.();
+            this.#onAlarmCallback?.();
             break;
           }
           case "resume-all-pending-workflow-runs": {
@@ -314,10 +312,10 @@ export class Cell implements DbAccessor, TaskScheduler {
           case "wake-sleep-step": {
             // Mark the sleep step as completed
             this.db.prepare(`
-            UPDATE workflow_steps
-            SET completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc')
-            WHERE workflow_run_id = ? AND step_index = ?
-          `).run(payload.workflowRunId, payload.stepIndex);
+              UPDATE workflow_steps
+              SET completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc')
+              WHERE workflow_run_id = ? AND step_index = ?
+            `).run(payload.workflowRunId, payload.stepIndex);
 
             // Retry the workflow directly
             if (this.workflow) {
@@ -339,6 +337,14 @@ export class Cell implements DbAccessor, TaskScheduler {
         DELETE FROM scheduled_tasks WHERE id = ?
       `).run(task.id);
     }
+  }
+
+  async #handleAlarm(): Promise<void> {
+    // Clear our tracked alarm time since we're handling it now
+    this.#currentGlobalAlarmTime = null;
+
+    // Process all due tasks
+    this.processDueTasks();
 
     // AFTER processing all due tasks, schedule the next alarm if any. Use
     // setTimeout to avoid connection issues with the current alarm request
