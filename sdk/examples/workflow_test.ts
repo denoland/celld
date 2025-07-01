@@ -1,5 +1,5 @@
 import { cell } from "../cell.ts";
-import { assertEquals, assertExists } from "jsr:@std/assert";
+import { assert, assertEquals, assertExists } from "jsr:@std/assert";
 
 // Example workflow definition
 const emailWorkflow = cell.workflow.define<
@@ -133,4 +133,52 @@ Deno.test("workflow can invoke another workflow", async () => {
   // Verify the results
   assertEquals(result.doubled, 20);
   assertEquals(result.tripled, 30);
+});
+
+// Test workflow with sleep
+Deno.test("workflow with sleep step", async () => {
+  // Define a workflow that uses sleep
+  const delayedProcessingWorkflow = cell.workflow.define<
+    { message: string; delayMs: number },
+    { processedMessage: string; duration: number }
+  >({
+    name: "delayed-processing",
+    handler: async ({ input, step }) => {
+      // Record when we started
+      const startTime = await step.run("record-start", () => {
+        return Date.now();
+      });
+
+      // Sleep for the specified duration
+      await step.sleep("wait-before-processing", input.delayMs);
+
+      // Process the message after the delay
+      const result = await step.run("process-message", () => {
+        const endTime = Date.now();
+        const duration = endTime - startTime;
+        const processedMessage = `Processed: ${input.message.toUpperCase()}`;
+        return { processedMessage, duration };
+      });
+
+      return result;
+    },
+  });
+
+  using env = cell.workflow.createTestEnvironment();
+
+  // Run the workflow with a short sleep
+  const { waitForCompletion } = await env.runWorkflow(
+    delayedProcessingWorkflow,
+    {
+      message: "hello world",
+      delayMs: 100, // Sleep for 100ms
+    },
+  );
+
+  const result = await waitForCompletion();
+
+  // Verify the results
+  assertEquals(result.processedMessage, "Processed: HELLO WORLD");
+  // Verify that the sleep actually happened (duration should be at least the sleep time)
+  assert(result.duration >= 100, `Expected duration >= 100ms, got ${result.duration}ms`);
 });
