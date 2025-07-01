@@ -50,27 +50,7 @@ export class TestEnvironment implements Disposable {
     for (const [name, handler] of workflowRegistry) {
       // Create a wrapped handler that supports mocking
       const wrappedHandler = async (ctx: WorkflowCtx<JSONValue>) => {
-        const originalStep = ctx.step;
-        const mockedStep: typeof ctx.step = {
-          run: async <StepOutput extends Voidable<JSONValue>>(
-            stepName: string,
-            fn: () => StepOutput | Promise<StepOutput>,
-          ) => {
-            const mockedHandler = this.#mockedSteps.get(stepName);
-            if (mockedHandler) {
-              const result = await mockedHandler();
-              if (result === undefined) {
-                return null as Unvoidable<StepOutput>;
-              } else {
-                return result as Unvoidable<StepOutput>;
-              }
-            }
-            return originalStep.run(stepName, fn);
-          },
-          invoke: (workflow, input) => originalStep.invoke(workflow, input),
-          sleep: (name, durationMs) => originalStep.sleep(name, durationMs),
-        };
-        // Call the original handler with mocked step
+        const mockedStep = this.#createMockedStep(ctx.step);
         const mockedCtx = { ...ctx, step: mockedStep };
         return await handler(mockedCtx);
       };
@@ -169,6 +149,30 @@ export class TestEnvironment implements Disposable {
     this.close();
   }
 
+  #createMockedStep(
+    originalStep: WorkflowCtx<JSONValue>["step"],
+  ): WorkflowCtx<JSONValue>["step"] {
+    return {
+      run: async <StepOutput extends Voidable<JSONValue>>(
+        stepName: string,
+        fn: () => StepOutput | Promise<StepOutput>,
+      ) => {
+        const mockedHandler = this.#mockedSteps.get(stepName);
+        if (mockedHandler) {
+          const result = await mockedHandler();
+          if (result === undefined) {
+            return null as Unvoidable<StepOutput>;
+          } else {
+            return result as Unvoidable<StepOutput>;
+          }
+        }
+        return originalStep.run(stepName, fn);
+      },
+      invoke: (workflow, input) => originalStep.invoke(workflow, input),
+      sleep: (name, durationMs) => originalStep.sleep(name, durationMs),
+    };
+  }
+
   #createTaskScheduler(): TaskScheduler {
     // Create scheduled_tasks table
     this.#db.exec(`
@@ -199,29 +203,9 @@ export class TestEnvironment implements Disposable {
     return this.#runtime.define<TInput, TOutput>({
       name: workflow.name,
       handler: async (ctx) => {
-        const originalStep = ctx.step;
-        const mockedStep: typeof ctx.step = {
-          run: async <StepOutput extends Voidable<JSONValue>>(
-            name: string,
-            fn: () => StepOutput | Promise<StepOutput>,
-          ) => {
-            const mockedHandler = this.#mockedSteps.get(name);
-            if (mockedHandler) {
-              const result = await mockedHandler();
-              if (result === undefined) {
-                return null as Unvoidable<StepOutput>;
-              } else {
-                return result as Unvoidable<StepOutput>;
-              }
-            }
-            return originalStep.run(name, fn);
-          },
-          invoke: (workflow, input) => originalStep.invoke(workflow, input),
-          sleep: (name, durationMs) => originalStep.sleep(name, durationMs),
-        };
-        // Call the original workflow handler with mocked step
-        const originalCtx = { ...ctx, step: mockedStep };
-        return await workflow.config.handler(originalCtx);
+        const mockedStep = this.#createMockedStep(ctx.step);
+        const mockedCtx = { ...ctx, step: mockedStep };
+        return await workflow.config.handler(mockedCtx);
       },
     });
   }
