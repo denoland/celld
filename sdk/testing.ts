@@ -46,13 +46,39 @@ export class TestEnvironment implements Disposable {
     // Initialize tables by calling listRuns
     this.#runtime.listRuns();
 
-    // Register workflows from the provided registry
+    // Register workflows from the provided registry with wrapping for mocking support
     if (workflowRegistry) {
       for (const [name, handler] of workflowRegistry) {
-        // Define a workflow that wraps the handler
+        // Create a wrapped handler that supports mocking
+        const wrappedHandler = async (ctx: WorkflowCtx<JSONValue>) => {
+          const originalStep = ctx.step;
+          const mockedStep: typeof ctx.step = {
+            run: async <StepOutput extends Voidable<JSONValue>>(
+              stepName: string,
+              fn: () => StepOutput | Promise<StepOutput>,
+            ) => {
+              const mockedHandler = this.#mockedSteps.get(stepName);
+              if (mockedHandler) {
+                const result = await mockedHandler();
+                if (result === undefined) {
+                  return null as Unvoidable<StepOutput>;
+                } else {
+                  return result as Unvoidable<StepOutput>;
+                }
+              }
+              return originalStep.run(stepName, fn);
+            },
+            invoke: (workflow, input) => originalStep.invoke(workflow, input),
+            sleep: (name, durationMs) => originalStep.sleep(name, durationMs),
+          };
+          // Call the original handler with mocked step
+          const mockedCtx = { ...ctx, step: mockedStep };
+          return await handler(mockedCtx);
+        };
+
         this.#runtime.define<JSONValue, Voidable<JSONValue>>({
           name,
-          handler: (ctx: WorkflowCtx<JSONValue>) => handler(ctx),
+          handler: wrappedHandler,
         });
       }
     }
@@ -90,6 +116,22 @@ export class TestEnvironment implements Disposable {
     runId: WorkflowRunId;
     waitForCompletion: () => Promise<TOutput>;
   } {
+    // For workflows from the registry, they're already wrapped, so dispatch by name
+    // For other workflows, create a wrapper
+    const registryWorkflows = this.#runtime.getWorkflowRegistry?.() ||
+      new Map();
+    if (registryWorkflows.has(workflow.name)) {
+      // Workflow is already registered and wrapped, dispatch by name
+      const runId = this.#runtime.dispatchByName(workflow.name, input);
+      if (!runId) {
+        throw new Error(`Workflow ${workflow.name} not found in runtime`);
+      }
+      return {
+        runId,
+        waitForCompletion: () => this.#waitForCompletion(runId),
+      };
+    }
+
     // Get or create a wrapper workflow that uses mocked steps
     let wrapperWorkflow = this.#workflowWrappers.get(workflow.name) as
       | WorkflowDef<TInput, TOutput>
@@ -158,10 +200,9 @@ export class TestEnvironment implements Disposable {
   ): WorkflowDef<TInput, TOutput> {
     return this.#runtime.define<TInput, TOutput>({
       name: workflow.name,
-      handler: (ctx) => {
+      handler: async (ctx) => {
         const originalStep = ctx.step;
         const mockedStep: typeof ctx.step = {
-          ...originalStep,
           run: async <StepOutput extends Voidable<JSONValue>>(
             name: string,
             fn: () => StepOutput | Promise<StepOutput>,
@@ -177,12 +218,12 @@ export class TestEnvironment implements Disposable {
             }
             return originalStep.run(name, fn);
           },
-          invoke: originalStep.invoke,
-          sleep: originalStep.sleep,
+          invoke: (workflow, input) => originalStep.invoke(workflow, input),
+          sleep: (name, durationMs) => originalStep.sleep(name, durationMs),
         };
         // Call the original workflow handler with mocked step
         const originalCtx = { ...ctx, step: mockedStep };
-        return workflow.config.handler(originalCtx);
+        return await workflow.config.handler(originalCtx);
       },
     });
   }

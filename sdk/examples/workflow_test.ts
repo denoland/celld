@@ -103,10 +103,7 @@ Deno.test("workflow can invoke another workflow", async () => {
   >({
     name: "multiply",
     handler: async ({ input }) => {
-      console.log("Multiply workflow called with:", input);
-      const result = input.a * input.b;
-      console.log("Multiply returning:", result);
-      return result;
+      return input.a * input.b;
     },
   });
 
@@ -117,15 +114,8 @@ Deno.test("workflow can invoke another workflow", async () => {
   >({
     name: "calculate",
     handler: async ({ input, step }) => {
-      console.log("Calculate workflow started with input:", input);
-      console.log("About to invoke multiply for doubled...");
       const doubled = await step.invoke(multiplyWorkflow, { a: input.x, b: 2 });
-      console.log("Doubled result:", doubled);
-
-      console.log("About to invoke multiply for tripled...");
       const tripled = await step.invoke(multiplyWorkflow, { a: input.x, b: 3 });
-      console.log("Tripled result:", tripled);
-
       return { doubled, tripled };
     },
   });
@@ -134,14 +124,9 @@ Deno.test("workflow can invoke another workflow", async () => {
   using env = cell.workflow.createTestEnvironment();
 
   // Run the parent workflow
-  console.log("Starting parent workflow...");
-  const { runId, waitForCompletion } = await env.runWorkflow(
-    calculateWorkflow,
-    {
-      x: 10,
-    },
-  );
-  console.log("Parent workflow started with runId:", runId);
+  const { waitForCompletion } = await env.runWorkflow(calculateWorkflow, {
+    x: 10,
+  });
 
   const result = await waitForCompletion();
 

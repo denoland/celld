@@ -473,7 +473,10 @@ export class WorkflowRuntime {
    * Get a copy of all registered workflows for testing purposes.
    * @returns A new Map containing all registered workflow handlers
    */
-  getWorkflowRegistry(): Map<string, (ctx: WorkflowCtx<JSONValue>) => Promise<Voidable<JSONValue>>> {
+  getWorkflowRegistry(): Map<
+    string,
+    (ctx: WorkflowCtx<JSONValue>) => Promise<Voidable<JSONValue>>
+  > {
     return new Map(this.#workflows);
   }
 

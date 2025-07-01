@@ -123,7 +123,7 @@ export interface RequestContext {
 }
 
 export type WorkflowHandler = (
-  ctx: WorkflowCtx<JSONValue>
+  ctx: WorkflowCtx<JSONValue>,
 ) => Promise<Voidable<JSONValue>>;
 
 export type WorkflowRegistry = Map<string, WorkflowHandler>;
