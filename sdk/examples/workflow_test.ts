@@ -93,3 +93,59 @@ Deno.test("workflow with database operations", async () => {
   );
   assertExists(user);
 });
+
+// Test workflow invocation
+Deno.test("workflow can invoke another workflow", async () => {
+  // Define child workflow BEFORE creating test environment
+  const multiplyWorkflow = cell.workflow.define<
+    { a: number; b: number },
+    number
+  >({
+    name: "multiply",
+    handler: async ({ input }) => {
+      console.log("Multiply workflow called with:", input);
+      const result = input.a * input.b;
+      console.log("Multiply returning:", result);
+      return result;
+    },
+  });
+
+  // Define parent workflow that invokes child
+  const calculateWorkflow = cell.workflow.define<
+    { x: number },
+    { doubled: number; tripled: number }
+  >({
+    name: "calculate",
+    handler: async ({ input, step }) => {
+      console.log("Calculate workflow started with input:", input);
+      console.log("About to invoke multiply for doubled...");
+      const doubled = await step.invoke(multiplyWorkflow, { a: input.x, b: 2 });
+      console.log("Doubled result:", doubled);
+
+      console.log("About to invoke multiply for tripled...");
+      const tripled = await step.invoke(multiplyWorkflow, { a: input.x, b: 3 });
+      console.log("Tripled result:", tripled);
+
+      return { doubled, tripled };
+    },
+  });
+
+  // Create test environment AFTER defining workflows
+  using env = cell.workflow.createTestEnvironment();
+
+  // Run the parent workflow
+  console.log("Starting parent workflow...");
+  const { runId, waitForCompletion } = await env.runWorkflow(
+    calculateWorkflow,
+    {
+      x: 10,
+    },
+  );
+  console.log("Parent workflow started with runId:", runId);
+
+  const result = await waitForCompletion();
+
+  // Verify the results
+  assertEquals(result.doubled, 20);
+  assertEquals(result.tripled, 30);
+});
