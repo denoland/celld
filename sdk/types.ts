@@ -37,6 +37,10 @@ export interface TaskScheduler {
   schedule(task: Task): Promise<ScheduledTaskId> | ScheduledTaskId;
 }
 
+export interface TaskProcessor {
+  processDueTasks(currentTime?: number): void;
+}
+
 export type WorkflowRunProgress = {
   id: WorkflowRunId;
   workflowName: string;

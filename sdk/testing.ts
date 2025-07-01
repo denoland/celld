@@ -6,6 +6,7 @@ import {
   type DbAccessor,
   type JSONValue,
   scheduledTaskId,
+  type TaskProcessor,
   type TaskScheduler,
   type Unvoidable,
   type Voidable,
@@ -27,6 +28,9 @@ export class TestEnvironment implements Disposable {
     string,
     WorkflowDef<JSONValue, Voidable<JSONValue>>
   >();
+  readonly #taskScheduler: TaskScheduler & TaskProcessor;
+  readonly #abortController = new AbortController();
+  #schedulerWakeSignal = Promise.withResolvers<void>();
 
   constructor(workflowRegistry: WorkflowRegistry = new Map()) {
     // Create in-memory database
@@ -38,10 +42,10 @@ export class TestEnvironment implements Disposable {
     };
 
     // Create mock task scheduler
-    const taskScheduler = this.#createTaskScheduler();
+    this.#taskScheduler = this.#createTaskScheduler();
 
     // Create workflow runtime
-    this.#runtime = new WorkflowRuntime(dbAccessor, taskScheduler);
+    this.#runtime = new WorkflowRuntime(dbAccessor, this.#taskScheduler);
 
     // Initialize tables by calling listRuns
     this.#runtime.listRuns();
@@ -60,6 +64,9 @@ export class TestEnvironment implements Disposable {
         handler: wrappedHandler,
       });
     }
+
+    // Start the background scheduler
+    this.#startScheduler();
   }
 
   /**
@@ -146,6 +153,8 @@ export class TestEnvironment implements Disposable {
    * Called automatically when using the `using` syntax.
    */
   [Symbol.dispose](): void {
+    // Signal scheduler to stop
+    this.#abortController.abort();
     this.close();
   }
 
@@ -173,7 +182,7 @@ export class TestEnvironment implements Disposable {
     };
   }
 
-  #createTaskScheduler(): TaskScheduler {
+  #createTaskScheduler(): TaskScheduler & TaskProcessor {
     // Create scheduled_tasks table
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS scheduled_tasks (
@@ -189,7 +198,53 @@ export class TestEnvironment implements Disposable {
         this.#db.prepare(`
           INSERT INTO scheduled_tasks (id, scheduled_time_unix_ms, payload) VALUES (?, ?, ?)
         `).run(id, task.scheduledTimeUnixMs, JSON.stringify(task));
+
+        // Wake up the scheduler
+        this.#schedulerWakeSignal.resolve();
+        // Create new promise for next wake
+        this.#schedulerWakeSignal = Promise.withResolvers<void>();
+
         return id;
+      },
+      processDueTasks: (currentTime) => {
+        const now = currentTime ?? Date.now();
+
+        // Get all due tasks
+        const dueTasks = this.#db.prepare(`
+          SELECT id, payload FROM scheduled_tasks
+          WHERE scheduled_time_unix_ms <= ?
+          ORDER BY scheduled_time_unix_ms ASC
+        `).all(now);
+
+        for (const task of dueTasks) {
+          const taskData = JSON.parse(task.payload as string);
+
+          switch (taskData.kind) {
+            case "wake-sleep-step":
+              // Mark sleep step as completed
+              this.#db.prepare(`
+                UPDATE workflow_steps
+                SET completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc')
+                WHERE workflow_run_id = ? AND step_index = ? AND step_type = 'sleep'
+              `).run(taskData.workflowRunId, taskData.stepIndex);
+
+              // Resume the workflow
+              this.#runtime.retry(taskData.workflowRunId);
+              break;
+
+            case "retry-workflow-run":
+              // Handle workflow retry
+              this.#runtime.retry(taskData.workflowRunId);
+              break;
+
+              // Add other task types as needed
+          }
+
+          // Delete processed task
+          this.#db.prepare(`DELETE FROM scheduled_tasks WHERE id = ?`).run(
+            task.id,
+          );
+        }
       },
     };
   }
@@ -230,5 +285,53 @@ export class TestEnvironment implements Disposable {
     }
 
     throw new Error("Workflow did not complete within timeout");
+  }
+
+  #getNextScheduledTime(): number | null {
+    const result = this.#db.prepare(`
+      SELECT MIN(scheduled_time_unix_ms) as next_time 
+      FROM scheduled_tasks
+    `).get();
+    return result?.next_time ? Number(result.next_time) : null;
+  }
+
+  #startScheduler(): void {
+    const signal = this.#abortController.signal;
+
+    const run = async () => {
+      while (!signal.aborted) {
+        try {
+          const nextTaskTime = this.#getNextScheduledTime();
+          const now = Date.now();
+
+          if (nextTaskTime !== null && nextTaskTime <= now) {
+            // Process due tasks
+            this.#taskScheduler.processDueTasks(now);
+            continue; // Check immediately for more due tasks
+          }
+
+          // Calculate wait time
+          const waitTime = nextTaskTime !== null
+            ? Math.min(nextTaskTime - now, 100)
+            : 100; // Poll every 100ms when no tasks
+
+          // Wait for either timeout or wake signal
+          await Promise.race([
+            delay(waitTime, { signal }),
+            this.#schedulerWakeSignal.promise,
+          ]);
+        } catch (error) {
+          if (error instanceof DOMException && error.name === "AbortError") {
+            // Normal abort, exit gracefully
+            break;
+          }
+          // Log other errors but continue scheduler
+          console.error("Scheduler error:", error);
+        }
+      }
+    };
+
+    // Start scheduler in background
+    run();
   }
 }
