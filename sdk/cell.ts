@@ -119,8 +119,9 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
       return;
     }
 
-    this.#initialize();
+    // Set initialized flag BEFORE calling initialize to prevent re-entry
     this.#initialized = true;
+    this.#initialize();
   }
 
   #initialize(): void {
