@@ -204,6 +204,8 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
       ) => Promise<Response> | Response | void)
       | ((req: Request) => Promise<Response> | Response | void),
   ): void {
+    this.#ensureInitialized();
+
     if (this.#onRequestCallback) {
       throw new Error(
         `Handler for request already registered for cell ${this.id}`,
