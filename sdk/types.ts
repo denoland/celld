@@ -126,6 +126,14 @@ export interface RequestContext {
   db: DatabaseSync;
 }
 
+export interface AlarmContext {
+  db: DatabaseSync;
+}
+
+export interface WebSocketContext {
+  db: DatabaseSync;
+}
+
 export type WorkflowHandler = (
   ctx: WorkflowCtx<JSONValue>,
 ) => Promise<Voidable<JSONValue>>;

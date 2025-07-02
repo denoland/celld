@@ -41,7 +41,7 @@ function broadcastUserList() {
 }
 
 // Handle HTTP requests
-cell.request((request: Request): Response => {
+cell.request((request: Request, ctx): Response => {
   const url = new URL(request.url);
 
   if (url.pathname === "/stats") {
@@ -64,7 +64,7 @@ cell.request((request: Request): Response => {
 });
 
 // Handle new connections
-cell.connect((socket: WebSocket, id: string) => {
+cell.connect((socket: WebSocket, id: string, ctx) => {
   // Initialize user with a guest name
   const guestName = `Guest${Math.floor(Math.random() * 1000)}`;
 
@@ -95,7 +95,7 @@ cell.connect((socket: WebSocket, id: string) => {
 });
 
 // Handle message reception
-cell.message((event: MessageEvent, socket: WebSocket, id: string) => {
+cell.message((event: MessageEvent, socket: WebSocket, id: string, ctx) => {
   const senderState = users.get(id);
   if (!senderState) return;
 
@@ -250,7 +250,7 @@ function handlePrivateMessage(
 }
 
 // Handle connection closures
-cell.close((socket: WebSocket, id: string) => {
+cell.close((socket: WebSocket, id: string, ctx) => {
   const state = users.get(id);
   const username = state?.username || "A user";
 

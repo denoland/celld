@@ -1,5 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import {
+  type AlarmContext,
   type DbAccessor,
   type RequestContext,
   type ScheduledTaskId,
@@ -7,13 +8,14 @@ import {
   type Task,
   type TaskProcessor,
   type TaskScheduler,
+  type WebSocketContext,
 } from "./types.ts";
 import { WorkflowRuntime } from "./workflow.ts";
 import { ulid } from "jsr:@std/ulid@^1.0.0/ulid";
 import { logger, setup as setupLogger } from "./logger.ts";
 
 // Create a Cell class to track sockets and provide broadcast functionality
-export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
+export class Cell implements TaskScheduler, TaskProcessor {
   sockets: Map<string, WebSocket> = new Map();
 
   #initialized = false;
@@ -34,23 +36,32 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
     ) => Promise<Response> | Response | void)
     | null = null;
   #onConnectCallback:
-    | ((socket: WebSocket, id: string) => Promise<void> | void)
+    | ((
+      socket: WebSocket,
+      id: string,
+      ctx: WebSocketContext,
+    ) => Promise<void> | void)
     | null = null;
   #onMessageCallback:
     | ((
       event: MessageEvent,
       socket: WebSocket,
       id: string,
+      ctx: WebSocketContext,
     ) => Promise<void> | void)
     | null = null;
   #onCloseCallback:
-    | ((socket: WebSocket, id: string) => Promise<void> | void)
+    | ((
+      socket: WebSocket,
+      id: string,
+      ctx: WebSocketContext,
+    ) => Promise<void> | void)
     | null = null;
   #onErrorCallback:
     | ((error: Error | ErrorEvent | Event) => Promise<void> | void)
     | null = null;
   #onAlarmCallback:
-    | (() => Promise<void> | void)
+    | ((ctx: AlarmContext) => Promise<void> | void)
     | null = null;
 
   static #defaultTenant: string | undefined;
@@ -81,7 +92,7 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
     return this.#ctlClient!;
   }
 
-  get db(): DatabaseSync {
+  #getDb(): DatabaseSync {
     this.#ensureInitialized();
 
     if (this.#dbInstance) {
@@ -109,7 +120,14 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
     // requiring setup that is not relevant in the workflow test.
 
     if (!this.#workflow) {
-      this.#workflow = new WorkflowRuntime(this, this);
+      this.#workflow = new WorkflowRuntime(
+        {
+          get db() {
+            return cell.#getDb();
+          },
+        } satisfies DbAccessor,
+        this,
+      );
     }
     return this.#workflow;
   }
@@ -217,7 +235,7 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
     ) => Promise<Response> | Response | void;
   }
 
-  alarm(cb: () => Promise<void> | void): void {
+  alarm(cb: (ctx: AlarmContext) => Promise<void> | void): void {
     if (this.#onAlarmCallback) {
       throw new Error(
         `Handler for alarm already registered for cell ${this.id}`,
@@ -235,7 +253,7 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
   getAlarm(id?: ScheduledTaskId): number | null {
     if (id === undefined) {
       // Get the closest "user-defined-alarm" task
-      const result = this.db.prepare(`
+      const result = this.#getDb().prepare(`
         SELECT
           scheduled_time_unix_ms
         FROM scheduled_tasks
@@ -248,7 +266,7 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
       return result.scheduled_time_unix_ms as number;
     }
 
-    const result = this.db.prepare(`
+    const result = this.#getDb().prepare(`
       SELECT scheduled_time_unix_ms FROM scheduled_tasks WHERE id = ?
     `).get(id);
     if (!result) {
@@ -265,7 +283,7 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
   }
 
   deleteAlarm(id: ScheduledTaskId): boolean {
-    const result = this.db.prepare(`
+    const result = this.#getDb().prepare(`
       DELETE FROM scheduled_tasks WHERE id = ?
     `).run(id);
 
@@ -285,7 +303,7 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
     const now = currentTime ?? Date.now();
 
     // Retrieve ALL tasks that are due now or overdue
-    const dueTasks = this.db.prepare(`
+    const dueTasks = this.#getDb().prepare(`
       SELECT id, payload FROM scheduled_tasks
       WHERE scheduled_time_unix_ms <= ?
       ORDER BY scheduled_time_unix_ms ASC
@@ -297,7 +315,10 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
       try {
         switch (payload.kind) {
           case "user-defined-alarm": {
-            this.#onAlarmCallback?.();
+            const ctx: AlarmContext = {
+              db: this.#getDb(),
+            };
+            this.#onAlarmCallback?.(ctx);
             break;
           }
           case "resume-all-pending-workflow-runs": {
@@ -314,7 +335,7 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
           }
           case "wake-sleep-step": {
             // Mark the sleep step as completed
-            this.db.prepare(`
+            this.#getDb().prepare(`
               UPDATE workflow_steps
               SET completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc')
               WHERE workflow_run_id = ? AND step_index = ?
@@ -336,7 +357,7 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
       }
 
       // Delete the task
-      this.db.prepare(`
+      this.#getDb().prepare(`
         DELETE FROM scheduled_tasks WHERE id = ?
       `).run(task.id);
     }
@@ -360,7 +381,7 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
 
   async #scheduleNextAlarm(): Promise<void> {
     // Get the next task that needs to run
-    const nextTask = this.db.prepare(`
+    const nextTask = this.#getDb().prepare(`
       SELECT scheduled_time_unix_ms FROM scheduled_tasks
       ORDER BY scheduled_time_unix_ms ASC
       LIMIT 1
@@ -380,7 +401,13 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
     }
   }
 
-  connect(cb: (socket: WebSocket, id: string) => Promise<void> | void): void {
+  connect(
+    cb: (
+      socket: WebSocket,
+      id: string,
+      ctx: WebSocketContext,
+    ) => Promise<void> | void,
+  ): void {
     if (this.#onConnectCallback) {
       throw new Error(
         `Handler for connect already registered for cell ${this.id}`,
@@ -394,6 +421,7 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
       event: MessageEvent,
       socket: WebSocket,
       id: string,
+      ctx: WebSocketContext,
     ) => Promise<void> | void,
   ): void {
     if (this.#onMessageCallback) {
@@ -404,7 +432,13 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
     this.#onMessageCallback = cb;
   }
 
-  close(cb: (socket: WebSocket, id: string) => Promise<void> | void): void {
+  close(
+    cb: (
+      socket: WebSocket,
+      id: string,
+      ctx: WebSocketContext,
+    ) => Promise<void> | void,
+  ): void {
     if (this.#onCloseCallback) {
       throw new Error(
         `Handler for close already registered for cell ${this.id}`,
@@ -437,13 +471,19 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
         // Set up the WebSocket event handlers
         socket.onopen = () => {
           if (this.#onConnectCallback) {
-            this.#onConnectCallback(socket, socketId);
+            const ctx: WebSocketContext = {
+              db: this.#getDb(),
+            };
+            this.#onConnectCallback(socket, socketId, ctx);
           }
         };
 
         socket.onmessage = (e) => {
           if (this.#onMessageCallback) {
-            this.#onMessageCallback(e, socket, socketId);
+            const ctx: WebSocketContext = {
+              db: this.#getDb(),
+            };
+            this.#onMessageCallback(e, socket, socketId, ctx);
           }
         };
 
@@ -451,7 +491,10 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
           this.sockets.delete(socketId);
 
           if (this.#onCloseCallback) {
-            this.#onCloseCallback(socket, socketId);
+            const ctx: WebSocketContext = {
+              db: this.#getDb(),
+            };
+            this.#onCloseCallback(socket, socketId, ctx);
           }
         };
 
@@ -478,7 +521,7 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
           req,
         );
         const ctx: RequestContext = {
-          db: this.db,
+          db: this.#getDb(),
         };
         const result = this.#onRequestCallback(modifiedReq, ctx);
         if (result instanceof Promise) {
@@ -503,7 +546,7 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
 
   #setupTables(): void {
     // This will create the database and call init callback if provided
-    const db = this.db;
+    const db = this.#getDb();
 
     // Ensure `scheduled_tasks` table exists.
     db.exec(`
@@ -559,7 +602,7 @@ export class Cell implements DbAccessor, TaskScheduler, TaskProcessor {
 
   async schedule(task: Task): Promise<ScheduledTaskId> {
     const id = scheduledTaskId(ulid());
-    this.db.prepare(`
+    this.#getDb().prepare(`
       INSERT INTO scheduled_tasks (id, scheduled_time_unix_ms, payload) VALUES (?, ?, ?)
     `).run(id, task.scheduledTimeUnixMs, JSON.stringify(task));
 

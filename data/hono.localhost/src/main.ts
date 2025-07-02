@@ -1,31 +1,38 @@
 import { cell } from "../../../sdk/mod.ts";
 import { Hono } from "npm:hono@4.7.10";
+import type { DatabaseSync } from "node:sqlite";
 
-cell.db.exec(`
-  CREATE TABLE IF NOT EXISTS requests (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    method TEXT,
-    path TEXT,
-    user_agent TEXT,
-    status INTEGER,
-    timestamp TEXT DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests (timestamp);
-`);
+// Store db reference for use in Hono middleware
+let db: DatabaseSync;
 
-cell.db.exec(`
-  CREATE TABLE IF NOT EXISTS errors (
-    error TEXT NOT NULL,
-    timestamp TEXT DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE INDEX IF NOT EXISTS idx_errors_timestamp ON errors (timestamp);
-`);
+cell.init((database) => {
+  db = database;
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      method TEXT,
+      path TEXT,
+      user_agent TEXT,
+      status INTEGER,
+      timestamp TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests (timestamp);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS errors (
+      error TEXT NOT NULL,
+      timestamp TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_errors_timestamp ON errors (timestamp);
+  `);
+});
 
 const app = new Hono();
 
 app.use("*", async (c, next) => {
   await next();
-  cell.db.prepare(
+  db.prepare(
     "INSERT INTO requests (method, path, user_agent, status) VALUES (?, ?, ?, ?)",
   ).run(
     c.req.method,
@@ -38,7 +45,7 @@ app.use("*", async (c, next) => {
 app.get("/", (c) => c.text("hello from hono"));
 
 app.get("/logs", (c) => {
-  const logs = cell.db
+  const logs = db
     .prepare(
       "SELECT method, path, user_agent, status, timestamp FROM requests ORDER BY timestamp DESC",
     )
@@ -51,14 +58,14 @@ app.get("/boom", () => {
 });
 
 app.get("/errors", (c) => {
-  const errors = cell.db
+  const errors = db
     .prepare("SELECT error FROM errors ORDER BY timestamp DESC")
     .all();
   return c.json(errors);
 });
 
 app.onError((err, c) => {
-  cell.db.prepare("INSERT INTO errors (error) VALUES (?)").run(
+  db.prepare("INSERT INTO errors (error) VALUES (?)").run(
     Deno.inspect(err),
   );
   return c.text("Internal Server Error from hono", 500);
