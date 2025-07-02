@@ -12,6 +12,7 @@ mod distributed_lock;
 mod heartbeat_service;
 mod node_state;
 mod peer_manager;
+mod pingora;
 mod process_reaper;
 mod router;
 mod sqlite_replica;
@@ -19,13 +20,15 @@ mod sqlite_replica;
 pub mod test_utils;
 
 use clap::{Arg, Command};
-use pingora::prelude::*;
-use pingora::server::configuration::ServerConf;
-use pingora::services::background::background_service;
+
+use crate::pingora::prelude::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info};
+
+// Additional explicit imports for types that might not be in prelude
+use crate::pingora::server::configuration::ServerConf;
 
 use node_state::NodeState;
 use process_reaper::ProcessReaper;
@@ -306,6 +309,10 @@ mod tests {
   use std::time::Duration;
   use tokio_tungstenite::tungstenite::protocol::Message;
 
+  type WebSocketStream = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+  >;
+
   // inspired by https://github.com/cloudflare/pingora/blob/caa6a0/pingora-core/tests/utils/mod.rs
   pub static TEST_SERVER: Lazy<std::thread::JoinHandle<()>> = Lazy::new(|| {
     let _ = tracing_subscriber::fmt::try_init();
@@ -444,9 +451,7 @@ mod tests {
   async fn connect_to_cell(
     cell_id: &str,
   ) -> (
-    tokio_tungstenite::WebSocketStream<
-      tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    WebSocketStream,
     String, // username
   ) {
     // Create URL with proper host header in the URL
@@ -718,7 +723,7 @@ mod tests {
       stmt
         .query_map([], |row| row.get::<_, String>(0))
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap()
     };
 

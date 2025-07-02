@@ -1,8 +1,8 @@
 use crate::node_state::NodeState;
+use crate::pingora::server::ShutdownWatch;
+use crate::pingora::services::background::BackgroundService;
 
 use chrono::Utc;
-use pingora::server::ShutdownWatch;
-use pingora::services::background::BackgroundService;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info};
