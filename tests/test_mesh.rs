@@ -270,8 +270,7 @@ async fn test_node_failure_takeover() {
     let public_port = port.public();
     let internal_port = port.internal();
     let owner_url = format!(
-      "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
-      internal_port, test_cell_id
+      "http://localhost:{internal_port}/_internal/mesh/owner/basic-db.localhost/{test_cell_id}"
     );
     let owner_resp = reqwest::get(&owner_url)
       .await
@@ -311,8 +310,7 @@ async fn test_node_failure_takeover() {
 
   // Send request to the primary node to create data in the cell
   let url = format!(
-    "http://basic-db.localhost:{}/cell/{}",
-    primary_owner_port, test_cell_id
+    "http://basic-db.localhost:{primary_owner_port}/cell/{test_cell_id}"
   );
   let client = reqwest::Client::builder().build().unwrap();
 
@@ -349,8 +347,7 @@ async fn test_node_failure_takeover() {
   // Try to access the cell through a secondary node
   let secondary_port = secondary_owners[0];
   let secondary_url = format!(
-    "http://basic-db.localhost:{}/cell/{}",
-    secondary_port, test_cell_id
+    "http://basic-db.localhost:{secondary_port}/cell/{test_cell_id}"
   );
 
   // This request should trigger takeover if not already happened
@@ -387,8 +384,7 @@ async fn test_node_failure_takeover() {
     let internal_port = test_env.ports[i].internal();
 
     let owner_url = format!(
-      "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
-      internal_port, test_cell_id
+      "http://localhost:{internal_port}/_internal/mesh/owner/basic-db.localhost/{test_cell_id}"
     );
     let owner_resp = reqwest::get(&owner_url)
       .await
@@ -434,8 +430,7 @@ async fn test_concurrent_takeover_locking() {
     let public_port = port.public();
     let internal_port = port.internal();
     let owner_url = format!(
-      "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
-      internal_port, test_cell_id
+      "http://localhost:{internal_port}/_internal/mesh/owner/basic-db.localhost/{test_cell_id}"
     );
     let owner_resp = reqwest::get(&owner_url)
       .await
@@ -468,8 +463,7 @@ async fn test_concurrent_takeover_locking() {
 
   // Create initial data on the primary node
   let url = format!(
-    "http://basic-db.localhost:{}/cell/{}",
-    primary_owner_port, test_cell_id
+    "http://basic-db.localhost:{primary_owner_port}/cell/{test_cell_id}"
   );
   let client = reqwest::Client::builder().build().unwrap();
   let response = client.get(&url).send().await.unwrap();
@@ -500,8 +494,7 @@ async fn test_concurrent_takeover_locking() {
     .iter()
     .map(|&public_port| {
       format!(
-        "http://basic-db.localhost:{}/cell/{}",
-        public_port, test_cell_id
+        "http://basic-db.localhost:{public_port}/cell/{test_cell_id}"
       )
     })
     .collect();
@@ -534,8 +527,7 @@ async fn test_concurrent_takeover_locking() {
     let value = body.trim();
     assert!(
       value == "2" || value == "3",
-      "Successful takeover should return 2 or 3, got {}",
-      value
+      "Successful takeover should return 2 or 3, got {value}"
     );
   }
 
@@ -569,8 +561,7 @@ async fn test_concurrent_takeover_locking() {
     let internal_port = test_env.ports[i].internal();
 
     let owner_url = format!(
-      "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
-      internal_port, test_cell_id
+      "http://localhost:{internal_port}/_internal/mesh/owner/basic-db.localhost/{test_cell_id}"
     );
     let owner_resp = reqwest::get(&owner_url)
       .await
@@ -612,8 +603,7 @@ async fn test_proxy_forwarding_retry() {
     let public_port = port.public();
     let internal_port = port.internal();
     let owner_url = format!(
-      "http://localhost:{}/_internal/mesh/owner/basic-db.localhost/{}",
-      internal_port, test_cell_id
+      "http://localhost:{internal_port}/_internal/mesh/owner/basic-db.localhost/{test_cell_id}"
     );
     let owner_resp = reqwest::get(&owner_url)
       .await
@@ -646,8 +636,7 @@ async fn test_proxy_forwarding_retry() {
 
   // Create initial data by sending request to a non-owner node (should forward to primary)
   let url = format!(
-    "http://basic-db.localhost:{}/cell/{}",
-    non_owner_port, test_cell_id
+    "http://basic-db.localhost:{non_owner_port}/cell/{test_cell_id}"
   );
   let client = reqwest::Client::builder().build().unwrap();
   let response1 = client.get(&url).send().await.unwrap();
@@ -717,7 +706,7 @@ async fn test_proxy_forwarding_retry() {
 
   // Verify the forwarding path now points to a different node
   let peer_info_url =
-    format!("http://localhost:{}/_mesh/peers", non_owner_port);
+    format!("http://localhost:{non_owner_port}/_mesh/peers");
   let new_peers = reqwest::get(&peer_info_url)
     .await
     .unwrap()
@@ -729,8 +718,7 @@ async fn test_proxy_forwarding_retry() {
 
   // Get the new owner info
   let new_owner_url = format!(
-    "http://localhost:{}/_mesh/owner/{}",
-    non_owner_port, test_cell_id
+    "http://localhost:{non_owner_port}/_mesh/owner/{test_cell_id}"
   );
   let new_owner_resp = reqwest::get(&new_owner_url)
     .await
@@ -762,7 +750,7 @@ async fn test_restore_coordination() {
 
   // Send request to Node A to create data in the cell
   let url_a =
-    format!("http://basic-db.localhost:{}/cell/{}", port_a, test_cell_id);
+    format!("http://basic-db.localhost:{port_a}/cell/{test_cell_id}");
   let client = reqwest::Client::builder().build().unwrap();
 
   let response_a = client.get(&url_a).send().await.unwrap();
@@ -778,8 +766,7 @@ async fn test_restore_coordination() {
 
   // Verify SQLite database exists
   let db_path = test_env.server_dirs[0].path().join(format!(
-    "data/basic-db.localhost/sqlite/{}.db",
-    test_cell_id
+    "data/basic-db.localhost/sqlite/{test_cell_id}.db"
   ));
   assert!(db_path.exists());
 
@@ -891,7 +878,7 @@ async fn test_restore_single() {
 
   let test_cell_id = "test-restore";
 
-  let url = format!("http://basic-db.localhost:{}/cell/{}", port, test_cell_id);
+  let url = format!("http://basic-db.localhost:{port}/cell/{test_cell_id}");
   let client = reqwest::Client::builder().build().unwrap();
 
   let response1 = client.get(&url).send().await.unwrap();
@@ -962,7 +949,7 @@ async fn read_message_of_type(
     }
   }
 
-  panic!("Timeout waiting for message of type: {}", msg_type);
+  panic!("Timeout waiting for message of type: {msg_type}");
 }
 
 /// Helper function to connect to a WebSocket cell and handle initial messages
@@ -977,7 +964,7 @@ async fn connect_to_cell(
 ) {
   // Use the hostname directly with the test port
   let url =
-    Url::parse(&format!("ws://ws-echo.localhost:{}/cell/{}", port, cell_id))
+    Url::parse(&format!("ws://ws-echo.localhost:{port}/cell/{cell_id}"))
       .unwrap();
 
   info!("Connecting to WebSocket at {}", url);
@@ -986,8 +973,7 @@ async fn connect_to_cell(
     .await
     .unwrap_or_else(|e| {
       panic!(
-        "Failed to connect to cell {} on port {}: {}",
-        cell_id, port, e
+        "Failed to connect to cell {cell_id} on port {port}: {e}"
       )
     });
 

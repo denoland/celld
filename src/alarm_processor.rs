@@ -556,8 +556,7 @@ fn dispatch_completed_handler(
     .collect::<Vec<_>>()
     .join(", ");
   let sql = format!(
-    "DELETE FROM global_alarms WHERE (tenant, cell_id, scheduled_time_unix_ms) IN ({})",
-    placeholders
+    "DELETE FROM global_alarms WHERE (tenant, cell_id, scheduled_time_unix_ms) IN ({placeholders})"
   );
 
   let Ok(mut stmt) = conn.prepare(&sql).inspect_err(|e| {

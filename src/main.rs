@@ -361,7 +361,7 @@ mod tests {
     // Test fetching the index.html file
     for x in ["/", "/index.html"] {
       let response = reqwest::Client::new()
-        .get(format!("http://127.0.0.1:6146{}", x))
+        .get(format!("http://127.0.0.1:6146{x}"))
         .header("Host", "hello.localhost")
         .send()
         .await
@@ -388,7 +388,7 @@ mod tests {
 
     // Make first request to cell
     let first_response = reqwest::Client::new()
-      .get(format!("http://127.0.0.1:6146/cell/{}", cell_name))
+      .get(format!("http://127.0.0.1:6146/cell/{cell_name}"))
       .header("Host", "basic-db.localhost")
       .send()
       .await
@@ -399,7 +399,7 @@ mod tests {
     assert_eq!(first_response.trim(), "1");
 
     // Verify SQLite database exists and has correct record count
-    let db_path = format!("data/basic-db.localhost/sqlite/{}.db", cell_name);
+    let db_path = format!("data/basic-db.localhost/sqlite/{cell_name}.db");
     assert!(std::path::Path::new(&db_path).exists());
 
     let output = std::process::Command::new("sqlite3")
@@ -416,7 +416,7 @@ mod tests {
 
     // Make second request to same cell
     let second_response = reqwest::Client::new()
-      .get(format!("http://127.0.0.1:6146/cell/{}", cell_name))
+      .get(format!("http://127.0.0.1:6146/cell/{cell_name}"))
       .header("Host", "basic-db.localhost")
       .send()
       .await
@@ -450,7 +450,7 @@ mod tests {
     String, // username
   ) {
     // Create URL with proper host header in the URL
-    let url = format!("ws://ws-echo.localhost:6146/cell/{}", cell_id);
+    let url = format!("ws://ws-echo.localhost:6146/cell/{cell_id}");
 
     // Add a small delay before connecting to ensure the server is ready
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -458,7 +458,7 @@ mod tests {
     let (mut ws_stream, _) = tokio_tungstenite::connect_async(url)
       .await
       .unwrap_or_else(|e| {
-        panic!("Failed to connect to cell {}: {}", cell_id, e)
+        panic!("Failed to connect to cell {cell_id}: {e}")
       });
 
     // Read welcome message

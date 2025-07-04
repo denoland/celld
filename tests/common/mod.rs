@@ -175,7 +175,7 @@ impl TestEnv {
 
   /// Create the same cell hash key format as peer_manager.rs
   fn cell_hash_key(tenant: &str, cell_id: &str) -> String {
-    format!("{}/{}", tenant, cell_id)
+    format!("{tenant}/{cell_id}")
   }
 
   // Start mesh nodes with auto-allocated non-conflicting ports
@@ -268,7 +268,7 @@ impl TestEnv {
     for (i, port) in ports.into_iter().enumerate() {
       let advertise_addr = format!("127.0.0.1:{}", port.public());
       let internal_addr = format!("127.0.0.1:{}", port.internal());
-      let node_name = format!("{}-{}", node_name_prefix, i);
+      let node_name = format!("{node_name_prefix}-{i}");
 
       // Prepare a properly structured temporary directory
       // This creates a temp dir with both sdk/ and data/ to maintain relative imports
@@ -353,7 +353,7 @@ impl TestEnv {
         }
 
         let Ok(res) = client
-          .get(format!("http://127.0.0.1:{}/_health", p))
+          .get(format!("http://127.0.0.1:{p}/_health"))
           .send()
           .await
         else {
@@ -390,8 +390,7 @@ impl TestEnv {
 
       if !ok {
         panic!(
-          "Server on port {} for node {} failed to start",
-          p, node_name
+          "Server on port {p} for node {node_name} failed to start"
         );
       }
     }
@@ -458,7 +457,7 @@ impl TestEnv {
       );
     }
 
-    panic!("Cluster did not settle after {} attempts", MAX_ATTEMPTS);
+    panic!("Cluster did not settle after {MAX_ATTEMPTS} attempts");
   }
 }
 
@@ -474,15 +473,13 @@ impl Drop for TestEnv {
         #[allow(clippy::print_stdout)]
         {
           println!(
-            "---- terminated node {} stdout ----\n{}",
-            node_name, stdout
+            "---- terminated node {node_name} stdout ----\n{stdout}"
           );
         }
         #[allow(clippy::print_stderr)]
         {
           eprintln!(
-            "---- terminated node {} stderr ----\n{}",
-            node_name, stderr
+            "---- terminated node {node_name} stderr ----\n{stderr}"
           );
         }
       }
@@ -517,11 +514,11 @@ fn prepare_test_directory() -> io::Result<(TempDir, PathBuf)> {
 
   // Verify source directories exist
   if !src_data_path.exists() {
-    panic!("Source data directory not found at {:?}", src_data_path);
+    panic!("Source data directory not found at {src_data_path:?}");
   }
 
   if !src_sdk_path.exists() {
-    panic!("Source sdk directory not found at {:?}", src_sdk_path);
+    panic!("Source sdk directory not found at {src_sdk_path:?}");
   }
 
   // Create data directory in temp dir

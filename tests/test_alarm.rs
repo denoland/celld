@@ -10,7 +10,7 @@ async fn test_alarm_crud_in_single_node_cluster() {
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
-  let url = format!("http://localhost:{}/cell/{}", port, cell_id);
+  let url = format!("http://localhost:{port}/cell/{cell_id}");
   let client = reqwest::Client::new();
 
   // Get alarm (none is set)
@@ -109,7 +109,7 @@ async fn test_alarm_dispatch_in_single_node_cluster() {
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
-  let url = format!("http://localhost:{}/cell/{}", port, cell_id);
+  let url = format!("http://localhost:{port}/cell/{cell_id}");
   let alarm_count_url = format!("{url}/getAlarmCount");
   let client = reqwest::Client::new();
 
@@ -167,11 +167,11 @@ async fn test_multiple_cells_alarm_dispatch_in_single_node_cluster() {
   let port = test_env.ports[0].public();
 
   let cell1_id = uuid::Uuid::new_v4().simple().to_string();
-  let cell1_url = format!("http://localhost:{}/cell/{}", port, cell1_id);
+  let cell1_url = format!("http://localhost:{port}/cell/{cell1_id}");
   let cell1_alarm_count_url = format!("{cell1_url}/getAlarmCount");
 
   let cell2_id = uuid::Uuid::new_v4().simple().to_string();
-  let cell2_url = format!("http://localhost:{}/cell/{}", port, cell2_id);
+  let cell2_url = format!("http://localhost:{port}/cell/{cell2_id}");
   let cell2_alarm_count_url = format!("{cell2_url}/getAlarmCount");
 
   let client = reqwest::Client::new();
@@ -696,7 +696,7 @@ async fn test_multi_alarms_with_delays(delays: &[u32], test_case_name: &str) {
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
-  let url = format!("http://localhost:{}/cell/{}", port, cell_id);
+  let url = format!("http://localhost:{port}/cell/{cell_id}");
   let alarm_count_url = format!("{url}/getAlarmCount");
   let client = reqwest::Client::new();
 
@@ -776,7 +776,7 @@ async fn test_multi_alarm_sequential() {
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
-  let url = format!("http://localhost:{}/cell/{}", port, cell_id);
+  let url = format!("http://localhost:{port}/cell/{cell_id}");
   let alarm_count_url = format!("{url}/getAlarmCount");
   let client = reqwest::Client::new();
 
@@ -823,7 +823,7 @@ async fn test_multi_alarm_sequential() {
     assert_eq!(res.status(), 200);
 
     let content = res.text().await.unwrap();
-    assert_eq!(content, format!(r#"{{"count":{}}}"#, i));
+    assert_eq!(content, format!(r#"{{"count":{i}}}"#));
     info!("Confirmed alarm {} fired, count is now {}", i, i);
   }
 }
@@ -834,7 +834,7 @@ async fn test_recursive_alarm() {
   let port = test_env.ports[0].public();
 
   let cell_id = uuid::Uuid::new_v4().simple().to_string();
-  let url = format!("http://localhost:{}/cell/{}", port, cell_id);
+  let url = format!("http://localhost:{port}/cell/{cell_id}");
   let client = reqwest::Client::new();
 
   #[derive(Debug, serde::Deserialize)]

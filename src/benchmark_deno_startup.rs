@@ -52,13 +52,12 @@ pub async fn run(iterations: usize) -> Result<()> {
   #[allow(clippy::print_stdout)]
   {
     println!(
-      "Starting Deno coldstart benchmark with {} iterations...",
-      iterations
+      "Starting Deno coldstart benchmark with {iterations} iterations..."
     );
   }
   for i in 0..iterations {
     // Use a unique cell_id for each iteration to ensure a new process each time
-    let cell_id = format!("{}-{}", cell_id_base, i);
+    let cell_id = format!("{cell_id_base}-{i}");
 
     // Start timing
     let start = Instant::now();
