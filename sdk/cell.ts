@@ -11,7 +11,7 @@ import {
   type WebSocketContext,
 } from "./types.ts";
 import { WorkflowRuntime } from "./workflow.ts";
-import { TestEnvironment } from "./testing.ts";
+import type { TestEnvironment } from "./testing.ts";
 import { ulid } from "jsr:@std/ulid@^1.0.0/ulid";
 import { logger, setup as setupLogger } from "./logger.ts";
 
