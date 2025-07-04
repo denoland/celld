@@ -244,12 +244,12 @@ where
                   .with_upgrades()
                   .await
                 {
-                  println!("Error serving connection: {:?}", err);
+                  println!("Error serving connection: {err:?}");
                 }
               });
             }
             Err(e) => {
-              println!("Accept error: {}", e);
+              println!("Accept error: {e}");
               break;
             }
           }
@@ -310,11 +310,11 @@ where
     for addr in &self.tcp_addresses {
       match TcpListener::bind(addr).await {
         Ok(listener) => {
-          println!("Listening on {}", addr);
+          println!("Listening on {addr}");
           listeners.push(listener);
         }
         Err(e) => {
-          println!("Failed to bind to {}: {}", addr, e);
+          println!("Failed to bind to {addr}: {e}");
         }
       }
     }
@@ -535,7 +535,7 @@ where
       use crate::error::{Error, ErrorType};
       let pingora_error = Error::explain(
         ErrorType::InternalError,
-        format!("Upstream error: {}", e),
+        format!("Upstream error: {e}"),
       );
       proxy_service
         .logging(&mut session, Some(&pingora_error), &mut ctx)

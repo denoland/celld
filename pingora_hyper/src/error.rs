@@ -71,7 +71,7 @@ impl Error {
       }
       ErrorType::TimeoutError => Error::TimeoutError,
       ErrorType::HTTPStatus(code) => Error::HttpStatus(code),
-      _ => Error::InternalError(format!("{}: {}", error_type, message)),
+      _ => Error::InternalError(format!("{error_type}: {message}")),
     };
     Box::new(error)
   }
@@ -126,7 +126,7 @@ impl fmt::Display for ErrorType {
       ErrorType::TimeoutError => write!(f, "TimeoutError"),
       ErrorType::BadRequest => write!(f, "BadRequest"),
       ErrorType::ServiceUnavailable => write!(f, "ServiceUnavailable"),
-      ErrorType::HTTPStatus(code) => write!(f, "HTTPStatus({})", code),
+      ErrorType::HTTPStatus(code) => write!(f, "HTTPStatus({code})"),
     }
   }
 }
