@@ -54,7 +54,7 @@ async fn test_system_main_cell_relocation() {
     "Initial node should own the system main cell"
   );
   let initial_owner = initial_resp["owner"].as_str().unwrap();
-  info!("Initial system main cell owner: {}", initial_owner);
+  info!("Initial system main cell owner: {initial_owner}");
 
   let test_cell_id = uuid::Uuid::new_v4().simple().to_string();
 
@@ -99,10 +99,7 @@ async fn test_system_main_cell_relocation() {
     .unwrap();
 
   let current_owner = owner_resp["owner"].as_str().unwrap();
-  info!(
-    "System main cell owner after adding second node: {}",
-    current_owner
-  );
+  info!("System main cell owner after adding second node: {current_owner}");
 
   assert!(owner_resp["is_local"].as_bool().unwrap());
 
@@ -199,7 +196,7 @@ async fn test_system_main_cell_relocation_with_existing_db() {
     "Initial node should own the system main cell"
   );
   let initial_owner = initial_resp["owner"].as_str().unwrap();
-  info!("Initial system main cell owner: {}", initial_owner);
+  info!("Initial system main cell owner: {initial_owner}");
 
   // Get the alarm, which should not exist yet
   let test_cell_id = uuid::Uuid::new_v4().simple().to_string();
@@ -244,10 +241,7 @@ async fn test_system_main_cell_relocation_with_existing_db() {
     .unwrap();
 
   let current_owner = owner_resp["owner"].as_str().unwrap();
-  info!(
-    "System main cell owner after adding second node: {}",
-    current_owner
-  );
+  info!("System main cell owner after adding second node: {current_owner}");
 
   assert!(owner_resp["is_local"].as_bool().unwrap());
 

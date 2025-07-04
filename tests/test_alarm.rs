@@ -754,7 +754,8 @@ async fn test_multi_alarms_with_delays(delays: &[u32], test_case_name: &str) {
     assert_eq!(res.status(), 200);
 
     let content = res.text().await.unwrap();
-    assert_eq!(content, format!(r#"{{"count":{}}}"#, delays.len()));
+    let delays_len = delays.len();
+    assert_eq!(content, format!(r#"{{"count":{delays_len}}}"#));
   }
 }
 

@@ -1,6 +1,6 @@
+use crate::pingora::server::ShutdownWatch;
+use crate::pingora::services::background::BackgroundService;
 use crate::NodeState;
-use pingora::server::ShutdownWatch;
-use pingora::services::background::BackgroundService;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;

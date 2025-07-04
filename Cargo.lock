@@ -830,6 +830,7 @@ dependencies = [
  "nix 0.30.1",
  "once_cell",
  "pingora",
+ "pingora_hyper",
  "proptest",
  "reqwest",
  "rusqlite",
@@ -844,6 +845,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -2740,6 +2742,25 @@ dependencies = [
  "pin-project-lite",
  "thread_local",
  "tokio",
+]
+
+[[package]]
+name = "pingora_hyper"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "http 1.3.1",
+ "http-body-util",
+ "hyper 1.6.0",
+ "hyper-util",
+ "pingora",
+ "thiserror 2.0.12",
+ "tokio",
+ "tokio-tungstenite",
+ "tower",
+ "tracing",
 ]
 
 [[package]]

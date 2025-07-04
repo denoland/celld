@@ -1,8 +1,9 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
+use crate::pingora::server::ShutdownWatch;
+use crate::pingora::services::background::BackgroundService;
 use bytes::{Buf as _, Bytes};
 use http_body_util::{combinators::BoxBody, BodyExt as _, Empty, Full};
-use pingora::{server::ShutdownWatch, services::background::BackgroundService};
 use tempfile::TempDir;
 use tokio::net::{TcpStream, UnixListener};
 use tracing::{error, info};

@@ -1486,14 +1486,16 @@ impl DistributedLock for S3DistributedLock {
         } else {
           warn!(error = ?del_err, lock_key = %lock_descriptor.lock_key, node_id = ?lock_descriptor.node_id, "Failed to release S3 lock (Service Error)");
           Err(del_err).with_context(|| {
-            format!("Failed to release S3 lock: {}", lock_descriptor.lock_key)
+            let lock_key = &lock_descriptor.lock_key;
+            format!("Failed to release S3 lock: {lock_key}")
           })
         }
       }
       Err(e) => {
         warn!(error = ?e, lock_key = %lock_descriptor.lock_key, node_id = ?lock_descriptor.node_id, "Failed to release S3 lock (SDK Error)");
         Err(e).with_context(|| {
-          format!("SDK Error releasing S3 lock: {}", lock_descriptor.lock_key)
+          let lock_key = &lock_descriptor.lock_key;
+          format!("SDK Error releasing S3 lock: {lock_key}")
         })
       }
     }
@@ -1710,7 +1712,8 @@ mod tests {
       .create_bucket(&bucket)
       .expect("Failed to create bucket");
 
-    let endpoint_url = format!("http://127.0.0.1:{}", minio.port);
+    let port = minio.port;
+    let endpoint_url = format!("http://127.0.0.1:{port}");
 
     // Create credentials from MinIO server
     let credentials = Credentials::new(
@@ -1837,9 +1840,7 @@ mod tests {
       Err(LockAcquireError::LockHeld(Some(info))) => {
         assert_eq!(info.node_id, node_a);
       }
-      _ => panic!(
-        "Node B should have failed with LockHeld, got {handle_b:?}"
-      ),
+      _ => panic!("Node B should have failed with LockHeld, got {handle_b:?}"),
     }
 
     handle_a.release().await;

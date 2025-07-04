@@ -24,6 +24,7 @@ use crate::distributed_lock::LockHandle;
 use crate::distributed_lock::LockInfo;
 use crate::distributed_lock::LockStateKind;
 use crate::peer_manager::PeerManager;
+use crate::pingora::prelude::*;
 use crate::router::ProxyError;
 use crate::sqlite_replica::{create_empty_database, SqliteReplica};
 use crate::NodeState;
@@ -819,38 +820,28 @@ pub enum CellManagerError {
   Internal(#[from] anyhow::Error),
 }
 
-impl From<CellManagerError> for Box<pingora::Error> {
+impl From<CellManagerError> for Box<Error> {
   fn from(e: CellManagerError) -> Self {
     use CellManagerError::*;
     match e {
-      CellCreationInProgress => pingora::Error::explain(
-        pingora::ErrorType::HTTPStatus(
-          http::StatusCode::INTERNAL_SERVER_ERROR.into(),
-        ),
+      CellCreationInProgress => Error::explain(
+        ErrorType::HTTPStatus(http::StatusCode::INTERNAL_SERVER_ERROR.into()),
         "Failed to get or spawn cell",
       ),
-      LockContention(_) => pingora::Error::explain(
-        pingora::ErrorType::HTTPStatus(
-          http::StatusCode::INTERNAL_SERVER_ERROR.into(),
-        ),
+      LockContention(_) => Error::explain(
+        ErrorType::HTTPStatus(http::StatusCode::INTERNAL_SERVER_ERROR.into()),
         "Cell is being handled by another node",
       ),
-      S3(_) => pingora::Error::explain(
-        pingora::ErrorType::HTTPStatus(
-          http::StatusCode::INTERNAL_SERVER_ERROR.into(),
-        ),
+      S3(_) => Error::explain(
+        ErrorType::HTTPStatus(http::StatusCode::INTERNAL_SERVER_ERROR.into()),
         "S3 operation failed",
       ),
-      Serde(_) => pingora::Error::explain(
-        pingora::ErrorType::HTTPStatus(
-          http::StatusCode::INTERNAL_SERVER_ERROR.into(),
-        ),
+      Serde(_) => Error::explain(
+        ErrorType::HTTPStatus(http::StatusCode::INTERNAL_SERVER_ERROR.into()),
         "Failed to serialize or deserialize lock data",
       ),
-      Internal(_) => pingora::Error::explain(
-        pingora::ErrorType::HTTPStatus(
-          http::StatusCode::INTERNAL_SERVER_ERROR.into(),
-        ),
+      Internal(_) => Error::explain(
+        ErrorType::HTTPStatus(http::StatusCode::INTERNAL_SERVER_ERROR.into()),
         "Internal server error during cell lookup",
       ),
     }
@@ -1008,9 +999,7 @@ fn spawn_deno_process(
 
   // Spawn with ChildOnParentExit for automatic termination when parent exits
   ChildOnParentExit::spawn(cmd).with_context(|| {
-    format!(
-      "Failed to spawn Deno process for {host} with parent-exit guard"
-    )
+    format!("Failed to spawn Deno process for {host} with parent-exit guard")
   })
 }
 

@@ -389,9 +389,7 @@ impl TestEnv {
       }
 
       if !ok {
-        panic!(
-          "Server on port {p} for node {node_name} failed to start"
-        );
+        panic!("Server on port {p} for node {node_name} failed to start");
       }
     }
   }
@@ -472,15 +470,11 @@ impl Drop for TestEnv {
       for (node_name, (stdout, stderr)) in self.shutdown_node_logs.iter() {
         #[allow(clippy::print_stdout)]
         {
-          println!(
-            "---- terminated node {node_name} stdout ----\n{stdout}"
-          );
+          println!("---- terminated node {node_name} stdout ----\n{stdout}");
         }
         #[allow(clippy::print_stderr)]
         {
-          eprintln!(
-            "---- terminated node {node_name} stderr ----\n{stderr}"
-          );
+          eprintln!("---- terminated node {node_name} stderr ----\n{stderr}");
         }
       }
     }

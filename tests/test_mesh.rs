@@ -5,6 +5,11 @@ use serde_json::Value;
 use std::time::Duration;
 use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::protocol::Message;
+
+type WebSocketStream = tokio_tungstenite::WebSocketStream<
+  tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+>;
+
 use tracing::{info, warn};
 use url::Url;
 use uuid::Uuid;
@@ -346,9 +351,8 @@ async fn test_node_failure_takeover() {
 
   // Try to access the cell through a secondary node
   let secondary_port = secondary_owners[0];
-  let secondary_url = format!(
-    "http://basic-db.localhost:{secondary_port}/cell/{test_cell_id}"
-  );
+  let secondary_url =
+    format!("http://basic-db.localhost:{secondary_port}/cell/{test_cell_id}");
 
   // This request should trigger takeover if not already happened
   // It might take several tries before the failover completes
@@ -493,9 +497,7 @@ async fn test_concurrent_takeover_locking() {
   let secondary_urls: Vec<String> = secondary_owners
     .iter()
     .map(|&public_port| {
-      format!(
-        "http://basic-db.localhost:{public_port}/cell/{test_cell_id}"
-      )
+      format!("http://basic-db.localhost:{public_port}/cell/{test_cell_id}")
     })
     .collect();
 
@@ -635,9 +637,8 @@ async fn test_proxy_forwarding_retry() {
   info!("Testing forwarding from non-owner port: {}", non_owner_port);
 
   // Create initial data by sending request to a non-owner node (should forward to primary)
-  let url = format!(
-    "http://basic-db.localhost:{non_owner_port}/cell/{test_cell_id}"
-  );
+  let url =
+    format!("http://basic-db.localhost:{non_owner_port}/cell/{test_cell_id}");
   let client = reqwest::Client::builder().build().unwrap();
   let response1 = client.get(&url).send().await.unwrap();
   assert_eq!(response1.status(), 200);
@@ -705,8 +706,7 @@ async fn test_proxy_forwarding_retry() {
   assert_eq!(response4.text().await.unwrap().trim(), "4");
 
   // Verify the forwarding path now points to a different node
-  let peer_info_url =
-    format!("http://localhost:{non_owner_port}/_mesh/peers");
+  let peer_info_url = format!("http://localhost:{non_owner_port}/_mesh/peers");
   let new_peers = reqwest::get(&peer_info_url)
     .await
     .unwrap()
@@ -717,9 +717,8 @@ async fn test_proxy_forwarding_retry() {
   info!("New peer info after primary failure: {}", new_peers);
 
   // Get the new owner info
-  let new_owner_url = format!(
-    "http://localhost:{non_owner_port}/_mesh/owner/{test_cell_id}"
-  );
+  let new_owner_url =
+    format!("http://localhost:{non_owner_port}/_mesh/owner/{test_cell_id}");
   let new_owner_resp = reqwest::get(&new_owner_url)
     .await
     .unwrap()
@@ -749,8 +748,7 @@ async fn test_restore_coordination() {
   let port_a = test_env.ports[0].public();
 
   // Send request to Node A to create data in the cell
-  let url_a =
-    format!("http://basic-db.localhost:{port_a}/cell/{test_cell_id}");
+  let url_a = format!("http://basic-db.localhost:{port_a}/cell/{test_cell_id}");
   let client = reqwest::Client::builder().build().unwrap();
 
   let response_a = client.get(&url_a).send().await.unwrap();
@@ -765,9 +763,9 @@ async fn test_restore_coordination() {
   assert_eq!(content_a2.trim(), "2");
 
   // Verify SQLite database exists
-  let db_path = test_env.server_dirs[0].path().join(format!(
-    "data/basic-db.localhost/sqlite/{test_cell_id}.db"
-  ));
+  let db_path = test_env.server_dirs[0]
+    .path()
+    .join(format!("data/basic-db.localhost/sqlite/{test_cell_id}.db"));
   assert!(db_path.exists());
 
   info!("Waiting for Litestream to replicate data to S3...");
@@ -919,9 +917,7 @@ async fn test_restore_single() {
 
 /// Helper function to read a message of a specific type from a WebSocket stream
 async fn read_message_of_type(
-  stream: &mut tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-  >,
+  stream: &mut WebSocketStream,
   msg_type: &str,
   timeout_ms: u64,
 ) -> Value {
@@ -957,9 +953,7 @@ async fn connect_to_cell(
   port: u16,
   cell_id: &str,
 ) -> (
-  tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-  >,
+  WebSocketStream,
   String, // username
 ) {
   // Use the hostname directly with the test port
@@ -972,9 +966,7 @@ async fn connect_to_cell(
   let (mut ws_stream, _) = tokio_tungstenite::connect_async(url.to_string())
     .await
     .unwrap_or_else(|e| {
-      panic!(
-        "Failed to connect to cell {cell_id} on port {port}: {e}"
-      )
+      panic!("Failed to connect to cell {cell_id} on port {port}: {e}")
     });
 
   // Read welcome message

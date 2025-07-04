@@ -410,9 +410,8 @@ impl SqliteReplica {
 
     // Create parent directory if needed
     if let Some(parent) = self.config_path.parent() {
-      fs::create_dir_all(parent).with_context(|| {
-        format!("Failed to create config dir: {parent:?}")
-      })?;
+      fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create config dir: {parent:?}"))?;
     }
 
     assert!(!self.tenant.contains('/'));
