@@ -17,6 +17,7 @@ import {
   type WorkflowStep,
 } from "./types.ts";
 import { logger } from "./logger.ts";
+import { TestEnvironment } from "./testing.ts";
 
 class WorkflowSuspendedError extends Error {
   constructor(public reason: string, public metadata?: unknown) {
@@ -69,14 +70,10 @@ export class WorkflowRuntime {
     return this.#runningWorkflows;
   }
 
-  register<Input extends JSONValue, Output extends Voidable<JSONValue>>(
+  #register<Input extends JSONValue, Output extends Voidable<JSONValue>>(
     name: string,
     handler: (ctx: WorkflowCtx<Input>) => Promise<Output>,
   ): void {
-    this.#ensureTablesExist();
-    this.#dbAccessor.db.prepare(
-      `INSERT OR IGNORE INTO workflows (name) VALUES (?)`,
-    ).run(name);
     this.#workflows.set(
       name,
       handler as unknown as (ctx: WorkflowCtx<JSONValue>) => Promise<JSONValue>,
@@ -100,16 +97,9 @@ export class WorkflowRuntime {
     if (this.#tablesCreated) return;
 
     this.#dbAccessor.db.exec(`
-      CREATE TABLE IF NOT EXISTS workflows (
-        name TEXT PRIMARY KEY NOT NULL,
-        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc'))
-      );
-    `);
-
-    this.#dbAccessor.db.exec(`
       CREATE TABLE IF NOT EXISTS workflow_runs (
         id TEXT PRIMARY KEY NOT NULL,
-        workflow_name TEXT NOT NULL REFERENCES workflows(name) ON DELETE CASCADE,
+        workflow_name TEXT NOT NULL,
         input_data TEXT NOT NULL,
         output_data TEXT,
         dispatched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc')),
@@ -229,7 +219,12 @@ export class WorkflowRuntime {
     WorkflowRuntime.#runningWorkflows++;
     try {
       // Execute the workflow handler
-      const output = await handler({ input: inputData, step, attempt: 1 });
+      const output = await handler({
+        input: inputData,
+        step,
+        db: this.#dbAccessor.db,
+        attempt: 1,
+      });
 
       logger().debug(
         `Workflow run ${runId} (${workflowName.toString()}) completed`,
@@ -434,7 +429,9 @@ export class WorkflowRuntime {
   define<Input extends JSONValue, Output extends Voidable<JSONValue>>(
     config: WorkflowConfig<Input, Output>,
   ): WorkflowDef<Input, Output> {
-    this.#ensureTablesExist();
+    // We intentionally don't call #ensureTablesExist() here because workflow
+    // definition itself does not require any database tables. Lazy DB setup
+    // enables testing workflows.
 
     // Wrapper to convert from new API to internal format
     const wrappedHandler = async (
@@ -442,7 +439,9 @@ export class WorkflowRuntime {
     ) => {
       if (ctx.input === null || ctx.input === undefined) {
         return await config.handler(
-          { step: ctx.step, attempt: ctx.attempt } as WorkflowCtx<Input>,
+          { step: ctx.step, db: ctx.db, attempt: ctx.attempt } as WorkflowCtx<
+            Input
+          >,
         );
       } else {
         return await config.handler(
@@ -453,7 +452,7 @@ export class WorkflowRuntime {
       }
     };
 
-    this.register(config.name, wrappedHandler);
+    this.#register(config.name, wrappedHandler);
     return { config, name: config.name };
   }
 
@@ -468,6 +467,25 @@ export class WorkflowRuntime {
       throw new Error(`Workflow ${workflow.name} not found`);
     }
     return runId;
+  }
+
+  /**
+   * Get a copy of all registered workflows for testing purposes.
+   * @returns A new Map containing all registered workflow handlers
+   */
+  getWorkflowRegistry(): Map<
+    string,
+    (ctx: WorkflowCtx<JSONValue>) => Promise<Voidable<JSONValue>>
+  > {
+    return new Map(this.#workflows);
+  }
+
+  /**
+   * Create a test environment with access to all registered workflows.
+   * @returns A new TestEnvironment instance
+   */
+  createTestEnvironment(): TestEnvironment {
+    return new TestEnvironment(this.getWorkflowRegistry());
   }
 }
 

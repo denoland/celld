@@ -117,7 +117,6 @@ fn start_server(config: config::Config) -> Server {
 
   // Create an HTTP proxy service with our app
   let mut proxy_service = http_proxy_service(&pingora_config2, app);
-  proxy_service.threads = Some(1);
 
   // Configure the proxy service to listen on the specified address
   proxy_service.add_tcp(&node_state.config.listen_addr.to_string());
@@ -129,7 +128,6 @@ fn start_server(config: config::Config) -> Server {
 
   // Create an HTTP service for the internal API
   let mut internal_service = http_proxy_service(&pingora_config2, internal_api);
-  internal_service.threads = Some(1);
 
   // Configure the internal service to listen on the internal address
   internal_service.add_tcp(&node_state.config.internal_listen_addr.to_string());
@@ -752,6 +750,14 @@ mod tests {
       .send()
       .await
       .unwrap();
+
+    // Trigger workflow table creation by calling getRunProgress
+    c.get("http://127.0.0.1:6146/cell/tables/run-progress?id=dummy")
+      .header("Host", "workflow.localhost")
+      .send()
+      .await
+      .unwrap();
+
     let workflow_tables =
       get_tables("data/workflow.localhost/sqlite/tables.db");
     assert_eq!(
@@ -761,8 +767,7 @@ mod tests {
         "logs",
         "scheduled_tasks",
         "workflow_runs",
-        "workflow_steps",
-        "workflows"
+        "workflow_steps"
       ]
     );
   }

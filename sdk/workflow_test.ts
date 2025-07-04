@@ -190,11 +190,6 @@ Deno.test("step.run that was already executed is not executed again on retry", a
   // Simulate a workflow that was dispatched but not completed
   const runId = workflowRunId(ulid());
 
-  // Insert test data - first register a workflow
-  dbAccessor.db.prepare(`
-      INSERT OR IGNORE INTO workflows (name) VALUES ('workflow')
-    `).run();
-
   // Insert a workflow run record to simulate a dispatched workflow
   dbAccessor.db.prepare(`
       INSERT INTO workflow_runs (id, workflow_name, input_data)
@@ -295,15 +290,7 @@ Deno.test("step.invoke recovers from crash", async () => {
   const parentId = workflowRunId(ulid());
   const childId = workflowRunId(ulid());
 
-  // Insert test data - first register workflows
-  dbAccessor.db.prepare(`
-      INSERT OR IGNORE INTO workflows (name) VALUES ('parent')
-    `).run();
-
-  dbAccessor.db.prepare(`
-      INSERT OR IGNORE INTO workflows (name) VALUES ('child')
-    `).run();
-
+  // Insert test data
   dbAccessor.db.prepare(`
       INSERT INTO workflow_runs (id, workflow_name, input_data) 
       VALUES (?, 'parent', '{"x": 5}')
@@ -357,15 +344,7 @@ Deno.test("step.invoke that was already executed is not executed again on retry"
   const parentId = workflowRunId(ulid());
   const childId = workflowRunId(ulid());
 
-  // Insert test data - first register workflows
-  dbAccessor.db.prepare(`
-      INSERT OR IGNORE INTO workflows (name) VALUES ('parent')
-    `).run();
-
-  dbAccessor.db.prepare(`
-      INSERT OR IGNORE INTO workflows (name) VALUES ('child')
-    `).run();
-
+  // Insert test data
   dbAccessor.db.prepare(`
       INSERT INTO workflow_runs (id, workflow_name, input_data) 
       VALUES (?, 'parent', 'null')
@@ -756,11 +735,6 @@ Deno.test("step.sleep is idempotent on retry", async () => {
 
   // Simulate a workflow that was interrupted during sleep
   const runId = workflowRunId(ulid());
-
-  // Insert test data - first register workflow
-  dbAccessor.db.prepare(`
-      INSERT OR IGNORE INTO workflows (name) VALUES ('sleep-retry-test')
-    `).run();
 
   // Insert workflow run
   dbAccessor.db.prepare(`

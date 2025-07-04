@@ -1,78 +1,184 @@
 import { DatabaseSync } from "node:sqlite";
 import {
+  type AlarmContext,
   type DbAccessor,
+  type RequestContext,
   type ScheduledTaskId,
   scheduledTaskId,
   type Task,
+  type TaskProcessor,
   type TaskScheduler,
+  type WebSocketContext,
 } from "./types.ts";
 import { WorkflowRuntime } from "./workflow.ts";
+import type { TestEnvironment } from "./testing.ts";
 import { ulid } from "jsr:@std/ulid@^1.0.0/ulid";
 import { logger, setup as setupLogger } from "./logger.ts";
 
 // Create a Cell class to track sockets and provide broadcast functionality
-export class Cell implements DbAccessor, TaskScheduler {
-  tenant: string;
-  id: string;
-  ctlClient: Deno.HttpClient;
-  sockets: Map<string, WebSocket>;
+export class Cell implements TaskScheduler, TaskProcessor {
+  sockets: Map<string, WebSocket> = new Map();
 
+  #initialized = false;
+  #tenant: string | undefined;
+  #id: string | undefined;
+  #ctlClient: Deno.HttpClient | undefined;
   #server: Deno.HttpServer | null = null;
-  #dbPath: string;
+  #dbPath: string | undefined;
   #dbInstance: DatabaseSync | null = null;
   #workflow: WorkflowRuntime | null = null;
+  #onInitCallback:
+    | ((db: DatabaseSync) => Promise<void> | void)
+    | null = null;
   #onRequestCallback:
-    | ((req: Request) => Promise<Response> | Response | void)
+    | ((
+      req: Request,
+      ctx: RequestContext,
+    ) => Promise<Response> | Response | void)
     | null = null;
   #onConnectCallback:
-    | ((socket: WebSocket, id: string) => Promise<void> | void)
+    | ((
+      socket: WebSocket,
+      id: string,
+      ctx: WebSocketContext,
+    ) => Promise<void> | void)
     | null = null;
   #onMessageCallback:
     | ((
       event: MessageEvent,
       socket: WebSocket,
       id: string,
+      ctx: WebSocketContext,
     ) => Promise<void> | void)
     | null = null;
   #onCloseCallback:
-    | ((socket: WebSocket, id: string) => Promise<void> | void)
+    | ((
+      socket: WebSocket,
+      id: string,
+      ctx: WebSocketContext,
+    ) => Promise<void> | void)
     | null = null;
   #onErrorCallback:
     | ((error: Error | ErrorEvent | Event) => Promise<void> | void)
     | null = null;
   #onAlarmCallback:
-    | (() => Promise<void> | void)
+    | ((ctx: AlarmContext) => Promise<void> | void)
     | null = null;
 
-  static #defaultTenant: string;
-  static #defaultId: string;
-  static #defaultDbPath: string;
-  static #defaultCtlSockPath: string;
+  static #defaultTenant: string | undefined;
+  static #defaultId: string | undefined;
+  static #defaultDbPath: string | undefined;
+  static #defaultCtlSockPath: string | undefined;
   static {
-    this.#defaultTenant = Deno.env.get("X-Tenant")!;
-    this.#defaultId = Deno.env.get("X-Cell-Id")!;
-    this.#defaultDbPath = `./sqlite/${this.#defaultId}.db`;
-    this.#defaultCtlSockPath = Deno.env.get("CELL_CONTROL_SOCKET")!;
+    Cell.#defaultTenant = Deno.env.get("X-Tenant");
+    Cell.#defaultId = Deno.env.get("X-Cell-Id");
+    Cell.#defaultDbPath = Cell.#defaultId
+      ? `./sqlite/${Cell.#defaultId}.db`
+      : undefined;
+    Cell.#defaultCtlSockPath = Deno.env.get("CELL_CONTROL_SOCKET");
   }
 
-  constructor(args?: {
-    tenant?: string;
-    id?: string;
-    dbPath?: string;
-    ctlSockPath?: string;
-  }) {
-    this.tenant = args?.tenant ?? Cell.#defaultTenant;
-    this.id = args?.id ?? Cell.#defaultId;
-    setupLogger(this.tenant, this.id, "DEBUG");
-    this.#dbPath = args?.dbPath ?? Cell.#defaultDbPath;
-    const ctlSockPath = args?.ctlSockPath ?? Cell.#defaultCtlSockPath;
-    this.ctlClient = Deno.createHttpClient({
+  get tenant(): string {
+    this.#ensureInitialized();
+    return this.#tenant!;
+  }
+
+  get id(): string {
+    this.#ensureInitialized();
+    return this.#id!;
+  }
+
+  get ctlClient(): Deno.HttpClient {
+    this.#ensureInitialized();
+    return this.#ctlClient!;
+  }
+
+  #getDb(): DatabaseSync {
+    this.#ensureInitialized();
+
+    if (this.#dbInstance) {
+      return this.#dbInstance;
+    }
+
+    this.#dbInstance = new DatabaseSync(this.#dbPath!);
+    // Call init callback if provided
+    if (this.#onInitCallback) {
+      const result = this.#onInitCallback(this.#dbInstance);
+      if (result instanceof Promise) {
+        // For now, we'll handle this synchronously
+        // In a real implementation, we might want to handle this differently
+        throw new Error(
+          "Init callback cannot be async when accessing db through getter. Use cell.init() before accessing cell.db",
+        );
+      }
+    }
+    return this.#dbInstance;
+  }
+
+  get workflow(): WorkflowRuntime {
+    // We intentionally don't call #ensureInitialized() here because we want to
+    // allow the test environment to obtain a WorkflowRuntime instance without
+    // requiring setup that is not relevant in the workflow test.
+
+    if (!this.#workflow) {
+      this.#workflow = new WorkflowRuntime(
+        {
+          get db() {
+            return cell.#getDb();
+          },
+        } satisfies DbAccessor,
+        this,
+      );
+    }
+    return this.#workflow;
+  }
+
+  /**
+   * Create a test environment for workflows.
+   */
+  createTestEnvironment(): TestEnvironment {
+    return this.workflow.createTestEnvironment();
+  }
+
+  #ensureInitialized(): void {
+    if (this.#initialized) {
+      return;
+    }
+
+    // Set initialized flag BEFORE calling initialize to prevent re-entry
+    this.#initialized = true;
+    this.#initialize();
+  }
+
+  #initialize(): void {
+    if (!Cell.#defaultTenant) {
+      throw new Error("X-Tenant env var is required");
+    }
+    this.#tenant = Cell.#defaultTenant;
+
+    if (!Cell.#defaultId) {
+      throw new Error("X-Cell-Id env var is required");
+    }
+    this.#id = Cell.#defaultId;
+
+    setupLogger(this.#tenant, this.#id, "DEBUG");
+
+    if (!Cell.#defaultDbPath) {
+      throw new Error("X-Cell-Id env var is required");
+    }
+    this.#dbPath = Cell.#defaultDbPath;
+
+    const ctlSockPath = Cell.#defaultCtlSockPath;
+    if (!ctlSockPath) {
+      throw new Error("CELL_CONTROL_SOCKET env var is required");
+    }
+    this.#ctlClient = Deno.createHttpClient({
       proxy: {
         transport: "unix",
         path: ctlSockPath,
       },
     });
-    this.sockets = new Map<string, WebSocket>();
+
     this.#setupServer();
     this.#setupTables();
   }
@@ -97,16 +203,47 @@ export class Cell implements DbAccessor, TaskScheduler {
     return this.sockets.values();
   }
 
-  request(cb: (req: Request) => Promise<Response> | Response | void): void {
+  init(cb: (db: DatabaseSync) => Promise<void> | void): void {
+    if (this.#onInitCallback) {
+      throw new Error(
+        `Init callback already registered for cell ${this.id}`,
+      );
+    }
+    this.#onInitCallback = cb;
+
+    // If database already exists, call the init callback immediately
+    if (this.#dbInstance) {
+      const result = cb(this.#dbInstance);
+      if (result instanceof Promise) {
+        throw new Error(
+          "Init callback cannot be async when database already exists. Use synchronous initialization.",
+        );
+      }
+    }
+  }
+
+  request(
+    cb:
+      | ((
+        req: Request,
+        ctx: RequestContext,
+      ) => Promise<Response> | Response | void)
+      | ((req: Request) => Promise<Response> | Response | void),
+  ): void {
+    this.#ensureInitialized();
+
     if (this.#onRequestCallback) {
       throw new Error(
         `Handler for request already registered for cell ${this.id}`,
       );
     }
-    this.#onRequestCallback = cb;
+    this.#onRequestCallback = cb as (
+      req: Request,
+      ctx: RequestContext,
+    ) => Promise<Response> | Response | void;
   }
 
-  alarm(cb: () => Promise<void> | void): void {
+  alarm(cb: (ctx: AlarmContext) => Promise<void> | void): void {
     if (this.#onAlarmCallback) {
       throw new Error(
         `Handler for alarm already registered for cell ${this.id}`,
@@ -124,7 +261,7 @@ export class Cell implements DbAccessor, TaskScheduler {
   getAlarm(id?: ScheduledTaskId): number | null {
     if (id === undefined) {
       // Get the closest "user-defined-alarm" task
-      const result = this.db.prepare(`
+      const result = this.#getDb().prepare(`
         SELECT
           scheduled_time_unix_ms
         FROM scheduled_tasks
@@ -137,7 +274,7 @@ export class Cell implements DbAccessor, TaskScheduler {
       return result.scheduled_time_unix_ms as number;
     }
 
-    const result = this.db.prepare(`
+    const result = this.#getDb().prepare(`
       SELECT scheduled_time_unix_ms FROM scheduled_tasks WHERE id = ?
     `).get(id);
     if (!result) {
@@ -154,7 +291,7 @@ export class Cell implements DbAccessor, TaskScheduler {
   }
 
   deleteAlarm(id: ScheduledTaskId): boolean {
-    const result = this.db.prepare(`
+    const result = this.#getDb().prepare(`
       DELETE FROM scheduled_tasks WHERE id = ?
     `).run(id);
 
@@ -170,18 +307,15 @@ export class Cell implements DbAccessor, TaskScheduler {
   // Track the currently scheduled global alarm time
   #currentGlobalAlarmTime: number | null = null;
 
-  async #handleAlarm(): Promise<void> {
-    const currentTime = Date.now();
-
-    // Clear our tracked alarm time since we're handling it now
-    this.#currentGlobalAlarmTime = null;
+  processDueTasks(currentTime?: number): void {
+    const now = currentTime ?? Date.now();
 
     // Retrieve ALL tasks that are due now or overdue
-    const dueTasks = this.db.prepare(`
+    const dueTasks = this.#getDb().prepare(`
       SELECT id, payload FROM scheduled_tasks
       WHERE scheduled_time_unix_ms <= ?
       ORDER BY scheduled_time_unix_ms ASC
-    `).all(currentTime);
+    `).all(now);
 
     // Dispatch the associated operations based on the task kind
     for (const task of dueTasks) {
@@ -189,7 +323,10 @@ export class Cell implements DbAccessor, TaskScheduler {
       try {
         switch (payload.kind) {
           case "user-defined-alarm": {
-            await this.#onAlarmCallback?.();
+            const ctx: AlarmContext = {
+              db: this.#getDb(),
+            };
+            this.#onAlarmCallback?.(ctx);
             break;
           }
           case "resume-all-pending-workflow-runs": {
@@ -206,11 +343,11 @@ export class Cell implements DbAccessor, TaskScheduler {
           }
           case "wake-sleep-step": {
             // Mark the sleep step as completed
-            this.db.prepare(`
-            UPDATE workflow_steps
-            SET completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc')
-            WHERE workflow_run_id = ? AND step_index = ?
-          `).run(payload.workflowRunId, payload.stepIndex);
+            this.#getDb().prepare(`
+              UPDATE workflow_steps
+              SET completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', 'utc')
+              WHERE workflow_run_id = ? AND step_index = ?
+            `).run(payload.workflowRunId, payload.stepIndex);
 
             // Retry the workflow directly
             if (this.workflow) {
@@ -228,10 +365,18 @@ export class Cell implements DbAccessor, TaskScheduler {
       }
 
       // Delete the task
-      this.db.prepare(`
+      this.#getDb().prepare(`
         DELETE FROM scheduled_tasks WHERE id = ?
       `).run(task.id);
     }
+  }
+
+  #handleAlarm(): void {
+    // Clear our tracked alarm time since we're handling it now
+    this.#currentGlobalAlarmTime = null;
+
+    // Process all due tasks
+    this.processDueTasks();
 
     // AFTER processing all due tasks, schedule the next alarm if any. Use
     // setTimeout to avoid connection issues with the current alarm request
@@ -244,7 +389,7 @@ export class Cell implements DbAccessor, TaskScheduler {
 
   async #scheduleNextAlarm(): Promise<void> {
     // Get the next task that needs to run
-    const nextTask = this.db.prepare(`
+    const nextTask = this.#getDb().prepare(`
       SELECT scheduled_time_unix_ms FROM scheduled_tasks
       ORDER BY scheduled_time_unix_ms ASC
       LIMIT 1
@@ -264,7 +409,13 @@ export class Cell implements DbAccessor, TaskScheduler {
     }
   }
 
-  connect(cb: (socket: WebSocket, id: string) => Promise<void> | void): void {
+  connect(
+    cb: (
+      socket: WebSocket,
+      id: string,
+      ctx: WebSocketContext,
+    ) => Promise<void> | void,
+  ): void {
     if (this.#onConnectCallback) {
       throw new Error(
         `Handler for connect already registered for cell ${this.id}`,
@@ -278,6 +429,7 @@ export class Cell implements DbAccessor, TaskScheduler {
       event: MessageEvent,
       socket: WebSocket,
       id: string,
+      ctx: WebSocketContext,
     ) => Promise<void> | void,
   ): void {
     if (this.#onMessageCallback) {
@@ -288,7 +440,13 @@ export class Cell implements DbAccessor, TaskScheduler {
     this.#onMessageCallback = cb;
   }
 
-  close(cb: (socket: WebSocket, id: string) => Promise<void> | void): void {
+  close(
+    cb: (
+      socket: WebSocket,
+      id: string,
+      ctx: WebSocketContext,
+    ) => Promise<void> | void,
+  ): void {
     if (this.#onCloseCallback) {
       throw new Error(
         `Handler for close already registered for cell ${this.id}`,
@@ -306,20 +464,6 @@ export class Cell implements DbAccessor, TaskScheduler {
     this.#onErrorCallback = cb;
   }
 
-  get db(): DatabaseSync {
-    if (!this.#dbInstance) {
-      this.#dbInstance = new DatabaseSync(this.#dbPath);
-    }
-    return this.#dbInstance;
-  }
-
-  get workflow(): WorkflowRuntime {
-    if (!this.#workflow) {
-      this.#workflow = new WorkflowRuntime(this, this);
-    }
-    return this.#workflow;
-  }
-
   #setupServer(): void {
     this.#server = Deno.serve(async (req) => {
       logger().debug({ url: req.url, method: req.method });
@@ -335,13 +479,19 @@ export class Cell implements DbAccessor, TaskScheduler {
         // Set up the WebSocket event handlers
         socket.onopen = () => {
           if (this.#onConnectCallback) {
-            this.#onConnectCallback(socket, socketId);
+            const ctx: WebSocketContext = {
+              db: this.#getDb(),
+            };
+            this.#onConnectCallback(socket, socketId, ctx);
           }
         };
 
         socket.onmessage = (e) => {
           if (this.#onMessageCallback) {
-            this.#onMessageCallback(e, socket, socketId);
+            const ctx: WebSocketContext = {
+              db: this.#getDb(),
+            };
+            this.#onMessageCallback(e, socket, socketId, ctx);
           }
         };
 
@@ -349,7 +499,10 @@ export class Cell implements DbAccessor, TaskScheduler {
           this.sockets.delete(socketId);
 
           if (this.#onCloseCallback) {
-            this.#onCloseCallback(socket, socketId);
+            const ctx: WebSocketContext = {
+              db: this.#getDb(),
+            };
+            this.#onCloseCallback(socket, socketId, ctx);
           }
         };
 
@@ -365,7 +518,7 @@ export class Cell implements DbAccessor, TaskScheduler {
       const url = new URL(req.url);
 
       if (req.method === "POST" && url.pathname === "/_internal/alarm") {
-        await this.#handleAlarm();
+        this.#handleAlarm();
         return new Response("OK", { status: 200 });
       }
 
@@ -375,7 +528,10 @@ export class Cell implements DbAccessor, TaskScheduler {
           req.url.replace(/^http\+unix:/, "http:"),
           req,
         );
-        const result = this.#onRequestCallback(modifiedReq);
+        const ctx: RequestContext = {
+          db: this.#getDb(),
+        };
+        const result = this.#onRequestCallback(modifiedReq, ctx);
         if (result instanceof Promise) {
           return await result;
         }
@@ -397,15 +553,18 @@ export class Cell implements DbAccessor, TaskScheduler {
   }
 
   #setupTables(): void {
+    // This will create the database and call init callback if provided
+    const db = this.#getDb();
+
     // Ensure `scheduled_tasks` table exists.
-    this.db.exec(`
+    db.exec(`
       CREATE TABLE IF NOT EXISTS scheduled_tasks (
         id TEXT PRIMARY KEY NOT NULL,
         scheduled_time_unix_ms INTEGER NOT NULL,
         payload TEXT NOT NULL
       )
     `);
-    this.db.exec(`
+    db.exec(`
       CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_schedule_time ON scheduled_tasks (scheduled_time_unix_ms)
     `);
   }
@@ -451,7 +610,7 @@ export class Cell implements DbAccessor, TaskScheduler {
 
   async schedule(task: Task): Promise<ScheduledTaskId> {
     const id = scheduledTaskId(ulid());
-    this.db.prepare(`
+    this.#getDb().prepare(`
       INSERT INTO scheduled_tasks (id, scheduled_time_unix_ms, payload) VALUES (?, ?, ?)
     `).run(id, task.scheduledTimeUnixMs, JSON.stringify(task));
 

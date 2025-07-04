@@ -37,6 +37,10 @@ export interface TaskScheduler {
   schedule(task: Task): Promise<ScheduledTaskId> | ScheduledTaskId;
 }
 
+export interface TaskProcessor {
+  processDueTasks(currentTime?: number): void;
+}
+
 export type WorkflowRunProgress = {
   id: WorkflowRunId;
   workflowName: string;
@@ -114,5 +118,24 @@ export interface WorkflowDef<
 
 export type WorkflowCtx<Input = void> = {
   step: WorkflowStep;
+  db: DatabaseSync;
   attempt: number;
 } & (Input extends void ? Record<PropertyKey, never> : { input: Input });
+
+export interface RequestContext {
+  db: DatabaseSync;
+}
+
+export interface AlarmContext {
+  db: DatabaseSync;
+}
+
+export interface WebSocketContext {
+  db: DatabaseSync;
+}
+
+export type WorkflowHandler = (
+  ctx: WorkflowCtx<JSONValue>,
+) => Promise<Voidable<JSONValue>>;
+
+export type WorkflowRegistry = Map<string, WorkflowHandler>;

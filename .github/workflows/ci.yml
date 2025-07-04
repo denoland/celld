@@ -110,7 +110,8 @@ jobs:
       run: |
         # For proper typing of node:sqlite
         deno cache npm:@types/node
-        deno test
+        # --allow-env is needed for examples/workflow_test.ts which imports the production cell singleton
+        deno test --allow-env
       working-directory: ./sdk
 
   lint:

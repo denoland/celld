@@ -1,4 +1,5 @@
 import { cell } from "../../../sdk/mod.ts";
+import type { DatabaseSync } from "node:sqlite";
 
 console.log(`[${cell.id}] Initializing LLM chat server...`);
 
@@ -21,8 +22,8 @@ function createMessage(
 }
 
 // Initialize database with messages table
-function initializeDatabase() {
-  cell.db.exec(`
+cell.init((db) => {
+  db.exec(`
     CREATE TABLE IF NOT EXISTS messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       role TEXT NOT NULL,
@@ -32,21 +33,18 @@ function initializeDatabase() {
   `);
 
   // Add a system message if the table is empty
-  const count = cell.db.prepare("SELECT COUNT(*) as count FROM messages")
+  const count = db.prepare("SELECT COUNT(*) as count FROM messages")
     .get() as { count: number };
   if (count.count === 0) {
-    cell.db.prepare(
+    db.prepare(
       "INSERT INTO messages (role, content, timestamp) VALUES (?, ?, ?)",
     ).run("system", "You are a helpful assistant.", new Date().toISOString());
   }
-}
-
-// Initialize the database
-initializeDatabase();
+});
 
 // Get all messages from the database
-function getMessages(): Message[] {
-  const rows = cell.db.prepare(
+function getMessages(db: DatabaseSync): Message[] {
+  const rows = db.prepare(
     "SELECT role, content, timestamp FROM messages ORDER BY id ASC",
   ).all();
 
@@ -59,17 +57,18 @@ function getMessages(): Message[] {
 
 // Save a message to the database
 function saveMessage(
+  db: DatabaseSync,
   role: "user" | "assistant" | "system",
   content: string,
 ): void {
-  cell.db.prepare(
+  db.prepare(
     "INSERT INTO messages (role, content, timestamp) VALUES (?, ?, ?)",
   ).run(role, content, new Date().toISOString());
 }
 
 // Clear all messages from the database
-function clearMessages(): void {
-  cell.db.exec("DELETE FROM messages WHERE role != 'system'");
+function clearMessages(db: DatabaseSync): void {
+  db.exec("DELETE FROM messages WHERE role != 'system'");
 }
 
 // Get assistant response from OpenAI API
@@ -114,13 +113,13 @@ async function getAssistantResponse(
 }
 
 // Handle HTTP requests
-cell.request((request: Request): Response => {
+cell.request((request: Request, ctx): Response => {
   const url = new URL(request.url);
 
   if (url.pathname === "/stats") {
     // Return chat cell stats
     const connectionCount = Array.from(cell.getWebSockets()).length;
-    const messageCount = getMessages().length;
+    const messageCount = getMessages(ctx.db).length;
 
     return new Response(
       JSON.stringify({
@@ -140,10 +139,10 @@ cell.request((request: Request): Response => {
 });
 
 // Handle new connections
-cell.connect((socket: WebSocket, id: string) => {
+cell.connect((socket: WebSocket, id: string, ctx) => {
   try {
     // Get all messages from the database
-    const messages = getMessages();
+    const messages = getMessages(ctx.db);
 
     // Filter out system messages for the client
     const clientMessages = messages.filter((msg) => msg.role !== "system");
@@ -165,57 +164,59 @@ cell.connect((socket: WebSocket, id: string) => {
 });
 
 // Handle message reception
-cell.message(async (event: MessageEvent, socket: WebSocket, id: string) => {
-  try {
-    const message = JSON.parse(event.data.toString());
+cell.message(
+  async (event: MessageEvent, socket: WebSocket, id: string, ctx) => {
+    try {
+      const message = JSON.parse(event.data.toString());
 
-    switch (message.type) {
-      case "message":
-        // Save user message to database
-        saveMessage("user", message.content);
+      switch (message.type) {
+        case "message":
+          // Save user message to database
+          saveMessage(ctx.db, "user", message.content);
 
-        // Get all messages for context
-        const allMessages = getMessages();
+          // Get all messages for context
+          const allMessages = getMessages(ctx.db);
 
-        // Get response from OpenAI
-        const responseContent = await getAssistantResponse(allMessages);
+          // Get response from OpenAI
+          const responseContent = await getAssistantResponse(allMessages);
 
-        // Save assistant response to database
-        saveMessage("assistant", responseContent);
+          // Save assistant response to database
+          saveMessage(ctx.db, "assistant", responseContent);
 
-        // Send response to all clients
-        cell.broadcast(
-          createMessage("message", {
-            role: "assistant",
-            content: responseContent,
-          }),
-        );
-        break;
+          // Send response to all clients
+          cell.broadcast(
+            createMessage("message", {
+              role: "assistant",
+              content: responseContent,
+            }),
+          );
+          break;
 
-      case "clear":
-        // Clear messages from database
-        clearMessages();
-        break;
+        case "clear":
+          // Clear messages from database
+          clearMessages(ctx.db);
+          break;
 
-      default:
-        socket.send(
-          createMessage("error", {
-            message: "Unknown message type",
-          }),
-        );
+        default:
+          socket.send(
+            createMessage("error", {
+              message: "Unknown message type",
+            }),
+          );
+      }
+    } catch (error) {
+      console.error("Error processing message:", error);
+      socket.send(
+        createMessage("error", {
+          message: "Error processing your message",
+        }),
+      );
     }
-  } catch (error) {
-    console.error("Error processing message:", error);
-    socket.send(
-      createMessage("error", {
-        message: "Error processing your message",
-      }),
-    );
-  }
-});
+  },
+);
 
 // Handle connection closures
-cell.close((socket: WebSocket, id: string) => {
+cell.close((socket: WebSocket, id: string, ctx) => {
   console.log("Connection closed", { connectionId: id });
 });
 

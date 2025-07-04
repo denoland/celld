@@ -1,16 +1,18 @@
 import { cell } from "../../../sdk/mod.ts";
 
-cell.db.exec(`
-  CREATE TABLE IF NOT EXISTS alarm_count (
-    cell_id TEXT NOT NULL PRIMARY KEY,
-    count INTEGER NOT NULL
-  )
-`);
+cell.init((db) => {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS alarm_count (
+      cell_id TEXT NOT NULL PRIMARY KEY,
+      count INTEGER NOT NULL
+    )
+  `);
+});
 
-cell.request(async (req: Request) => {
+cell.request(async (req: Request, ctx) => {
   switch (req.method) {
     case "GET": {
-      const row = cell.db.prepare(`
+      const row = ctx.db.prepare(`
         SELECT count FROM alarm_count WHERE cell_id = ?
       `).get(cell.id) as { count?: number };
       return Response.json({ count: row?.count ?? 0 });
@@ -29,8 +31,8 @@ cell.request(async (req: Request) => {
 });
 
 // This alarm will trigger itself recursively at 1 second intervals.
-cell.alarm(async () => {
-  cell.db.prepare(`
+cell.alarm(async (ctx) => {
+  ctx.db.prepare(`
     INSERT INTO alarm_count (cell_id, count) VALUES (?, 1)
     ON CONFLICT(cell_id) DO UPDATE SET count = count + 1
   `)

@@ -2,31 +2,33 @@ import { cell, types } from "../../../sdk/mod.ts";
 import { delay } from "jsr:@std/async@1.0.13/delay";
 import { randomIntegerBetween } from "jsr:@std/random@0.1.1";
 
-cell.db.exec(`
-  CREATE TABLE IF NOT EXISTS logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    text TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now', 'utc'))
-  )
-`);
-cell.db.exec(`
-  CREATE TABLE IF NOT EXISTS key_values (
-    key TEXT PRIMARY KEY NOT NULL,
-    value INTEGER NOT NULL
-  )
-`);
+cell.init((db) => {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      text TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now', 'utc'))
+    )
+  `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS key_values (
+      key TEXT PRIMARY KEY NOT NULL,
+      value INTEGER NOT NULL
+    )
+  `);
+});
 
 const reliableWorkflow = cell.workflow.define<
   { username: string; email: string; phoneNumber: string },
   null
 >({
   name: "reliable",
-  handler: async ({ input, step }) => {
+  handler: async ({ input, step, db }) => {
     await step.run("send-email", async () => {
       // Simulate a delay of sending email
       await delay(500);
       // Save the email sent log to the database
-      cell.db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
+      db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
         `${input.username} signup email sent to ${input.email}`,
       );
       return null;
@@ -36,7 +38,7 @@ const reliableWorkflow = cell.workflow.define<
       // Simulate a delay of sending SMS
       await delay(800);
       // Save the SMS sent log to the database
-      cell.db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
+      db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
         `${input.username} signup SMS sent to ${input.phoneNumber}`,
       );
       return null;
@@ -52,7 +54,7 @@ const reliableWorkflow = cell.workflow.define<
 // This aims to verify the result memoization in retried workflow runs.
 const flakyWorkflow = cell.workflow.define<null, null>({
   name: "flaky",
-  handler: async ({ step }) => {
+  handler: async ({ step, db }) => {
     const randomNumber = await step.run(
       "generate-random-number",
       async () => {
@@ -63,7 +65,7 @@ const flakyWorkflow = cell.workflow.define<null, null>({
     );
 
     await step.run("throws-until-flaky-key-is-set", async () => {
-      const flakyToggle = cell.db.prepare(
+      const flakyToggle = db.prepare(
         `SELECT value FROM key_values WHERE key = 'flaky'`,
       ).get();
       if (flakyToggle === undefined) {
@@ -106,9 +108,9 @@ const sleepWorkflow = cell.workflow.define<
   { message: string }
 >({
   name: "sleep-test",
-  handler: async ({ input, step }) => {
+  handler: async ({ input, step, db }) => {
     await step.run("before-sleep", () => {
-      cell.db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
+      db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
         `Starting sleep for ${input.sleepDurationMs}ms`,
       );
       return null;
@@ -117,7 +119,7 @@ const sleepWorkflow = cell.workflow.define<
     await step.sleep("wait", input.sleepDurationMs);
 
     await step.run("after-sleep", () => {
-      cell.db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
+      db.prepare(`INSERT INTO logs (text) VALUES (?)`).run(
         `Sleep completed after ${input.sleepDurationMs}ms`,
       );
       return null;
@@ -127,13 +129,13 @@ const sleepWorkflow = cell.workflow.define<
   },
 });
 
-cell.request(async (req: Request) => {
+cell.request(async (req: Request, ctx) => {
   const url = new URL(req.url);
 
   const lastPathSegment = url.pathname.split("/").at(-1);
 
   if (lastPathSegment === "logs" && req.method === "GET") {
-    const logs = cell.db.prepare(`SELECT * FROM logs ORDER BY created_at DESC`)
+    const logs = ctx.db.prepare(`SELECT * FROM logs ORDER BY created_at DESC`)
       .all();
     return Response.json(logs);
   }
@@ -143,14 +145,14 @@ cell.request(async (req: Request) => {
     if (!key) {
       return Response.json({ error: "key is required" }, { status: 400 });
     }
-    const value = cell.db.prepare(`SELECT value FROM key_values WHERE key = ?`)
+    const value = ctx.db.prepare(`SELECT value FROM key_values WHERE key = ?`)
       .get(key);
     return Response.json(value);
   }
 
   if (lastPathSegment === "kv" && req.method === "POST") {
     const { key, value } = await req.json();
-    cell.db.prepare(`INSERT INTO key_values (key, value) VALUES (?, ?)`).run(
+    ctx.db.prepare(`INSERT INTO key_values (key, value) VALUES (?, ?)`).run(
       key,
       value,
     );
