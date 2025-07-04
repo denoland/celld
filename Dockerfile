@@ -18,6 +18,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src/
 COPY tests ./tests/
+COPY pingora_hyper ./pingora_hyper/
 
 # Build the actual application
 RUN cargo build --release
