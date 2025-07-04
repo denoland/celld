@@ -25,8 +25,7 @@
       "Bash(cargo build:*)",
       "Bash(cargo run:*)",
       "Bash(RUST_LOG=debug cargo test test_websocket_echo -- --nocapture 2 >& 1)",
-      "Bash(RUST_LOG=pingora_hyper=debug cargo test test_websocket_echo -- --nocapture 2 >& 1)",
-      "Bash(git add:*)"
+      "Bash(RUST_LOG=pingora_hyper=debug cargo test test_websocket_echo -- --nocapture 2 >& 1)"
     ],
     "deny": []
   }
