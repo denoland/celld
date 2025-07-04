@@ -42,7 +42,7 @@ const userWorkflow = cell.workflow.define<
 
 // Test using Deno.test
 Deno.test("emailWorkflow sends email and logs result", async () => {
-  using env = cell.workflow.createTestEnvironment();
+  using env = cell.createTestEnvironment();
 
   // Mock the email sending step
   env.mockStep("send-email", () => "msg-12345");
@@ -69,7 +69,7 @@ Deno.test("emailWorkflow sends email and logs result", async () => {
 
 // Test with database access
 Deno.test("workflow with database operations", async () => {
-  using env = cell.workflow.createTestEnvironment();
+  using env = cell.createTestEnvironment();
 
   // Initialize database tables
   env.db.exec(`
@@ -121,7 +121,7 @@ Deno.test("workflow can invoke another workflow", async () => {
   });
 
   // Create test environment AFTER defining workflows
-  using env = cell.workflow.createTestEnvironment();
+  using env = cell.createTestEnvironment();
 
   // Run the parent workflow
   const { waitForCompletion } = await env.runWorkflow(calculateWorkflow, {
@@ -164,7 +164,7 @@ Deno.test("workflow with sleep step", async () => {
     },
   });
 
-  using env = cell.workflow.createTestEnvironment();
+  using env = cell.createTestEnvironment();
 
   // Run the workflow with a short sleep
   const { waitForCompletion } = await env.runWorkflow(
