@@ -353,9 +353,15 @@ fn as_user_sql<T>(callback: impl FnOnce() -> T) -> T {
 
 fn is_reserved_sql_name(name: &str) -> bool {
     USER_SQL.with(std::cell::Cell::get)
-        && name
+        && (name
             .get(..4)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("_cf_"))
+            // The ltx replicator's control tables predate the `_cf_` prefix
+            // convention; application SQL that touches them breaks WAL
+            // capture for the cell, so they are reserved the same way.
+            || name
+                .get(..12)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("_litestream_")))
 }
 
 fn valid_sql_boolean(value: &str) -> bool {
@@ -2415,6 +2421,17 @@ pub fn delete_all_with_alarm(scope: &str, delete_alarm: bool) -> anyhow::Result<
             let result = (|| -> anyhow::Result<()> {
                 for table in tables {
                     if table == "_cf_METADATA" || (!delete_alarm && table == "_cf_ALARM") {
+                        continue;
+                    }
+                    // The ltx replicator owns its control tables. Dropping
+                    // them here fails every subsequent WAL capture for the
+                    // cell ("no such table: _litestream_seq") until the
+                    // database is reopened, which also wedges the output
+                    // gate: writes after deleteAll() can never prove durable.
+                    if table
+                        .get(..12)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("_litestream_"))
+                    {
                         continue;
                     }
                     let quoted = table.replace('"', "\"\"");

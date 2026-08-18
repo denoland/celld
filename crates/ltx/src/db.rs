@@ -378,6 +378,20 @@ impl Db {
 
     // ── WAL bootstrap ──────────────────────────────────────────────────────
 
+    /// Recreates the control tables if they are missing. They are created at
+    /// open, but an application-level sweep of `sqlite_schema` can drop them
+    /// (they do not carry the protected `_cf_` prefix); `CREATE TABLE IF NOT
+    /// EXISTS` on an existing table is a no-op, so this is safe to run on
+    /// every capture.
+    fn ensure_control_tables(&self) -> Result<()> {
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS _litestream_seq (id INTEGER PRIMARY KEY, seq INTEGER);\
+                 CREATE TABLE IF NOT EXISTS _litestream_lock (id INTEGER);",
+            )
+            .map_err(sql_err)
+    }
+
     /// Ensures the real WAL exists and has a header.
     ///
     /// Ported from `ensureWALExists` (db.go:1199-1209): exit early if the WAL
@@ -552,6 +566,12 @@ impl Db {
     /// Ported from `DB.Sync` (db.go:994-1056). The public entry point of the
     /// capture loop. Synchronous (see module docs); T10 drives it.
     pub fn sync(&mut self) -> Result<()> {
+        // Self-heal: recreate the control tables if something swept them out
+        // of `sqlite_schema` from under the replicator — without them every
+        // capture fails until the database is reopened. A no-op when the
+        // tables exist (no schema change, no WAL write).
+        self.ensure_control_tables()?;
+
         // Ensure the WAL has at least one frame (db.go:1017-1020).
         self.ensure_wal_exists()?;
 
