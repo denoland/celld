@@ -551,7 +551,13 @@ impl LtxRepl {
         };
         let ticket = handle.req_seq.fetch_add(1, Ordering::SeqCst) + 1;
         self.dirty.notify_one();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        // A sustained write burst (a large upload landing in one cell) can
+        // legitimately need more than one capture+upload cycle to prove; on a
+        // slow or busy store a fixed 10s fences the cell out from under an
+        // active request. Keep 10s as the default, let operators raise it.
+        let timeout_secs =
+            crate::env_vars::with_default("CELLD_LTX_DURABILITY_TIMEOUT_SECS", 10u64)?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
         loop {
             // Register the waiter before checking, so a sync that completes
             // between the check and the await is not missed.
