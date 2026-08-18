@@ -153,7 +153,9 @@ async function __drainBody(target) {
     offset += chunk.byteLength;
   }
   target._bodyBytes = bytes;
-  target._body = new TextDecoder().decode(bytes);
+  // text()/json() decode lazily; draining a binary body must not build the
+  // string form (it can exceed V8's string length for multi-hundred-MB
+  // payloads, which turns arrayBuffer() of a large body into a throw).
   return bytes;
 }
 class CelldBodyStream extends ReadableStream {
@@ -244,9 +246,10 @@ globalThis.Response = class Response {
     this._bodyBytes = stream !== null
       ? null
       : typed ? typed.bytes : __bodyBytes(body);
-    this._body = stream !== null
-      ? null
-      : new TextDecoder().decode(this._bodyBytes);
+    // Never decoded eagerly: a response whose text is never read must not
+    // pay a whole-body UTF-8 decode — for a large binary body (an archive,
+    // a git pack) that costs seconds and can exceed V8's string length.
+    this._body = undefined;
     // Hono rebuilds a response after middleware with
     // `new Response(response.body, response)`; the held stream (or a
     // fresh CelldBodyStream) preserves the payload across that
@@ -2204,7 +2207,7 @@ const __reviveBlob = (marker, bytes) => {
 };
 const __adoptBody = (target, bytes) => {
   target._bodyBytes = bytes;
-  target._body = new TextDecoder().decode(bytes);
+  target._body = undefined; // decoded lazily on the first text()/json()
   const body = target.body;
   if (body !== null) {
     body._st.bytes = bytes;
