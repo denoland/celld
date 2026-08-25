@@ -2191,8 +2191,10 @@ pub(crate) async fn drive_cell(
         report_alarm_moves(&report, moves);
     }
 
-    // An alarm that ended without running JS again still owes its outcome,
-    // and recording it is storage only the isolate can reach.
+    // An alarm that ended without running JS again still owes its outcome —
+    // `fail` deliberately leaves the claim, because it runs between turns
+    // where cell storage is unreachable (denoland/celld#170) — and
+    // recording it is storage only the isolate can reach.
     if entry.owes_alarm() {
         let moves = slot
             .turn(|worker| {

@@ -1896,13 +1896,16 @@ impl InFlight {
 
     /// Fail whichever shape is waiting, without knowing which.
     ///
-    /// An alarm that fails here failed for a reason that is not the
-    /// handler's — a budget overrun, a disconnect — so it does not count
-    /// against the retry limit. A handler that threw is recorded by
-    /// `settle`, which knows that it did, before it reaches this.
+    /// This must not touch cell storage: a budget overrun and a stuck
+    /// handler are found on the driving task, between turns, where the
+    /// storage thread-local is null — settling the alarm claim here
+    /// panicked the node (denoland/celld#170). The claim stays put, and
+    /// the drive loop's `owes_alarm` turn records it as not counting
+    /// against the retry limit, because a failure here is not the
+    /// handler's. A handler that threw is recorded by `settle`, which
+    /// knows that it did, before it reaches this.
     fn fail(&mut self, error: anyhow::Error) {
         if let Some(reply) = self.reply.take() {
-            self.settle_alarm(false, false);
             if self.trace.is_some() {
                 self.failure = Some(crate::telemetry::cap_error(error.to_string()));
             }
