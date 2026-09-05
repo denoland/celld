@@ -130,20 +130,32 @@ pub(super) fn install_harness(scope: &mut v8::PinScope) -> Result<()> {
     #[cfg(not(celld_internal_tests))]
     let harness = include_str!("harness.js");
     run_bootstrap_script(scope, "harness.js", harness)?;
+    // After the harness: both build on its EventTarget, and EventSource
+    // uses its fetch and timers.
+    run_bootstrap_script(
+        scope,
+        "message_channel.js",
+        include_str!("message_channel.js"),
+    )?;
+    run_bootstrap_script(scope, "event_source.js", include_str!("event_source.js"))?;
+    run_bootstrap_script(scope, "cache.js", include_str!("cache.js"))?;
+    run_bootstrap_script(scope, "sockets.js", include_str!("sockets.js"))?;
+    run_bootstrap_script(scope, "html_rewriter.js", include_str!("html_rewriter.js"))?;
     run_bootstrap_script(scope, "crypto.js", include_str!("crypto.js"))?;
     // Resolving the event hooks belongs to installing the harness, not to the
     // first event: the harness is what defines them, and a caller that
     // installed the harness without them would silently fall back to nothing
-    // at all. `harness.js` has just run, so all three globals exist here.
+    // at all. `harness.js` has just run, so all four globals exist here.
     install_event_hooks(scope)
 }
 
 /// Resolve the per-event harness hooks once and hold them for the isolate.
-/// See [`EventHooks`] for why all three resolve together.
+/// See [`EventHooks`] for why all four resolve together.
 fn install_event_hooks(scope: &mut v8::PinScope) -> Result<()> {
     let hooks = EventHooks {
         begin_event: global_function(scope, "__beginEvent")?,
         end_event: global_function(scope, "__endEvent")?,
+        advance_io_time: global_function(scope, "__advanceIoTime")?,
         abort_incoming_request: global_function(scope, "__abortIncomingRequest")?,
     };
     actor_runtime_state(scope)
@@ -790,6 +802,11 @@ pub(super) fn inject_queue_config(scope: &mut v8::PinScope, config: &WorkerConfi
     );
     set_limit(
         scope,
+        "producerGroupMs",
+        crate::env_vars::optional::<u64>("CELLD_QUEUE_PRODUCER_GROUP_MS")?.unwrap_or(4) as f64,
+    );
+    set_limit(
+        scope,
         "maxConcurrency",
         celld_logic::queue::MAX_CONCURRENCY as f64,
     );
@@ -845,6 +862,11 @@ pub(super) fn register_entrypoints(
         .get(scope, key.into())
         .and_then(|value| value.to_object(scope))
         .ok_or_else(|| anyhow!("missing doExports registry"))?;
+    let key = v8::String::new(scope, "classes").unwrap();
+    let classes = cell
+        .get(scope, key.into())
+        .and_then(|value| value.to_object(scope))
+        .ok_or_else(|| anyhow!("missing Durable Object class registry"))?;
     let cf_key = v8::String::new(scope, "__cf").unwrap();
     let cf = global
         .get(scope, cf_key.into())
@@ -886,6 +908,7 @@ pub(super) fn register_entrypoints(
             entrypoints.set(scope, name, value);
         } else if call_extends(scope, extends, value, durable_base)? {
             do_exports.set(scope, name, yes.into());
+            classes.set(scope, name, value);
         }
     }
     Ok(())
@@ -995,10 +1018,40 @@ pub(super) fn adopt_cell(
             cell,
             cell_storage.path,
             cell_storage.epoch,
+            cell_storage.vfs,
             compat.sqlite_vec,
         )
         .context("cell storage open failed")?;
     }
+    finish_cell_adoption(tc, cell, owned)
+}
+
+pub(super) fn adopt_embedded_cell(
+    tc: &mut v8::PinScope,
+    cell: &str,
+    parent: &storage::StorageIdentity,
+    name: &str,
+    id: &str,
+    props_json: &str,
+    compat: Compat,
+) -> Result<Option<i64>> {
+    storage::open_embedded(cell, parent, name, compat.sqlite_vec)
+        .context("facet storage open failed")?;
+    let alarm = finish_cell_adoption(tc, cell, true)?;
+    let depth = parent.facet_path.len() + 1;
+    let source = format!(
+        "__cell.facetConfigs[{cell:?}] = {{ id: {id:?}, props: JSON.parse({props_json:?}), depth: {depth} }};"
+    );
+    let code = v8::String::new(tc, &source).unwrap();
+    let script =
+        v8::Script::compile(tc, code, None).ok_or_else(|| anyhow!("facet config compile"))?;
+    script
+        .run(tc)
+        .ok_or_else(|| anyhow!("facet config install"))?;
+    Ok(alarm)
+}
+
+fn finish_cell_adoption(tc: &mut v8::PinScope, cell: &str, owned: bool) -> Result<Option<i64>> {
     // Every cell dispatch goes out through the host and arrives as an ordinary
     // reentrant `CellJob::Fetch`. There is no same-isolate shortcut, and there
     // will not be one.

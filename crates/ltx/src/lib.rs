@@ -22,6 +22,8 @@ pub mod error;
 pub mod host;
 pub mod ltx;
 mod lz4_block;
+pub mod paged;
+pub mod paged_vfs;
 pub mod replica;
 pub mod replica_compactor;
 pub mod replica_url;

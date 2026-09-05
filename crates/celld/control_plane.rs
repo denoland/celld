@@ -122,8 +122,8 @@ pub enum ManagedRuntimeState {
     ControlPlaneUnavailable,
     BucketUnavailable,
     CredentialRevoked,
-    /// The bucket answers, and the credential works, but the store does
-    /// not enforce the conditional write celld fences with. Distinct from
+    /// The bucket answers, and the credential works, but the store does not
+    /// support a required conditional write or ranged read. Distinct from
     /// `BucketUnavailable`, which a retry can clear: this one never does.
     StorageContractViolated,
 }
@@ -174,14 +174,14 @@ pub fn report_managed_runtime_state(state: ManagedRuntimeState) {
             "managed storage credential was rejected; restart celld to fetch a \
              fresh one, or run `celld credentials refresh` if a rotation is pending"
         ),
-        // No remedy on this node: the store itself cannot fence, so a
+        // No remedy on this node: the store lacks a required operation, so a
         // restart repeats the refusal. Name the two exits an operator has.
         ManagedRuntimeState::StorageContractViolated => warn!(
             event = "managed_runtime_state",
             managed_state,
-            "the fleet bucket does not enforce the conditional write celld fences \
-             with, so serving cannot start; move the fleet to a store that does, \
-             or set CELLD_STORAGE_PROBE=0 to start without this test"
+            "the fleet bucket does not support a storage operation celld requires, \
+             so serving cannot start; move the fleet to a compatible store, or set \
+             CELLD_STORAGE_PROBE=0 to start without this test"
         ),
     }
 }
@@ -2042,7 +2042,9 @@ fn validate_managed_module_envelope(deployment: &AgentDeployment) -> anyhow::Res
     let mut manifest_modules = std::collections::BTreeMap::new();
     let mut total_bytes = 0_usize;
     for module in &deployment.manifest.modules {
-        if !valid_managed_module_name(&module.name) || !valid_lower_hex(&module.sha256, 16) {
+        if !valid_managed_module_name(&module.name)
+            || !(valid_lower_hex(&module.sha256, 16) || valid_lower_hex(&module.sha256, 64))
+        {
             return Err(anyhow!(
                 "control-plane manifest has an invalid module reference: {:?}",
                 module.name

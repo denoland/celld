@@ -1,7 +1,7 @@
 # Examples
 
-These small Wrangler projects demonstrate progressively more of the Worker and
-Durable Object surface supported by `celld`:
+These small Wrangler projects demonstrate the Workers platform that `celld`
+supports, one service or API at a time:
 
 - `hello/` — a stateless Worker `fetch` handler
 - `webapi/` — common Web Platform APIs
@@ -19,6 +19,8 @@ Durable Object surface supported by `celld`:
 - `cron/` — a cron trigger that logs each tick
 - `workflow/` — a Workflow that builds a report in one durable step
 - `rpc/` — Durable Object method calls through JS RPC
+- `pi/` — the PiHarness agent loop in a Durable Object
+- `opencode/` — the OpenCode Workerd SDK in a Durable Object
 - `wasm/` — a Durable Object counter in Rust, compiled to Wasm with
   [workers-rs](https://github.com/cloudflare/workers-rs); needs a build step
   first (see its [README](wasm/README.md))

@@ -318,19 +318,80 @@ impl<W: Write> Encoder<W> {
 }
 
 fn verify_page_index(bytes: &[u8]) -> Result<()> {
+    decode_page_index(bytes).map(|_| ())
+}
+
+/// Decodes a page index into its `(pgno, frame_offset, frame_size)` entries.
+/// The index is varint triples terminated by a `pgno == 0` marker; each entry
+/// locates one page's whole frame (header plus LZ4 body) at `frame_offset` in
+/// the file, `frame_size` bytes long. Paged restore builds its page map from
+/// these, so it can range-read one frame without the object.
+pub(crate) fn decode_page_index(bytes: &[u8]) -> Result<Vec<(u32, u64, u64)>> {
     let mut position = 0;
+    let mut entries = Vec::new();
     loop {
         let page_number = read_uvarint(bytes, &mut position)?;
         if page_number == 0 {
             break;
         }
-        read_uvarint(bytes, &mut position)?;
-        read_uvarint(bytes, &mut position)?;
+        let offset = read_uvarint(bytes, &mut position)?;
+        let size = read_uvarint(bytes, &mut position)?;
+        entries.push((page_number as u32, offset, size));
     }
     if position != bytes.len() {
         return Err(Error::LTXCorrupted);
     }
-    Ok(())
+    Ok(entries)
+}
+
+/// Decodes one page frame — the `[header][optional 4-byte size][LZ4 body]` a
+/// page-index entry locates — into `page_size` bytes, standalone from the
+/// sequential [`Decoder`]. It reads the same two page encodings the decoder
+/// does (a sized LZ4 block or a legacy LZ4 frame), so paged restore serves a
+/// single ranged-read frame without materializing the object.
+/// Decodes the frame that a page index says holds `pgno`. The frame names
+/// its own page, so a wrong index entry or offset is an error, not another
+/// page's bytes served as this one.
+pub(crate) fn decode_page_frame_of(frame: &[u8], page_size: usize, pgno: u32) -> Result<Vec<u8>> {
+    let header = frame.get(..PAGE_HEADER_SIZE).ok_or(Error::LTXCorrupted)?;
+    if PageHeader::parse(header)?.pgno != pgno {
+        return Err(Error::LTXCorrupted);
+    }
+    decode_page_frame(frame, page_size)
+}
+
+pub(crate) fn decode_page_frame(frame: &[u8], page_size: usize) -> Result<Vec<u8>> {
+    let mut reader = std::io::Cursor::new(frame);
+    let mut header_bytes = [0; PAGE_HEADER_SIZE];
+    reader.read_exact(&mut header_bytes)?;
+    let page = PageHeader::parse(&header_bytes)?;
+    if page.is_zero() {
+        return Err(Error::LTXCorrupted);
+    }
+    page.validate()?;
+
+    let mut data = vec![0u8; page_size];
+    if page.flags & PAGE_HEADER_FLAG_SIZE != 0 {
+        let mut size_bytes = [0; 4];
+        reader.read_exact(&mut size_bytes)?;
+        let compressed_size = u32::from_be_bytes(size_bytes) as usize;
+        if compressed_size > crate::lz4_block::compress_bound(page_size) {
+            return Err(Error::LTXCorrupted);
+        }
+        let mut compressed = vec![0; compressed_size];
+        reader.read_exact(&mut compressed)?;
+        let n = lz4_flex::block::decompress_into(&compressed, &mut data)
+            .map_err(|_| Error::LTXCorrupted)?;
+        if n != page_size {
+            return Err(Error::LTXCorrupted);
+        }
+    } else {
+        let mut decoder = lz4_flex::frame::FrameDecoder::new(&mut reader);
+        decoder
+            .read_exact(&mut data)
+            .map_err(|_| Error::LTXCorrupted)?;
+    }
+    Ok(data)
 }
 
 fn read_uvarint(bytes: &[u8], position: &mut usize) -> Result<u64> {

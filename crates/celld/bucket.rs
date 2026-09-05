@@ -18,10 +18,12 @@
 //! read answers and a conditional write consumes.
 //!
 //! Error contract, relied on by the self-fence: `put_cas` answers
-//! `Ok(None)` only for a clean 412/409 rejection; every other failure is
-//! ambiguous — the write may have committed — and surfaces as `Err`.
-//! In the same spirit a response that carries no CAS token is an error,
-//! never an empty token a later conditional write would trust.
+//! `Ok(None)` only for a clean 412/409 rejection; every other failure
+//! surfaces as `Err`. An `Err` is ambiguous — the write may have
+//! committed — unless `cas_write_did_not_commit` recognizes an answer
+//! that proves the store wrote no object. In the same spirit a response
+//! that carries no CAS token is an error, never an empty token a later
+//! conditional write would trust.
 
 use anyhow::anyhow;
 use anyhow::Context;
@@ -175,6 +177,12 @@ pub struct CommonPrefixPage {
     pub page_token: Option<String>,
 }
 
+/// One bounded page of object descriptions from a recursive listing.
+pub(crate) struct ObjectPage {
+    pub objects: Vec<ObjectMeta>,
+    pub page_token: Option<String>,
+}
+
 /// Whether a conditional write reached a provider-enforced conflict.
 /// Azure reports a failed `If-None-Match` as `Precondition`, while some
 /// stores report the same create conflict as `AlreadyExists`. Both are a
@@ -187,11 +195,51 @@ pub fn is_clean_cas_rejection(error: &Error) -> bool {
     )
 }
 
+/// Whether a failed conditional write proves that the store holds no new
+/// object. A caller that renews a lease uses this to skip the readback
+/// that resolves an ambiguous write, because the readback costs a round
+/// trip out of the authority a store blip is already eating.
+///
+/// Every variant below is either a rejection the client made before it
+/// sent a request, or a store answer that precedes the object write:
+/// `object_store` maps 401 to `Unauthenticated` and 403 to
+/// `PermissionDenied`, and each of the four object stores this engine
+/// speaks to authorizes a `PUT` before it applies one. A `PUT` that
+/// answers 404 reached no bucket, so it wrote nothing.
+///
+/// `Error::Generic` is absent on purpose, and it carries every 5xx, every
+/// timeout and every connection failure. A connection that never opened
+/// also wrote nothing, but `object_store` 0.12 keeps `RetryError` (and so
+/// the `Connect` error kind) private, so no public API separates it from
+/// a 500 that can have committed. Matching the message text would decide
+/// a lease fence on a string, therefore the whole variant stays ambiguous
+/// until the upstream type is reachable.
+#[doc(hidden)]
+pub fn cas_write_did_not_commit(error: &anyhow::Error) -> bool {
+    // `put_cas` wraps the store error in context, so read the chain rather
+    // than the outermost error. A chain that carries no `object_store`
+    // error at all -- an applied write whose response had no CAS token --
+    // does not match, which leaves it ambiguous. That is the safe answer.
+    error.downcast_ref::<Error>().is_some_and(|error| {
+        matches!(
+            error,
+            Error::Unauthenticated { .. }
+                | Error::PermissionDenied { .. }
+                | Error::NotFound { .. }
+                | Error::InvalidPath { .. }
+                | Error::NotSupported { .. }
+                | Error::NotImplemented
+                | Error::UnknownConfigurationKey { .. }
+        )
+    })
+}
+
 /// Split a `[s3://|gs://|az://]NAME[/PREFIX]` bucket spec into the
 /// backend, the bucket name and a normalized key prefix: empty, or
 /// slash-terminated. A spec without a scheme stays S3-compatible, and a
 /// spec without a PREFIX keeps every key at the bucket root, so a fleet
 /// provisioned before either existed never moves its objects.
+/// Scheme names are ASCII case-insensitive, as URI schemes require.
 ///
 /// On `az://` the NAME is the container, and the storage account comes
 /// from `AZURE_STORAGE_ACCOUNT_NAME`. The second path segment is the key
@@ -199,10 +247,19 @@ pub fn is_clean_cas_rejection(error: &Error) -> bool {
 /// making `az://` parse differently from the other two.
 #[doc(hidden)]
 pub fn split_spec(spec: &str) -> (StorageBackend, &str, String) {
-    let (backend, spec) = match (spec.strip_prefix("gs://"), spec.strip_prefix("az://")) {
-        (Some(rest), _) => (StorageBackend::Gcs, rest),
-        (_, Some(rest)) => (StorageBackend::Azure, rest),
-        _ => (StorageBackend::S3, spec.trim_start_matches("s3://")),
+    let strip_scheme = |scheme: &str| {
+        spec.get(..scheme.len())
+            .filter(|candidate| candidate.eq_ignore_ascii_case(scheme))
+            .map(|_| &spec[scheme.len()..])
+    };
+    let (backend, spec) = if let Some(rest) = strip_scheme("gs://") {
+        (StorageBackend::Gcs, rest)
+    } else if let Some(rest) = strip_scheme("az://") {
+        (StorageBackend::Azure, rest)
+    } else if let Some(rest) = strip_scheme("s3://") {
+        (StorageBackend::S3, rest)
+    } else {
+        (StorageBackend::S3, spec)
     };
     let (name, prefix) = spec.split_once('/').unwrap_or((spec, ""));
     let parts = prefix.split('/').filter(|part| !part.is_empty());
@@ -455,6 +512,24 @@ impl PaginatedListStore for UnpaginatedStore {
 }
 
 impl Bucket {
+    /// Builds a bucket from separate ordinary and paginated stores.
+    #[cfg(celld_internal_tests)]
+    #[doc(hidden)]
+    pub fn with_paginated_store_for_test(
+        store: Arc<dyn ObjectStore>,
+        paginated: Arc<dyn PaginatedListStore>,
+        prefix: String,
+    ) -> Self {
+        Self {
+            cas_store: store.clone(),
+            store,
+            paginated,
+            backend: StorageBackend::S3,
+            name: "telemetry-test".to_string(),
+            prefix,
+        }
+    }
+
     /// Builds a bucket over injected ordinary and conditional-write stores.
     #[cfg(celld_internal_tests)]
     #[doc(hidden)]
@@ -573,6 +648,17 @@ impl Bucket {
             retry_timeout: Duration::from_secs(30),
             ..RetryConfig::default()
         };
+        // A conditional write retries zero times, and that is a correctness
+        // bound rather than a conservative default. A retry inside the
+        // transport repeats a `PUT` that can already have committed, and it
+        // repeats it with the same If-Match token, so the second attempt
+        // answers 412 for a write the first one applied. The caller then
+        // reads a clean lost race where it in fact still holds the record.
+        // A transport retry also spends the renewal attempt's own deadline:
+        // the actor bounds a renewal CAS to half of the remaining authority,
+        // and a hidden second attempt inside that bound removes the readback
+        // the core needs to resolve the first. Ownership of the retry belongs
+        // to the core, which schedules it against the authority that remains.
         let cas_retry = RetryConfig {
             max_retries: 0,
             retry_timeout: Duration::from_secs(30),
@@ -955,7 +1041,45 @@ impl Bucket {
         }
     }
 
-    /// One page of the immediate child "directories" under `prefix/`.
+    /// One provider page of objects under `prefix/`.
+    ///
+    /// The opaque token resumes the same listing with the same prefix and
+    /// limit. A maintenance caller must finish and release this page before
+    /// it asks for the next one, or pagination would bound requests without
+    /// bounding retained object descriptions.
+    pub(crate) async fn objects_page(
+        &self,
+        prefix: &str,
+        page_token: Option<String>,
+        max_keys: usize,
+    ) -> anyhow::Result<ObjectPage> {
+        // `PaginatedListStore` does not append the separator that
+        // `ObjectStore::list` appends to a path-segment prefix.
+        let path = self.key(&format!("{}/", prefix.trim_end_matches('/')));
+        let mut result = self
+            .paginated
+            .list_paginated(
+                Some(path.as_str()),
+                PaginatedListOptions {
+                    max_keys: Some(max_keys),
+                    page_token,
+                    ..PaginatedListOptions::default()
+                },
+            )
+            .await
+            .with_context(|| format!("list {}://{}/{path}", self.scheme(), self.name))?;
+        if !self.prefix.is_empty() {
+            for object in &mut result.result.objects {
+                object.location = Path::parse(self.unkey(object.location.as_ref())).unwrap();
+            }
+        }
+        Ok(ObjectPage {
+            objects: result.result.objects,
+            page_token: result.page_token,
+        })
+    }
+
+    /// One page of the immediate child "directories" that start with `prefix`.
     ///
     /// `start_after` resumes from a child a previous page returned, and
     /// `page_token` continues the same walk. Pass one or the other: a
@@ -975,9 +1099,10 @@ impl Bucket {
         page_token: Option<String>,
         max_keys: usize,
     ) -> anyhow::Result<CommonPrefixPage> {
-        // `PaginatedListStore` does not append the delimiter the way
-        // `ObjectStore::list_with_delimiter` does, so the prefix carries it.
-        let path = self.key(&format!("{}/", prefix.trim_end_matches('/')));
+        // Keep the caller's exact prefix. Most callers use a directory prefix
+        // such as `cells/`, but a class-filtered cell walk uses `cells/Class:`
+        // so the store excludes every other class before it applies the bound.
+        let path = self.key(prefix);
         if start_after.is_some() && self.backend == StorageBackend::Azure {
             anyhow::bail!(
                 "az:// cannot resume a listing by name, because Azure listing has no \
@@ -1366,19 +1491,8 @@ impl Bucket {
     /// clears, so it can stop a node. An `Err` is ambiguous — a network
     /// fault, a rejected credential — and a retry can clear it, so a
     /// caller that must not fail on a transient blip keeps serving.
-    pub(crate) async fn probe_cas_steps(&self) -> anyhow::Result<CasVerdict> {
-        let nanos = crate::asyncrt::wall_ms().max(0) as u128 * 1_000_000;
-        // Unique per probe, so several nodes probing at once touch
-        // disjoint keys and no probe reads another one's object as the
-        // store misbehaving — a collision surfaces as a false `Violation`,
-        // which stops a node. The random half carries that alone, because
-        // a container fleet shares pid 1 and a clock before the epoch
-        // leaves `nanos` at zero.
-        let key = format!(
-            "probe/cas-{nanos}-{}-{:016x}",
-            crate::asyncrt::process_tag(),
-            rand::RngCore::next_u64(&mut crate::asyncrt::rng("cas_probe"))
-        );
+    pub(crate) async fn probe_cas_steps(&self) -> anyhow::Result<StorageProbeVerdict> {
+        let key = Self::probe_key("cas");
         let verdict = self.cas_contract(&key).await;
         // The object is debris on every path, so retire it before the
         // verdict. A delete that fails leaves one tiny object under
@@ -1390,18 +1504,62 @@ impl Bucket {
         verdict
     }
 
+    /// Run every storage check that a node needs before it serves.
+    ///
+    /// A clear unsupported-operation response is permanent, so it becomes a
+    /// contract violation. Other errors remain ambiguous so the startup
+    /// caller can retry the complete probe with fresh keys.
+    pub(crate) async fn probe_startup_storage_steps(&self) -> anyhow::Result<StorageProbeVerdict> {
+        match self.probe_cas_steps().await {
+            Ok(StorageProbeVerdict::Conformant) => {}
+            Ok(violation) => return Ok(violation),
+            Err(error) if is_unsupported_operation(&error) => {
+                return Ok(StorageProbeVerdict::Violation(
+                    "the store does not support conditional writes, so celld cannot acquire a cell"
+                        .to_string(),
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+
+        match self.probe_range_steps().await {
+            Err(error) if is_unsupported_operation(&error) || is_invalid_range_response(&error) => {
+                Ok(StorageProbeVerdict::Violation(
+                    "the store does not honor ranged reads, so celld cannot read stored cell data"
+                        .to_string(),
+                ))
+            }
+            result => result,
+        }
+    }
+
+    fn probe_key(kind: &str) -> String {
+        let nanos = crate::asyncrt::wall_ms().max(0) as u128 * 1_000_000;
+        // Unique per probe, so several nodes probing at once touch
+        // disjoint keys and no probe reads another one's object as the
+        // store misbehaving — a collision surfaces as a false `Violation`,
+        // which stops a node. The random half carries that alone, because
+        // a container fleet shares pid 1 and a clock before the epoch
+        // leaves `nanos` at zero.
+        format!(
+            "probe/{kind}-{nanos}-{}-{:016x}",
+            crate::asyncrt::process_tag(),
+            rand::RngCore::next_u64(&mut crate::asyncrt::rng("cas_probe"))
+        )
+    }
+
     /// [`Self::probe_cas_steps`] collapsed to one answer, where any wrong
     /// answer fails the check.
     pub async fn probe_cas(&self) -> anyhow::Result<()> {
         match self.probe_cas_steps().await? {
-            CasVerdict::Conformant => Ok(()),
-            CasVerdict::Violation(reason) => Err(anyhow!(reason)),
+            StorageProbeVerdict::Conformant => Ok(()),
+            StorageProbeVerdict::Violation(reason) => Err(anyhow!(reason)),
         }
     }
 
     /// The four steps, against one key. Steps 2 and 4 must be rejected;
     /// a store that applies either one cannot fence.
-    async fn cas_contract(&self, key: &str) -> anyhow::Result<CasVerdict> {
+    async fn cas_contract(&self, key: &str) -> anyhow::Result<StorageProbeVerdict> {
         let precondition = self.backend.precondition();
         let ambiguous = || {
             format!(
@@ -1418,7 +1576,7 @@ impl Bucket {
             .await
             .context("the conditional-write probe could not create its object")?
         else {
-            return Ok(CasVerdict::Violation(
+            return Ok(StorageProbeVerdict::Violation(
                 "the store rejected a conditional create of an object that does not exist"
                     .to_string(),
             ));
@@ -1431,7 +1589,7 @@ impl Bucket {
             .with_context(ambiguous)?
             .is_some()
         {
-            return Ok(CasVerdict::Violation(format!(
+            return Ok(StorageProbeVerdict::Violation(format!(
                 "the store overwrote an object although the write was conditional on that object \
                  being absent; the store accepts {precondition} and does not enforce it, so two \
                  nodes can own one cell"
@@ -1446,7 +1604,7 @@ impl Bucket {
             .context("the conditional-write probe could not update its object")?
             .is_none()
         {
-            return Ok(CasVerdict::Violation(
+            return Ok(StorageProbeVerdict::Violation(
                 "the store rejected a conditional update that carried the current token"
                     .to_string(),
             ));
@@ -1460,23 +1618,107 @@ impl Bucket {
             .with_context(ambiguous)?
             .is_some()
         {
-            return Ok(CasVerdict::Violation(format!(
+            return Ok(StorageProbeVerdict::Violation(format!(
                 "the store applied a conditional write that carried a stale token; the store \
                  accepts {precondition} and does not enforce it, so two nodes can own one cell"
             )));
         }
 
-        Ok(CasVerdict::Conformant)
+        Ok(StorageProbeVerdict::Conformant)
+    }
+
+    async fn probe_range_steps(&self) -> anyhow::Result<StorageProbeVerdict> {
+        let key = Self::probe_key("range");
+        let verdict = self.range_contract(&key).await;
+        if let Err(error) = self.delete(&key).await {
+            tracing::warn!(%error, "the ranged-read probe could not delete its object");
+        }
+        verdict
+    }
+
+    async fn range_contract(&self, key: &str) -> anyhow::Result<StorageProbeVerdict> {
+        const BODY: &[u8] = b"celld-range-probe";
+        const START: u64 = 6;
+        const END: u64 = 11;
+        let requested = START..END;
+
+        self.put(key, BODY.to_vec())
+            .await
+            .context("the ranged-read probe could not create its object")?;
+        let scoped = self.key(key);
+        let result = self
+            .store
+            .get_opts(
+                &Path::from(scoped.as_str()),
+                GetOptions {
+                    range: Some(GetRange::Bounded(requested.clone())),
+                    ..GetOptions::default()
+                },
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "the ranged-read probe could not read {}://{}/{scoped}",
+                    self.scheme(),
+                    self.name
+                )
+            })?;
+        let served = result.range.clone();
+        let bytes = result
+            .bytes()
+            .await
+            .context("the ranged-read probe could not read its response body")?;
+        if served != requested || bytes.as_ref() != &BODY[START as usize..END as usize] {
+            return Ok(StorageProbeVerdict::Violation(
+                "the store does not honor ranged reads because it returned a different range or different bytes"
+                    .to_string(),
+            ));
+        }
+        Ok(StorageProbeVerdict::Conformant)
     }
 }
 
-/// What [`Bucket::probe_cas_steps`] found.
-pub(crate) enum CasVerdict {
-    /// The store rejected both writes it had to reject.
+/// What one storage-contract check found.
+pub(crate) enum StorageProbeVerdict {
+    /// The store returned every result that this check requires.
     Conformant,
     /// The store answered wrongly, and the string says how. This never
     /// clears on a retry, so a caller can act on it.
     Violation(String),
+}
+
+/// Whether an operation failed because the store clearly does not implement
+/// it. The public object-store errors preserve that result structurally, but
+/// its HTTP adapters keep a 405 or 501 status only in a private source error.
+fn is_unsupported_operation(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        if matches!(
+            cause.downcast_ref::<Error>(),
+            Some(Error::NotSupported { .. } | Error::NotImplemented)
+        ) {
+            return true;
+        }
+        let text = cause.to_string();
+        text.contains("status 405")
+            || text.contains("status 501")
+            || text.contains("405 Method Not Allowed")
+            || text.contains("501 Not Implemented")
+    })
+}
+
+/// Whether the object-store client rejected a successful HTTP response because
+/// it did not describe the requested byte range. The locked object-store
+/// library keeps these parser types private, so their messages are the only
+/// available boundary. A dependency update must verify these messages.
+fn is_invalid_range_response(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let text = cause.to_string();
+        text == "Received non-partial response when range requested"
+            || text == "Content-Range header not present in partial response"
+            || text.starts_with("Failed to parse value for CONTENT_RANGE header:")
+            || text == "Content-Range header contained non UTF-8 characters"
+            || (text.starts_with("Requested ") && text.contains(", got "))
+    })
 }
 
 /// The replica-lane store for a `gs://` fleet bucket: its own transport

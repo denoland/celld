@@ -10,17 +10,25 @@
 //! requires successor publication, memory headroom, bounded restoration, and
 //! bounded ownership skew before the fleet loses another node.
 //!
-//! The token is advisory. Correctness never depends on it: a donor that
-//! cannot claim it within a bounded wait proceeds unserialized, a fresh
-//! node's gate falls open after a bounded wait, and a dead holder's claim
-//! lapses by TTL. Every failure path degrades to the unserialized behavior
-//! that existed before the token, never to something worse.
+//! The token is advisory for donor serialization. A donor that cannot claim it
+//! within a bounded wait proceeds unserialized, and a dead holder's claim
+//! lapses by TTL. Readiness stays fail-closed when the token or fleet capacity
+//! is unsettled, so the orchestrator's rollout deadline bounds that wait.
 
 /// The fleet drain token as stored at its well-known bucket key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DrainToken {
     pub node: String,
     pub expires_ms: u64,
+    /// The live nodes' cold-work levels immediately before this donor began.
+    /// A released token keeps this snapshot for the replacement readiness gate.
+    pub restoration_baseline: Vec<RestorationBaseline>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestorationBaseline {
+    pub node: String,
+    pub restoring: u64,
 }
 
 /// Whether another node holds a live claim. A claim is live while
@@ -73,8 +81,8 @@ pub fn joining_contributes_successor_capacity(
 
 /// Evaluate the drain token and the successor capacity published in live node
 /// leases. The joining node must publish itself. Every live peer must have
-/// memory headroom, the fleet restore backlog must be bounded, and incumbent
-/// ownership must fit the successor-share envelope.
+/// memory headroom, each live node must return to its pre-donor restore
+/// baseline, and incumbent ownership must fit the successor-share envelope.
 pub fn fleet_status(
     existing: Option<&DrainToken>,
     node: &str,
@@ -102,14 +110,29 @@ pub fn fleet_status(
         return Err(FleetUnsettled::MemoryHeadroom { node: node.clone() });
     }
 
-    let restoring = live
-        .iter()
-        .fold(0_u64, |sum, peer| sum.saturating_add(peer.restoring));
-    if restoring > max_restoring {
-        return Err(FleetUnsettled::Restoration {
-            current: restoring,
-            maximum: max_restoring,
-        });
+    // `restoring` includes ordinary cold activations, and their healthy level
+    // can be nonzero under continuous load. With no token there was no donor,
+    // so there is no rollout recovery backlog to gate. A donor snapshots the
+    // healthy level before it releases ownership. Its replacement gets one
+    // local activation budget of slack above each node's baseline; anything
+    // more must settle before the fleet spends another donor. An older token
+    // has an empty snapshot and therefore retains the conservative zero
+    // baseline during a mixed-version rollout.
+    let blocked_restoration = existing.and_then(|token| {
+        live.iter()
+            .filter_map(|peer| {
+                let baseline = token
+                    .restoration_baseline
+                    .iter()
+                    .find(|baseline| baseline.node == peer.node)
+                    .map_or(0, |baseline| baseline.restoring);
+                let maximum = baseline.saturating_add(max_restoring);
+                (peer.restoring > maximum).then_some((&peer.node, peer.restoring, maximum))
+            })
+            .min_by(|left, right| left.0.cmp(right.0))
+    });
+    if let Some((_, current, maximum)) = blocked_restoration {
+        return Err(FleetUnsettled::Restoration { current, maximum });
     }
 
     // A paced joining node publishes its peer endpoint before readiness and

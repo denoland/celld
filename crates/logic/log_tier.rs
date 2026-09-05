@@ -46,6 +46,15 @@ pub struct LogRecord {
     /// Offsets at or below this are durable in the bucket.
     pub tiered: Offset,
     pub state: LogState,
+    /// The node recovering this log while `state` is `Recovering`, and the
+    /// last instant it said so. A recovery reads every retained bundle of
+    /// the dead session, which takes minutes on a loaded fleet, and every
+    /// other node used to take the claim over after a fixed wait and repeat
+    /// the same gather: on 2026-09-03 three peers and the restarting node
+    /// fetched the same 209 bundles at once. A claimant that keeps its
+    /// heartbeat fresh is left alone; only a stale one is taken over.
+    pub claimant: Option<NodeId>,
+    pub claimed_ms: Option<u64>,
 }
 
 /// Created before the first fleet-durable ack. The open fragment begins at
@@ -60,6 +69,8 @@ pub fn create_record(ensemble: BTreeSet<NodeId>, bucket_end: Offset) -> Option<L
         ensemble,
         tiered: bucket_end,
         state: LogState::Open,
+        claimant: None,
+        claimed_ms: None,
     })
 }
 
@@ -160,6 +171,8 @@ pub fn plan_reconfigure(
             ensemble,
             tiered: log_end,
             state: LogState::Open,
+            claimant: None,
+            claimed_ms: None,
         },
     })
 }
@@ -167,12 +180,60 @@ pub fn plan_reconfigure(
 /// Recovery step one: fence via the record. S3 is the root of truth, so
 /// this CAS is what makes every later tiering or reconfiguration attempt by
 /// the old leader fail. Sealing followers comes after, never before.
-pub fn start_recovery(record: &LogRecord) -> Option<LogRecord> {
+pub fn start_recovery(record: &LogRecord, claimant: &str, now_ms: u64) -> Option<LogRecord> {
     if record.state != LogState::Open {
         return None;
     }
     Some(LogRecord {
         state: LogState::Recovering,
+        claimant: Some(claimant.to_string()),
+        claimed_ms: Some(now_ms),
+        ..record.clone()
+    })
+}
+
+/// Whether `claimant` owns the recovery in progress.
+pub fn recovery_claimed_by(record: &LogRecord, claimant: &str) -> bool {
+    record.state == LogState::Recovering && record.claimant.as_deref() == Some(claimant)
+}
+
+/// Whether another node's claim is fresh: its last heartbeat is younger
+/// than `stale_after_ms`. A record from before claims carried a heartbeat
+/// reads as stale, so an upgrade never waits on a claim it cannot judge.
+pub fn recovery_claim_live(record: &LogRecord, now_ms: u64, stale_after_ms: u64) -> bool {
+    record.state == LogState::Recovering
+        && record.claimant.is_some()
+        && record
+            .claimed_ms
+            .is_some_and(|claimed| now_ms.saturating_sub(claimed) < stale_after_ms)
+}
+
+/// The claimant's heartbeat. `None` when the claim is no longer this
+/// node's: the recovery was taken over and this node must stop.
+pub fn refresh_recovery(record: &LogRecord, claimant: &str, now_ms: u64) -> Option<LogRecord> {
+    if !recovery_claimed_by(record, claimant) {
+        return None;
+    }
+    Some(LogRecord {
+        claimed_ms: Some(now_ms),
+        ..record.clone()
+    })
+}
+
+/// Take a recovery over from a claimant whose heartbeat went stale. `None`
+/// while the claim is live or the log is not recovering.
+pub fn take_over_recovery(
+    record: &LogRecord,
+    claimant: &str,
+    now_ms: u64,
+    stale_after_ms: u64,
+) -> Option<LogRecord> {
+    if record.state != LogState::Recovering || recovery_claim_live(record, now_ms, stale_after_ms) {
+        return None;
+    }
+    Some(LogRecord {
+        claimant: Some(claimant.to_string()),
+        claimed_ms: Some(now_ms),
         ..record.clone()
     })
 }
@@ -196,6 +257,8 @@ pub fn finish_recovery(record: &LogRecord, cert: Offset) -> Option<LogRecord> {
     Some(LogRecord {
         tiered: cert,
         state: LogState::Sealed,
+        claimant: None,
+        claimed_ms: None,
         ..record.clone()
     })
 }

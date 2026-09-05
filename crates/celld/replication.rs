@@ -103,6 +103,12 @@ pub struct ActivationOptions<'a> {
 pub struct ActivationResult {
     pub path: PathBuf,
     pub restored: bool,
+    /// The paged VFS registered for this activation, when the restore paged
+    /// instead of downloading. The local main-db file is then sparse, so every
+    /// connection to `path` — the actor's included — must open through this
+    /// VFS; a plain open reads holes as zeros and SQLite reports a malformed
+    /// database (the 2026-09-01 cold-whale fleet failure).
+    pub vfs: Option<String>,
 }
 
 /// Is this a preserved eviction snapshot? `.hibernated` is the pre-2026-08-05

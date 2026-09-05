@@ -180,6 +180,13 @@ const MAX_ASSET_FILE_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_ASSET_DIRECTIVE_BYTES: u64 = 100 * 1024;
 const ASSET_UPLOAD_CONCURRENCY: usize = 16;
 
+/// Wrangler's Worker-name bound. The charset below is ASCII, so the byte and
+/// character counts are identical. This also keeps a generated Workflow class
+/// far below the cell-scope limit.
+const MAX_SCRIPT_NAME_BYTES: usize = 63;
+const _: () =
+    assert!(WORKFLOW_CLASS.len() + 1 + MAX_SCRIPT_NAME_BYTES <= celld_logic::cell::MAX_CELL_SCOPE);
+
 pub struct Options {
     pub config: Option<PathBuf>,
     pub bucket: Option<String>,
@@ -204,7 +211,11 @@ Wrangler for route configuration.\n\
 A running node polls the deployment pointer and adopts the new version in\n\
 place; nothing restarts."
     ;
-    let _ = crate::cli_output::Output::new(crate::cli_output::Format::Text).help(text);
+    let text = format!(
+        "{text}\nThe config `name` uses lowercase ASCII letters, digits, and internal hyphens. \
+         It is at most {MAX_SCRIPT_NAME_BYTES} bytes."
+    );
+    let _ = crate::cli_output::Output::new(crate::cli_output::Format::Text).help(&text);
 }
 
 pub fn options_from_arguments(
@@ -231,7 +242,7 @@ pub fn options_from_arguments(
             }
             "--bucket" => {
                 let value = arguments.next().context("--bucket requires a value")?;
-                options.bucket = Some(value.trim_start_matches("s3://").to_string());
+                options.bucket = Some(value);
             }
             "--endpoint" => {
                 options.endpoint = Some(arguments.next().context("--endpoint requires a value")?);
@@ -504,7 +515,7 @@ pub fn build(options: &Options) -> anyhow::Result<Built> {
             .map(|(name, bytes)| ModuleRef {
                 name: name.clone(),
                 bytes: bytes.len(),
-                sha256: format!("{:x}", Sha256::digest(bytes))[..16].to_string(),
+                sha256: format!("{:x}", Sha256::digest(bytes)),
                 kind: wasm_names.contains(name).then_some(ModuleKind::Wasm),
             })
             .collect(),
@@ -876,13 +887,17 @@ pub fn read_d1_project(given: Option<PathBuf>) -> anyhow::Result<D1Project> {
                 Some(Value::String(identity)) if !identity.is_empty() => identity.clone(),
                 Some(_) => bail!("d1 database {name:?} has an invalid `database_id`"),
             };
+            let migrations_dir = match entry.get("migrations_dir") {
+                None => root.join("migrations"),
+                Some(Value::String(directory)) => {
+                    root.join(project_relative_path(directory, "migrations_dir")?)
+                }
+                Some(_) => bail!("d1 database {name:?} has a non-string `migrations_dir`"),
+            };
             databases.push(D1Declaration {
                 database_name: name.to_string(),
                 database_identity,
-                migrations_dir: entry
-                    .get("migrations_dir")
-                    .and_then(Value::as_str)
-                    .map_or_else(|| root.join("migrations"), |dir| root.join(dir)),
+                migrations_dir,
                 migrations_table,
             });
         }
@@ -980,6 +995,12 @@ fn read_project(path: &Path, root: &Path) -> anyhow::Result<Project> {
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("config has no `name`"))?
         .to_string();
+    if !valid_script_name(&script_name) {
+        bail!(
+            "config `name` must contain 1 to {MAX_SCRIPT_NAME_BYTES} bytes of lowercase \
+             ASCII letters, digits, or internal hyphens: {script_name:?}"
+        );
+    }
     let main = object
         .get("main")
         .map(|value| {
@@ -1639,6 +1660,24 @@ fn valid_resource_name(name: &str) -> bool {
             .all(|value| value == '_' || value == '-' || value.is_ascii_alphanumeric())
 }
 
+/// The Wrangler-compatible Worker name that is safe in every place where
+/// celld reuses it. Checking only the generated Workflow class would leave
+/// deployment keys and operator output with a different accepted language.
+fn valid_script_name(name: &str) -> bool {
+    name.len() <= MAX_SCRIPT_NAME_BYTES
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        && name
+            .bytes()
+            .last()
+            .is_some_and(|last| last.is_ascii_lowercase() || last.is_ascii_digit())
+        && name
+            .bytes()
+            .all(|value| value.is_ascii_lowercase() || value.is_ascii_digit() || value == b'-')
+}
+
 /// `triggers.crons`, validated here so a malformed expression stops the deploy
 /// the developer is watching instead of an activation an hour later. Wrangler
 /// accepts `triggers` with other keys we do not model; only `crons` is read.
@@ -2050,6 +2089,10 @@ fn collect_asset_files(
         if child_relative.len() + 1 > 1024 {
             bail!("asset path exceeds 1024 bytes: /{child_relative}");
         }
+        let asset_path = format!("/{child_relative}");
+        if !crate::assets::is_canonical_asset_path(&asset_path) {
+            bail!("asset path is not canonical: {asset_path:?}");
+        }
         let file_type = entry
             .file_type()
             .with_context(|| format!("inspect asset {}", entry.path().display()))?;
@@ -2120,6 +2163,22 @@ fn run_esbuild(root: &Path, entry: &str) -> anyhow::Result<BundleOutput> {
     // provides them.
     let binary = std::env::var("CELLD_ESBUILD").unwrap_or_else(|_| "esbuild".to_string());
     let outdir = tempfile::tempdir().context("create esbuild output directory")?;
+    // esbuild leaves an external builtin from a CommonJS dependency behind
+    // its synchronous __require helper. Workerd's Wrangler plugin rewrites
+    // that call to an ESM import, but the esbuild CLI has no equivalent
+    // plugin hook. Give only this generated bundle a lexical bridge to the
+    // same builtin table. A runtime global would make require visible to raw
+    // ESM Workers, which Workerd does not do.
+    let commonjs_builtin_bridge = r#"var require = (id) => {
+  const name = String(id);
+  const builtin = process.getBuiltinModule(name);
+  if (builtin === undefined) {
+    const error = new Error(`Cannot find module '${name}'`);
+    error.code = "MODULE_NOT_FOUND";
+    throw error;
+  }
+  return builtin;
+};"#;
     let output = Command::new(&binary)
         .current_dir(root)
         .arg(entry)
@@ -2128,6 +2187,7 @@ fn run_esbuild(root: &Path, entry: &str) -> anyhow::Result<BundleOutput> {
         .arg("--platform=browser")
         .arg("--target=es2024")
         .arg("--conditions=workerd,worker,browser")
+        .arg(format!("--banner:js={commonjs_builtin_bridge}"))
         .arg("--external:node:*")
         .arg("--external:cloudflare:*")
         .args(

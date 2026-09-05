@@ -43,6 +43,19 @@ struct Key {
     metadata: Option<Value>,
 }
 
+/// Convert the cell's storage deadline to the Wrangler field's unit.
+///
+/// The cell compares millisecond deadlines with `Date.now()`, but every
+/// operator input and output named `expiration` uses Unix seconds. Keeping the
+/// conversion at the serialization boundary prevents an exported deadline
+/// from becoming one thousand times larger when it is used in another put.
+fn expiration_seconds(entry: &Value) -> Option<i64> {
+    entry
+        .get("expiration")
+        .and_then(Value::as_i64)
+        .map(|milliseconds| milliseconds / 1000)
+}
+
 impl Record for Key {
     fn json(&self) -> Value {
         json!({
@@ -98,6 +111,16 @@ use serde_json::{json, Value};
 
 use crate::operator_cell::{Fleet, Reachable, Subject};
 
+trait NamespaceCall {
+    async fn call(&self, body: Value) -> anyhow::Result<Value>;
+}
+
+impl NamespaceCall for Reachable {
+    async fn call(&self, body: Value) -> anyhow::Result<Value> {
+        Reachable::call(self, body).await
+    }
+}
+
 pub async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
     let Some(command) = Command::parse(arguments)? else {
         print_help();
@@ -144,10 +167,7 @@ pub async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
             // and a value written from a Worker as an ArrayBuffer has no
             // faithful string form — so `celld kv get` piped to a file gives
             // back exactly what was stored.
-            use std::io::Write;
-            std::io::stdout()
-                .write_all(&bytes)
-                .context("write the value to stdout")?;
+            Output::new(Format::Text).bytes(&bytes)?;
         }
         Action::Put {
             key,
@@ -237,7 +257,7 @@ pub async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
                                 .and_then(Value::as_str)
                                 .unwrap_or_default()
                                 .to_string(),
-                            expiration: entry.get("expiration").and_then(Value::as_i64),
+                            expiration: expiration_seconds(entry),
                             metadata: entry.get("metadata").cloned(),
                         })
                         .collect();
@@ -323,62 +343,25 @@ pub async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
             note!("deleted {} key(s)", keys.len());
         }
         Action::BulkGet { file } => {
-            // The whole namespace, in Wrangler's bulk-put shape, so the output
-            // of this command is the input of `celld kv bulk put`.
-            let mut after = String::new();
-            let mut out = Vec::new();
-            loop {
-                let page = namespace
-                    .call(json!({
-                        "op": "list",
-                        "prefix": "",
-                        "limit": celld_logic::kv::list_limit(None),
-                        "after": after,
-                    }))
-                    .await?;
-                let keys = page
-                    .get("keys")
-                    .and_then(Value::as_array)
-                    .ok_or_else(|| anyhow!("the namespace reply carried no keys: {page}"))?;
-                if keys.is_empty() {
-                    break;
-                }
-                for entry in keys {
-                    let name = entry
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    after = name.to_string();
-                    let found = namespace.call(json!({ "op": "get", "key": name })).await?;
-                    if found.get("found").and_then(Value::as_bool) != Some(true) {
-                        // Expired between the listing and the read. Skipping is
-                        // right: the export is what a reader would see.
-                        continue;
-                    }
-                    let bytes = decode_bytes(&found)?;
-                    let mut row =
-                        json!({ "key": name, "value": encode_base64(&bytes), "base64": true });
-                    // The cell stores metadata as the JSON text the binding
-                    // wrote, and Wrangler's file carries it as an object. Emit
-                    // the object: writing the text would make a reimport encode
-                    // it a second time, and the value would come back as a
-                    // string of JSON rather than the structure that went in.
-                    if let Some(text) = found.get("metadata").and_then(Value::as_str) {
-                        row["metadata"] = serde_json::from_str::<Value>(text)
-                            .unwrap_or_else(|_| Value::String(text.to_string()));
-                    }
-                    out.push(row);
-                }
-                if page.get("complete").and_then(Value::as_bool) == Some(true) {
-                    break;
-                }
-            }
-            let rendered = serde_json::to_string_pretty(&out).context("encode the export")?;
             match file {
-                Some(path) => std::fs::write(&path, rendered)
-                    .with_context(|| format!("write {}", path.display()))?,
-                // The export is data, and its consumer is `kv bulk put`.
-                None => Output::new(Format::Text).help(&rendered)?,
+                Some(path) => bulk_export_file(&namespace, &path).await?,
+                None => {
+                    // A failed stdout export stays an incomplete JSON array,
+                    // so a consumer cannot mistake a prefix for a complete
+                    // migration. A named file has a stronger atomic contract
+                    // in `bulk_export_file` because it has a stable pathname.
+                    let stdout = std::io::stdout();
+                    let mut writer = std::io::BufWriter::new(stdout.lock());
+                    if let Err(error) = bulk_export(&namespace, &mut writer).await {
+                        if error
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
+                        {
+                            return Ok(());
+                        }
+                        return Err(error);
+                    }
+                }
             }
         }
         Action::Info => {
@@ -400,6 +383,98 @@ pub async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
             out.finish()?;
         }
     }
+    Ok(())
+}
+
+async fn bulk_export(
+    namespace: &impl NamespaceCall,
+    writer: &mut impl std::io::Write,
+) -> anyhow::Result<()> {
+    // The whole namespace, in Wrangler's bulk-put shape, so the output of this
+    // command is the input of `celld kv bulk put`.
+    let mut after = String::new();
+    let mut wrote_row = false;
+    writer.write_all(b"[\n").context("write the export")?;
+    loop {
+        let page = namespace
+            .call(json!({
+                "op": "list",
+                "prefix": "",
+                "limit": celld_logic::kv::list_limit(None),
+                "after": after,
+            }))
+            .await?;
+        let keys = page
+            .get("keys")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("the namespace reply carried no keys: {page}"))?;
+        if keys.is_empty() {
+            break;
+        }
+        for entry in keys {
+            let name = entry
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            after = name.to_string();
+            let found = namespace.call(json!({ "op": "get", "key": name })).await?;
+            if found.get("found").and_then(Value::as_bool) != Some(true) {
+                // Expired between the listing and the read. Skipping is right:
+                // the export is what a reader would see.
+                continue;
+            }
+            let bytes = decode_bytes(&found)?;
+            let mut row = json!({
+                "key": name,
+                "value": encode_base64(&bytes),
+                "base64": true
+            });
+            // The cell stores metadata as the JSON text the binding wrote, and
+            // Wrangler's file carries it as an object. Emit the object: writing
+            // the text would make a reimport encode it a second time.
+            if let Some(text) = found.get("metadata").and_then(Value::as_str) {
+                row["metadata"] = serde_json::from_str::<Value>(text)
+                    .unwrap_or_else(|_| Value::String(text.to_string()));
+            }
+            if let Some(expiration) = expiration_seconds(&found) {
+                row["expiration"] = Value::from(expiration);
+            }
+            let encoded = serde_json::to_vec(&row).context("encode an export row")?;
+            if wrote_row {
+                writer.write_all(b",\n").context("write the export")?;
+            }
+            writer.write_all(&encoded).context("write the export")?;
+            writer.flush().context("write the export")?;
+            wrote_row = true;
+        }
+        if page.get("complete").and_then(Value::as_bool) == Some(true) {
+            break;
+        }
+    }
+    writer.write_all(b"\n]\n").context("write the export")?;
+    writer.flush().context("write the export")
+}
+
+async fn bulk_export_file(
+    namespace: &impl NamespaceCall,
+    path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".celld-kv-export-")
+        .tempfile_in(parent)
+        .with_context(|| format!("create a temporary export beside {}", path.display()))?;
+    {
+        let mut writer = std::io::BufWriter::new(temporary.as_file_mut());
+        bulk_export(namespace, &mut writer).await?;
+    }
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("install the complete export at {}", path.display()))?;
     Ok(())
 }
 
@@ -494,6 +569,11 @@ impl Action {
             Self::BulkGet { .. } | Self::BulkPut { .. } | Self::BulkDelete { .. } => None,
         }
     }
+}
+
+#[cfg(all(test, celld_internal_tests))]
+mod kv_cli_contract {
+    include!(env!("CELLD_INTERNAL_KV_CLI_TESTS"));
 }
 
 enum Action {

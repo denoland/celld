@@ -8,6 +8,30 @@
 
 use anyhow::{anyhow, bail};
 
+pub const DEFAULT_SHUTDOWN_TOTAL_MS: u64 = 40_000;
+pub const DEFAULT_DRAIN_TOKEN_WAIT_MS: u64 = 30_000;
+pub const MAX_DRAIN_TOKEN_WAIT_NUMERATOR: u64 = 3;
+pub const MAX_DRAIN_TOKEN_WAIT_DENOMINATOR: u64 = 4;
+
+/// Calculate the largest drain-token wait that preserves the shutdown work
+/// share. The split operations avoid overflow for a `u64` process bound.
+pub const fn maximum_drain_token_wait_ms(total_ms: u64) -> u64 {
+    (total_ms / MAX_DRAIN_TOKEN_WAIT_DENOMINATOR) * MAX_DRAIN_TOKEN_WAIT_NUMERATOR
+        + (total_ms % MAX_DRAIN_TOKEN_WAIT_DENOMINATOR) * MAX_DRAIN_TOKEN_WAIT_NUMERATOR
+            / MAX_DRAIN_TOKEN_WAIT_DENOMINATOR
+}
+
+const _: () =
+    assert!(DEFAULT_DRAIN_TOKEN_WAIT_MS == maximum_drain_token_wait_ms(DEFAULT_SHUTDOWN_TOTAL_MS));
+
+/// The two shutdown values whose relationship controls whether handoff work
+/// can start after the drain-token wait.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShutdownTiming {
+    pub total_ms: u64,
+    pub drain_token_wait_ms: u64,
+}
+
 /// Validate every typed production variable before the runtime starts.
 ///
 /// Some consumers cache a value or read it from a synchronous callback, so
@@ -18,6 +42,7 @@ pub fn validate() -> anyhow::Result<()> {
         "CELLD_CLOUD",
         "CELLD_CLOUD_RESTART_ON_DEPLOY",
         "CELLD_LTX_COMPACTION",
+        "CELLD_LTX_PAGED",
         "CELLD_OUTPUT_GATE",
         "CELLD_PRESENCE_SHADOW",
         "CELLD_TRUST_FORWARDED_HEADERS",
@@ -43,11 +68,14 @@ pub fn validate() -> anyhow::Result<()> {
         "CELLD_MAX_OUTBOUND_WEBSOCKETS",
         "CELLD_MAX_REQUEST_BODY_BYTES",
         "CELLD_MAX_REQUESTS",
+        "CELLD_RECOVERY_RETRY_MS",
+        "CELLD_RECOVERY_RETRIES",
         "CELLD_MAX_STATELESS_ISOLATES",
         "CELLD_OPERATION_DEADLINE_MS",
+        "CELLD_PLACEMENT_WEIGHT",
+        "CELLD_REBALANCE_BATCH_CELLS",
         "CELLD_RELEASES",
         "CELLD_SHUTDOWN_DRAIN_MS",
-        "CELLD_SHUTDOWN_TOTAL_MS",
         "CELLD_TOKIO_THREADS",
         "CELLD_TTL_MS",
         "CELLD_WAKER_TICK_MS",
@@ -60,18 +88,22 @@ pub fn validate() -> anyhow::Result<()> {
         "CELLD_ALARM_RESIDENT_MS",
         "CELLD_ASSET_CACHE_BYTES",
         "CELLD_DEPLOY_MAX_AGE_S",
-        "CELLD_DRAIN_TOKEN_WAIT_MS",
         "CELLD_LOCAL_CACHE_MAX_BYTES",
         "CELLD_LTX_TRUNCATE_PAGES",
+        "CELLD_LOG_GROUP_COMMIT_MS",
         "CELLD_LOG_HEDGE_MS",
         "CELLD_LOG_WINDOW",
         "CELLD_LOG_WINDOW_BYTES",
         "CELLD_MAX_RESIDENT_CELLS",
         "CELLD_MAX_RSS_MB",
+        "CELLD_QUEUE_PRODUCER_GROUP_MS",
         "CELLD_READY_FLEET_GATE_MS",
+        "CELLD_REBALANCE_INTERVAL_MS",
     ] {
         optional::<u64>(name)?;
     }
+
+    shutdown_timing()?;
 
     if let Some(value) = optional::<u64>("CELLD_PRESENCE_HEARTBEAT_MS")? {
         if !(50..=30_000).contains(&value) {
@@ -96,7 +128,34 @@ pub fn validate() -> anyhow::Result<()> {
             bail!("CELLD_PRESSURE_OWNERSHIP must be release or sticky, not {value:?}");
         }
     }
+    if let Some(node) = value("CELLD_NODE")? {
+        crate::machine::validate_node_name(&node).map_err(|error| anyhow!("CELLD_NODE {error}"))?;
+    }
     Ok(())
+}
+
+/// Read the complete shutdown bound and the drain-token wait together.
+///
+/// The wait can use at most three quarters of the complete bound. The
+/// remaining quarter is available for request drain, ownership handoff,
+/// connection flush, and local durability shutdown.
+pub fn shutdown_timing() -> anyhow::Result<ShutdownTiming> {
+    let total_ms = positive("CELLD_SHUTDOWN_TOTAL_MS")?.unwrap_or(DEFAULT_SHUTDOWN_TOTAL_MS);
+    let drain_token_wait_ms =
+        with_default("CELLD_DRAIN_TOKEN_WAIT_MS", DEFAULT_DRAIN_TOKEN_WAIT_MS)?;
+    let maximum_wait_ms = maximum_drain_token_wait_ms(total_ms);
+    if drain_token_wait_ms > maximum_wait_ms {
+        bail!(
+            "CELLD_DRAIN_TOKEN_WAIT_MS must be at most \
+             {MAX_DRAIN_TOKEN_WAIT_NUMERATOR}/{MAX_DRAIN_TOKEN_WAIT_DENOMINATOR} of \
+             CELLD_SHUTDOWN_TOTAL_MS; maximum is {maximum_wait_ms} for {total_ms}, \
+             not {drain_token_wait_ms}"
+        );
+    }
+    Ok(ShutdownTiming {
+        total_ms,
+        drain_token_wait_ms,
+    })
 }
 
 pub fn value(name: &str) -> anyhow::Result<Option<String>> {

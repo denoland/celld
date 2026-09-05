@@ -13,25 +13,27 @@
 use crate::host_services::HostServices;
 use rand::{CryptoRng, RngCore};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt;
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static PROCESS_DOMAIN: OnceLock<ProductionDomain> = OnceLock::new();
 static FALLBACK_SERVICES: OnceLock<Arc<HostServices>> = OnceLock::new();
+static RUNTIME_SERVICES: OnceLock<Mutex<HashMap<tokio::runtime::Id, Weak<HostServices>>>> =
+    OnceLock::new();
 static SELECT_STATE: OnceLock<AtomicU64> = OnceLock::new();
 
 thread_local! {
-    static SPAWNS: RefCell<Vec<(u64, OpFuture)>> = const { RefCell::new(Vec::new()) };
+    static SPAWNS: RefCell<Vec<(u64, OpFuture, OpLifetime)>> = const { RefCell::new(Vec::new()) };
 }
 
 struct ProductionDomain {
-    handle: tokio::runtime::Handle,
-    started_at: Instant,
+    owner: Arc<ProductionDomainOwner>,
     services: Arc<HostServices>,
     filesystem: Arc<dyn celld_ltx::FileSystem>,
     next_core_request: AtomicU64,
@@ -41,10 +43,13 @@ struct ProductionDomain {
 
 impl ProductionDomain {
     fn new(handle: tokio::runtime::Handle) -> Self {
+        let owner = Arc::new(ProductionDomainOwner::new(handle));
+        let token = DomainToken::new(&owner);
+        let services = Arc::new(HostServices::production());
+        services.bind_domain(token.clone());
         Self {
-            handle,
-            started_at: Instant::now(),
-            services: Arc::new(HostServices::production()),
+            owner,
+            services,
             filesystem: Arc::new(celld_ltx::DirectFileSystem),
             next_core_request: AtomicU64::new(1),
             next_async_op: AtomicU64::new(1),
@@ -55,6 +60,85 @@ impl ProductionDomain {
 
 fn current_domain() -> &'static ProductionDomain {
     PROCESS_DOMAIN.get_or_init(|| ProductionDomain::new(tokio::runtime::Handle::current()))
+}
+
+struct ProductionDomainOwner {
+    handle: tokio::runtime::Handle,
+    started_at: Instant,
+}
+
+impl ProductionDomainOwner {
+    fn new(handle: tokio::runtime::Handle) -> Self {
+        Self {
+            handle,
+            started_at: Instant::now(),
+        }
+    }
+}
+
+/// A cloneable capability for scheduling work on one execution domain.
+#[derive(Clone)]
+pub(crate) struct DomainToken {
+    inner: Weak<ProductionDomainOwner>,
+}
+
+/// The execution domain no longer accepts work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DomainClosed;
+
+impl fmt::Display for DomainClosed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("execution domain is closed")
+    }
+}
+
+impl std::error::Error for DomainClosed {}
+
+impl DomainToken {
+    fn new(owner: &Arc<ProductionDomainOwner>) -> Self {
+        Self {
+            inner: Arc::downgrade(owner),
+        }
+    }
+
+    fn owner(&self) -> Result<Arc<ProductionDomainOwner>, DomainClosed> {
+        self.inner.upgrade().ok_or(DomainClosed)
+    }
+
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        Weak::ptr_eq(&self.inner, &other.inner)
+    }
+
+    pub(crate) fn mono_ms(&self) -> Result<u64, DomainClosed> {
+        Ok(self.owner()?.started_at.elapsed().as_millis() as u64)
+    }
+
+    pub(crate) fn sleep_until(&self, deadline_ms: u64) -> Result<Sleep, DomainClosed> {
+        let owner = self.owner()?;
+        let now_ms = owner.started_at.elapsed().as_millis() as u64;
+        let wait = Duration::from_millis(deadline_ms.saturating_sub(now_ms));
+        // Tokio binds a sleep to the current timer driver when it constructs
+        // the future. Enter this token's runtime so an ambient runtime cannot
+        // capture a timer that belongs to another execution domain.
+        let _entered = owner.handle.enter();
+        Ok(Box::pin(tokio::time::sleep(wait)))
+    }
+
+    #[track_caller]
+    pub(crate) fn spawn_detached<T, F>(
+        &self,
+        _root: impl Into<String>,
+        future: F,
+    ) -> Result<TaskHandle<T>, DomainClosed>
+    where
+        T: Send + 'static,
+        F: Future<Output = T> + Send + 'static,
+    {
+        let owner = self.owner()?;
+        Ok(TaskHandle {
+            inner: owner.handle.spawn(future),
+        })
+    }
 }
 
 /// A normalized task panic returned by a typed task handle.
@@ -104,7 +188,7 @@ pub fn set_host_handle(handle: tokio::runtime::Handle) {
 
 /// Return the Tokio handle for the V8 arm.
 pub fn op_handle() -> tokio::runtime::Handle {
-    current_domain().handle.clone()
+    current_domain().owner.handle.clone()
 }
 
 pub fn spawn<T, F>(future: F) -> TaskHandle<T>
@@ -113,7 +197,7 @@ where
     F: Future<Output = T> + Send + 'static,
 {
     TaskHandle {
-        inner: current_domain().handle.spawn(future),
+        inner: current_domain().owner.handle.spawn(future),
     }
 }
 
@@ -123,7 +207,7 @@ where
     F: FnOnce() -> T + Send + 'static,
 {
     TaskHandle {
-        inner: current_domain().handle.spawn_blocking(operation),
+        inner: current_domain().owner.handle.spawn_blocking(operation),
     }
 }
 
@@ -132,7 +216,7 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    current_domain().handle.block_on(future)
+    current_domain().owner.handle.block_on(future)
 }
 
 /// Return the local filesystem for the process.
@@ -154,12 +238,12 @@ pub fn wall_ms() -> i64 {
 }
 
 pub fn mono_ms() -> u64 {
-    current_domain().started_at.elapsed().as_millis() as u64
+    current_domain().owner.started_at.elapsed().as_millis() as u64
 }
 
 /// Return monotonic process time in microseconds for timing instrumentation.
 pub fn mono_us() -> u64 {
-    current_domain().started_at.elapsed().as_micros() as u64
+    current_domain().owner.started_at.elapsed().as_micros() as u64
 }
 
 pub fn rng(consumer: &'static str) -> rng::Stream {
@@ -205,6 +289,46 @@ pub fn services() -> Arc<HostServices> {
                 .get_or_init(|| Arc::new(HostServices::production()))
                 .clone()
         })
+}
+
+/// Return services bound to the current runtime without installing a process domain.
+pub(crate) fn runtime_services() -> Arc<HostServices> {
+    if let Some(domain) = PROCESS_DOMAIN.get() {
+        return domain.services.clone();
+    }
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return services();
+    };
+    let mut runtimes = RUNTIME_SERVICES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    // The map owns each runtime ID even after its weak service expires. A
+    // caller can also retain a service after its runtime anchor closes, which
+    // leaves a live Arc with a dead owner token. Prune both states before an ID
+    // can resolve to services from an earlier runtime.
+    runtimes.retain(|_, services| {
+        services.upgrade().is_some_and(|services| {
+            services
+                .domain_token()
+                .is_some_and(|domain| domain.mono_ms().is_ok())
+        })
+    });
+    if let Some(services) = runtimes.get(&handle.id()).and_then(Weak::upgrade) {
+        return services;
+    }
+    let owner = Arc::new(ProductionDomainOwner::new(handle.clone()));
+    let token = DomainToken::new(&owner);
+    let services = Arc::new(HostServices::production());
+    services.bind_domain(token);
+    let anchor_services = services.clone();
+    let anchor_owner = owner;
+    handle.spawn(async move {
+        std::future::pending::<()>().await;
+        drop((anchor_services, anchor_owner));
+    });
+    runtimes.insert(handle.id(), Arc::downgrade(&services));
+    services
 }
 
 pub type Sleep = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -330,20 +454,46 @@ impl From<Vec<u8>> for OpOut {
 
 pub type OpFuture = Pin<Box<dyn Future<Output = Result<OpOut, String>> + Send>>;
 
-/// Register an asynchronous operation. The request driver polls the operation.
-pub fn enqueue<T: Into<OpOut>>(
+#[derive(Clone, Copy)]
+enum OpLifetime {
+    Handler,
+    IoContext,
+}
+
+fn enqueue_with_lifetime<T: Into<OpOut>>(
     future: impl Future<Output = Result<T, String>> + Send + 'static,
+    lifetime: OpLifetime,
 ) -> u64 {
     let id = current_domain()
         .next_async_op
         .fetch_add(1, Ordering::Relaxed);
     let future: OpFuture = Box::pin(async move { future.await.map(Into::into) });
-    SPAWNS.with(|spawns| spawns.borrow_mut().push((id, future)));
+    SPAWNS.with(|spawns| spawns.borrow_mut().push((id, future, lifetime)));
     id
 }
 
-pub fn drain_spawns() -> Vec<(u64, OpFuture)> {
-    SPAWNS.with(|spawns| spawns.borrow_mut().drain(..).collect())
+/// Register an asynchronous operation. The request driver polls the operation.
+pub fn enqueue<T: Into<OpOut>>(
+    future: impl Future<Output = Result<T, String>> + Send + 'static,
+) -> u64 {
+    enqueue_with_lifetime(future, OpLifetime::Handler)
+}
+
+/// Register an operation that keeps its `IoContext` alive after the handler ends.
+pub(crate) fn enqueue_io_context<T: Into<OpOut>>(
+    future: impl Future<Output = Result<T, String>> + Send + 'static,
+) -> u64 {
+    enqueue_with_lifetime(future, OpLifetime::IoContext)
+}
+
+pub fn drain_spawns() -> Vec<(u64, OpFuture, bool)> {
+    SPAWNS.with(|spawns| {
+        spawns
+            .borrow_mut()
+            .drain(..)
+            .map(|(id, future, lifetime)| (id, future, matches!(lifetime, OpLifetime::IoContext)))
+            .collect()
+    })
 }
 
 pub use crate::__celld_domain_select as select;

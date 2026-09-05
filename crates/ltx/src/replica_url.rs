@@ -124,6 +124,10 @@ fn parse_scheme(s: &str) -> (String, &str) {
 /// `s3://arn:` Access-Point form is handled specially because a raw ARN is not
 /// a parseable authority.
 pub fn parse_replica_url_with_query(s: &str) -> Result<ParsedReplicaUrl> {
+    // A fragment is not part of the replica location. Remove it before the
+    // custom ARN, path, and query parsers can treat it as stored data.
+    let s = s.split_once('#').map_or(s, |(before, _)| before);
+
     if s.to_ascii_lowercase().starts_with("s3://arn:") {
         let (scheme, host, path, query) = parse_s3_access_point_url(s)?;
         return Ok(ParsedReplicaUrl {
@@ -408,17 +412,12 @@ pub fn is_local_endpoint(endpoint: &str) -> bool {
     if let Some(idx) = host.rfind(':') {
         host = host[..idx].to_string();
     }
+    let is_private_ipv4 = host
+        .parse::<std::net::Ipv4Addr>()
+        .is_ok_and(|address| address.is_private());
     host == "localhost"
         || host == "127.0.0.1"
-        || host.starts_with("192.168.")
-        || host.starts_with("10.")
-        || host.starts_with("172.16.")
-        || host.starts_with("172.17.")
-        || host.starts_with("172.18.")
-        || host.starts_with("172.19.")
-        || host.starts_with("172.2")
-        || host.starts_with("172.30.")
-        || host.starts_with("172.31.")
+        || is_private_ipv4
         || host.ends_with(".local")
         || host.ends_with(".localhost")
 }

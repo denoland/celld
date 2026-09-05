@@ -45,6 +45,8 @@ use crate::bucket::Bucket;
 use crate::ltx_repl::ShipEntry;
 use crate::peer_auth::PeerAuth;
 
+mod recovery_progress;
+
 /// The one peer-POST boundary used by the node log.
 ///
 /// Production installs the signed `reqwest` implementation below. A
@@ -127,23 +129,88 @@ where
     Ok(())
 }
 
-/// Serve one ordered append stream: read frames sequentially, apply each
-/// through the same handler `/peer/log/append` uses, answer in order. Apply
-/// order equals arrival order because this loop is the stream's only
-/// reader — that single fact is what lets the leader keep several frames
-/// in flight without the follower needing reorder state. Any error or EOF
-/// ends the stream with no cleanup: the contiguity rule already treats a
-/// half-received stream exactly like a half-delivered round, and the seal
-/// marks fence a zombie leader's frames here just as they fence its
-/// one-shot appends.
+/// Frames one commit may carry from one stream. The leader's window holds
+/// eight frames per lane, so an honest burst is eight; the bound only keeps
+/// a misbehaving peer from building an unbounded commit.
+const SERVE_BATCH_FRAMES: usize = 64;
+
+/// The bytes one serve read asks for: enough that a burst of small frames
+/// arrives in one read rather than one read per frame.
+const SERVE_READ_CHUNK: usize = 64 * 1024;
+
+/// One complete frame from the front of `buf`, when it holds one. A partial
+/// frame stays put for the next read; a header past the cap is the same
+/// error `read_frame` reports.
+fn take_buffered_frame(buf: &mut Vec<u8>) -> anyhow::Result<Option<Vec<u8>>> {
+    if buf.len() < 4 {
+        return Ok(None);
+    }
+    let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    if len > STREAM_FRAME_CAP {
+        anyhow::bail!("stream frame of {len} bytes exceeds the cap");
+    }
+    if buf.len() < 4 + len {
+        return Ok(None);
+    }
+    let frame = buf[4..4 + len].to_vec();
+    buf.drain(..4 + len);
+    Ok(Some(frame))
+}
+
+/// Serve one ordered append stream as a group commit: block for the next
+/// frame, take every further frame the socket has ALREADY delivered, commit
+/// them as one batch, and answer each in order. Apply order equals arrival
+/// order because this loop is the stream's only reader — that single fact
+/// is what lets the leader keep several frames in flight without the
+/// follower needing reorder state. Any error or EOF ends the stream with no
+/// cleanup: the contiguity rule already treats a half-received stream
+/// exactly like a half-delivered round, and the seal marks fence a zombie
+/// leader's frames here just as they fence its one-shot appends.
+///
+/// Why the commit is grouped (the 2026-09-01 write-latency ledger, 131k
+/// served frames): the leader pipelines up to eight frames per lane, this
+/// loop served them one at a time, and each `store.append` paid its own
+/// fsync chain — ~4 ms of a ~5.8 ms serial service interval. A burst of
+/// eight rounds therefore drained at eight chains, and the leader billed
+/// every frame behind the head its queue position times that interval.
+/// The frames a burst leaves on the socket are exactly the ones that can
+/// share a chain. Merging at the leader instead was tried and refuted: the
+/// lane drains its queue into the socket immediately, so there is never a
+/// backlog on that side to merge.
 pub async fn serve_log_stream<IO>(mut io: IO, store: Arc<FollowerStore>) -> anyhow::Result<()>
 where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    use tokio::io::AsyncReadExt;
+    let mut buf: Vec<u8> = Vec::new();
+    // A delivered frame that belongs to another fragment: it could not ride
+    // the batch it arrived with, so it opens the next one.
+    let mut carried: Option<AppendReq> = None;
     let mut cycle_started = mono_us();
-    while let Some(frame) = read_frame(&mut io).await? {
+    loop {
+        let head = match carried.take() {
+            Some(req) => req,
+            None => {
+                let frame = loop {
+                    if let Some(frame) = take_buffered_frame(&mut buf)? {
+                        break frame;
+                    }
+                    buf.reserve(SERVE_READ_CHUNK);
+                    if io.read_buf(&mut buf).await? == 0 {
+                        // EOF on a frame boundary is the peer closing;
+                        // mid-frame EOF is an error, exactly like a torn
+                        // append body.
+                        if buf.is_empty() {
+                            return Ok(());
+                        }
+                        anyhow::bail!("stream closed mid-frame");
+                    }
+                };
+                decode_append(&frame)?
+            }
+        };
         // The cycle split is the follower-side latency ledger: `read_ms`
-        // is time waiting for (and reading) the next frame, and the rest
+        // is time waiting for (and reading) the batch head, and the rest
         // is this loop's serial service — the lane's throughput ceiling.
         let read_done = mono_us();
         // The reader-idle ledger: a long read wait is either no traffic or a
@@ -157,25 +224,52 @@ where
                 idle_ms, "stream reader idle past one second"
             );
         }
-        let req = decode_append(&frame)?;
+        let mut batch = AppendBatch::new(head);
+        // The drain takes only what has already arrived. A single poll of
+        // `read_buf` is cancel-safe — a pending read consumes nothing — so
+        // the drain never waits on the wire and never tears a frame, which
+        // `read_frame` (a `read_exact` of the header, then the body) could
+        // not promise if it were polled once and dropped.
+        while batch.frame_count() < SERVE_BATCH_FRAMES {
+            let frame = match take_buffered_frame(&mut buf)? {
+                Some(frame) => frame,
+                None => {
+                    buf.reserve(SERVE_READ_CHUNK);
+                    match io.read_buf(&mut buf).now_or_never() {
+                        // Nothing more delivered, or EOF: commit what is
+                        // here. The blocking read above reports the EOF.
+                        None | Some(Ok(0)) => break,
+                        Some(Ok(_)) => continue,
+                        Some(Err(error)) => return Err(error.into()),
+                    }
+                }
+            };
+            if let Err(other) = batch.try_push(decode_append(&frame)?) {
+                carried = Some(other);
+                break;
+            }
+        }
         let decode_done = mono_us();
-        let entries = req.entries.len();
-        let resp = store.append(req).await;
+        let frames = batch.frame_count();
+        let entries = batch.entry_count();
+        let answers = store.append_batch(batch).await;
         let append_done = mono_us();
-        write_frame(&mut io, &serde_json::to_vec(&resp)?).await?;
+        for resp in &answers {
+            write_frame(&mut io, &serde_json::to_vec(resp)?).await?;
+        }
         let ack_done = mono_us();
         info!(
             event = "log_serve_cycle",
+            frames,
             entries,
             read_ms = read_done.saturating_sub(cycle_started) / 1000,
             decode_ms = decode_done.saturating_sub(read_done) / 1000,
             append_ms = append_done.saturating_sub(decode_done) / 1000,
             ack_ms = ack_done.saturating_sub(append_done) / 1000,
-            "served one stream append frame"
+            "served one stream append commit"
         );
         cycle_started = ack_done;
     }
-    Ok(())
 }
 
 /// Concurrent per-cell upload lanes during node-log recovery. The
@@ -184,14 +278,57 @@ where
 /// plus every survivor's eager sweep) tripped R2's same-object 429 rate
 /// limit into a livelock, so the lanes are modest and each upload retries
 /// 429-class refusals with backoff.
-const RECOVERY_UPLOAD_CONCURRENCY: usize = 8;
+/// Recovery uploads one merged segment per cell epoch after one watermark
+/// lookup each. A dead session on a loaded fleet holds thousands of cells,
+/// and at eight in flight the 2026-09-03 restart spent 388 s of its 403 s
+/// recovery in this phase; the bucket takes far more in flight than that.
+const RECOVERY_UPLOAD_CONCURRENCY: usize = 32;
+/// Per-cell coverage reads of the graceful seal and the uncovered-row scan
+/// stay below a small fleet's cell count, so a close does not fan out one
+/// listing per cell at once.
+const COVERAGE_READ_CONCURRENCY: usize = 16;
 
 /// A contender observes a live recovery before it tries to replace it. The
 /// node-log tail is bounded to the flush window, so thirty seconds is enough
 /// for the elected reader in normal operation and still leaves ninety seconds
 /// inside the default rollout readiness bound after a crashed recoverer.
-const RECOVERY_CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+/// A recovery claim whose heartbeat is older than this is stale and may be
+/// taken over. The claimant beats every `RECOVERY_HEARTBEAT`, so a live
+/// claimant is never mistaken for a dead one by a slow bucket round trip.
+pub(crate) const RECOVERY_CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 const RECOVERY_CLAIM_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+const RECOVERY_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long a boot waits behind another node's live claim before it says
+/// so again in the log.
+const RECOVERY_WAIT_REPORT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What a recovery does when another node holds a live claim on the log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecoverMode {
+    /// A maintenance sweep: another node is on it, so there is nothing to
+    /// do here. Every peer used to take the claim over after a fixed wait
+    /// and repeat the same gather.
+    Sweep,
+    /// A boot, or a cold route that needs the seal: this node cannot go on
+    /// until the log is sealed, so it waits behind the claimant and takes
+    /// the claim over only once its heartbeat is stale.
+    Boot,
+}
+
+/// The claimant's heartbeat while it gathers, beaten cooperatively at each
+/// step of the gather and the upload. A cooperative beat cannot race the
+/// seal, and it is deterministic under the simulated clock.
+struct ClaimBeat {
+    last_mono_ms: u64,
+}
+
+impl ClaimBeat {
+    fn new() -> Self {
+        Self {
+            last_mono_ms: mono_ms(),
+        }
+    }
+}
 
 /// Process-monotonic milliseconds for follower-health bookkeeping: latency
 /// windows and quarantine arithmetic must not jump with the wall clock.
@@ -249,11 +386,11 @@ fn lease_key(node: &str) -> String {
     format!("nodes/{node}.json")
 }
 
-struct FoldedRead {
-    record: log_tier::LogRecord,
-    active: bool,
-    token: String,
-    wire: crate::ownership_store::NodeLeaseWire,
+pub(crate) struct FoldedRead {
+    pub(crate) record: log_tier::LogRecord,
+    pub(crate) active: bool,
+    pub(crate) token: String,
+    pub(crate) wire: crate::ownership_store::NodeLeaseWire,
 }
 
 fn log_from_wire(log: &crate::ownership_store::NodeLogWire) -> anyhow::Result<log_tier::LogRecord> {
@@ -267,6 +404,8 @@ fn log_from_wire(log: &crate::ownership_store::NodeLogWire) -> anyhow::Result<lo
             "sealed" => LogState::Sealed,
             other => return Err(anyhow!("unknown log record state {other:?}")),
         },
+        claimant: log.claimant.clone(),
+        claimed_ms: log.claimed_ms,
     })
 }
 
@@ -285,10 +424,15 @@ pub(crate) fn log_to_wire(
         ensemble: record.ensemble.iter().cloned().collect(),
         tiered: record.tiered,
         active,
+        claimant: record.claimant.clone(),
+        claimed_ms: record.claimed_ms,
     }
 }
 
-async fn read_record(bucket: &Bucket, session: &str) -> anyhow::Result<Option<FoldedRead>> {
+pub(crate) async fn read_record(
+    bucket: &Bucket,
+    session: &str,
+) -> anyhow::Result<Option<FoldedRead>> {
     let (node, generation) = session.split_once('/').unwrap_or((session, ""));
     let Some((bytes, token)) = bucket.get(&lease_key(node)).await? else {
         return Ok(None);
@@ -314,7 +458,7 @@ async fn read_record(bucket: &Bucket, session: &str) -> anyhow::Result<Option<Fo
 /// CAS a DEAD session's folded log fields. Authority fields ride through
 /// from the wire the caller read; expiry is never extended, so this write
 /// can only fence, never revive.
-async fn write_dead_record(
+pub(crate) async fn write_dead_record(
     bucket: &Bucket,
     session: &str,
     prior: &crate::ownership_store::NodeLeaseWire,
@@ -486,6 +630,29 @@ pub struct AppendReq {
     pub entries: Vec<Entry>,
 }
 
+fn validate_log_leader(leader: &str) -> anyhow::Result<()> {
+    let validate = |name| crate::machine::validate_node_name(name);
+    match leader.split_once('/') {
+        Some((node, generation)) => {
+            validate(node)?;
+            validate(generation)?;
+        }
+        None => validate(leader)?,
+    }
+    Ok(())
+}
+
+fn deserialize_log_leader<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let leader = <String as serde::Deserialize>::deserialize(deserializer)?;
+    validate_log_leader(&leader).map_err(|error| {
+        serde::de::Error::custom(format!("invalid log leader identity: {error}"))
+    })?;
+    Ok(leader)
+}
+
 fn take<'a>(buf: &mut &'a [u8], n: usize, what: &str) -> anyhow::Result<&'a [u8]> {
     if buf.len() < n {
         return Err(anyhow!("log wire: truncated {what}"));
@@ -565,6 +732,7 @@ pub fn decode_append(mut body: &[u8]) -> anyhow::Result<AppendReq> {
         return Err(anyhow!("log wire: bad append magic"));
     }
     let leader = take_string(buf, "append leader")?;
+    validate_log_leader(&leader).context("invalid log leader identity")?;
     let epoch = take_u64(buf, "append epoch")?;
     let truncate_to = take_u64(buf, "append truncate_to")?;
     let entries = decode_entries(buf, "append")?;
@@ -610,6 +778,41 @@ pub fn decode_tail_resp(mut body: &[u8]) -> anyhow::Result<TailResp> {
     })
 }
 
+/// The frames one commit may carry: consecutive stream frames of ONE
+/// fragment. Growing a batch is the only way to build one, and it hands
+/// back a frame for another leader or epoch, so `append_batch` never has to
+/// decide what a mixed batch means — the caller keeps the refused frame and
+/// opens the next batch with it.
+pub struct AppendBatch {
+    frames: Vec<AppendReq>,
+}
+
+impl AppendBatch {
+    pub fn new(first: AppendReq) -> Self {
+        Self {
+            frames: vec![first],
+        }
+    }
+
+    /// Add a frame of the same fragment, or hand it back untouched.
+    pub fn try_push(&mut self, req: AppendReq) -> Result<(), AppendReq> {
+        let head = &self.frames[0];
+        if req.leader != head.leader || req.epoch != head.epoch {
+            return Err(req);
+        }
+        self.frames.push(req);
+        Ok(())
+    }
+
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.frames.iter().map(|frame| frame.entries.len()).sum()
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct AppendResp {
     pub ok: bool,
@@ -625,6 +828,7 @@ pub struct AppendResp {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct SealReq {
+    #[serde(deserialize_with = "deserialize_log_leader")]
     pub leader: String,
     pub epoch: u64,
 }
@@ -632,17 +836,28 @@ pub struct SealReq {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct SealResp {
     pub end: u64,
-    /// The fragment epoch this follower actually holds. A name-reused
-    /// machine with a fresh disk answers 0 — reachable, sealable, and a
-    /// witness to nothing. Recovery requires at least one member whose
-    /// fragment epoch matches the record before it may declare the log
-    /// gathered (the spec's certify guard, `CelldLogTier.tla`).
+    /// The highest sequence that this follower already removed after the
+    /// bucket covered it. Recovery must receive every sequence in
+    /// `(base, end]` before this follower is complete evidence. An older
+    /// follower omits this field, so it cannot certify a recovery pass.
+    #[serde(default)]
+    pub base: Option<u64>,
+    /// The fragment epoch that this response can certify. A name-reused
+    /// machine with a fresh disk answers 0. A follower with an incomplete
+    /// retained range also answers 0, so an older recovery caller cannot
+    /// count a successful-looking response with a gap.
     #[serde(default)]
     pub fragment_epoch: u64,
+    /// The fragment epoch that this follower actually holds. Recovery uses
+    /// this field to distinguish an incomplete current fragment from a
+    /// different fragment. An older follower omits it.
+    #[serde(default)]
+    pub held_fragment_epoch: Option<u64>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct TailReq {
+    #[serde(deserialize_with = "deserialize_log_leader")]
     pub leader: String,
 }
 
@@ -652,13 +867,94 @@ pub struct TailResp {
 
 // ── The follower side ───────────────────────────────────────────────────────
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[doc(hidden)]
 pub struct FollowerState {
     pub fragment_epoch: u64,
     pub base: u64,
     pub end: u64,
     pub sealed_to: u64,
+}
+
+// A committed follower batch carries the state transition that its entries
+// make durable. The SHA-256 footer distinguishes a complete fsynced batch from
+// a crash-torn direct write, so the batch itself can be the recovery commit
+// point without a second state-file fsync and rename.
+//
+//   batch: "CLB1" fragment_epoch base end sealed_to count entry* sha256
+const COMMITTED_BATCH_MAGIC: &[u8; 4] = b"CLB1";
+const COMMITTED_BATCH_DIGEST_LEN: usize = 32;
+
+struct CommittedBatch {
+    state: FollowerState,
+    entries: Vec<Entry>,
+}
+
+fn encode_committed_batch(state: FollowerState, entries: &[Entry]) -> Vec<u8> {
+    use sha2::Digest as _;
+
+    let mut out = Vec::new();
+    out.extend_from_slice(COMMITTED_BATCH_MAGIC);
+    out.extend_from_slice(&state.fragment_epoch.to_le_bytes());
+    out.extend_from_slice(&state.base.to_le_bytes());
+    out.extend_from_slice(&state.end.to_le_bytes());
+    out.extend_from_slice(&state.sealed_to.to_le_bytes());
+    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for entry in entries {
+        encode_entry(entry, &mut out);
+    }
+    let digest = sha2::Sha256::digest(&out);
+    out.extend_from_slice(&digest);
+    out
+}
+
+fn decode_committed_batch(bytes: &[u8]) -> anyhow::Result<CommittedBatch> {
+    use sha2::Digest as _;
+
+    let payload_len = bytes
+        .len()
+        .checked_sub(COMMITTED_BATCH_DIGEST_LEN)
+        .ok_or_else(|| anyhow!("follower batch is shorter than its digest"))?;
+    let (payload, stored_digest) = bytes.split_at(payload_len);
+    let actual_digest = sha2::Sha256::digest(payload);
+    if actual_digest.as_slice() != stored_digest {
+        anyhow::bail!("follower batch digest mismatch");
+    }
+
+    let mut buf = payload;
+    if take(&mut buf, 4, "follower batch magic")? != COMMITTED_BATCH_MAGIC {
+        anyhow::bail!("bad follower batch magic");
+    }
+    let state = FollowerState {
+        fragment_epoch: take_u64(&mut buf, "follower batch epoch")?,
+        base: take_u64(&mut buf, "follower batch base")?,
+        end: take_u64(&mut buf, "follower batch end")?,
+        sealed_to: take_u64(&mut buf, "follower batch seal")?,
+    };
+    let entries = decode_entries(&mut buf, "follower batch")?;
+    let Some(first) = entries.first() else {
+        anyhow::bail!("follower batch has no entries");
+    };
+    let last = entries.last().expect("a non-empty batch has a last entry");
+    if state.fragment_epoch == 0 || state.base > state.end || state.end != last.seq {
+        anyhow::bail!("follower batch state does not cover its entries");
+    }
+    if entries
+        .windows(2)
+        .any(|pair| pair[1].seq != pair[0].seq.saturating_add(1))
+    {
+        anyhow::bail!("follower batch entries are not contiguous");
+    }
+    if first.seq <= state.base {
+        anyhow::bail!("follower batch starts at or below its base");
+    }
+    Ok(CommittedBatch { state, entries })
+}
+
+fn follower_batch_range(name: &str, suffix: &str) -> Option<(u64, u64)> {
+    let stem = name.strip_suffix(suffix)?;
+    let (first, last) = stem.split_once('-')?;
+    Some((first.parse().ok()?, last.parse().ok()?))
 }
 
 #[cfg(celld_internal_tests)]
@@ -670,6 +966,14 @@ pub fn sync_directory(path: &Path) -> std::io::Result<()> {
 
 #[cfg(celld_internal_tests)]
 type DirectorySyncForTest = dyn Fn(&Path) -> std::io::Result<()> + Send + Sync;
+
+#[derive(Default)]
+struct FollowerPersistTiming {
+    write_us: u64,
+    fsync_us: u64,
+    rename_us: u64,
+    directory_us: u64,
+}
 
 /// One node's store of the log fragments that it follows.
 ///
@@ -730,6 +1034,24 @@ impl FollowerStore {
         store
     }
 
+    /// A store over an injected filesystem, so a test can count every
+    /// fsync the serve path issues — the directory sync included, which is
+    /// why the directory seam is wired to the same filesystem here.
+    #[cfg(celld_internal_tests)]
+    #[doc(hidden)]
+    pub fn new_with_filesystem_for_test(
+        root: &Path,
+        bucket: Option<Arc<Bucket>>,
+        node: &str,
+        filesystem: Arc<dyn celld_ltx::FileSystem>,
+    ) -> Self {
+        let mut store = Self::new(root, bucket, node);
+        let directory_filesystem = filesystem.clone();
+        store.filesystem = filesystem;
+        store.directory_sync_for_test = Arc::new(move |path| directory_filesystem.sync_all(path));
+        store
+    }
+
     #[cfg(celld_internal_tests)]
     fn sync_directory(&self, path: &Path) -> std::io::Result<()> {
         (self.directory_sync_for_test)(path)
@@ -769,6 +1091,34 @@ impl FollowerStore {
             leaf.display(),
             data_root.display()
         ))
+    }
+
+    /// Make the leader directory durable, and the first time this process
+    /// commits anything for `leader`, its ancestor chain as well. The leaf
+    /// sync makes a rename or a new batch file durable on every commit; the
+    /// ancestor chain only holds the directory's creation, so it is synced
+    /// once per (process, leader) rather than on every append serve cycle,
+    /// and a failed chain sync re-arms so the next commit retries it. A
+    /// predecessor can create the chain and die before its own barrier
+    /// completes, so a directory that already exists proves nothing. Both
+    /// the state chain and the batch commit go through here: a batch
+    /// acknowledged over a chain this process never synced would claim a
+    /// durability its directory entries do not have.
+    fn sync_leader_directory(&self, leader: &str, dir: &Path) -> anyhow::Result<()> {
+        let first_commit = self
+            .synced_namespaces
+            .lock()
+            .unwrap()
+            .insert(leader.to_string());
+        if first_commit {
+            if let Err(error) = self.sync_namespace_to_data_root(dir) {
+                self.synced_namespaces.lock().unwrap().remove(leader);
+                return Err(error);
+            }
+            return Ok(());
+        }
+        self.sync_directory(dir)?;
+        Ok(())
     }
 
     fn guard(&self, leader: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -824,50 +1174,149 @@ impl FollowerStore {
         sessions
     }
 
+    fn committed_batches(&self, leader: &str) -> Vec<CommittedBatch> {
+        let dir = self.dir(leader);
+        let Ok(read) = self.filesystem.read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut batches = Vec::new();
+        for item in read {
+            let Some(name) = item.file_name.to_str() else {
+                continue;
+            };
+            let Some((named_first, named_last)) = follower_batch_range(name, ".batch") else {
+                continue;
+            };
+            let decoded = self
+                .filesystem
+                .read(&item.path)
+                .map_err(anyhow::Error::from)
+                .and_then(|bytes| decode_committed_batch(&bytes));
+            match decoded {
+                Ok(batch)
+                    if batch.entries.first().map(|entry| entry.seq) == Some(named_first)
+                        && batch.entries.last().map(|entry| entry.seq) == Some(named_last) =>
+                {
+                    batches.push(batch);
+                }
+                Ok(_) => warn!(
+                    leader,
+                    path = %item.path.display(),
+                    "follower batch filename does not match its committed range"
+                ),
+                Err(error) => warn!(
+                    leader,
+                    path = %item.path.display(),
+                    %error,
+                    "invalid committed follower batch ignored"
+                ),
+            }
+        }
+        batches.sort_by_key(|batch| batch.entries.first().map_or(0, |entry| entry.seq));
+        batches
+    }
+
+    /// Recover the newest checksum-valid state whose live suffix is complete.
+    /// The durable state file proves its prefix. A later batch can advance the
+    /// base past a missing prefix because its `base` is a bucket watermark;
+    /// every sequence above that base must still be present without a gap.
+    fn recover_committed_state(&self, leader: &str, seed: FollowerState) -> FollowerState {
+        if seed.fragment_epoch == 0 {
+            return seed;
+        }
+        let batches = self.committed_batches(leader);
+        let mut candidates: Vec<&CommittedBatch> = batches
+            .iter()
+            .filter(|batch| {
+                batch.state.fragment_epoch == seed.fragment_epoch && batch.state.end > seed.end
+            })
+            .collect();
+        candidates.sort_by_key(|batch| std::cmp::Reverse(batch.state.end));
+        for candidate in candidates {
+            let mut covered = seed.end.max(candidate.state.base);
+            for batch in batches
+                .iter()
+                .filter(|batch| batch.state.fragment_epoch == seed.fragment_epoch)
+            {
+                let first = batch
+                    .entries
+                    .first()
+                    .expect("committed batches are non-empty")
+                    .seq;
+                let last = batch
+                    .entries
+                    .last()
+                    .expect("committed batches are non-empty")
+                    .seq;
+                if last <= covered {
+                    continue;
+                }
+                if first > covered.saturating_add(1) {
+                    break;
+                }
+                covered = covered.max(last);
+            }
+            if covered >= candidate.state.end {
+                return FollowerState {
+                    fragment_epoch: seed.fragment_epoch,
+                    base: seed.base.max(candidate.state.base),
+                    end: candidate.state.end,
+                    sealed_to: seed.sealed_to.max(candidate.state.sealed_to),
+                };
+            }
+        }
+        seed
+    }
+
     #[doc(hidden)]
     pub fn load(&self, leader: &str) -> FollowerState {
         if let Some(state) = self.logs.lock().unwrap().get(leader) {
             return *state;
         }
-        let state = self
+        let seed = self
             .filesystem
             .read(&self.dir(leader).join("state.json"))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
+        let state = self.recover_committed_state(leader, seed);
         self.logs.lock().unwrap().insert(leader.to_string(), state);
         state
     }
 
     #[doc(hidden)]
     pub fn persist(&self, leader: &str, state: FollowerState) -> anyhow::Result<()> {
+        self.persist_timed(leader, state).map(|_| ())
+    }
+
+    fn persist_timed(
+        &self,
+        leader: &str,
+        state: FollowerState,
+    ) -> anyhow::Result<FollowerPersistTiming> {
         let dir = self.dir(leader);
         self.filesystem.create_dir_all(&dir)?;
         let path = dir.join("state.json");
         let tmp = dir.join("state.json.tmp");
+        let write_started = mono_us();
         self.filesystem.write(&tmp, &serde_json::to_vec(&state)?)?;
+        let write_us = mono_us().saturating_sub(write_started);
+        let fsync_started = mono_us();
         self.filesystem.sync_all(&tmp)?;
+        let fsync_us = mono_us().saturating_sub(fsync_started);
+        let rename_started = mono_us();
         self.filesystem.rename(&tmp, &path)?;
-        // The leaf sync makes the rename durable on every persist. The
-        // ancestor chain only holds this directory's CREATION, so it is
-        // synced once per (process, leader); syncing it per persist was a
-        // serial fsync chain on every append serve cycle. A failed chain
-        // sync re-arms so the next persist retries it.
-        let first_persist = self
-            .synced_namespaces
-            .lock()
-            .unwrap()
-            .insert(leader.to_string());
-        if first_persist {
-            if let Err(error) = self.sync_namespace_to_data_root(&dir) {
-                self.synced_namespaces.lock().unwrap().remove(leader);
-                return Err(error);
-            }
-        } else {
-            self.sync_directory(&dir)?;
-        }
+        let rename_us = mono_us().saturating_sub(rename_started);
+        let dir_started = mono_us();
+        self.sync_leader_directory(leader, &dir)?;
+        let directory_us = mono_us().saturating_sub(dir_started);
         self.logs.lock().unwrap().insert(leader.to_string(), state);
-        Ok(())
+        Ok(FollowerPersistTiming {
+            write_us,
+            fsync_us,
+            rename_us,
+            directory_us,
+        })
     }
 
     /// Adopt a new fragment epoch — only against the record. A leader's
@@ -889,9 +1338,13 @@ impl FollowerStore {
             || record.state != LogState::Open
             || !member
             || state.sealed_to >= epoch
+            || first_seq != 1
         {
             return false;
         }
+        // A new fragment has no durable records before its first append.
+        // Starting above sequence 1 would let its seal response certify an
+        // epoch whose missing prefix cannot be gathered during recovery.
         // Old-fragment entries are garbage the record no longer references.
         let _ = self.remove_entries_below(leader, u64::MAX);
         self.persist(
@@ -930,53 +1383,83 @@ impl FollowerStore {
                 {
                     let _ = self.filesystem.remove_file(&item.path);
                 }
+            } else if follower_batch_range(name, ".batch").is_some_and(|(_, last)| last <= seq) {
+                let _ = self.filesystem.remove_file(&item.path);
             }
         }
         Ok(())
     }
 
+    /// One frame through the batch commit: the stream and the one-shot
+    /// `/peer/log/append` share a single implementation, so an answer
+    /// means the same thing on both transports.
     pub async fn append(&self, req: AppendReq) -> AppendResp {
+        let mut answers = self.append_batch(AppendBatch::new(req)).await;
+        debug_assert_eq!(answers.len(), 1, "one frame in, one answer out");
+        answers.pop().expect("append_batch answers every frame")
+    }
+
+    /// Commit a batch of consecutive frames of one fragment as ONE
+    /// durability chain and answer every frame from the committed end.
+    ///
+    /// Each frame's answer is its own: confirmed when the committed end
+    /// reaches its last sequence, refused otherwise — exactly what it
+    /// would have received alone, because the contiguity rule accepts the
+    /// batch's entries in the order the frames arrived and a refusal stops
+    /// the batch where a lone frame would have been refused. The cost this
+    /// removes is one fsync chain per frame; see `serve_log_stream`.
+    pub async fn append_batch(&self, batch: AppendBatch) -> Vec<AppendResp> {
+        fn refusals(count: usize, state: FollowerState) -> Vec<AppendResp> {
+            (0..count)
+                .map(|_| AppendResp {
+                    ok: false,
+                    end: state.end,
+                    epoch: Some(state.fragment_epoch),
+                })
+                .collect()
+        }
+        let frames = batch.frames;
+        let leader = frames[0].leader.clone();
+        let epoch = frames[0].epoch;
+        let total_entries: usize = frames.iter().map(|frame| frame.entries.len()).sum();
         let handled = mono_us();
-        let guard = self.guard(&req.leader);
+        let guard = self.guard(&leader);
         let guard_started = mono_us();
         let _held = guard.lock().await;
         let guard_us = mono_us().saturating_sub(guard_started);
         let _emit = HandleTiming {
             handled,
             guard_us,
-            entries: req.entries.len(),
+            entries: total_entries,
         };
-        let mut state = self.load(&req.leader);
-        if state.fragment_epoch != req.epoch {
-            if req.entries.is_empty() {
+        let mut state = self.load(&leader);
+        if state.fragment_epoch != epoch {
+            if total_entries == 0 {
                 // An idle probe at an epoch we do not hold: adopting here
                 // would fix the fragment base at zero and poison the next
                 // real append, so refuse — the probe measured the guard
                 // lock and nothing else.
-                return AppendResp {
-                    ok: false,
-                    end: state.end,
-                    epoch: Some(state.fragment_epoch),
-                };
+                return refusals(frames.len(), state);
             }
-            let first = req.entries.first().map_or(0, |entry| entry.seq);
-            if !self.adopt(&req.leader, req.epoch, first).await {
+            let first = frames
+                .iter()
+                .flat_map(|frame| frame.entries.first())
+                .map(|entry| entry.seq)
+                .next()
+                .unwrap_or(0);
+            if !self.adopt(&leader, epoch, first).await {
                 // A refusal here degrades the leader to bucket acks; the
                 // silent version cost the lab an unattributed 85 s window.
                 warn!(
-                    leader = req.leader,
-                    epoch = req.epoch,
+                    leader,
+                    epoch,
                     held_epoch = state.fragment_epoch,
                     sealed_to = state.sealed_to,
                     "append refused: fragment adoption failed against the record"
                 );
-                return AppendResp {
-                    ok: false,
-                    end: state.end,
-                    epoch: Some(state.fragment_epoch),
-                };
+                return refusals(frames.len(), state);
             }
-            state = self.load(&req.leader);
+            state = self.load(&leader);
         }
         // The shipping decision is celld_logic::log_tier::FollowerLog; drive
         // it entry by entry so the seal and contiguity refusals are exactly
@@ -987,135 +1470,187 @@ impl FollowerStore {
             end: state.end,
             sealed_to: state.sealed_to,
         };
-        let dir = self.dir(&req.leader);
+        let dir = self.dir(&leader);
         if self.filesystem.create_dir_all(&dir).is_err() {
-            return AppendResp {
-                ok: false,
-                end: state.end,
-                epoch: Some(state.fragment_epoch),
-            };
+            return refusals(frames.len(), state);
         }
-        // The accepted prefix of the batch persists as ONE file whose bytes
-        // are the wire body's entries section — one decoder for the wire
-        // and the disk, extended to batches — so an append costs one
-        // entry-file fsync regardless of its size instead of one per entry.
-        // The durability commit
-        // point is unchanged: `persist` below fsyncs the state whose `end`
-        // covers these entries, and anything above the persisted end is
-        // debris whether it sits in per-entry files or in a torn batch.
-        let mut synced = false;
+        // The accepted prefix of every frame in the burst persists as ONE
+        // checksum-protected commit file. It carries the entries and their
+        // resulting follower state, so one file fsync plus the directory
+        // barrier makes the whole transition recoverable — per burst, not
+        // per frame. A crash-torn direct write has no valid digest and is
+        // ignored; a later state-file rewrite is not on the hot append path.
         let persist_started = mono_ms();
-        let mut encoded = Vec::new();
-        let mut first_seq = None;
-        let mut last_seq = None;
-        for entry in &req.entries {
-            let accept = log.accept_append(req.epoch, entry.seq);
-            if !accept {
-                warn!(
-                    leader = req.leader,
-                    epoch = req.epoch,
-                    seq = entry.seq,
-                    end = log.end,
-                    sealed_to = log.sealed_to,
-                    "append refused: seal or contiguity"
-                );
-                break;
+        let mut entry_write_us = 0_u64;
+        let mut entry_fsync_us = 0_u64;
+        let mut entry_directory_us = 0_u64;
+        // Each frame's answer needs its own last sequence after the frames
+        // have given up their entries to the commit below.
+        let frame_count = frames.len();
+        let lasts: Vec<Option<u64>> = frames
+            .iter()
+            .map(|frame| frame.entries.last().map(|entry| entry.seq))
+            .collect();
+        let truncate_to = frames
+            .iter()
+            .map(|frame| frame.truncate_to)
+            .max()
+            .unwrap_or(0);
+        let mut accepted: Vec<Entry> = Vec::new();
+        'accept: for frame in frames {
+            // A frame the fragment already covers confirms from the end
+            // without reapplying — the resume rule's follower half. The
+            // model refuses a covered sequence as a contiguity break, and
+            // alone that refusal is harmless because the frame's answer is
+            // read off the end anyway; in a batch it must not stop the
+            // frames behind it, which a retransmission delivers in the same
+            // burst as the duplicate. Only a real gap or seal stops the
+            // batch, where it would have refused the lone frame too.
+            if frame
+                .entries
+                .last()
+                .is_none_or(|entry| entry.seq <= log.end)
+            {
+                continue;
             }
-            encode_entry(entry, &mut encoded);
-            first_seq.get_or_insert(entry.seq);
-            last_seq = Some(entry.seq);
-        }
-        if let (Some(first), Some(last)) = (first_seq, last_seq) {
-            let path = dir.join(format!("{first}-{last}.entries"));
-            let write = self
-                .filesystem
-                .write(&path, &encoded)
-                .and_then(|()| self.filesystem.sync_all(&path));
-            if write.is_err() {
-                // None of the batch is durable; the model's end must not
-                // cover any of it.
-                log.end = first - 1;
-            } else {
-                synced = true;
-            }
-        }
-        let ok = log.end >= req.entries.last().map_or(log.end, |entry| entry.seq);
-        if synced {
-            if let Err(error) = self.sync_directory(&dir) {
-                // The entry files written above stay on disk. They are
-                // debris above the persisted `end` — the same shape a crash
-                // between the entry writes and `persist` leaves — so `tail`
-                // reads them as unacked debris, a retransmission overwrites
-                // them, and `adopt` or the fragment GC removes them.
-                warn!(
-                    leader = req.leader,
-                    epoch = req.epoch,
-                    end = state.end,
-                    %error,
-                    "append refused: entry directory sync failed"
-                );
-                return AppendResp {
-                    ok: false,
-                    end: state.end,
-                    epoch: Some(state.fragment_epoch),
-                };
+            for entry in frame.entries {
+                if !log.accept_append(epoch, entry.seq) {
+                    warn!(
+                        leader,
+                        epoch,
+                        seq = entry.seq,
+                        end = log.end,
+                        sealed_to = log.sealed_to,
+                        "append refused: seal or contiguity"
+                    );
+                    break 'accept;
+                }
+                accepted.push(entry);
             }
         }
-        let handle_ms = mono_us().saturating_sub(_emit.handled) / 1000;
-        let persist_ms = mono_ms().saturating_sub(persist_started);
         let mut new_state = FollowerState {
             fragment_epoch: log.fragment_epoch,
             base: log.base,
             end: log.end,
             sealed_to: log.sealed_to,
         };
-        // The truncate folds into the batch persist: one state chain
-        // carries the new end AND the new base, where a second full
-        // tmp-write/fsync/rename chain per round was most of the untimed
-        // serial serve cost. Removing entry files before the persist keeps
-        // the crash-window shape recovery already tolerates — files gone,
-        // base still old — and the removed files sit below `covered_seq`,
-        // which the bucket already holds, so an unpersisted removal loses
-        // nothing.
-        if req.truncate_to > 0 {
+        // The truncate folds into the commit file's state. The watermark is
+        // monotone per lane, so the burst's newest value is what applying
+        // each frame's in turn would leave — capped below the burst's first
+        // accepted sequence, because `decode_committed_batch` rejects a
+        // file whose first entry is at or below its base, and a later
+        // frame's watermark can cover an earlier frame's range once the
+        // bucket proves it mid-burst. The rest of the truncation arrives
+        // with the next round's watermark.
+        let truncate_to = match accepted.first() {
+            Some(first) => truncate_to.min(first.seq.saturating_sub(1)),
+            None => truncate_to,
+        };
+        if truncate_to > 0 {
             let mut truncated = log_tier::FollowerLog {
                 fragment_epoch: new_state.fragment_epoch,
                 base: new_state.base,
                 end: new_state.end,
                 sealed_to: new_state.sealed_to,
             };
-            truncated.truncate(req.truncate_to.min(new_state.end));
-            let _ = self.remove_entries_below(&req.leader, truncated.base);
+            truncated.truncate(truncate_to.min(new_state.end));
             new_state.base = truncated.base;
         }
-        // `state_ms` bills the folded state persist — the cost that was
-        // invisible before the 2026-08-25 ledger.
+
+        let mut commit_ok = true;
+        if !accepted.is_empty() {
+            let first = accepted
+                .first()
+                .expect("an accepted batch has a first entry")
+                .seq;
+            let last = accepted
+                .last()
+                .expect("an accepted batch has a last entry")
+                .seq;
+            let path = dir.join(format!("{first}-{last}.batch"));
+            let encoded = encode_committed_batch(new_state, &accepted);
+            let write_started = mono_us();
+            let write = self.filesystem.write(&path, &encoded);
+            entry_write_us = mono_us().saturating_sub(write_started);
+            let write = write.and_then(|()| {
+                let fsync_started = mono_us();
+                let result = self.filesystem.sync_all(&path);
+                entry_fsync_us = mono_us().saturating_sub(fsync_started);
+                result
+            });
+            if write.is_err() {
+                commit_ok = false;
+            } else {
+                let directory_started = mono_us();
+                if let Err(error) = self.sync_leader_directory(&leader, &dir) {
+                    // The complete file can survive despite a failed barrier.
+                    // Recovering it is safe because its own fsync finished; if
+                    // its name disappears, the failed append was never acked.
+                    warn!(
+                        leader,
+                        epoch,
+                        end = state.end,
+                        %error,
+                        "append refused: batch directory sync failed"
+                    );
+                    commit_ok = false;
+                }
+                entry_directory_us = mono_us().saturating_sub(directory_started);
+            }
+        }
+        let handle_ms = mono_us().saturating_sub(_emit.handled) / 1000;
+        let persist_ms = mono_ms().saturating_sub(persist_started);
         let state_started = mono_ms();
-        let state_ok = self.persist(&req.leader, new_state).is_ok();
-        // One entry-file fsync persists the accepted batch. This interval
-        // decides whether the fleet proof beats the bucket proof.
+        let state_persist = if !commit_ok {
+            Err(anyhow!("the follower batch did not reach its commit point"))
+        } else if !accepted.is_empty() {
+            self.logs.lock().unwrap().insert(leader.clone(), new_state);
+            // Reclaim committed ranges only after the new base is durable.
+            // The deletion is best-effort and needs no second directory sync:
+            // a crash can retain covered files, which `tail` already hides.
+            let _ = self.remove_entries_below(&leader, new_state.base);
+            Ok(FollowerPersistTiming::default())
+        } else if new_state != state {
+            // A duplicate append can still advance only the bucket watermark.
+            // With no new batch to carry it, retain the ordinary state chain.
+            self.persist_timed(&leader, new_state)
+        } else {
+            Ok(FollowerPersistTiming::default())
+        };
+        let state_ok = state_persist.is_ok();
+        let state_timing = state_persist.unwrap_or_default();
         info!(
             event = "log_append_serve",
-            leader = req.leader,
-            entries = req.entries.len(),
+            leader,
+            frames = frame_count,
+            entries = total_entries,
             guard_ms = _emit.guard_us / 1000,
             handle_ms,
             persist_ms,
             state_ms = mono_ms().saturating_sub(state_started),
+            entry_write_us,
+            entry_fsync_us,
+            entry_directory_us,
+            state_write_us = state_timing.write_us,
+            state_fsync_us = state_timing.fsync_us,
+            state_rename_us = state_timing.rename_us,
+            state_directory_us = state_timing.directory_us,
             "follower persisted an append batch"
         );
         if !state_ok {
-            return AppendResp {
-                ok: false,
-                end: state.end,
-                epoch: Some(state.fragment_epoch),
-            };
+            return refusals(frame_count, state);
         }
-        AppendResp {
-            ok,
-            end: log.end,
-            epoch: Some(log.fragment_epoch),
-        }
+        lasts
+            .into_iter()
+            .map(|last| {
+                let last = last.unwrap_or(new_state.end);
+                AppendResp {
+                    ok: new_state.end >= last,
+                    end: new_state.end,
+                    epoch: Some(new_state.fragment_epoch),
+                }
+            })
+            .collect()
     }
 
     /// Persist the seal mark BEFORE answering: once the response leaves,
@@ -1139,9 +1674,34 @@ impl FollowerStore {
                 ..state
             },
         )?;
+        // `fragment_epoch` is the field that older recovery callers already
+        // use as their certificate. Inspect the frozen tail before returning
+        // it, so a torn current fragment fails closed even when the caller
+        // ignores the newer range fields. The actual epoch travels
+        // separately so a new caller can still gather the readable prefix
+        // and classify the incomplete fragment conclusively.
+        let tail = self.tail(&TailReq {
+            leader: req.leader.clone(),
+        });
+        let retained_complete = tail_covers_sealed_range(state.base, end, &tail.entries);
+        if !retained_complete {
+            warn!(
+                leader = req.leader,
+                fragment_epoch = state.fragment_epoch,
+                base = state.base,
+                end,
+                "sealed follower cannot certify its incomplete retained range"
+            );
+        }
         Ok(SealResp {
             end,
-            fragment_epoch: state.fragment_epoch,
+            base: Some(state.base),
+            fragment_epoch: if retained_complete {
+                state.fragment_epoch
+            } else {
+                0
+            },
+            held_fragment_epoch: Some(state.fragment_epoch),
         })
     }
 
@@ -1220,7 +1780,13 @@ impl FollowerStore {
         let state = self.load(&req.leader);
         let base = state.base;
         let end = state.end;
-        let mut entries = Vec::new();
+        let mut entries: Vec<Entry> = self
+            .committed_batches(&req.leader)
+            .into_iter()
+            .filter(|batch| batch.state.fragment_epoch == state.fragment_epoch)
+            .flat_map(|batch| batch.entries)
+            .filter(|entry| entry.seq > base)
+            .collect();
         let dir = self.dir(&req.leader);
         if let Ok(read) = self.filesystem.read_dir(&dir) {
             for item in read {
@@ -1286,8 +1852,42 @@ impl FollowerStore {
             }
         }
         entries.sort_by_key(|entry| entry.seq);
+        // Batch files can overlap: a torn batch leaves its file above the
+        // persisted end, and the retransmission of its unanswered frames
+        // commits again under whatever batch boundaries the socket had
+        // then. One fragment sequence is one set of bytes — a leader
+        // assigns each sequence once per epoch and adoption clears an old
+        // epoch's files — so a repeated sequence is the same entry twice,
+        // never a conflict.
+        entries.dedup_by_key(|entry| entry.seq);
         TailResp { entries }
     }
+}
+
+fn tail_covers_sealed_range(base: u64, end: u64, entries: &[Entry]) -> bool {
+    if base > end {
+        return false;
+    }
+    // `(base, end]` is empty here. `tail` can still expose an entry above
+    // `end` because an entry-file sync precedes the state commit, but that
+    // unacknowledged debris says nothing about this retained range.
+    if base == end {
+        return true;
+    }
+    let mut covered = base;
+    for entry in entries {
+        if entry.seq <= covered {
+            continue;
+        }
+        if covered.checked_add(1) != Some(entry.seq) {
+            return false;
+        }
+        covered = entry.seq;
+        if covered == end {
+            return true;
+        }
+    }
+    covered == end
 }
 
 /// The signed production implementation. It preserves the previous request
@@ -1961,6 +2561,81 @@ struct StreamInFlight {
     hedged: bool,
 }
 
+#[derive(Clone, Copy)]
+enum StreamProgress {
+    AwaitingFirstResponse,
+    ReceivedResponse,
+}
+
+impl StreamProgress {
+    fn after_response(self) -> Self {
+        match self {
+            Self::AwaitingFirstResponse => Self::ReceivedResponse,
+            Self::ReceivedResponse => self,
+        }
+    }
+
+    fn permits_replay(self) -> bool {
+        matches!(self, Self::ReceivedResponse)
+    }
+}
+
+/// The progress recovered by consuming and fully retiring one connection.
+/// Replay code cannot carry progress away from a live connection.
+struct RetiredStream {
+    progress: StreamProgress,
+}
+
+impl RetiredStream {
+    fn permits_replay(&self) -> bool {
+        self.progress.permits_replay()
+    }
+}
+
+/// One physical append stream, its reader, and the progress observed on that
+/// stream. A new connection always starts without progress. Only a response
+/// matched to a frame advances its state, so a one-shot answer cannot permit a
+/// replay on a silent stream. Dropping `responses` closes the reader's sender;
+/// `retire` then joins the reader before a replacement stream can start.
+struct StreamConnection {
+    write: tokio::io::WriteHalf<LogStreamIo>,
+    responses: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    reader: crate::asyncrt::TaskHandle<()>,
+    progress: StreamProgress,
+}
+
+impl StreamConnection {
+    fn new(
+        write: tokio::io::WriteHalf<LogStreamIo>,
+        responses: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+        reader: crate::asyncrt::TaskHandle<()>,
+    ) -> Self {
+        Self {
+            write,
+            responses,
+            reader,
+            progress: StreamProgress::AwaitingFirstResponse,
+        }
+    }
+
+    fn record_matched_response(&mut self) {
+        self.progress = self.progress.after_response();
+    }
+
+    async fn retire(self) -> RetiredStream {
+        let Self {
+            write,
+            responses,
+            reader,
+            progress,
+        } = self;
+        drop(write);
+        drop(responses);
+        let _ = reader.await;
+        RetiredStream { progress }
+    }
+}
+
 /// Arm the service clock on the current head — the first unresolved
 /// frame — and give the health ledger its start sample.
 fn arm_head(
@@ -1999,21 +2674,27 @@ async fn stream_lane(
     jobs: &mut tokio::sync::mpsc::UnboundedReceiver<LaneJob>,
     stop: &crate::ltx_repl::StopToken,
 ) {
-    type Writer = tokio::io::WriteHalf<LogStreamIo>;
-    let mut conn: Option<(Writer, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>)> = None;
+    let mut conn: Option<StreamConnection> = None;
     let mut inflight: std::collections::VecDeque<StreamInFlight> =
         std::collections::VecDeque::new();
-    let mut answered_since_dial = false;
     let mut hedge_rx: Option<tokio::sync::oneshot::Receiver<AppendSend>> = None;
 
     fn spawn_reader(
         read: tokio::io::ReadHalf<LogStreamIo>,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
+    ) -> (
+        tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+        crate::asyncrt::TaskHandle<()>,
+    ) {
         let (send, receive) = tokio::sync::mpsc::unbounded_channel();
-        crate::asyncrt::spawn(async move {
+        let reader = crate::asyncrt::spawn(async move {
             let mut read = read;
             loop {
-                match read_frame(&mut read).await {
+                let frame = crate::asyncrt::select_biased! {
+                    "reader cancellation wins a tie with a frame from the retired connection";
+                    _ = send.closed() => return,
+                    frame = read_frame(&mut read) => frame,
+                };
+                match frame {
                     Ok(Some(frame)) => {
                         if send.send(frame).is_err() {
                             return;
@@ -2022,20 +2703,26 @@ async fn stream_lane(
                     Ok(None) | Err(_) => return,
                 }
             }
-        })
-        .detach();
-        receive
+        });
+        (receive, reader)
     }
 
     async fn dial(
         member: &Member,
         transport: &Arc<dyn LogTransport>,
-    ) -> anyhow::Result<(Writer, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>)> {
+    ) -> anyhow::Result<StreamConnection> {
         let io = transport
             .open_stream(&member.node, &member.addr, "/peer/log/stream")
             .await?;
         let (read, write) = tokio::io::split(io);
-        Ok((write, spawn_reader(read)))
+        let (responses, reader) = spawn_reader(read);
+        Ok(StreamConnection::new(write, responses, reader))
+    }
+
+    async fn retire_connection(conn: &mut Option<StreamConnection>) {
+        if let Some(conn) = conn.take() {
+            let _ = conn.retire().await;
+        }
     }
 
     /// Fail every unanswered frame; the round futures then fail and the
@@ -2073,10 +2760,7 @@ async fn stream_lane(
             };
             let Some(job) = job else { return };
             match dial(member, transport).await {
-                Ok(established) => {
-                    conn = Some(established);
-                    answered_since_dial = false;
-                }
+                Ok(established) => conn = Some(established),
                 Err(error) => {
                     let incapable = error
                         .downcast_ref::<PeerHttpError>()
@@ -2111,11 +2795,11 @@ async fn stream_lane(
                 }
             }
             // Fall through with the job still to write.
-            let (write, _) = conn.as_mut().expect("just established");
+            let write = &mut conn.as_mut().expect("just established").write;
             let frame = encode_append(&job.req);
             let started = mono_ms();
             if write_frame(write, &frame).await.is_err() {
-                conn = None;
+                retire_connection(&mut conn).await;
                 health.lock().unwrap().append_started(&member.node, started);
                 resolve_append(
                     member,
@@ -2186,7 +2870,7 @@ async fn stream_lane(
             }
         }
 
-        let (_, responses) = conn.as_mut().expect("connected");
+        let responses = &mut conn.as_mut().expect("connected").responses;
         enum LaneEvent {
             Job(Option<LaneJob>),
             Response(Option<Vec<u8>>),
@@ -2244,11 +2928,15 @@ async fn stream_lane(
         match event {
             LaneEvent::Stopped => {
                 fail_all(member, policy, health, tuning, &mut inflight);
+                retire_connection(&mut conn).await;
                 return;
             }
-            LaneEvent::Job(None) => return,
+            LaneEvent::Job(None) => {
+                retire_connection(&mut conn).await;
+                return;
+            }
             LaneEvent::Job(Some(job)) => {
-                let (write, _) = conn.as_mut().expect("connected");
+                let write = &mut conn.as_mut().expect("connected").write;
                 let frame = encode_append(&job.req);
                 let started = mono_ms();
                 let written = write_frame(write, &frame).await;
@@ -2277,13 +2965,13 @@ async fn stream_lane(
                             hedged: false,
                         });
                         conn = reconnect(
+                            conn.take().expect("connected"),
                             member,
                             transport,
                             policy,
                             health,
                             tuning,
                             &mut inflight,
-                            &mut answered_since_dial,
                         )
                         .await;
                     }
@@ -2294,18 +2982,18 @@ async fn stream_lane(
                     // A response with no frame outstanding is a protocol
                     // violation; drop the stream and let redial sort it out.
                     conn = reconnect(
+                        conn.take().expect("connected"),
                         member,
                         transport,
                         policy,
                         health,
                         tuning,
                         &mut inflight,
-                        &mut answered_since_dial,
                     )
                     .await;
                     continue;
                 };
-                answered_since_dial = true;
+                conn.as_mut().expect("connected").record_matched_response();
                 let Some(job) = entry.job.take() else {
                     // The hedge already answered this frame; the stream's
                     // duplicate only frees the FIFO slot.
@@ -2339,13 +3027,13 @@ async fn stream_lane(
                             AppendSend::Failed(error.into()),
                         );
                         conn = reconnect(
+                            conn.take().expect("connected"),
                             member,
                             transport,
                             policy,
                             health,
                             tuning,
                             &mut inflight,
-                            &mut answered_since_dial,
                         )
                         .await;
                     }
@@ -2353,13 +3041,13 @@ async fn stream_lane(
             }
             LaneEvent::Response(None) => {
                 conn = reconnect(
+                    conn.take().expect("connected"),
                     member,
                     transport,
                     policy,
                     health,
                     tuning,
                     &mut inflight,
-                    &mut answered_since_dial,
                 )
                 .await;
             }
@@ -2396,6 +3084,7 @@ async fn stream_lane(
             }
             LaneEvent::HedgeAnswer(resp) => {
                 hedge_rx = None;
+                let mut confirmed = None;
                 if let Some(entry) = inflight
                     .iter_mut()
                     .find(|entry| entry.hedged && entry.job.is_some())
@@ -2415,21 +3104,40 @@ async fn stream_lane(
                     if send_confirms(epoch, last, &resp) {
                         if let Some(job) = entry.job.take() {
                             let service_started = entry.head_started.unwrap_or(entry.started);
-                            resolve_append(
-                                member,
-                                policy,
-                                health,
-                                tuning,
-                                job,
-                                service_started,
-                                entry.write_ms,
-                                resp,
-                            );
-                            answered_since_dial = true;
+                            confirmed = Some((job, service_started, entry.write_ms));
                         }
                     }
                 }
-                arm_head(member, health, &mut inflight);
+                if let Some((job, service_started, write_ms)) = confirmed {
+                    // A one-shot answer proves that the follower is reachable,
+                    // but it is not progress on this stream connection. Retire
+                    // the stalled connection now, so its complete unresolved
+                    // queue shares one deadline. `reconnect` permits one ordered
+                    // replay only when this stream previously returned a frame.
+                    let retired = conn.take().expect("connected").retire().await;
+                    resolve_append(
+                        member,
+                        policy,
+                        health,
+                        tuning,
+                        job,
+                        service_started,
+                        write_ms,
+                        resp,
+                    );
+                    conn = redial_after_retire(
+                        retired,
+                        member,
+                        transport,
+                        policy,
+                        health,
+                        tuning,
+                        &mut inflight,
+                    )
+                    .await;
+                } else {
+                    arm_head(member, health, &mut inflight);
+                }
             }
         }
     }
@@ -2440,18 +3148,28 @@ async fn stream_lane(
     /// ack. A break with no answer since the last dial fails everything
     /// instead of looping.
     async fn reconnect(
+        established: StreamConnection,
         member: &Member,
         transport: &Arc<dyn LogTransport>,
         policy: &celld_logic::log_evict::EvictionPolicy,
         health: &Arc<Mutex<celld_logic::log_evict::FollowerHealth>>,
         tuning: &LaneTuning,
         inflight: &mut std::collections::VecDeque<StreamInFlight>,
-        answered_since_dial: &mut bool,
-    ) -> Option<(
-        tokio::io::WriteHalf<LogStreamIo>,
-        tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
-    )> {
-        if !*answered_since_dial {
+    ) -> Option<StreamConnection> {
+        let retired = established.retire().await;
+        redial_after_retire(retired, member, transport, policy, health, tuning, inflight).await
+    }
+
+    async fn redial_after_retire(
+        retired: RetiredStream,
+        member: &Member,
+        transport: &Arc<dyn LogTransport>,
+        policy: &celld_logic::log_evict::EvictionPolicy,
+        health: &Arc<Mutex<celld_logic::log_evict::FollowerHealth>>,
+        tuning: &LaneTuning,
+        inflight: &mut std::collections::VecDeque<StreamInFlight>,
+    ) -> Option<StreamConnection> {
+        if !retired.permits_replay() {
             fail_all(member, policy, health, tuning, inflight);
             return None;
         }
@@ -2463,16 +3181,16 @@ async fn stream_lane(
             entry.head_started = None;
         }
         match dial(member, transport).await {
-            Ok((mut write, responses)) => {
+            Ok(mut conn) => {
                 for entry in inflight.iter() {
-                    if write_frame(&mut write, &entry.frame).await.is_err() {
+                    if write_frame(&mut conn.write, &entry.frame).await.is_err() {
+                        conn.retire().await;
                         fail_all(member, policy, health, tuning, inflight);
                         return None;
                     }
                 }
-                *answered_since_dial = false;
                 arm_head(member, health, inflight);
-                Some((write, responses))
+                Some(conn)
             }
             Err(_) => {
                 fail_all(member, policy, health, tuning, inflight);
@@ -2641,6 +3359,10 @@ pub struct NodeLogManager {
     /// record) must not cost a bundle LIST on every sweep tick forever
     /// Process-local; a restart re-confirms once.
     gc_confirmed_empty: Mutex<std::collections::HashSet<String>>,
+    /// Retained bundles this process has already declared unreadable. The
+    /// record is the durable one; this only keeps one process from
+    /// rewriting the same declaration on every scan.
+    declared_bundle_losses: Mutex<BTreeSet<String>>,
     /// One-slot cache for the compactor's fetches: bundles are read many
     /// rows at a time, and re-GETting per row would refund the savings.
     bundle_cache: tokio::sync::Mutex<Option<(String, Arc<Vec<u8>>)>>,
@@ -2675,6 +3397,8 @@ pub struct NodeLogManager {
     maintenance_install_pause: Mutex<Option<Arc<NodeLogTransitionPause>>>,
     #[cfg(all(test, celld_internal_tests))]
     maintenance_publish_pause: Mutex<Option<Arc<NodeLogTransitionPause>>>,
+    #[cfg(all(test, celld_internal_tests))]
+    shipper_injection_calls: std::sync::atomic::AtomicU64,
     /// Every predecessor session's log is proven recovered; see
     /// `ensure_predecessors_recovered` for why this can latch.
     predecessors_clean: std::sync::atomic::AtomicBool,
@@ -2685,7 +3409,6 @@ pub struct NodeLogManager {
     /// Sessions for which this process won the Open -> Recovering CAS. A
     /// failed elected pass can retry immediately; other processes wait for
     /// the bounded claim before they compete to replace it.
-    claimed_recoveries: Mutex<BTreeSet<String>>,
     task_stop: crate::ltx_repl::StopToken,
     child_tasks: crate::ltx_repl::TaskGroup,
 }
@@ -2734,6 +3457,16 @@ impl DurabilityOwner {
     /// The function panics if another owner controls the LTX task set. It also
     /// panics if a fleet registration targets a stopped LTX service.
     pub fn new(manager: Arc<NodeLogManager>, fleet: bool, bundle_mode: bool) -> Self {
+        let shipper = manager.clone();
+        Self::new_with_shipper(manager, fleet, bundle_mode, shipper)
+    }
+
+    fn new_with_shipper(
+        manager: Arc<NodeLogManager>,
+        fleet: bool,
+        bundle_mode: bool,
+        shipper: Arc<dyn crate::ltx_repl::Shipper>,
+    ) -> Self {
         let ltx = manager.ltx.clone();
         // Claim the unique lifecycle capability before changing the coupled
         // registration. A duplicate construction fails here, so its unwind
@@ -2741,11 +3474,37 @@ impl DurabilityOwner {
         let ltx_tasks = ltx.take_task_owner();
         let registration = fleet.then(|| {
             ltx.register_durability(
-                manager.clone(),
+                shipper,
                 bundle_mode.then(|| manager.clone() as Arc<dyn crate::ltx_repl::BundleSink>),
             )
             .expect("a new durability owner cannot install on a stopped LTX service")
         });
+        Self::from_claimed_registration(manager, fleet, ltx, ltx_tasks, registration)
+    }
+
+    /// Installs a gated shipper decorator at the shipping registration seam.
+    /// The lifecycle owner still retains the real manager, so the decorator
+    /// cannot replace its maintenance, shutdown, or bundle ownership.
+    #[cfg(all(test, celld_internal_tests))]
+    pub(crate) fn new_with_shipper_for_world(
+        manager: Arc<NodeLogManager>,
+        fleet: bool,
+        bundle_mode: bool,
+        shipper: Arc<dyn crate::ltx_repl::Shipper>,
+    ) -> Self {
+        manager
+            .shipper_injection_calls
+            .fetch_add(1, Ordering::SeqCst);
+        Self::new_with_shipper(manager, fleet, bundle_mode, shipper)
+    }
+
+    fn from_claimed_registration(
+        manager: Arc<NodeLogManager>,
+        fleet: bool,
+        ltx: Arc<crate::ltx_repl::LtxRepl>,
+        ltx_tasks: crate::ltx_repl::LtxTaskOwner,
+        registration: Option<crate::ltx_repl::DurabilityRegistration>,
+    ) -> Self {
         let follower_stop = crate::ltx_repl::StopToken::new();
         let node_log_stop = manager.task_stop.clone();
         let child_tasks = manager.child_tasks.clone();
@@ -3038,6 +3797,16 @@ impl crate::ltx_repl::Shipper for NodeLogManager {
 }
 
 impl NodeLogManager {
+    #[cfg(all(test, celld_internal_tests))]
+    pub fn reset_shipper_injection_calls_for_world(&self) {
+        self.shipper_injection_calls.store(0, Ordering::SeqCst);
+    }
+
+    #[cfg(all(test, celld_internal_tests))]
+    pub fn shipper_injection_calls_for_world(&self) -> u64 {
+        self.shipper_injection_calls.load(Ordering::SeqCst)
+    }
+
     /// `session` is the process's full log identity, `<node>/<generation>`,
     /// with the generation taken from the node lease record.
     pub fn new(
@@ -3119,10 +3888,12 @@ impl NodeLogManager {
             maintenance_install_pause: Mutex::new(None),
             #[cfg(all(test, celld_internal_tests))]
             maintenance_publish_pause: Mutex::new(None),
+            #[cfg(all(test, celld_internal_tests))]
+            shipper_injection_calls: std::sync::atomic::AtomicU64::new(0),
             predecessors_clean: std::sync::atomic::AtomicBool::new(false),
             recovery_locks: Mutex::new(BTreeMap::new()),
-            claimed_recoveries: Mutex::new(BTreeSet::new()),
             gc_confirmed_empty: Mutex::new(std::collections::HashSet::new()),
+            declared_bundle_losses: Mutex::new(BTreeSet::new()),
             task_stop,
             child_tasks,
         }
@@ -3147,7 +3918,7 @@ impl NodeLogManager {
                     == log_tier::TakeoverGate::RecoverFirst
             {
                 info!(session, "recovering a predecessor session's node log");
-                self.recover(&session).await?;
+                self.recover_as(&session, RecoverMode::Boot).await?;
             }
         }
         // The install about to follow erases the record's only pointer to
@@ -3163,12 +3934,12 @@ impl NodeLogManager {
         Ok(())
     }
 
-    /// Delete every bundle object under this node that belongs to a
+    /// Delete every bundle and recovery checkpoint under this node from a
     /// generation other than the running session's. Recovery-before-
     /// install has already sealed the predecessor by the time this runs,
     /// and a sealed session's bundles are garbage (recovery folded every
-    /// acked row per-cell first). Loss declarations and every non-bundle
-    /// key stay untouched.
+    /// acked row per-cell first). Its recovery checkpoints are obsolete too.
+    /// Loss declarations and all other keys stay untouched.
     async fn gc_stale_generation_bundles(&self) -> anyhow::Result<()> {
         let prefix = format!("log/{}/", self.node);
         let mut stale: Vec<String> = Vec::new();
@@ -3180,7 +3951,7 @@ impl NodeLogManager {
             let Some((generation, tail)) = rest.split_once('/') else {
                 continue;
             };
-            if !tail.starts_with("bundle/") {
+            if !tail.starts_with("bundle/") && !tail.starts_with("recovered/") {
                 continue;
             }
             if format!("{}/{generation}", self.node) == self.session {
@@ -3195,13 +3966,13 @@ impl NodeLogManager {
         let gone = self.bucket.delete_many(&stale).await;
         if gone.len() != count {
             anyhow::bail!(
-                "{} of {count} stale-generation bundle objects survived the delete",
+                "{} of {count} stale-generation recovery objects survived the delete",
                 count - gone.len()
             );
         }
         info!(
-            bundles = count,
-            "stale predecessor generations' bundles retired"
+            objects = count,
+            "stale predecessor generations' recovery objects retired"
         );
         Ok(())
     }
@@ -3378,10 +4149,10 @@ impl NodeLogManager {
 
     /// Node-log recovery, the model's StartRecovery/SealFollower/
     /// FinishRecovery in one pass: fence via CAS, seal every reachable
-    /// member (at least one must succeed), gather their tails, upload each
-    /// entry to the exact per-cell key the dead leader would have used, and
-    /// CAS the record sealed. Every step is a CAS or an idempotent PUT, so
-    /// racing recoverers re-run harmlessly.
+    /// member, gather their tails, require one matching member to return its
+    /// complete retained range, upload each entry to the exact per-cell key
+    /// the dead leader would have used, and CAS the record sealed. Every step
+    /// is a CAS or an idempotent PUT, so racing recoverers re-run harmlessly.
     /// Upload gathered rows into the per-cell layout: grouped per
     /// (cell, epoch), each group's contiguous tail merged into ONE L0
     /// segment (per-row fallback for non-contiguous chains), skipping
@@ -3391,7 +4162,15 @@ impl NodeLogManager {
     async fn upload_gathered(
         &self,
         gathered: BTreeMap<(String, u64, u64), Vec<u8>>,
+        mut claim: Option<(&str, &mut ClaimBeat)>,
     ) -> anyhow::Result<usize> {
+        if gathered.is_empty() {
+            return Ok(0);
+        }
+        let mut progress = match claim.as_mut() {
+            Some((dead, beat)) => Some(recovery_progress::Progress::load(self, dead, beat).await?),
+            None => None,
+        };
         type CellRows = Vec<(u64, Vec<u8>)>;
         let mut groups: BTreeMap<(String, u64), CellRows> = BTreeMap::new();
         for ((cell, cell_epoch, txid), bytes) in gathered {
@@ -3400,16 +4179,25 @@ impl NodeLogManager {
                 .or_default()
                 .push((txid, bytes));
         }
+        if let Some(progress) = &progress {
+            groups.retain(|(cell, epoch), rows| {
+                if let Some(through) = progress.through(cell, *epoch) {
+                    rows.retain(|(txid, _)| *txid > through);
+                }
+                !rows.is_empty()
+            });
+        }
         let uploads = groups.into_iter().map(|((cell, cell_epoch), rows)| {
             let ltx = self.ltx.clone();
             async move {
+                let through = rows.last().expect("a gathered cell has at least one row").0;
                 let watermark = ltx.covered_txid(&cell, cell_epoch).await;
                 let rows: Vec<(u64, Vec<u8>)> = rows
                     .into_iter()
                     .filter(|(txid, _)| *txid > watermark)
                     .collect();
                 if rows.is_empty() {
-                    return anyhow::Ok(0_usize);
+                    return anyhow::Ok((recovery_progress::CoveredCell { cell, epoch: cell_epoch, through }, 0_usize));
                 }
                 let uploaded = rows.len();
                 let puts: Vec<(u64, u64, Vec<u8>)> =
@@ -3452,20 +4240,31 @@ impl NodeLogManager {
                         }
                     }
                 }
-                anyhow::Ok(uploaded)
+                anyhow::Ok((recovery_progress::CoveredCell { cell, epoch: cell_epoch, through }, uploaded))
             }
         });
         let mut count = 0_usize;
         let mut uploads =
             futures_util::stream::iter(uploads).buffer_unordered(RECOVERY_UPLOAD_CONCURRENCY);
         while let Some(uploaded) = futures_util::StreamExt::next(&mut uploads).await {
-            count += uploaded?;
+            let (cell, uploaded) = uploaded?;
+            count += uploaded;
+            if let Some(progress) = progress.as_mut() {
+                progress.completed(&self.bucket, cell).await;
+            }
+            if let Some((dead, beat)) = claim.as_mut() {
+                self.beat_claim(dead, beat).await?;
+            }
         }
         Ok(count)
     }
 
     /// Recover one dead SESSION's log: `dead` is `<node>/<generation>`.
     pub async fn recover(&self, dead: &str) -> anyhow::Result<()> {
+        self.recover_as(dead, RecoverMode::Sweep).await
+    }
+
+    pub(crate) async fn recover_as(&self, dead: &str, mode: RecoverMode) -> anyhow::Result<()> {
         let recovery_lock = {
             let mut locks = self.recovery_locks.lock().unwrap();
             locks.retain(|_, lock| lock.strong_count() > 0);
@@ -3478,15 +4277,53 @@ impl NodeLogManager {
                 }
             }
         };
-        let _single_flight = recovery_lock.lock().await;
-        let result = self.recover_serial(dead).await;
-        if result.is_ok() {
-            self.claimed_recoveries.lock().unwrap().remove(dead);
-        }
-        result
+        // A sweep that finds this process already recovering the session,
+        // for a boot or a cold route, has nothing to add; waiting here held
+        // the maintenance ticker for the length of the recovery.
+        let _single_flight = match mode {
+            RecoverMode::Boot => recovery_lock.lock().await,
+            RecoverMode::Sweep => match recovery_lock.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    info!(dead, "this node is already recovering the log");
+                    return Ok(());
+                }
+            },
+        };
+        self.recover_serial(dead, mode).await
     }
 
-    async fn recover_serial(&self, dead: &str) -> anyhow::Result<()> {
+    /// Refresh the claim's heartbeat once `RECOVERY_HEARTBEAT` has passed.
+    /// An error means another node took the claim over because this one
+    /// looked stale; the gather stops and the caller re-resolves.
+    async fn beat_claim(&self, dead: &str, beat: &mut ClaimBeat) -> anyhow::Result<()> {
+        if mono_ms().saturating_sub(beat.last_mono_ms) < RECOVERY_HEARTBEAT.as_millis() as u64 {
+            return Ok(());
+        }
+        let Some(folded) = read_record(&self.bucket, dead).await? else {
+            return Ok(());
+        };
+        let now = crate::ownership_store::now_ms();
+        let Some(refreshed) = log_tier::refresh_recovery(&folded.record, &self.node, now) else {
+            anyhow::bail!("node-log recovery for {dead} was taken over by another node");
+        };
+        // A lost CAS is a concurrent record write, not a lost claim; the
+        // next beat re-reads and refreshes again.
+        let _ = write_dead_record(
+            &self.bucket,
+            dead,
+            &folded.wire,
+            &refreshed,
+            folded.active,
+            &folded.token,
+        )
+        .await?;
+        beat.last_mono_ms = mono_ms();
+        Ok(())
+    }
+
+    async fn recover_serial(&self, dead: &str, mode: RecoverMode) -> anyhow::Result<()> {
+        let stale_after_ms = RECOVERY_CLAIM_TTL.as_millis() as u64;
         for _attempt in 0..5 {
             let Some(folded) = read_record(&self.bucket, dead).await? else {
                 return Ok(());
@@ -3517,7 +4354,8 @@ impl NodeLogManager {
             match record.state {
                 LogState::Sealed => return Ok(()),
                 LogState::Open => {
-                    let Some(recovering) = log_tier::start_recovery(&record) else {
+                    let Some(recovering) = log_tier::start_recovery(&record, &self.node, now)
+                    else {
                         continue;
                     };
                     if write_dead_record(&self.bucket, dead, &wire, &recovering, active, &token)
@@ -3526,59 +4364,77 @@ impl NodeLogManager {
                     {
                         continue; // lost the CAS; re-read
                     }
-                    self.claimed_recoveries
-                        .lock()
-                        .unwrap()
-                        .insert(dead.to_string());
                 }
-                LogState::Recovering if !self.claimed_recoveries.lock().unwrap().contains(dead) => {
-                    // The Open -> Recovering CAS elects one reader. Every
-                    // other process observes that reader instead of repeating
-                    // its GET/PUT/DELETE fan-out. If the elected process dies,
-                    // one contender wins an identical CAS after the bounded
-                    // observation window and resumes the idempotent work.
-                    let deadline_ms =
-                        mono_ms().saturating_add(RECOVERY_CLAIM_TTL.as_millis() as u64);
+                LogState::Recovering if log_tier::recovery_claimed_by(&record, &self.node) => {}
+                LogState::Recovering
+                    if log_tier::recovery_claim_live(&record, now, stale_after_ms) =>
+                {
+                    // The Open -> Recovering CAS elects one reader, and its
+                    // heartbeat is the proof it is still reading. A sweep
+                    // leaves it alone. A boot cannot go on without the seal,
+                    // so it waits; the wait ends when the log seals or the
+                    // heartbeat goes stale, and the next pass takes over.
+                    let claimant = record.claimant.clone().unwrap_or_default();
+                    if mode == RecoverMode::Sweep {
+                        info!(dead, claimant, "another node is recovering this log");
+                        return Ok(());
+                    }
+                    let waited_from = mono_ms();
+                    let mut reported = waited_from;
                     loop {
                         crate::asyncrt::sleep(RECOVERY_CLAIM_POLL).await;
                         let Some(current) = read_record(&self.bucket, dead).await? else {
                             return Ok(());
                         };
+                        let now = crate::ownership_store::now_ms();
                         if current.record.state == LogState::Sealed {
                             return Ok(());
                         }
-                        if mono_ms() >= deadline_ms {
-                            if write_dead_record(
-                                &self.bucket,
-                                dead,
-                                &current.wire,
-                                &current.record,
-                                current.active,
-                                &current.token,
-                            )
-                            .await?
-                            .is_some()
-                            {
-                                self.claimed_recoveries
-                                    .lock()
-                                    .unwrap()
-                                    .insert(dead.to_string());
-                            }
+                        if !log_tier::recovery_claim_live(&current.record, now, stale_after_ms) {
                             break;
+                        }
+                        if mono_ms().saturating_sub(reported)
+                            >= RECOVERY_WAIT_REPORT.as_millis() as u64
+                        {
+                            reported = mono_ms();
+                            info!(
+                                dead,
+                                claimant,
+                                waited_ms = mono_ms().saturating_sub(waited_from),
+                                "waiting behind another node's live recovery"
+                            );
                         }
                     }
                     continue;
                 }
-                LogState::Recovering => {}
+                LogState::Recovering => {
+                    let Some(taken) =
+                        log_tier::take_over_recovery(&record, &self.node, now, stale_after_ms)
+                    else {
+                        continue;
+                    };
+                    warn!(
+                        dead,
+                        stale_claimant = record.claimant.as_deref().unwrap_or("none"),
+                        "taking over a stale recovery claim"
+                    );
+                    if write_dead_record(&self.bucket, dead, &wire, &taken, active, &token)
+                        .await?
+                        .is_none()
+                    {
+                        continue; // lost the CAS; re-read
+                    }
+                }
             }
+            let mut beat = ClaimBeat::new();
             let Some(folded) = read_record(&self.bucket, dead).await? else {
                 return Ok(());
             };
             let FoldedRead {
                 record,
                 active,
-                token,
-                wire,
+                token: _,
+                wire: _,
             } = folded;
             if record.state == LogState::Sealed {
                 return Ok(());
@@ -3586,14 +4442,13 @@ impl NodeLogManager {
 
             let now = crate::ownership_store::now_ms();
             let pass_started = mono_ms();
-            let mut witnesses = 0_usize;
+            let mut complete_witnesses = 0_usize;
             // A member is CONCLUSIVE when its fate is known: lease provably
-            // expired and unreachable (its disk is not coming back on its
-            // own), or reachable but holding a different fragment epoch (a
-            // fresh disk under a reused name — the data is already gone).
-            // Only a fully conclusive, witness-free, active log may declare
-            // bounded loss; an unreachable member with a live lease is a
-            // transient and keeps the loud retry.
+            // expired and unreachable, reachable with a different fragment
+            // epoch, or reachable with an explicitly incomplete retained
+            // range. A failed tail or an old response without that range is
+            // inconclusive. Only a fully conclusive, witness-free, active log
+            // may declare bounded loss.
             let mut inconclusive = 0_usize;
             let mut gathered: BTreeMap<(String, u64, u64), Vec<u8>> = BTreeMap::new();
             // "A blink is not death" applies to loss declaration too: a
@@ -3606,6 +4461,7 @@ impl NodeLogManager {
             // published expiry with no grace).
             let grace_ms = (self.ownership.lease_ttl_ms() * 3).max(20_000);
             for member in &record.ensemble {
+                self.beat_claim(dead, &mut beat).await?;
                 let lease = self.ownership.read_node_lease(member).await;
                 let lease_live = matches!(&lease, Ok(Some(lease)) if lease.expires_ms > now);
                 let lease_long_dead = matches!(
@@ -3634,19 +4490,68 @@ impl NodeLogManager {
                     }
                     continue;
                 };
-                // A member holding a different fragment epoch is reachable
-                // but witnesses nothing — a name-reused fresh disk answers
-                // 0. Only a member at the record's epoch proves the gather
-                // is the fragment, not an amnesiac's silence.
-                if sealed.fragment_epoch == record.epoch {
-                    witnesses += 1;
-                }
+                let held_fragment_epoch =
+                    sealed.held_fragment_epoch.unwrap_or(sealed.fragment_epoch);
                 let tail = TailReq {
                     leader: dead.to_string(),
                 };
-                let Ok(tail) = self.post_tail(member, &addr, &tail).await else {
-                    continue;
+                let mut tail = match self.post_tail(member, &addr, &tail).await {
+                    Ok(tail) => tail,
+                    Err(error) => {
+                        // The seal answer and the fragment are TWO requests,
+                        // and only the second carries the data. Counting the
+                        // witness on the first let a fragment this pass never
+                        // read satisfy the certify guard: recovery sealed the
+                        // record as "the bucket is complete" while the acked
+                        // frames sat fsync'd on a member that had just
+                        // answered, and the fragment GC then deleted the last
+                        // copy. A member that sealed has a live disk, so its
+                        // fate is open, not conclusive — it joins the loud
+                        // retry instead.
+                        warn!(
+                            member,
+                            dead,
+                            epoch = record.epoch,
+                            %error,
+                            "recovery could not read a sealed member's tail"
+                        );
+                        if held_fragment_epoch == record.epoch {
+                            inconclusive += 1;
+                        }
+                        continue;
+                    }
                 };
+                tail.entries.sort_by_key(|entry| entry.seq);
+                // A matching fragment epoch identifies the right fragment,
+                // but it does not prove that every persisted sequence is
+                // still readable. The seal returns the retained range, and
+                // the tail must cover that complete range before recovery can
+                // use this member as its evidence. A response from an older
+                // follower has no base, so a rolling upgrade retries instead
+                // of silently accepting an unverifiable tail.
+                if held_fragment_epoch == record.epoch {
+                    match sealed.base {
+                        Some(base) if tail_covers_sealed_range(base, sealed.end, &tail.entries) => {
+                            complete_witnesses += 1;
+                        }
+                        Some(base) => {
+                            warn!(
+                                dead,
+                                member,
+                                base,
+                                end = sealed.end,
+                                "sealed follower returned an incomplete tail"
+                            );
+                        }
+                        None => {
+                            inconclusive += 1;
+                            warn!(
+                                dead,
+                                member, "sealed follower did not report its retained range"
+                            );
+                        }
+                    }
+                }
                 for entry in tail.entries {
                     gathered.insert((entry.cell, entry.cell_epoch, entry.txid), entry.bytes);
                 }
@@ -3693,6 +4598,7 @@ impl NodeLogManager {
             let mut fetches =
                 futures_util::stream::iter(fetches).buffer_unordered(RECOVERY_UPLOAD_CONCURRENCY);
             while let Some(fetched) = futures_util::StreamExt::next(&mut fetches).await {
+                self.beat_claim(dead, &mut beat).await?;
                 let (key, bytes) = fetched?;
                 let rows = celld_ltx::bundle::decode_rows(&bytes)
                     .with_context(|| format!("decode retained recovery bundle {key}"))?;
@@ -3709,21 +4615,20 @@ impl NodeLogManager {
             let bundles_ms = mono_ms()
                 .saturating_sub(pass_started)
                 .saturating_sub(members_ms);
-            // `active` was CASed before the first fleet ack of this epoch
-            // was credited, so: no witness + active means acked frames
-            // existed and every holder is gone or wiped. If any member's
-            // fate is still open (live lease, unreachable), keep failing
-            // loudly — the data may come back. If every member is
-            // conclusively gone, declare the bounded loss AS A RECORD: a
-            // permanent object beside the log record stating what was
-            // unrecoverable, then seal and let the fleet proceed.
+            // `active` was CASed before the first fleet ack of this epoch was
+            // credited, so no complete witness plus active means that acked
+            // frames can be missing. If any member's state remains
+            // inconclusive, keep failing loudly because its data can still
+            // become readable. If every member is conclusive, declare the
+            // bounded loss AS A RECORD: a permanent object beside the log
+            // record stating what was unrecoverable, then seal and proceed.
             // "Loss is a record, never a prompt."
-            if witnesses == 0 && active && !record.ensemble.is_empty() {
+            if complete_witnesses == 0 && active && !record.ensemble.is_empty() {
                 anyhow::ensure!(
                     inconclusive == 0,
-                    "node-log recovery for {dead}: no true witness among {:?} and \
-                     {inconclusive} member(s) undecided; refusing to seal what may \
-                     be an amnesiac's silence",
+                    "node-log recovery for {dead}: no complete true witness among {:?} and \
+                     {inconclusive} member(s) undecided; refusing to seal while \
+                     member state remains unverified",
                     record.ensemble
                 );
                 let loss = serde_json::json!({
@@ -3732,7 +4637,7 @@ impl NodeLogManager {
                     "declared_at_ms": now,
                     "declared_by": self.node,
                     "ensemble": record.ensemble.iter().collect::<Vec<_>>(),
-                    "note": "no true witness survived; acked writes within the \
+                    "note": "no complete true witness survived; acked writes within the \
                              final flush window may be unrecovered",
                 });
                 self.bucket
@@ -3744,12 +4649,12 @@ impl NodeLogManager {
                 warn!(
                     dead,
                     epoch = record.epoch,
-                    "declared bounded loss: no true witness for an active log; \
+                    "declared bounded loss: no complete true witness for an active log; \
                      recovery record written"
                 );
             }
             // Skip rows the drain points already folded into the per-cell
-            // prefix: one LIST per cell bounds the uploads to the true
+            // prefix: one listing per level and cell bounds uploads to the true
             // un-drained tail, so recovery cost tracks the flush window,
             // not the epoch's age. LTX TXIDs are contiguous per epoch, so
             // coverage up to the listed maximum is coverage of everything
@@ -3758,15 +4663,42 @@ impl NodeLogManager {
             // within a cell stay ordered; any failure aborts the pass
             // before the record can seal.
             let upload_started = mono_ms();
-            let count = self.upload_gathered(gathered).await?;
+            let count = self
+                .upload_gathered(gathered, Some((dead, &mut beat)))
+                .await?;
             let upload_ms = mono_ms().saturating_sub(upload_started);
-            let Some(done) = log_tier::finish_recovery(&record, record.tiered) else {
-                continue;
-            };
-            if write_dead_record(&self.bucket, dead, &wire, &done, active, &token)
+            // The record is re-read for the token the beats moved.
+            let mut sealed = false;
+            for _ in 0..3 {
+                let Some(current) = read_record(&self.bucket, dead).await? else {
+                    return Ok(());
+                };
+                if current.record.state == LogState::Sealed {
+                    return Ok(());
+                }
+                anyhow::ensure!(
+                    log_tier::recovery_claimed_by(&current.record, &self.node),
+                    "node-log recovery for {dead} was taken over by another node"
+                );
+                let Some(done) = log_tier::finish_recovery(&current.record, record.tiered) else {
+                    break;
+                };
+                if write_dead_record(
+                    &self.bucket,
+                    dead,
+                    &current.wire,
+                    &done,
+                    current.active,
+                    &current.token,
+                )
                 .await?
                 .is_some()
-            {
+                {
+                    sealed = true;
+                    break;
+                }
+            }
+            if sealed {
                 info!(
                     dead,
                     entries = count,
@@ -3814,8 +4746,11 @@ impl NodeLogManager {
         match log_tier::takeover_gate(folded.as_ref().map(|folded| &folded.record)) {
             log_tier::TakeoverGate::BucketComplete => {}
             log_tier::TakeoverGate::RecoverFirst => {
-                self.recover(&session.expect("a record implies a session"))
-                    .await?
+                self.recover_as(
+                    &session.expect("a record implies a session"),
+                    RecoverMode::Boot,
+                )
+                .await?
             }
         }
         Ok(())
@@ -3890,7 +4825,7 @@ impl NodeLogManager {
         // hour sealed 1,300 acked rows into orphanhood behind epoch 156.
         // An Open record is always safe: the next incarnation's recovery
         // drains the bundles.
-        let per_cell_complete = self.ltx.all_shipped_tiered()
+        let per_cell_complete = self.ltx.all_tails_ready_for_graceful_seal()
             && (!self.bundle_mode
                 || match self.uncovered_bundle_rows().await {
                     Ok(uncovered) => uncovered.is_empty(),
@@ -4115,6 +5050,8 @@ impl NodeLogManager {
                 ensemble: ensemble.clone(),
                 tiered: 0,
                 state: LogState::Open,
+                claimant: None,
+                claimed_ms: None,
             },
         };
         // A fresh epoch always opens inactive: `active` flips — through
@@ -4263,47 +5200,81 @@ impl NodeLogManager {
         // concurrently: the first cut GET every retained bundle serially
         // and blew systemd's stop budget — the graceful close timed out
         // into SIGKILL and the seal never happened at all.
+        // Where one bundle's rows come from: its payload, or the bounded
+        // index that already holds them.
+        enum Fetched {
+            Payload(bytes::Bytes),
+            Indexed(Vec<celld_ltx::bundle::BundleRow>),
+        }
         let listed = self.bucket.list(&prefix).await?;
         let fetches = listed.into_iter().map(|meta| {
             let key = meta.location.as_ref().to_string();
             let indexed = {
                 let index = self.bundle_index.lock().unwrap();
-                index.iter().any(|(indexed, _)| *indexed == key)
+                index
+                    .iter()
+                    .find(|(indexed, _)| *indexed == key)
+                    .map(|(_, rows)| rows.clone())
             };
             let bucket = self.bucket.clone();
             async move {
-                if indexed {
-                    return Some((key, None));
+                // The rows travel WITH the index hit. Looking them up again
+                // after the fetch let a rotation out of the bounded index
+                // drop the bundle from the scan between the two lookups,
+                // and a dropped bundle reads as a bundle with no rows --
+                // the same silent gap a failed read used to leave.
+                if let Some(rows) = indexed {
+                    return anyhow::Ok(Some((key, Fetched::Indexed(rows))));
                 }
                 match bucket.get(&key).await {
-                    Ok(Some((bytes, _))) => Some((key, Some(bytes))),
-                    _ => None,
+                    Ok(Some((bytes, _))) => Ok(Some((key, Fetched::Payload(bytes)))),
+                    // Absent IS an answer: bundle GC deletes a bundle only
+                    // once the per-cell layout covers every row it carries,
+                    // so a listed-then-absent bundle carries nothing this
+                    // scan must report. A read FAILURE is not an answer.
+                    // Reporting one as a bundle with no rows is what let the
+                    // graceful seal call an unread bundle drained and orphan
+                    // its acked rows behind a record that says the bucket is
+                    // complete; the callers both fail closed on an error, so
+                    // the error has to reach them.
+                    Ok(None) => Ok(None),
+                    Err(error) => Err(error.context(format!(
+                        "read retained bundle {key} for the uncovered-row scan"
+                    ))),
                 }
             }
         });
         let mut fetched = Vec::new();
         let mut fetches =
-            futures_util::stream::iter(fetches).buffer_unordered(RECOVERY_UPLOAD_CONCURRENCY * 2);
+            futures_util::stream::iter(fetches).buffer_unordered(COVERAGE_READ_CONCURRENCY);
         while let Some(item) = futures_util::StreamExt::next(&mut fetches).await {
-            if let Some(item) = item {
+            if let Some(item) = item? {
                 fetched.push(item);
             }
         }
         drop(fetches);
+        // Bundles whose bytes this pass read and could not use. They are
+        // declared together below, before the scan answers, so no caller
+        // proceeds past an undeclared loss.
+        let mut unreadable: BTreeMap<String, (String, Vec<celld_ltx::bundle::BundleRow>)> =
+            BTreeMap::new();
         let mut bundles = Vec::new();
-        for (key, bytes) in fetched {
-            let (rows, bytes) = match bytes {
-                Some(bytes) => match celld_ltx::bundle::decode_rows(&bytes) {
+        for (key, item) in fetched {
+            let (rows, bytes) = match item {
+                Fetched::Payload(bytes) => match celld_ltx::bundle::decode_rows(&bytes) {
                     Ok(rows) => (rows, Some(bytes)),
-                    Err(_) => continue,
-                },
-                None => {
-                    let index = self.bundle_index.lock().unwrap();
-                    let Some((_, rows)) = index.iter().find(|(indexed, _)| *indexed == key) else {
+                    // The envelope is unreadable, so the object no longer
+                    // says what it held and the declaration cannot name a
+                    // row. Skipping it instead reported a bundle with no
+                    // rows, which seals over whatever it carried.
+                    Err(error) => {
+                        unreadable
+                            .entry(key)
+                            .or_insert_with(|| (error.to_string(), Vec::new()));
                         continue;
-                    };
-                    (rows.clone(), None)
-                }
+                    }
+                },
+                Fetched::Indexed(rows) => (rows, None),
             };
             bundles.push((key, rows, bytes));
         }
@@ -4326,7 +5297,7 @@ impl NodeLogManager {
             ((cell, epoch), watermark)
         });
         let mut lookups =
-            futures_util::stream::iter(lookups).buffer_unordered(RECOVERY_UPLOAD_CONCURRENCY * 2);
+            futures_util::stream::iter(lookups).buffer_unordered(COVERAGE_READ_CONCURRENCY);
         let mut covered: HashMap<(String, u64), u64> = HashMap::new();
         while let Some((cell, watermark)) = lookups.next().await {
             covered.insert(cell, watermark);
@@ -4349,23 +5320,116 @@ impl NodeLogManager {
                     // Index-hit bundles were not fetched; an uncovered row
                     // forces the one lazy GET its payload needs.
                     if bytes.is_none() {
-                        bytes = match self.bucket.get(&key).await {
-                            Ok(Some((bytes, _))) => Some(bytes),
-                            _ => None,
-                        };
+                        // Same rule as the first pass: absence is an answer,
+                        // a failed read is not.
+                        bytes = self
+                            .bucket
+                            .get(&key)
+                            .await
+                            .with_context(|| {
+                                format!("read retained bundle {key} for the uncovered-row scan")
+                            })?
+                            .map(|(bytes, _)| bytes);
                     }
                     let Some(bytes) = bytes.as_ref() else {
                         continue;
                     };
-                    if let Ok(payload) = celld_ltx::bundle::slice(bytes, &row) {
-                        uncovered
-                            .entry((row.cell.clone(), row.cell_epoch, row.txid))
-                            .or_insert_with(|| payload.to_vec());
+                    match celld_ltx::bundle::slice(bytes, &row) {
+                        Ok(payload) => {
+                            uncovered
+                                .entry((row.cell.clone(), row.cell_epoch, row.txid))
+                                .or_insert_with(|| payload.to_vec());
+                        }
+                        // The envelope decoded, and this row does not lie
+                        // inside the object. The row reached here only
+                        // because the per-cell layout does not cover it, so
+                        // this is one acknowledged row with no remaining
+                        // bucket copy, and the declaration can name it.
+                        Err(error) => {
+                            let entry = unreadable
+                                .entry(key.clone())
+                                .or_insert_with(|| (error.to_string(), Vec::new()));
+                            entry.1.push(row);
+                        }
                     }
                 }
             }
         }
+        // Declare before answering. A caller that seals or restores on this
+        // answer must do it against a durable record of what was lost.
+        for (key, (reason, rows)) in unreadable {
+            self.declare_bundle_loss(&key, &rows, &reason).await?;
+        }
         Ok(uncovered)
+    }
+
+    /// Record a retained bundle that this session wrote and cannot read
+    /// back.
+    ///
+    /// The scan reads `log/<session>/bundle/` only, so the writer is this
+    /// process running this binary. Bytes that do not decode are therefore
+    /// corruption, not a newer envelope this reader does not know, and no
+    /// retry and no other reader can do better. That leaves a permanent
+    /// refusal or a record. A refusal wedges every activation waiting on
+    /// the fold, so the loss becomes a record and the scan continues --
+    /// the shape the amnesiac ensemble already uses, and the reason "loss
+    /// is a record, never a prompt" is a rule here.
+    ///
+    /// `rows` names what was lost when one row failed to slice out of an
+    /// envelope that decoded. It is empty when the envelope itself was
+    /// unreadable, because the object then no longer says what it held.
+    ///
+    /// The record sits beside `log/<session>/`, never inside its `bundle/`
+    /// subtree, so no bundle listing tries to decode a declaration.
+    async fn declare_bundle_loss(
+        &self,
+        key: &str,
+        rows: &[celld_ltx::bundle::BundleRow],
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        if !self
+            .declared_bundle_losses
+            .lock()
+            .unwrap()
+            .insert(key.to_string())
+        {
+            return Ok(());
+        }
+        let name = key.rsplit('/').next().unwrap_or(key);
+        let record = format!("log/{}.bundle-{name}.loss.json", self.session);
+        let body = serde_json::json!({
+            "session": self.session,
+            "bundle": key,
+            "declared_at_ms": crate::ownership_store::now_ms(),
+            "declared_by": self.node,
+            "reason": reason,
+            "rows": rows
+                .iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "cell": row.cell,
+                        "cell_epoch": row.cell_epoch,
+                        "txid": row.txid,
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "note": "a retained bundle this session wrote could not be read \
+                     back; an acknowledged row it carried that the per-cell \
+                     layout does not cover is unrecovered",
+        });
+        if let Err(error) = self.bucket.put(&record, serde_json::to_vec(&body)?).await {
+            // The scan must not answer until the record is durable, so a
+            // failed declaration un-latches and the next pass retries it.
+            self.declared_bundle_losses.lock().unwrap().remove(key);
+            return Err(error.context(format!("declare the unreadable bundle {key}")));
+        }
+        warn!(
+            bundle = key,
+            reason,
+            rows = rows.len(),
+            "declared a retained bundle this session cannot read back"
+        );
+        Ok(())
     }
 
     pub async fn gc_bundles(&self) -> anyhow::Result<()> {
@@ -4535,18 +5599,24 @@ impl NodeLogManager {
 
     /// Delete a dead, sealed session's retained bundles. Under the fold
     /// the record itself lives in the lease and is retired by dead-lease
-    /// GC; what a sealed session leaves behind is its bundle subtree, and
-    /// recovery folded every acked row per-cell before the seal, so the
-    /// bundles are garbage. Batched: a session can retain hundreds, and
+    /// GC; a sealed session leaves bundles and recovery checkpoints behind.
+    /// Recovery folded every acked row per-cell before the seal, so both
+    /// subtrees are garbage. Batched: a session can retain hundreds, and
     /// the lab priced one-key-at-a-time GC at 9k class A operations an
     /// hour. A key that fails stays for the next sweep tick.
     async fn gc_sealed_session(&self, session: &str) -> anyhow::Result<bool> {
+        let prefix = format!("log/{session}/");
         let keys: Vec<String> = self
             .bucket
-            .list(&format!("log/{session}/bundle/"))
+            .list(&prefix)
             .await?
             .into_iter()
             .map(|meta| meta.location.as_ref().to_string())
+            .filter(|key| {
+                key.strip_prefix(&prefix).is_some_and(|tail| {
+                    tail.starts_with("bundle/") || tail.starts_with("recovered/")
+                })
+            })
             .collect();
         if keys.is_empty() {
             return Ok(true);
@@ -4555,11 +5625,15 @@ impl NodeLogManager {
         let gone = self.bucket.delete_many(&keys).await;
         if gone.len() != count {
             anyhow::bail!(
-                "{} of {count} bundle objects survived the delete; retrying next tick",
+                "{} of {count} recovery objects survived the delete; retrying next tick",
                 count - gone.len()
             );
         }
-        info!(session, bundles = count, "sealed session's bundles retired");
+        info!(
+            session,
+            objects = count,
+            "sealed session's recovery objects retired"
+        );
         Ok(true)
     }
 }
@@ -4913,7 +5987,7 @@ impl crate::ltx_repl::BundleSink for NodeLogManager {
             if gathered.is_empty() {
                 return Ok(());
             }
-            let uploaded = self.upload_gathered(gathered).await?;
+            let uploaded = self.upload_gathered(gathered, None).await?;
             info!(
                 cell,
                 uploaded, "folded a quietly stranded tail before reactivation"

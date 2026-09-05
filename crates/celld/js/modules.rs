@@ -197,6 +197,11 @@ const LAZY_MODULES: &[LazyModule] = &[
         source: include_str!("node_events.js"),
     },
     LazyModule {
+        specs: &["os", "node:os"],
+        global: "__osModule",
+        source: include_str!("node_os.js"),
+    },
+    LazyModule {
         specs: &["path", "node:path", "path/posix", "node:path/posix"],
         global: "__pathModule",
         source: include_str!("node_path.js"),
@@ -224,6 +229,11 @@ const LAZY_MODULES: &[LazyModule] = &[
         specs: &["async_hooks", "node:async_hooks"],
         global: "__asyncHooksModule",
         source: include_str!("node_async_hooks.js"),
+    },
+    LazyModule {
+        specs: &["diagnostics_channel", "node:diagnostics_channel"],
+        global: "__diagnosticsChannelModule",
+        source: include_str!("node_diagnostics_channel.js"),
     },
     // One source defines the whole stream family; whichever entry runs
     // first, its guard covers the others.
@@ -345,7 +355,8 @@ pub(super) fn install_lazy_globals(scope: &mut v8::PinScope) -> Result<()> {
 /// `LAZY_MODULES` instead.
 fn eager_module_global(spec: &str) -> Option<&'static str> {
     Some(match spec {
-        "fs" | "node:fs" | "fs/promises" | "node:fs/promises" => "globalThis.__fs",
+        "fs" | "node:fs" => "globalThis.__fs",
+        "fs/promises" | "node:fs/promises" => "globalThis.__fsPromises",
         "zlib" | "node:zlib" => "globalThis.__zlibModule",
         _ => return None,
     })
@@ -353,6 +364,7 @@ fn eager_module_global(spec: &str) -> Option<&'static str> {
 
 fn stub_source(spec: &str, names: &std::collections::BTreeSet<String>) -> String {
     let cf = spec == "cloudflare:workers";
+    let cf_sockets = spec == "cloudflare:sockets";
     // `cloudflare:workflows` is real, not a pass-through proxy: its one
     // export is `NonRetryableError`, and a proxy standing in for an Error
     // subclass would make `throw new NonRetryableError(...)` throw a value
@@ -362,6 +374,8 @@ fn stub_source(spec: &str, names: &std::collections::BTreeSet<String>) -> String
     let eager = eager_module_global(spec);
     let base = if cf {
         "globalThis.__cf".to_string()
+    } else if cf_sockets {
+        "globalThis.__cfSockets".to_string()
     } else if cf_workflows {
         "globalThis.__cfWorkflows".to_string()
     } else if let Some(m) = lazy {
@@ -369,9 +383,14 @@ fn stub_source(spec: &str, names: &std::collections::BTreeSet<String>) -> String
     } else if let Some(global) = eager {
         global.to_string()
     } else {
-        "globalThis.__nodeStub".to_string()
+        // Unsupported: a path-carrying stub whose property walks stay
+        // inert but whose calls throw, so first use fails loudly with the
+        // specifier in the message instead of silently passing through.
+        format!(
+            "globalThis.__nodeStubFor({})",
+            serde_json::to_string(spec).unwrap()
+        )
     };
-    let real = cf || cf_workflows || lazy.is_some() || eager.is_some();
     let mut out = String::new();
     if let Some(m) = lazy {
         out.push_str(&format!("if (!globalThis.{}) {{\n", m.global));
@@ -390,10 +409,8 @@ fn stub_source(spec: &str, names: &std::collections::BTreeSet<String>) -> String
             )
         {
             out.push_str(&format!("export const {n} = globalThis.__cf.{n};\n"));
-        } else if real {
-            out.push_str(&format!("export const {n} = {base}.{n};\n"));
         } else {
-            out.push_str(&format!("export const {n} = globalThis.__nodeStub;\n"));
+            out.push_str(&format!("export const {n} = {base}.{n};\n"));
         }
     }
     out
@@ -651,6 +668,9 @@ fn builtin_source(spec: &str) -> Option<(String, String)> {
     if spec == "cloudflare:workers" {
         return Some((String::new(), "globalThis.__cf".into()));
     }
+    if spec == "cloudflare:sockets" {
+        return Some((String::new(), "globalThis.__cfSockets".into()));
+    }
     if spec == "cloudflare:workflows" {
         return Some((String::new(), "globalThis.__cfWorkflows".into()));
     }
@@ -663,7 +683,13 @@ fn builtin_source(spec: &str) -> Option<(String, String)> {
     if let Some(global) = eager_module_global(spec) {
         return Some((String::new(), global.to_string()));
     }
-    is_external(spec).then(|| (String::new(), "globalThis.__nodeStub".to_string()))
+    is_external(spec).then(|| {
+        let stub = format!(
+            "globalThis.__nodeStubFor({})",
+            serde_json::to_string(spec).unwrap()
+        );
+        (String::new(), stub)
+    })
 }
 
 /// Full-surface module source for a builtin: run the (guarded) setup, probe

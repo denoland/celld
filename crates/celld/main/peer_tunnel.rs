@@ -223,7 +223,16 @@ async fn serve_do(upgraded: hyper::upgrade::Upgraded, app: AppHandle) {
                     .map_ok(|data: Bytes| data.to_vec())
                     .map_err(|error| error.to_string()),
             );
-            let body = celld::js::RequestBody::Stream(celld::js::register_body_stream(chunks));
+            let stream_id = match celld::js::register_body_stream(chunks) {
+                Ok(stream_id) => stream_id,
+                Err(error) => {
+                    return Ok(peer_response(response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        format!("request body stream: {error}"),
+                    )));
+                }
+            };
+            let body = celld::js::RequestBody::Stream(stream_id);
             let fetch = ForwardedFetch {
                 name: control.name,
                 url: parts.uri.to_string(),
@@ -288,6 +297,20 @@ async fn serve_do(upgraded: hyper::upgrade::Upgraded, app: AppHandle) {
 
 type TunnelSender = hyper::client::conn::http1::SendRequest<TunnelBody>;
 
+/// The peer rejected the outer tunnel before an application request crossed
+/// it. This is a definite stale route, so the caller can refresh ownership
+/// without risking a duplicate handler invocation.
+#[derive(Debug)]
+pub(crate) struct StaleTunnelRoute;
+
+impl std::fmt::Display for StaleTunnelRoute {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("peer rejected the stale tunnel route")
+    }
+}
+
+impl std::error::Error for StaleTunnelRoute {}
+
 /// Who node A dials and how it proves itself. One borrow carries the
 /// client, the fleet key, and the routed peer's address and name through
 /// an attempt.
@@ -344,6 +367,13 @@ async fn establish(peer: &Peer<'_>, kind: &'static str) -> anyhow::Result<Tunnel
         .send()
         .await?;
     peer_auth::validate_response(response.headers())?;
+    if response
+        .headers()
+        .get(STALE_ROUTE_HEADER)
+        .is_some_and(|value| value == STALE_ROUTE_VALUE)
+    {
+        return Err(StaleTunnelRoute.into());
+    }
     anyhow::ensure!(
         response.status() == reqwest::StatusCode::SWITCHING_PROTOCOLS,
         "tunnel establishment answered {}",
@@ -619,18 +649,42 @@ pub(crate) fn park_upgrade(upgrade: hyper::upgrade::OnUpgrade) -> u64 {
     id
 }
 
-/// Splice the upgraded client socket to the tunneled owner: the hop stops
-/// interpreting WebSocket frames and copies bytes until either side closes.
-pub(crate) async fn splice<S>(client: S, parked: u64) -> anyhow::Result<()>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    let upgrade = TUNNEL_UPGRADES
+fn remove_upgrade(parked: u64) -> Option<hyper::upgrade::OnUpgrade> {
+    TUNNEL_UPGRADES
         .get_or_init(Default::default)
         .lock()
         .unwrap()
         .remove(&parked)
+}
+
+/// Own one parked upgrade after its numeric id returns from JavaScript.
+///
+/// The id itself releases nothing. Binding it to this value makes every early
+/// response exit and every cancelled executor task remove the stored upgrade.
+/// A successful splice consumes the same value and takes the connection once.
+pub(crate) struct TunnelUpgradeClaim {
+    upgrade: hyper::upgrade::OnUpgrade,
+}
+
+pub(crate) fn claim_upgrade(parked: u64) -> anyhow::Result<TunnelUpgradeClaim> {
+    let upgrade = remove_upgrade(parked)
         .ok_or_else(|| anyhow::anyhow!("tunneled upgrade {parked} is gone"))?;
+    Ok(TunnelUpgradeClaim { upgrade })
+}
+
+impl TunnelUpgradeClaim {
+    fn into_upgrade(self) -> hyper::upgrade::OnUpgrade {
+        self.upgrade
+    }
+}
+
+/// Splice the upgraded client socket to the tunneled owner: the hop stops
+/// interpreting WebSocket frames and copies bytes until either side closes.
+pub(crate) async fn splice<S>(client: S, parked: TunnelUpgradeClaim) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let upgrade = parked.into_upgrade();
     let inner = upgrade.await?;
     let inner = TokioIo::new(inner);
     let (mut client_read, mut client_write) = tokio::io::split(client);

@@ -650,12 +650,13 @@
       keyType: result.keyType,
       details: result.details,
     };
-    const algorithm = { name: WEB_CRYPTO_ALGORITHM[result.keyType] };
-    if (result.keyType === "ec") algorithm.namedCurve = "P-256";
-    if (result.keyType === "rsa") {
-      algorithm.modulusLength = result.details.modulusLength;
-      algorithm.hash = { name: "SHA-256" };
-    }
+    // The same builder Web Crypto's own importKey uses, so a key that
+    // arrives through node:crypto reports what the same key reports after
+    // crypto.subtle.importKey(). There is no request dictionary here, so
+    // an RSA key takes the SHA-256 that builder defaults to.
+    const algorithm = $$keyAlgorithm(
+      WEB_CRYPTO_ALGORITHM[result.keyType], null, result.keyType,
+      result.details);
     return KeyObject.from(
       new CryptoKey(visibility, algorithm, true, [], material));
   }
@@ -1002,11 +1003,8 @@
         return Buffer.from(
           keyOp("rsa-pkcs1-sign", { key: der, data: input, hash }).bytes);
       case "ec":
-        if (material.details.namedCurve !== "prime256v1")
-          throw ERR_METHOD_NOT_IMPLEMENTED(
-            `sign with ${material.details.namedCurve}`);
         return Buffer.from(
-          keyOp("p256-sign-der", { key: der, data: input }).bytes);
+          keyOp("ec-sign-der", { key: der, data: input, hash }).bytes);
       default:
         throw ERR_METHOD_NOT_IMPLEMENTED(`sign with ${material.keyType}`);
     }
@@ -1029,11 +1027,10 @@
         return keyOp(
           "rsa-pkcs1-verify", { key: der, data: input, signature: sig, hash }).ok;
       case "ec":
-        if (material.details.namedCurve !== "prime256v1")
-          throw ERR_METHOD_NOT_IMPLEMENTED(
-            `verify with ${material.details.namedCurve}`);
         return keyOp(
-          "p256-verify-der", { key: der, data: input, signature: sig }).ok;
+          "ec-verify-der", {
+            key: der, data: input, signature: sig, hash,
+          }).ok;
       default:
         throw ERR_METHOD_NOT_IMPLEMENTED(`verify with ${material.keyType}`);
     }

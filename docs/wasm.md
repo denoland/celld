@@ -54,7 +54,7 @@ The runtime surface that the application can use is the surface in
 [Cloudflare compatibility](cloudflare-compat.md); a workers-rs API
 that maps to a missing runtime feature does not work.
 
-## The Worker Loader
+## Dynamic Workers
 
 A dynamically loaded worker can also carry wasm. Pass the bytes in the
 `modules` map; a `BufferSource` value becomes a compiled-module import

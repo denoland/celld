@@ -53,8 +53,11 @@ use crate::{
     ltx_file_path, ltx_level_dir, Pos, CHECKPOINT_MODE_PASSIVE, CHECKPOINT_MODE_RESTART,
     CHECKPOINT_MODE_TRUNCATE, META_DIR_SUFFIX, TXID, WAL_FRAME_HEADER_SIZE, WAL_HEADER_SIZE,
 };
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::ffi;
+use rusqlite::Connection;
+use rusqlite::OpenFlags;
 use std::collections::HashMap;
+use std::ffi::c_int;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -80,6 +83,15 @@ pub enum CheckpointMode {
     Restart,
     /// Like RESTART plus truncates the WAL file to zero length.
     Truncate,
+}
+
+/// The three columns of `PRAGMA wal_checkpoint`: whether a lock stopped the
+/// checkpoint, the frames in the WAL, and the frames backfilled.
+#[derive(Clone, Copy, Debug)]
+struct CheckpointPragma {
+    busy: i64,
+    wal_frames: i64,
+    backfilled: i64,
 }
 
 impl std::fmt::Display for CheckpointMode {
@@ -109,6 +121,12 @@ struct SyncInfo {
     reason: String,
 }
 
+/// Databases larger than this many pages (4 MiB at 4 KiB) must outgrow
+/// themselves in the WAL before a TRUNCATE checkpoint, since the checkpoint
+/// ends in a boundary image of the whole database. Smaller ones keep the
+/// absolute `truncate_page_n` threshold.
+const RELATIVE_TRUNCATE_PAGES: u32 = 1024;
+
 /// A SQLite database managed for replication.
 ///
 /// Owns the connection (WAL mode, auto-checkpoint disabled) so litestream — not
@@ -132,6 +150,7 @@ fn snapshot_reason_code(reason: &str) -> u8 {
         "last page does not exist in last ltx file, wal overwritten by another process" => 4,
         "full or restart checkpoint detected, snapshotting" => 5,
         "checkpoint boundary snapshot" => 6,
+        "WAL restarted before passive checkpoint barrier" => 8,
         _ => 7,
     }
 }
@@ -175,10 +194,10 @@ pub struct SyncTiming {
     pub wal_len_bytes: u64,
     /// True when this call snapshotted (the full-database path).
     pub snapshot: bool,
-    /// Which WAL read ran: 0 tail, 1 full because snapshotting, 2 full
-    /// because the offset sat at the WAL start, 3 full because the tail
-    /// read fell back. `wal_read_bytes` is what that read actually
-    /// transferred (the tail length, or the whole file).
+    /// Which WAL read ran: 0 valid tail, 1 full because snapshotting, 2 valid
+    /// prefix because the offset sat at the WAL start, 3 full because the
+    /// bounded read fell back. `wal_read_bytes` is what that read actually
+    /// transferred, including a bounded probe past the valid checksum chain.
     pub wal_read_kind: u8,
     pub wal_read_bytes: u64,
     /// The bytes the sync allocated to hold what it read: the tail plus the
@@ -187,13 +206,36 @@ pub struct SyncTiming {
     /// Which verify branch forced the snapshot: 0 none, 1 first sync,
     /// 2 wal truncated by another process, 3 salt reset, 4 last page
     /// missing from the last L0, 5 full or restart checkpoint detected,
-    /// 6 checkpoint boundary, 7 other.
+    /// 6 checkpoint boundary, 7 other, 8 WAL restarted before the passive
+    /// checkpoint barrier.
     pub snapshot_reason: u8,
     /// The cut file's fsync (zero under lazy capture).
     pub fsync_us: u64,
     /// `checkpoint_if_needed`: SQLite's checkpoint, including its own
     /// writes and fsyncs through the SQLite VFS.
     pub checkpoint_us: u64,
+    /// One when this call ran a checkpoint pragma or swallowed its busy
+    /// error, else zero. Counters rather than flags, so the round ledger
+    /// sums them across cells like every other field here. A Queue soak
+    /// showed 14% of checkpoint rounds repeating on the next round with only
+    /// the sealing frame captured, and `checkpoint_us` alone could not say
+    /// whether the backfill was short, the pragma was busy, or the sealing
+    /// write failed to restart the WAL.
+    pub checkpoint_runs: u64,
+    /// The frames the WAL held when the pragma ran and the frames it had
+    /// backfilled when it returned: `PRAGMA wal_checkpoint`'s second and
+    /// third columns. Equal for a complete backfill; a shortfall names a
+    /// reader that pinned the WAL.
+    pub checkpoint_wal_frames: u64,
+    pub checkpoint_backfilled: u64,
+    /// One when the pragma reported a lock it could not take (its first
+    /// column), and one when the checkpoint path failed with `SQLITE_BUSY`
+    /// and the sync swallowed the error.
+    pub checkpoint_busy: u64,
+    pub checkpoint_busy_errors: u64,
+    /// One when the WAL header changed across the sealing write, so the
+    /// logical WAL restarted at its header.
+    pub checkpoint_restarts: u64,
 }
 
 pub struct Db {
@@ -241,6 +283,19 @@ pub struct Db {
     /// from the last LTX (#997, db.go:96). Used for checkpoint thresholds
     /// instead of file size (stale post-checkpoint frames inflate file size).
     last_synced_wal_offset: i64,
+    /// The database's page count as the last capture saw it, for the
+    /// truncate guard: a second stat per sync would break the syscall
+    /// ledger, and the capture already read the size.
+    last_db_pages: u32,
+    /// Logical WAL offset through which the last checkpoint backfilled the
+    /// database, in the current WAL's coordinates; `WAL_HEADER_SIZE` after
+    /// a restart and 0 before any checkpoint. The passive threshold counts
+    /// frames appended past this point. The port compared the whole logical
+    /// size, which re-fired the checkpoint on every sync after a checkpoint
+    /// whose sealing write could not restart the WAL: the backfilled frames
+    /// kept counting, so a Queue owner paid a writer barrier, a sealing
+    /// write, and a fresh LTX per round until a restart succeeded.
+    checkpointed_wal_offset: i64,
     /// The schema version `ensure_control_tables` last verified. The
     /// self-heal exists for a swept `sqlite_schema`, and any sweep bumps
     /// SQLite's schema version, so an unchanged version proves the tables
@@ -293,6 +348,7 @@ impl Db {
     pub const DEFAULT_MIN_CHECKPOINT_PAGE_N: u32 = 1000;
     /// Default truncate page count (`DefaultTruncatePageN`, db.go:35).
     pub const DEFAULT_TRUNCATE_PAGE_N: u32 = 121_359;
+
     /// Default checkpoint interval (`DefaultCheckpointInterval`, db.go:32).
     pub const DEFAULT_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);
     /// Default busy timeout (`DefaultBusyTimeout`, db.go:33).
@@ -312,8 +368,8 @@ impl Db {
         Self::open_with_host_and_optional_vfs(path, host, None)
     }
 
-    /// Opens both managed connections through a named SQLite VFS.
-    #[cfg(celld_internal_tests)]
+    /// Opens both managed connections through a named SQLite VFS. Used by the
+    /// fault-injection VFS of the test suite and by paged restore's fault-in VFS.
     pub fn open_with_host_and_vfs(
         path: impl AsRef<Path>,
         host: crate::LtxHost,
@@ -382,6 +438,8 @@ impl Db {
             synced_since_checkpoint: false,
             synced_to_wal_end: false,
             last_synced_wal_offset: 0,
+            last_db_pages: 0,
+            checkpointed_wal_offset: 0,
             verified_schema_version: None,
             last_l0_header: None,
             pos_cache: None,
@@ -781,6 +839,39 @@ impl Db {
         Ok(())
     }
 
+    /// Continues a chain at `txid`, whose database has `commit` pages: the
+    /// next sync captures a delta at `txid + 1`, not the whole database. A
+    /// zero-page L0 at `txid` is the local baseline verify reads back; its
+    /// WAL fields name the start of the WAL as it stands, so the first
+    /// capture begins at the WAL header. The WAL must exist: an activation
+    /// writes the control tables before this runs. Returns the baseline's
+    /// bytes: the caller uploads the same object as the epoch's marker, so
+    /// the epoch is never empty (CelldPersistencePaged.tla, `BreakNoMarker`).
+    /// A whole-database opener is what a paged cell cannot afford: on the
+    /// 2 GB fleet whale it took minutes through the fault path, the
+    /// durability gate timed out, and every re-activation started it over.
+    pub fn seed_continuation(&mut self, txid: TXID, commit: u32) -> Result<Vec<u8>> {
+        let wal = self.wal_header_bytes()?;
+        let header = ltx::Header {
+            version: ltx::VERSION,
+            flags: ltx::HEADER_FLAG_NO_CHECKSUM,
+            page_size: self.page_size,
+            commit,
+            min_txid: txid,
+            max_txid: txid,
+            timestamp: self.host.now_unix_millis(),
+            pre_apply_checksum: 0,
+            wal_offset: WAL_HEADER_SIZE as i64,
+            wal_size: 0,
+            wal_salt1: be_u32(&wal[16..]),
+            wal_salt2: be_u32(&wal[20..]),
+            node_id: 0,
+        };
+        let baseline = ltx::encode_file(&header, &[], 0)?;
+        self.seed_l0_baseline(txid, txid, &baseline)?;
+        Ok(baseline)
+    }
+
     // ── Capture loop ───────────────────────────────────────────────────────
 
     /// Where one `sync` call's wall time went, phase by phase. The phases
@@ -1107,6 +1198,104 @@ impl Db {
         Ok(!m.is_empty())
     }
 
+    /// Read an incremental WAL image through the first invalid frame.
+    ///
+    /// SQLite can retain stale frames after a checkpoint restarts the logical
+    /// WAL. The frame checksum chain is the format's end marker, so grow a
+    /// prefix geometrically and stop when `WalReader` stops before the bytes
+    /// that were read. The geometric window keeps parsing linear overall and
+    /// reads at most one prior window past the valid end. The returned byte
+    /// count includes that discarded probe for an honest I/O ledger.
+    fn read_valid_wal_image(&mut self, info: &SyncInfo, start: usize) -> Result<(WalImage, usize)> {
+        let frame_size = self.page_size as usize + WAL_FRAME_HEADER_SIZE;
+        let offset = info.offset;
+        let salt1 = info.salt1;
+        let salt2 = info.salt2;
+        Ok(self.with_wal_file(|file| {
+            let file_len = file.file_len()? as usize;
+            if file_len < WAL_HEADER_SIZE || start < WAL_HEADER_SIZE || start >= file_len {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+            }
+            let complete_end =
+                WAL_HEADER_SIZE + ((file_len - WAL_HEADER_SIZE) / frame_size) * frame_size;
+            if start >= complete_end || !(start - WAL_HEADER_SIZE).is_multiple_of(frame_size) {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+            }
+
+            let tail_base = if start == WAL_HEADER_SIZE { 0 } else { start };
+            let mut bytes = file.read_exact_at(0, WAL_HEADER_SIZE)?;
+            let mut read_bytes = bytes.len();
+            let mut cursor = start;
+            let mut target_frames = 1_usize;
+            loop {
+                let target_end = start
+                    .saturating_add(target_frames.saturating_mul(frame_size))
+                    .min(complete_end);
+                if target_end > cursor {
+                    let chunk = file.read_exact_at(cursor as u64, target_end - cursor)?;
+                    read_bytes += chunk.len();
+                    bytes.extend_from_slice(&chunk);
+                    cursor = target_end;
+                }
+
+                let valid_end = {
+                    let parsed = if offset == WAL_HEADER_SIZE as i64 {
+                        WalReader::new(&bytes)
+                    } else if tail_base == 0 {
+                        WalReader::new_with_offset(&bytes, offset, salt1, salt2)
+                    } else {
+                        WalReader::new_with_offset_over_tail(
+                            &bytes,
+                            tail_base as i64,
+                            offset,
+                            salt1,
+                            salt2,
+                        )
+                    };
+                    let mut reader = parsed.map_err(|error| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+                    })?;
+                    reader.page_map().map_err(|error| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+                    })?;
+                    if reader.offset() == 0 {
+                        WAL_HEADER_SIZE
+                    } else {
+                        reader.offset() as usize + frame_size
+                    }
+                };
+
+                if valid_end < cursor {
+                    let keep = if tail_base == 0 {
+                        valid_end
+                    } else {
+                        WAL_HEADER_SIZE + valid_end.saturating_sub(tail_base)
+                    };
+                    bytes.truncate(keep);
+                    return Ok((
+                        WalImage {
+                            bytes,
+                            tail_base,
+                            file_len,
+                        },
+                        read_bytes,
+                    ));
+                }
+                if cursor == complete_end {
+                    return Ok((
+                        WalImage {
+                            bytes,
+                            tail_base,
+                            file_len,
+                        },
+                        read_bytes,
+                    ));
+                }
+                target_frames = target_frames.saturating_mul(2);
+            }
+        })?)
+    }
+
     /// Copies pending bytes from the real WAL into a new L0 LTX file.
     ///
     /// Ported from `DB.sync` (db.go:1517-1723). Returns `true` if an LTX file was
@@ -1114,58 +1303,54 @@ impl Db {
     /// tmp→fsync→rename with the pos cache + anti-feedback flags updated after.
     fn sync_inner(&mut self, mut info: SyncInfo) -> Result<bool> {
         let phase = crate::host::telemetry_us();
+        // A capture that starts at the WAL header reads a logical WAL with no
+        // backfilled prefix: the first sync, a restart, or a boundary image.
+        // The checkpoint trigger counts from the backfilled boundary, so it
+        // must not carry an offset from the WAL that just ended, or the new
+        // WAL would grow past that offset before its first checkpoint.
+        if info.offset == WAL_HEADER_SIZE as i64 {
+            self.checkpointed_wal_offset = WAL_HEADER_SIZE as i64;
+        }
         let pos = self.pos()?;
         let tx_id = TXID(pos.txid.0 + 1);
         let filename = self.ltx_path(0, tx_id, tx_id);
 
         let db_size = self.db_file_size()?;
         let mut commit = (db_size / self.page_size as i64) as u32;
+        self.last_db_pages = commit;
         self.last_sync_timing.pos_us = crate::host::telemetry_us().saturating_sub(phase);
         let phase = crate::host::telemetry_us();
 
-        // The incremental path reads only what the reader touches: the
-        // 32-byte WAL header, the previous frame, and the frames from
-        // `info.offset` on. The whole-file read it replaces cost ~1.5 us
-        // per WAL page PER SYNC at constant delta (sync_cost.rs), which
-        // was 69% of the fleet's capture time at saturation. The sparse
-        // image keeps every offset absolute, so the reader and the page
-        // collectors are byte-for-byte unchanged; a short tail read (a
-        // rare truncation race) falls back to the full read the port
-        // always did.
+        // The incremental path reads only the valid checksum chain: the
+        // 32-byte WAL header, the previous frame when there is one, and the
+        // frames from `info.offset` on. A passive or restart checkpoint can
+        // leave a large physical suffix after SQLite restarts the logical WAL
+        // at its beginning. Reading to the physical file length made every
+        // Queue capture re-read that stale suffix because Queue cells cannot
+        // use size-triggered TRUNCATE checkpoints. The progressive reader
+        // doubles its valid-prefix window, then drops the bounded look-ahead
+        // after the first salt or checksum failure. The sparse image keeps
+        // every offset absolute, so the reader and page collectors remain
+        // unchanged. An I/O race or a previous-frame mismatch falls back to
+        // the full read the port always did.
         let frame_size_bytes = self.page_size as i64 + WAL_FRAME_HEADER_SIZE as i64;
-        let mut wal = if info.snapshotting
-            || info.offset <= WAL_HEADER_SIZE as i64 + frame_size_bytes
-        {
-            self.last_sync_timing.wal_read_kind = if info.snapshotting { 1 } else { 2 };
+        let mut wal = if info.snapshotting {
+            self.last_sync_timing.wal_read_kind = 1;
             let bytes = self.host.read(&self.wal_path())?;
             self.last_sync_timing.wal_read_bytes = bytes.len() as u64;
             self.last_sync_timing.wal_len_bytes = bytes.len() as u64;
             WalImage::whole(bytes)
         } else {
-            // The tail starts one frame early: the offset reader re-reads the
-            // previous frame to seed its checksum. The image is the header
-            // followed by that tail, and nothing in between — the reader maps
-            // offsets through `tail_base` — so a sync allocates what it reads,
-            // not the length of a file whose middle it never touches.
-            let start = info.offset - frame_size_bytes;
-            let tail_image = self.with_wal_file(|file| {
-                let len = file.file_len()? as usize;
-                if start as usize >= len {
-                    return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
-                }
-                let mut bytes = Vec::with_capacity(WAL_HEADER_SIZE + (len - start as usize));
-                bytes.extend_from_slice(&file.read_exact_at(0, WAL_HEADER_SIZE)?);
-                bytes.extend_from_slice(&file.read_exact_at(start as u64, len - start as usize)?);
-                Ok(WalImage {
-                    bytes,
-                    tail_base: start as usize,
-                    file_len: len,
-                })
-            });
-            match tail_image {
-                Ok(image) => {
-                    self.last_sync_timing.wal_read_kind = 0;
-                    self.last_sync_timing.wal_read_bytes = image.bytes.len() as u64;
+            let start = if info.offset <= WAL_HEADER_SIZE as i64 + frame_size_bytes {
+                WAL_HEADER_SIZE
+            } else {
+                (info.offset - frame_size_bytes) as usize
+            };
+            match self.read_valid_wal_image(&info, start) {
+                Ok((image, read_bytes)) => {
+                    self.last_sync_timing.wal_read_kind =
+                        if start == WAL_HEADER_SIZE { 2 } else { 0 };
+                    self.last_sync_timing.wal_read_bytes = read_bytes as u64;
                     self.last_sync_timing.wal_len_bytes = image.file_len as u64;
                     image
                 }
@@ -1379,20 +1564,10 @@ impl Db {
         pgnos.sort_unstable();
 
         let mut out = Vec::with_capacity(pgnos.len());
-        let mut db_file: Option<crate::HostFile> = None;
         for pgno in pgnos {
-            let data = if let Some(&offset) = page_map.get(&pgno) {
-                wal.page(offset, self.page_size)?
-            } else {
-                let f = match &mut db_file {
-                    Some(f) => f,
-                    None => {
-                        db_file = Some(self.host.open(&self.path)?);
-                        db_file.as_mut().unwrap()
-                    }
-                };
-                let offset = (pgno as i64 - 1) * self.page_size as i64;
-                f.read_exact_at(offset as u64, self.page_size as usize)?
+            let data = match page_map.get(&pgno) {
+                Some(&offset) => wal.page(offset, self.page_size)?,
+                None => self.read_db_page(pgno)?,
             };
             out.push((pgno, data));
         }
@@ -1409,31 +1584,50 @@ impl Db {
         commit: u32,
     ) -> Result<Vec<(u32, Vec<u8>)>> {
         let lock = lock_pgno(self.page_size);
-        let mut db_file: Option<crate::HostFile> = None;
         let mut out = Vec::with_capacity(commit as usize);
-
-        for pgno in 1..=commit {
-            if pgno == lock {
-                continue;
-            }
-            if let Some(&offset) = page_map.get(&pgno) {
-                let data = wal.page(offset, self.page_size)?;
-                out.push((pgno, data));
-                continue;
-            }
-            // Read directly from the database file.
-            let f = match &mut db_file {
-                Some(f) => f,
-                None => {
-                    db_file = Some(self.host.open(&self.path)?);
-                    db_file.as_mut().unwrap()
-                }
+        for pgno in (1..=commit).filter(|pgno| *pgno != lock) {
+            let data = match page_map.get(&pgno) {
+                Some(&offset) => wal.page(offset, self.page_size)?,
+                None => self.read_db_page(pgno)?,
             };
-            let offset = (pgno as i64 - 1) * self.page_size as i64;
-            let data = f.read_exact_at(offset as u64, self.page_size as usize)?;
             out.push((pgno, data));
         }
         Ok(out)
+    }
+
+    /// Reads one page of the main database through the connection's VFS file,
+    /// never through a host read of the path. A paged cell's file is a sparse
+    /// cache of its cut, and the host read returned every unfaulted page as
+    /// zeros: each paged epoch's opener snapshot shipped holes, and the next
+    /// epoch restored a database whose integrity_check named every overflow
+    /// chain (fleet, 2026-09-02). The VFS faults the page in instead.
+    fn read_db_page(&self, pgno: u32) -> Result<Vec<u8>> {
+        let mut file: *mut ffi::sqlite3_file = std::ptr::null_mut();
+        // SAFETY: `conn` is open, and FILE_POINTER hands out the main file,
+        // which lives as long as the connection.
+        let rc = unsafe {
+            ffi::sqlite3_file_control(
+                self.conn.handle(),
+                c"main".as_ptr(),
+                ffi::SQLITE_FCNTL_FILE_POINTER,
+                (&mut file as *mut *mut ffi::sqlite3_file).cast(),
+            )
+        };
+        if rc != ffi::SQLITE_OK || file.is_null() {
+            return Err(std::io::Error::other("no main database file").into());
+        }
+        let n = self.page_size as usize;
+        let mut page = vec![0u8; n];
+        let offset = i64::from(pgno - 1) * i64::from(self.page_size);
+        // SAFETY: `file` is the live main file and `page` holds `n` bytes.
+        let rc = unsafe {
+            let read = (*(*file).pMethods).xRead.expect("xRead");
+            read(file, page.as_mut_ptr().cast(), n as c_int, offset)
+        };
+        if rc != ffi::SQLITE_OK {
+            return Err(std::io::Error::other(format!("read page {pgno}: sqlite rc {rc}")).into());
+        }
+        Ok(page)
     }
 
     // ── Checkpointing ──────────────────────────────────────────────────────
@@ -1448,15 +1642,40 @@ impl Db {
             return Ok(());
         }
 
-        // Priority 1: emergency TRUNCATE (blocking) on the *original* logical size.
-        if self.truncate_page_n > 0
-            && orig_wal_size >= calc_wal_size(self.page_size, self.truncate_page_n)
-        {
-            return self.checkpoint(CheckpointMode::Truncate);
+        // Priority 1: emergency TRUNCATE (blocking) on the *original* logical
+        // size. A truncate ends in a boundary image of the whole database
+        // (see `checkpoint`). For a small database that image is the cheap
+        // price the threshold was tuned for, so below `RELATIVE_TRUNCATE_PAGES`
+        // the threshold is absolute, as upstream's. Above it the WAL must also
+        // have grown past the database before a truncate: the image then costs
+        // at most what the WAL it replaces did, and the chain stays within 2x
+        // of the writes. A fixed threshold made a 1MB-row whale pay a
+        // database-sized capture every write, and its chain grew as the
+        // square of its size.
+        if self.truncate_page_n > 0 {
+            let relative = if self.last_db_pages > RELATIVE_TRUNCATE_PAGES {
+                self.last_db_pages
+            } else {
+                0
+            };
+            let threshold = self.truncate_page_n.max(relative);
+            if orig_wal_size >= calc_wal_size(self.page_size, threshold) {
+                return self.checkpoint(CheckpointMode::Truncate);
+            }
         }
 
-        // Priority 2: PASSIVE at the min threshold on the *new* logical size.
-        if new_wal_size >= calc_wal_size(self.page_size, self.min_checkpoint_page_n) {
+        // Priority 2: PASSIVE once the frames appended since the last
+        // backfill reach the threshold. See `checkpointed_wal_offset` for why
+        // this is not the whole logical size: a checkpoint whose sealing
+        // write could not restart the WAL must cost one retry at the next
+        // threshold, not a checkpoint per sync.
+        let backfilled_through = self.checkpointed_wal_offset.clamp(
+            WAL_HEADER_SIZE as i64,
+            new_wal_size.max(WAL_HEADER_SIZE as i64),
+        );
+        let threshold =
+            calc_wal_size(self.page_size, self.min_checkpoint_page_n) - WAL_HEADER_SIZE as i64;
+        if new_wal_size - backfilled_through >= threshold {
             return self.checkpoint_passive_swallowing_busy();
         }
 
@@ -1479,7 +1698,11 @@ impl Db {
     fn checkpoint_passive_swallowing_busy(&mut self) -> Result<()> {
         match self.checkpoint(CheckpointMode::Passive) {
             Ok(()) => Ok(()),
-            Err(e) if is_sqlite_busy_error(&e) => Ok(()),
+            Err(e) if is_sqlite_busy_error(&e) => {
+                self.last_sync_timing.checkpoint_runs = 1;
+                self.last_sync_timing.checkpoint_busy_errors = 1;
+                Ok(())
+            }
             Err(e) => Err(e),
         }
     }
@@ -1495,7 +1718,7 @@ impl Db {
     /// the synchronous `Db`. `&mut self` serializes `sync`, `checkpoint`, and
     /// `snapshot`, and one blocking thread owns the `Db`.
     pub fn checkpoint(&mut self, mode: CheckpointMode) -> Result<()> {
-        self.checkpoint_with_passive_hooks(mode, None, None)
+        self.checkpoint_with_passive_hooks(mode, None, None, None)
     }
 
     fn checkpoint_with_passive_hooks(
@@ -1503,6 +1726,7 @@ impl Db {
         mode: CheckpointMode,
         passive_hook: Option<Box<dyn FnOnce() + Send>>,
         passive_unlocked_hook: Option<Box<dyn FnOnce() + Send>>,
+        post_barrier_hook: Option<Box<dyn FnOnce() + Send>>,
     ) -> Result<()> {
         // Self-heal, as in `sync`: `checkpoint` writes to both control tables
         // and re-acquires the read lock through `_litestream_seq`, and the
@@ -1528,11 +1752,24 @@ impl Db {
         // short write transaction on the dedicated read-lock connection, then
         // sync again to seal every commit before running the checkpoint on the
         // main connection. Keep the barrier until the checkpoint completes.
-        let wal_frame_n = if mode == CheckpointMode::Passive {
+        let pragma = if mode == CheckpointMode::Passive {
             self.exec_passive_checkpoint_with_barrier(hdr, passive_hook, passive_unlocked_hook)?
         } else {
             self.exec_checkpoint(mode)?
         };
+        self.last_sync_timing.checkpoint_runs = 1;
+        self.last_sync_timing.checkpoint_wal_frames = pragma.wal_frames.max(0) as u64;
+        self.last_sync_timing.checkpoint_backfilled = pragma.backfilled.max(0) as u64;
+        self.last_sync_timing.checkpoint_busy = u64::from(pragma.busy != 0);
+        // The backfilled boundary in this WAL's coordinates. A short backfill
+        // (a reader pinned the WAL) leaves the remainder counting toward the
+        // next threshold, so a pinned WAL retries at the threshold and an
+        // unpinned one does not retry at all.
+        self.checkpointed_wal_offset =
+            WAL_HEADER_SIZE as i64 + pragma.backfilled.max(0) * frame_size;
+        if let Some(hook) = post_barrier_hook {
+            hook();
+        }
 
         // Force a write so a restarted WAL has a new header and at least one
         // frame that verify can read.
@@ -1549,6 +1786,7 @@ impl Db {
             self.synced_since_checkpoint = false;
             return Ok(());
         }
+        self.last_sync_timing.checkpoint_restarts = 1;
 
         // The WAL restarted. Grab the write lock, then either copy the new WAL
         // tail or take a complete boundary image. TRUNCATE always needs the
@@ -1565,7 +1803,7 @@ impl Db {
                 .and_then(|mut statement| statement.execute([]))
                 .map_err(sql_err)?;
             if mode == CheckpointMode::Truncate
-                || (mode != CheckpointMode::Passive && wal_frame_n > pre_checkpoint_frame_n)
+                || (mode != CheckpointMode::Passive && pragma.wal_frames > pre_checkpoint_frame_n)
             {
                 let info = SyncInfo {
                     offset: WAL_HEADER_SIZE as i64,
@@ -1601,13 +1839,13 @@ impl Db {
         pre_checkpoint_header: [u8; WAL_HEADER_SIZE],
         hook: Option<Box<dyn FnOnce() + Send>>,
         unlocked_hook: Option<Box<dyn FnOnce() + Send>>,
-    ) -> Result<i64> {
+    ) -> Result<CheckpointPragma> {
         self.release_read_lock()?;
         if let Some(hook) = unlocked_hook {
             hook();
         }
 
-        let result = (|| -> Result<i64> {
+        let result = (|| -> Result<CheckpointPragma> {
             self.rtx_conn
                 .prepare_cached("BEGIN")
                 .and_then(|mut statement| statement.execute([]))
@@ -1656,10 +1894,10 @@ impl Db {
         let reacquire_result = self.acquire_read_lock();
         match result {
             Err(error) => Err(error),
-            Ok(wal_frame_n) => {
+            Ok(pragma) => {
                 rollback_result?;
                 reacquire_result?;
-                Ok(wal_frame_n)
+                Ok(pragma)
             }
         }
     }
@@ -1669,7 +1907,7 @@ impl Db {
     ///
     /// Ported from `DB.execCheckpoint` (db.go:1875-1919). The exact
     /// release→checkpoint→re-acquire sequence is load-bearing.
-    fn exec_checkpoint(&mut self, mode: CheckpointMode) -> Result<i64> {
+    fn exec_checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointPragma> {
         // Ensure the read lock is removed before the checkpoint; defer the
         // re-acquire so it runs even on early return.
         self.release_read_lock()?;
@@ -1681,28 +1919,26 @@ impl Db {
         // error; otherwise surface the original pragma error.
         let reacquire = self.acquire_read_lock();
         match (result, reacquire) {
-            (Ok(wal_frame_n), Ok(())) => Ok(wal_frame_n),
+            (Ok(pragma), Ok(())) => Ok(pragma),
             (Ok(_), Err(e)) => Err(e),
             (Err(e), _) => Err(e),
         }
     }
 
     /// Runs the raw `PRAGMA wal_checkpoint(<mode>)` and reads its 3-int result.
-    fn run_checkpoint_pragma(&self, mode: CheckpointMode) -> Result<i64> {
+    fn run_checkpoint_pragma(&self, mode: CheckpointMode) -> Result<CheckpointPragma> {
         let sql = format!("PRAGMA wal_checkpoint({mode})");
-        let (_, wal_frame_n, _): (i64, i64, i64) = self
-            .conn
+        self.conn
             .prepare_cached(&sql)
             .map_err(sql_err)?
             .query_row([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
+                Ok(CheckpointPragma {
+                    busy: row.get::<_, i64>(0)?,
+                    wal_frames: row.get::<_, i64>(1)?,
+                    backfilled: row.get::<_, i64>(2)?,
+                })
             })
-            .map_err(sql_err)?;
-        Ok(wal_frame_n)
+            .map_err(sql_err)
     }
 
     // ── CRC64 ──────────────────────────────────────────────────────────────
@@ -1716,10 +1952,13 @@ impl Db {
 
         let pos = self.pos()?;
 
-        // Checksum the whole database file (CRC64-ISO).
-        let bytes = self.host.read(&self.path)?;
+        // Checksum the whole database (CRC64-ISO), page by page through the
+        // VFS like every other database read.
+        let pages = self.db_file_size()? / i64::from(self.page_size);
         let mut h = Crc64::new();
-        h.update(&bytes);
+        for pgno in 1..=u32::try_from(pages).expect("page count") {
+            h.update(&self.read_db_page(pgno)?);
+        }
         Ok((h.sum64(), pos))
     }
 
@@ -2121,14 +2360,24 @@ pub mod internal {
         db: &mut Db,
         hook: Box<dyn FnOnce() + Send>,
     ) -> Result<()> {
-        db.checkpoint_with_passive_hooks(CheckpointMode::Passive, Some(hook), None)
+        db.checkpoint_with_passive_hooks(CheckpointMode::Passive, Some(hook), None, None)
     }
 
     pub fn checkpoint_passive_with_unlocked_hook(
         db: &mut Db,
         hook: Box<dyn FnOnce() + Send>,
     ) -> Result<()> {
-        db.checkpoint_with_passive_hooks(CheckpointMode::Passive, None, Some(hook))
+        db.checkpoint_with_passive_hooks(CheckpointMode::Passive, None, Some(hook), None)
+    }
+
+    /// Run a passive checkpoint with `hook` invoked after the writer barrier
+    /// dropped and before the sealing write: the window in which another
+    /// writer can take the lock and restart the WAL itself.
+    pub fn checkpoint_passive_with_post_barrier_hook(
+        db: &mut Db,
+        hook: Box<dyn FnOnce() + Send>,
+    ) -> Result<()> {
+        db.checkpoint_with_passive_hooks(CheckpointMode::Passive, None, None, Some(hook))
     }
 
     pub fn be_u32(bytes: &[u8]) -> u32 {

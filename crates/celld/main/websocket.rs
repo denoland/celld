@@ -31,25 +31,56 @@ async fn dispatch_ws_message(
         .map_err(|error| anyhow::anyhow!("route WebSocket {scope}: {error:?}"))?;
     anyhow::ensure!(route == Route::Local, "WebSocket owner moved off node");
     let activity = app.activity(request, scope.to_string());
-    let dispatch = app
+    let dispatch = match app
         .runtime
         .as_ref()
         .context("no cell runtime")?
         .ws_message(scope.to_string(), ws_id, data)
-        .await?;
+        .await
+    {
+        Ok(dispatch) => dispatch,
+        // A handler that failed after it committed opens the barrier a
+        // successful writer's batch opens, with no frames behind it: the
+        // commit is as unproven either way, and a read-only batch or response
+        // that followed would otherwise trail nothing and reveal it (#715).
+        // The frames it captured before it failed are dropped, as before.
+        Err(error) => {
+            if app.output_gate {
+                if let Some(position) = celld::js::failed_write_position(&error) {
+                    // The barrier is registered before the activity guard
+                    // drops: the core reads the still-pinned request when it
+                    // opens the barrier, and a guard dropped first would let
+                    // the cell be released under an unregistered write.
+                    if let Err(stopped) = app
+                        .ws_output(request, scope.to_string(), Vec::new(), Some(position), None)
+                        .await
+                    {
+                        tracing::warn!(scope, position, %stopped, "no barrier for a failed webSocketMessage handler's write");
+                    }
+                }
+            }
+            drop(activity);
+            return Err(error);
+        }
+    };
     // The gate captured the handler's outbound frames. With the gate armed, hand
     // them to the cell's barrier queue; else flush them as the handler produced
     // them. Either way the frames only reach a socket from here.
     if !app.output_gate {
         celld::js::ws_emit_batch(dispatch.frames);
     } else if !dispatch.frames.is_empty() || dispatch.write_position.is_some() {
-        app.ws_output(
-            request,
-            scope.to_string(),
-            dispatch.frames,
-            dispatch.write_position,
-        )
-        .await;
+        if let Err(stopped) = app
+            .ws_output(
+                request,
+                scope.to_string(),
+                dispatch.frames,
+                dispatch.write_position,
+                dispatch.observed_position,
+            )
+            .await
+        {
+            tracing::warn!(scope, %stopped, "no barrier for a webSocketMessage handler's output");
+        }
     }
     drop(activity);
     Ok(())
@@ -69,11 +100,47 @@ async fn dispatch_ws_closed(
         .map_err(|error| anyhow::anyhow!("route WebSocket close {scope}: {error:?}"))?;
     anyhow::ensure!(route == Route::Local, "WebSocket owner moved off node");
     let _activity = app.activity(request, scope.to_string());
-    app.runtime
+    let answer = app
+        .runtime
         .as_ref()
         .context("no cell runtime")?
         .ws_closed(scope.to_string(), ws_id, code, reason, was_clean)
-        .await
+        .await;
+    gate_lifecycle_write(app, request, scope, &answer).await;
+    answer.map(|_| ())
+}
+
+/// Open the barrier a lifecycle handler's write needs.
+///
+/// `webSocketOpen` and `webSocketClose` answer nothing a client sees, so a
+/// write they made opens a barrier with no frames behind it, whether the
+/// handler returned or failed after it committed. A read-only batch or
+/// response that follows then trails that barrier instead of revealing the
+/// write while a crash can still lose it (#715).
+async fn gate_lifecycle_write(
+    app: &AppHandle,
+    request: u64,
+    scope: &str,
+    answer: &anyhow::Result<Option<u64>>,
+) {
+    let position = match answer {
+        Ok(position) => *position,
+        Err(error) => celld::js::failed_write_position(error),
+    };
+    if let (true, Some(position)) = (app.output_gate, position) {
+        tracing::debug!(
+            scope,
+            position,
+            failed = answer.is_err(),
+            "gate lifecycle write"
+        );
+        if let Err(stopped) = app
+            .ws_output(request, scope.to_string(), Vec::new(), Some(position), None)
+            .await
+        {
+            tracing::warn!(scope, position, %stopped, "no barrier for a lifecycle handler's write");
+        }
+    }
 }
 
 async fn finish_websocket(
@@ -104,6 +171,43 @@ async fn reject_accepted_websocket(app: &AppHandle, target: &celld::js::WsTarget
     }
 }
 
+/// One accepted WebSocket response after it returns from JavaScript.
+///
+/// Keep the response shape in one value through every validation and executor
+/// exit. A tunneled response attaches its parked connection lifetime here,
+/// so dropping an unfinished response cannot leave host state behind.
+enum PendingWebSocket {
+    Worker(celld::js::websocket::WorkerWebSocket),
+    Cell(celld::js::WsTarget),
+    Tunnel {
+        target: celld::js::WsTarget,
+        upgrade: super::peer_tunnel::TunnelUpgradeClaim,
+    },
+}
+
+impl PendingWebSocket {
+    fn new(websocket: HttpResponseWebSocket) -> anyhow::Result<Self> {
+        Ok(match websocket {
+            HttpResponseWebSocket::Worker(worker) => Self::Worker(worker),
+            HttpResponseWebSocket::Cell(target) => match target.tunnel {
+                Some(parked) => Self::Tunnel {
+                    target,
+                    upgrade: super::peer_tunnel::claim_upgrade(parked)?,
+                },
+                None => Self::Cell(target),
+            },
+        })
+    }
+
+    fn target(&self) -> Option<&celld::js::WsTarget> {
+        match self {
+            Self::Worker(_) => None,
+            Self::Cell(target) => Some(target),
+            Self::Tunnel { target, .. } => Some(target),
+        }
+    }
+}
+
 enum OutboundWebSocketSink {
     Cell { app: Box<AppHandle>, scope: String },
     Isolate(celld::js::WsPullSender),
@@ -124,19 +228,21 @@ impl OutboundWebSocketSink {
                 let _activity = app.activity(request, scope.clone());
                 app.websocket_opened(scope.clone(), websocket, WebSocketKind::Outbound)
                     .await?;
-                let result = app
+                let answer = app
                     .runtime
                     .as_ref()
                     .context("no cell runtime")?
                     .ws_open(scope.clone(), websocket, protocol)
                     .await;
-                if result.is_err() {
+                gate_lifecycle_write(app, request, scope, &answer).await;
+                if answer.is_err() {
                     app.websocket_closed(scope.clone(), websocket);
                 }
-                result
+                answer.map(|_| ())
             }
             Self::Isolate(tx) => tx
                 .send(celld::js::WsPull::Open(protocol))
+                .await
                 .map_err(|_| anyhow::anyhow!("isolate stopped reading WebSocket")),
         }
     }
@@ -146,6 +252,7 @@ impl OutboundWebSocketSink {
             Self::Cell { app, scope } => dispatch_ws_message(app, scope, websocket, data).await,
             Self::Isolate(tx) => tx
                 .send(data.into())
+                .await
                 .map_err(|_| anyhow::anyhow!("isolate stopped reading WebSocket")),
         }
     }
@@ -165,7 +272,7 @@ impl OutboundWebSocketSink {
                 result
             }
             Self::Isolate(tx) => tx
-                .send(celld::js::WsPull::Close(code, reason, was_clean))
+                .send_close(code, reason, was_clean)
                 .map_err(|_| anyhow::anyhow!("isolate stopped reading WebSocket")),
         }
     }
@@ -246,13 +353,13 @@ async fn local_websocket_pipe(
             },
             frame = from_cell.recv() => match frame {
                 Some(celld::js::WsOut::Text(text)) => {
-                    if pull.send(celld::js::WsPull::Text(text)).is_err() { break; }
+                    if pull.send(celld::js::WsPull::Text(text)).await.is_err() { break; }
                 }
                 Some(celld::js::WsOut::Binary(bytes)) => {
-                    if pull.send(celld::js::WsPull::Binary(bytes)).is_err() { break; }
+                    if pull.send(celld::js::WsPull::Binary(bytes)).await.is_err() { break; }
                 }
                 Some(celld::js::WsOut::Close(code, reason)) => {
-                    let _ = pull.send(celld::js::WsPull::Close(code, reason, true));
+                    let _ = pull.send_close(code, reason, true);
                     break;
                 }
                 None => break,
@@ -425,14 +532,16 @@ fn websocket_close_details(payload: &[u8]) -> (u16, String, bool) {
     match payload {
         [] => (1005, String::new(), true),
         [_] => (1002, String::new(), false),
-        [first, second, reason @ ..] => match std::str::from_utf8(reason) {
-            Ok(reason) => (
-                u16::from_be_bytes([*first, *second]),
-                reason.to_string(),
-                true,
-            ),
-            Err(_) => (1007, String::new(), false),
-        },
+        [first, second, reason @ ..] => {
+            let Ok(reason) = std::str::from_utf8(reason) else {
+                return (1007, String::new(), false);
+            };
+            let code = u16::from_be_bytes([*first, *second]);
+            if !celld_logic::schedule::websocket_close_code_is_allowed(code) {
+                return (1002, String::new(), false);
+            }
+            (code, reason.to_string(), true)
+        }
     }
 }
 
@@ -651,6 +760,7 @@ async fn worker_websocket_task<S>(
         async move {
             inbound
                 .send(data.into())
+                .await
                 .map_err(|_| anyhow::anyhow!("Worker stopped reading WebSocket"))
         }
     })
@@ -658,11 +768,9 @@ async fn worker_websocket_task<S>(
     if close.initiator == CloseInitiator::Peer {
         echo_websocket_close(&writer, &close.state, false).await;
     }
-    let _ = worker.inbound().send(celld::js::WsPull::Close(
-        close.state.0,
-        close.state.1,
-        close.state.2,
-    ));
+    let _ = worker
+        .inbound()
+        .send_close(close.state.0, close.state.1, close.state.2);
 }
 
 pub(super) async fn websocket_task<S>(
@@ -778,7 +886,8 @@ fn forwards_worker_websocket_header(name: &str) -> bool {
 
 pub(crate) async fn handle_websocket(mut request: Request<Incoming>, app: AppHandle) -> HttpReply {
     let started = Instant::now();
-    let request_id = celld::js::next_request_id();
+    let cancellation = celld::runtime::RequestCancellationLifetime::stateless();
+    let request_id = cancellation.request_id();
     let (mut upgrade_response, upgrade) = match fastwebsockets::upgrade::upgrade(&mut request) {
         Ok(upgrade) => upgrade,
         Err(error) => return response(StatusCode::BAD_REQUEST, format!("ws upgrade: {error}")),
@@ -798,7 +907,7 @@ pub(crate) async fn handle_websocket(mut request: Request<Incoming>, app: AppHan
     let body_read_us = body_started.elapsed().as_micros() as u64;
     let worker_started = Instant::now();
     let mut worker_response = match runtime
-        .fetch_worker_pool(url, method, body.into(), headers, request_id)
+        .fetch_worker_pool(url, method, body.into(), headers, cancellation)
         .await
     {
         Ok(response) => response,
@@ -824,7 +933,15 @@ pub(crate) async fn handle_websocket(mut request: Request<Incoming>, app: AppHan
     };
     let worker_dispatch_us = worker_started.elapsed().as_micros() as u64;
     let websocket = match worker_response.websocket.take() {
-        Some(websocket) => websocket,
+        Some(websocket) => match PendingWebSocket::new(websocket) {
+            Ok(websocket) => websocket,
+            Err(error) => {
+                return response(
+                    StatusCode::BAD_GATEWAY,
+                    format!("tunneled WebSocket upgrade: {error}"),
+                );
+            }
+        },
         None => {
             emit_websocket_connection_timing(
                 runtime,
@@ -842,10 +959,7 @@ pub(crate) async fn handle_websocket(mut request: Request<Incoming>, app: AppHan
             return runtime_response(worker_response, false);
         }
     };
-    let target = match &websocket {
-        HttpResponseWebSocket::Worker(_) => None,
-        HttpResponseWebSocket::Cell(target) => Some(target),
-    };
+    let target = websocket.target();
     if worker_response.status != 101 {
         emit_websocket_connection_timing(
             runtime,
@@ -920,31 +1034,7 @@ pub(crate) async fn handle_websocket(mut request: Request<Incoming>, app: AppHan
         },
     );
     let task_app = app.clone();
-    let task = Box::pin(async move {
-        match (upgrade.await, websocket) {
-            (Ok(socket), HttpResponseWebSocket::Worker(worker)) => {
-                worker_websocket_task(worker, socket).await;
-            }
-            (Ok(socket), HttpResponseWebSocket::Cell(target)) if target.tunnel.is_some() => {
-                let parked = target.tunnel.expect("guarded");
-                if let Err(error) = super::peer_tunnel::splice(socket.into_inner(), parked).await {
-                    eprintln!("celld tunneled WebSocket splice ended: {error:#}");
-                }
-            }
-            (Ok(socket), HttpResponseWebSocket::Cell(target)) => {
-                websocket_task(task_app, target, socket).await;
-            }
-            (Err(error), HttpResponseWebSocket::Worker(_)) => {
-                eprintln!("celld Worker WebSocket upgrade failed: {error}");
-            }
-            (Err(error), HttpResponseWebSocket::Cell(target)) => {
-                eprintln!("celld WebSocket upgrade failed: {error}");
-                if target.tunnel.is_none() {
-                    finish_websocket(&task_app, &target, 1006, String::new(), false).await;
-                }
-            }
-        }
-    });
+    let task = Box::pin(run_websocket_upgrade(task_app, upgrade, websocket));
     if app.websockets.send(task).is_err() {
         return response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -952,6 +1042,49 @@ pub(crate) async fn handle_websocket(mut request: Request<Incoming>, app: AppHan
         );
     }
     upgrade_response.map(|body| body.map_err(|never| match never {}).boxed_unsync())
+}
+
+/// Finish the client upgrade through the same owned response value that
+/// survives validation. Keeping this work in one future makes a failed client
+/// upgrade and a cancelled executor task drop the same owned response.
+async fn run_websocket_upgrade(
+    task_app: AppHandle,
+    upgrade: fastwebsockets::upgrade::UpgradeFut,
+    websocket: PendingWebSocket,
+) {
+    match (upgrade.await, websocket) {
+        (Ok(socket), PendingWebSocket::Worker(worker)) => {
+            worker_websocket_task(worker, socket).await;
+        }
+        (Ok(socket), PendingWebSocket::Tunnel { upgrade, .. }) => {
+            if let Err(error) = super::peer_tunnel::splice(socket.into_inner(), upgrade).await {
+                eprintln!("celld tunneled WebSocket splice ended: {error:#}");
+            }
+        }
+        (Ok(socket), PendingWebSocket::Cell(target)) => {
+            websocket_task(task_app, target, socket).await;
+        }
+        (Err(error), PendingWebSocket::Worker(_)) => {
+            eprintln!("celld Worker WebSocket upgrade failed: {error}");
+        }
+        (Err(error), PendingWebSocket::Cell(target)) => {
+            eprintln!("celld WebSocket upgrade failed: {error}");
+            finish_websocket(&task_app, &target, 1006, String::new(), false).await;
+        }
+        (Err(error), PendingWebSocket::Tunnel { .. }) => {
+            eprintln!("celld tunneled WebSocket upgrade failed: {error}");
+        }
+    }
+}
+
+#[cfg(all(test, celld_internal_tests))]
+pub(super) async fn run_websocket_upgrade_for_test(
+    task_app: AppHandle,
+    upgrade: fastwebsockets::upgrade::UpgradeFut,
+    websocket: HttpResponseWebSocket,
+) {
+    let websocket = PendingWebSocket::new(websocket).unwrap();
+    run_websocket_upgrade(task_app, upgrade, websocket).await;
 }
 
 struct WebSocketConnectionOutcome<'a> {

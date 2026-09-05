@@ -63,53 +63,33 @@ pub fn lock_pgno(page_size: u32) -> u32 {
 
 // ── CRC64-ISO (checksum.go:177 `crc64.MakeTable(crc64.ISO)`) ──────────────────
 
-/// CRC-64/ISO polynomial (reflected), identical to Go's `crc64.ISO`.
-const CRC64_ISO_POLY: u64 = 0xD800_0000_0000_0000;
-
-const fn crc64_iso_table() -> [u64; 256] {
-    let mut table = [0u64; 256];
-    let mut i = 0usize;
-    while i < 256 {
-        let mut crc = i as u64;
-        let mut j = 0;
-        while j < 8 {
-            if crc & 1 == 1 {
-                crc = (crc >> 1) ^ CRC64_ISO_POLY;
-            } else {
-                crc >>= 1;
-            }
-            j += 1;
-        }
-        table[i] = crc;
-        i += 1;
-    }
-    table
+/// Streaming CRC64-ISO hasher matching Go's `hash/crc64` digest semantics
+/// (CRC-64/GO-ISO). `crc-fast` keeps the exact streaming result while using
+/// SIMD folding on the architectures that celld ships.
+#[derive(Clone)]
+pub struct Crc64 {
+    digest: crc_fast::Digest,
 }
 
-static CRC64_TABLE: [u64; 256] = crc64_iso_table();
-
-/// Streaming CRC64-ISO hasher matching Go's `hash/crc64` digest semantics
-/// (init 0; each update performs the standard reflected invert-process-invert).
-#[derive(Clone, Default)]
-pub struct Crc64 {
-    crc: u64,
+impl Default for Crc64 {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Crc64 {
     pub fn new() -> Self {
-        Crc64 { crc: 0 }
+        Self {
+            digest: crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc64GoIso),
+        }
     }
 
     pub fn update(&mut self, data: &[u8]) {
-        let mut crc = !self.crc;
-        for &b in data {
-            crc = CRC64_TABLE[((crc as u8) ^ b) as usize] ^ (crc >> 8);
-        }
-        self.crc = !crc;
+        self.digest.update(data);
     }
 
     pub fn sum64(&self) -> u64 {
-        self.crc
+        self.digest.finalize()
     }
 }
 

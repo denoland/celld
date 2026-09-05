@@ -306,13 +306,46 @@ pub fn validate_required_features(required: &[String]) -> anyhow::Result<()> {
 pub struct ModuleRef {
     pub name: String,
     pub bytes: usize,
-    /// content hash of this module's bytes (hex, truncated)
+    /// Full SHA-256 of this module's exact bytes, as lowercase hexadecimal.
+    ///
+    /// The loader also accepts the 16-character prefix written by celld and
+    /// the managed control plane before full module digests were introduced.
     pub sha256: String,
     /// Absent means UTF-8 source: the main module is ESM, siblings become
     /// text modules. `wasm` bytes become a module whose default export is a
     /// compiled `WebAssembly.Module` (Wrangler's `CompiledWasm` rule).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<ModuleKind>,
+}
+
+impl ModuleRef {
+    pub(crate) fn verify(&self, body: &[u8]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            body.len() == self.bytes,
+            "deployment module size mismatch for {:?}: expected {}, got {}",
+            self.name,
+            self.bytes,
+            body.len()
+        );
+        anyhow::ensure!(
+            matches!(self.sha256.len(), 16 | 64)
+                && self
+                    .sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "deployment module {:?} has an invalid SHA-256 digest",
+            self.name
+        );
+        let actual = format!("{:x}", Sha256::digest(body));
+        anyhow::ensure!(
+            actual.starts_with(&self.sha256),
+            "deployment module digest mismatch for {:?}: expected {}, got {}",
+            self.name,
+            self.sha256,
+            actual
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

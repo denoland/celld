@@ -11,12 +11,14 @@
 
 pub type Ms = u64;
 
-/// Is a peer identity (`source`/`target`) well-formed? Non-empty, at most 128
-/// bytes, and only ASCII alphanumerics plus `_ - .`. The charset is the fence —
-/// admit `/` and a `target` could carry a path segment.
+/// Is a node name or peer identity (`source`/`target`) well-formed? Non-empty,
+/// at most 128 bytes, and only ASCII alphanumerics plus `_ - .`. The special
+/// path components `.` and `..` are not names. The charset is the fence — admit
+/// `/` and an identity could carry a path segment.
 pub fn valid_identity(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
+        && !matches!(id, "." | "..")
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))

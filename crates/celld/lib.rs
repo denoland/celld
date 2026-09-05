@@ -301,12 +301,16 @@ pub mod actor;
 mod conformance_core_loop_tests {
     include!(env!("CELLD_CONFORMANCE_CORE_LOOP_TESTS"));
 }
+#[cfg(all(test, celld_internal_tests))]
+mod conformance_facet_failure_tests {
+    include!(env!("CELLD_CONFORMANCE_FACET_FAILURE_TESTS"));
+}
 pub mod assets;
 #[cfg(not(celld_internal_tests))]
 pub mod asyncrt;
-// The corpus flag alone selects the simulated asyncrt, so the external
-// engine-tests crate (denoland/celld.dev#404) sees the same simulated
-// world the in-crate suites see. `test` must not be part of the gate:
+// The corpus flag alone selects the simulated asyncrt, so an external
+// test harness built with the flag sees the same simulated world the
+// in-crate suites see. `test` must not be part of the gate:
 // a dependency never has it, and the harness binary builds unflagged,
 // so the shipped and harness builds keep the real asyncrt.
 #[cfg(celld_internal_tests)]

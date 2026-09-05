@@ -20,6 +20,7 @@
 //! one thing this runtime refuses to do.
 
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -27,6 +28,7 @@ use std::sync::Mutex;
 use std::sync::RwLock;
 
 use anyhow::Result;
+use celld_logic::isolate::HeapId;
 use celld_logic::isolate::IsolateId;
 use celld_logic::isolate::IsolateLoad;
 use celld_logic::isolate::Placement;
@@ -36,10 +38,43 @@ use celld_logic::isolate::Refusal;
 
 use crate::js;
 
-/// One Queue producer event can execute while one successor waits. A third
-/// event cannot enter the isolate queue, because producer work must not hide
-/// the alarms and settlements that drain the durable backlog.
-pub(crate) const MAX_QUEUE_PRODUCER_EVENTS_PER_CELL: usize = 2;
+/// Heap identity is process-wide because pressure policy compares cells from
+/// every script pool and every draining generation. A counter inside `Pool`
+/// would reproduce the collision this identity prevents. The core treats the
+/// value as opaque, so its allocation order is not a deterministic decision.
+static NEXT_HEAP_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_heap_id() -> HeapId {
+    let value = NEXT_HEAP_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .expect("V8 heap identity space exhausted");
+    HeapId::new(value)
+}
+
+/// A Queue producer parks in the owner-side commit group before it writes, so
+/// four bounded groups can install their waiters and overlap one group's
+/// durability proof with successor local commits. The turn scheduler remains
+/// fair by cell scope: one hot Queue turn yields to an alarm or another Queue
+/// before its next turn.
+///
+/// This equals `MAX_QUEUE_PRODUCER_EVENTS_PER_CELL`, so every admitted
+/// producer enters the isolate at once and the `waiting` lane in
+/// `QueueProducerAdmission` is latent: it carries no producer until a smaller
+/// turn cap re-arms it. It is kept because a turn cap below the event cap is
+/// the lever for a workload whose producers must not all park in the isolate,
+/// and no test drives that lane while the caps are equal.
+const MAX_QUEUE_PRODUCER_TURNS_PER_CELL: usize = 256;
+const _: () = assert!(
+    MAX_QUEUE_PRODUCER_TURNS_PER_CELL <= MAX_QUEUE_PRODUCER_EVENTS_PER_CELL,
+    "an execution position is one of the bounded producer events"
+);
+
+/// Bound the producer replies that can wait for one Queue's shared commit and
+/// durability proof. Four 64-call groups can overlap, and a stopped bucket
+/// still cannot retain an unbounded number of promises or copied bodies.
+pub(crate) const MAX_QUEUE_PRODUCER_EVENTS_PER_CELL: usize = 256;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum TurnLane {
@@ -133,28 +168,42 @@ impl Drop for TurnPermit<'_> {
 pub(crate) struct QueueProducerPermit {
     slot: Arc<Slot>,
     scope: String,
+    executing: bool,
+}
+
+#[derive(Default)]
+struct QueueProducerAdmission {
+    executing: usize,
+    outstanding: usize,
+    waiting: std::collections::VecDeque<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl QueueProducerPermit {
+    /// A producer that installed its durability gate no longer occupies one
+    /// of the two isolate positions. It retains its outstanding reservation
+    /// until the durable reply completes, so stalled storage remains bounded.
+    pub(crate) fn reached_reply_gate(&mut self) {
+        if self.executing {
+            self.slot.release_queue_producer(&self.scope, true, false);
+            self.executing = false;
+        }
+    }
 }
 
 impl Drop for QueueProducerPermit {
     fn drop(&mut self) {
-        let mut producers = self
-            .slot
-            .queue_producers
-            .lock()
-            .expect("Queue producer admission poisoned");
-        let active = producers
-            .get_mut(&self.scope)
-            .expect("a Queue producer permit has an admission");
-        *active -= 1;
-        if *active == 0 {
-            producers.remove(&self.scope);
-        }
+        self.slot
+            .release_queue_producer(&self.scope, self.executing, true);
     }
 }
 
 /// One isolate, and everything the decision core needs to know about it.
 pub struct Slot {
+    /// The index used only inside this pool's placement snapshot and slot
+    /// vector. Distinct pools can use the same value.
     pub id: IsolateId,
+    /// The identity reported to node-wide Actor and pressure policy.
+    heap_id: HeapId,
     /// The async gate, holding the isolate it guards. Locking this is what
     /// makes the V8 `Locker` beneath it uncontended.
     ///
@@ -164,7 +213,7 @@ pub struct Slot {
     /// can arrive afterwards. Entering one would be a bug in this module.
     worker: tokio::sync::Mutex<Option<js::Worker>>,
     turn_scheduler: TurnScheduler,
-    queue_producers: Mutex<std::collections::HashMap<String, usize>>,
+    queue_producers: Mutex<std::collections::HashMap<String, QueueProducerAdmission>>,
     turns: AtomicUsize,
     requests: AtomicUsize,
     /// The pool's admission bell, cloned into every slot so an
@@ -228,23 +277,75 @@ impl Slot {
         f(worker)
     }
 
-    /// Reserve one of the two producer positions before the event can wait
-    /// for an isolate turn. The permit spans the complete cell event, so a
-    /// suspended producer still occupies its position.
-    pub(crate) fn try_queue_producer(self: &Arc<Self>, scope: &str) -> Option<QueueProducerPermit> {
+    /// Reserve one bounded producer event, then wait outside the isolate for
+    /// one of its two execution positions. A durability gate releases only
+    /// the execution position; the complete event retains the outer bound.
+    pub(crate) async fn queue_producer(
+        self: &Arc<Self>,
+        scope: &str,
+    ) -> Option<QueueProducerPermit> {
+        let receive = {
+            let mut producers = self
+                .queue_producers
+                .lock()
+                .expect("Queue producer admission poisoned");
+            let admission = producers.entry(scope.to_string()).or_default();
+            if admission.outstanding >= MAX_QUEUE_PRODUCER_EVENTS_PER_CELL {
+                return None;
+            }
+            admission.outstanding += 1;
+            if admission.executing < MAX_QUEUE_PRODUCER_TURNS_PER_CELL {
+                admission.executing += 1;
+                None
+            } else {
+                let (send, receive) = tokio::sync::oneshot::channel();
+                admission.waiting.push_back(send);
+                Some(receive)
+            }
+        };
+        if let Some(receive) = receive {
+            // The Slot stays alive through `self`, and an execution permit is
+            // transferred until one live waiter accepts it. A closed channel
+            // therefore means the admission state was violated.
+            receive
+                .await
+                .expect("Queue producer admission dropped a live waiter");
+        }
+        Some(QueueProducerPermit {
+            slot: self.clone(),
+            scope: scope.to_string(),
+            executing: true,
+        })
+    }
+
+    fn release_queue_producer(&self, scope: &str, release_execution: bool, finish: bool) {
         let mut producers = self
             .queue_producers
             .lock()
             .expect("Queue producer admission poisoned");
-        let active = producers.entry(scope.to_string()).or_default();
-        if *active >= MAX_QUEUE_PRODUCER_EVENTS_PER_CELL {
-            return None;
+        let admission = producers
+            .get_mut(scope)
+            .expect("a Queue producer permit has an admission");
+        if release_execution {
+            let mut transferred = false;
+            while let Some(waiter) = admission.waiting.pop_front() {
+                if waiter.send(()).is_ok() {
+                    transferred = true;
+                    break;
+                }
+            }
+            if !transferred {
+                admission.executing -= 1;
+            }
         }
-        *active += 1;
-        Some(QueueProducerPermit {
-            slot: self.clone(),
-            scope: scope.to_string(),
-        })
+        if finish {
+            admission.outstanding -= 1;
+        }
+        if admission.outstanding == 0 {
+            debug_assert_eq!(admission.executing, 0);
+            debug_assert!(admission.waiting.is_empty());
+            producers.remove(scope);
+        }
     }
 
     /// Mark a request as living in this isolate. Held for the request's whole
@@ -262,6 +363,7 @@ impl Slot {
     pub(crate) fn standalone(worker: js::Worker) -> Arc<Self> {
         Arc::new(Slot {
             id: 0,
+            heap_id: next_heap_id(),
             worker: tokio::sync::Mutex::new(Some(worker)),
             turn_scheduler: TurnScheduler::default(),
             queue_producers: Mutex::new(std::collections::HashMap::new()),
@@ -278,6 +380,23 @@ impl Slot {
     #[cfg(celld_internal_tests)]
     pub fn for_test(worker: js::Worker) -> Arc<Self> {
         Self::standalone(worker)
+    }
+
+    #[cfg(all(test, celld_internal_tests))]
+    pub(crate) fn vacant_for_request_cancellation_test() -> Arc<Self> {
+        Arc::new(Slot {
+            id: 0,
+            heap_id: HeapId::new(0),
+            worker: tokio::sync::Mutex::new(None),
+            turn_scheduler: TurnScheduler::default(),
+            queue_producers: Mutex::new(std::collections::HashMap::new()),
+            turns: AtomicUsize::new(0),
+            requests: AtomicUsize::new(0),
+            freed: Arc::new(tokio::sync::Notify::new()),
+            cells: AtomicUsize::new(0),
+            retiring: AtomicBool::new(false),
+            turn_observations: Mutex::new(Vec::new()),
+        })
     }
 
     #[cfg(celld_internal_tests)]
@@ -313,6 +432,11 @@ impl Slot {
 
     pub fn is_retiring(&self) -> bool {
         self.retiring.load(Ordering::Relaxed)
+    }
+
+    /// The node-wide identity of this slot's currently installed V8 heap.
+    pub fn heap_id(&self) -> HeapId {
+        self.heap_id
     }
 
     fn is_reusable(&self) -> bool {
@@ -442,8 +566,10 @@ impl Pool {
         // than with every isolate created during the process lifetime.
         let reusable = slots.iter().position(|slot| slot.is_reusable());
         let id = reusable.unwrap_or(slots.len());
+        let heap_id = next_heap_id();
         let slot = Arc::new(Slot {
             id,
+            heap_id,
             worker: tokio::sync::Mutex::new(Some(worker)),
             turn_scheduler: TurnScheduler::default(),
             queue_producers: Mutex::new(std::collections::HashMap::new()),
@@ -460,7 +586,7 @@ impl Pool {
         } else {
             slots.push(slot.clone());
         }
-        tracing::info!(isolate = id, total = slots.len(), "isolate started");
+        tracing::info!(isolate = %heap_id, slot = id, total = slots.len(), "isolate started");
         Ok(slot)
     }
 
@@ -602,7 +728,7 @@ impl Pool {
         self.retired.store(true, Ordering::Relaxed);
         for slot in self.slots.read().expect("pool poisoned").iter() {
             if !slot.retiring.swap(true, Ordering::Relaxed) {
-                tracing::info!(isolate = slot.id, "isolate retiring");
+                tracing::info!(isolate = %slot.heap_id, slot = slot.id, "isolate retiring");
             }
         }
         self.free_retired();
@@ -625,7 +751,7 @@ impl Pool {
         };
         let slot = self.get(id);
         if !slot.retiring.swap(true, Ordering::Relaxed) {
-            tracing::info!(isolate = id, "isolate retiring");
+            tracing::info!(isolate = %slot.heap_id, slot = id, "isolate retiring");
         }
         true
     }
@@ -643,7 +769,7 @@ impl Pool {
                 continue;
             };
             if worker.take().is_some() {
-                tracing::info!(isolate = slot.id, "isolate freed");
+                tracing::info!(isolate = %slot.heap_id, slot = slot.id, "isolate freed");
             }
         }
     }

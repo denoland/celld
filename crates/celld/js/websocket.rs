@@ -26,6 +26,10 @@ pub enum WsOut {
 pub struct WsDispatch {
     pub frames: Vec<(u64, WsOut)>,
     pub write_position: Option<u64>,
+    /// As on `HttpResponse`: what a handler that wrote nothing observed above
+    /// the cell's published baseline, for the gate to hold its frames behind
+    /// the proof of another handler's commit.
+    pub observed_position: Option<u64>,
 }
 
 /// One inbound event on a socket the ISOLATE polls, rather than one the host
@@ -44,6 +48,10 @@ pub enum WsPull {
     Binary(Vec<u8>),
     Close(u16, String, bool),
 }
+
+/// Maximum charged bytes for non-terminal frames in one isolate-polled
+/// WebSocket input queue.
+pub(crate) const WS_PULL_QUEUE_MAX_BYTES: usize = 1024 * 1024;
 
 /// Tags for the byte frame `__ws_next` resolves with. A tagged buffer keeps a
 /// binary message on its fast path instead of base64 through a JSON envelope.
@@ -76,8 +84,192 @@ impl WsPull {
     }
 }
 
-pub type WsPullReceiver = tokio::sync::mpsc::UnboundedReceiver<WsPull>;
-pub type WsPullSender = tokio::sync::mpsc::UnboundedSender<WsPull>;
+struct WsPullCharge {
+    #[cfg(all(test, celld_internal_tests))]
+    bytes: usize,
+    #[cfg(all(test, celld_internal_tests))]
+    queued_bytes: Arc<std::sync::atomic::AtomicUsize>,
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+#[cfg(all(test, celld_internal_tests))]
+impl Drop for WsPullCharge {
+    fn drop(&mut self) {
+        self.queued_bytes
+            .fetch_sub(self.bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+struct QueuedWsPull {
+    frame: WsPull,
+    // Capacity and each non-terminal frame move through the channel together.
+    // Every path that consumes or drops that frame therefore returns its queue
+    // budget. One terminal frame has no permit because it must release a full
+    // queue, but the private observer still measures its retained bytes.
+    _charge: WsPullCharge,
+}
+
+struct WsPullSendState {
+    tx: tokio::sync::mpsc::UnboundedSender<QueuedWsPull>,
+    terminal_sent: bool,
+}
+
+#[derive(Clone)]
+pub struct WsPullSender {
+    state: Arc<std::sync::Mutex<WsPullSendState>>,
+    #[cfg(all(test, celld_internal_tests))]
+    queued_bytes: Arc<std::sync::atomic::AtomicUsize>,
+    capacity: Arc<tokio::sync::Semaphore>,
+}
+
+pub struct WsPullReceiver {
+    rx: tokio::sync::mpsc::UnboundedReceiver<QueuedWsPull>,
+    #[cfg(all(test, celld_internal_tests))]
+    queued_bytes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+pub fn ws_pull_channel() -> (WsPullSender, WsPullReceiver) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    #[cfg(all(test, celld_internal_tests))]
+    let queued_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let capacity = Arc::new(tokio::sync::Semaphore::new(WS_PULL_QUEUE_MAX_BYTES));
+    (
+        WsPullSender {
+            state: Arc::new(std::sync::Mutex::new(WsPullSendState {
+                tx,
+                terminal_sent: false,
+            })),
+            #[cfg(all(test, celld_internal_tests))]
+            queued_bytes: queued_bytes.clone(),
+            capacity,
+        },
+        WsPullReceiver {
+            rx,
+            #[cfg(all(test, celld_internal_tests))]
+            queued_bytes,
+        },
+    )
+}
+
+impl WsPull {
+    fn queue_bytes(&self) -> usize {
+        let payload = match self {
+            Self::Open(protocol) | Self::Text(protocol) => protocol.len(),
+            Self::Binary(bytes) => bytes.len(),
+            Self::Close(_, reason, _) => reason.len(),
+        };
+        std::mem::size_of::<Self>().saturating_add(payload)
+    }
+}
+
+impl WsPullSender {
+    pub fn is_closed(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.terminal_sent || state.tx.is_closed()
+    }
+
+    pub async fn send(&self, frame: WsPull) -> Result<(), WsPull> {
+        let frame = match frame {
+            WsPull::Close(code, reason, was_clean) => {
+                return self.send_close(code, reason, was_clean);
+            }
+            frame => frame,
+        };
+        let bytes = frame.queue_bytes();
+        // One message can exceed this queue limit until the separate incoming
+        // message limit rejects it. Reserving the complete budget admits that
+        // message only into an empty queue and prevents a second message from
+        // increasing its retained peak.
+        let permit_bytes = bytes.min(WS_PULL_QUEUE_MAX_BYTES) as u32;
+        let permit = match self.capacity.clone().acquire_many_owned(permit_bytes).await {
+            Ok(permit) => permit,
+            Err(_) => return Err(frame),
+        };
+        // The terminal sender closes the semaphore before it queues the close.
+        // A data sender can already own a permit at that point, so this lock
+        // either orders that data before the close or rejects it after the
+        // close. Without the shared order, a data frame could enter behind the
+        // only terminal frame and keep the receiver open.
+        let state = self.state.lock().unwrap();
+        if state.terminal_sent {
+            return Err(frame);
+        }
+        #[cfg(all(test, celld_internal_tests))]
+        self.queued_bytes
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+        state
+            .tx
+            .send(QueuedWsPull {
+                frame,
+                _charge: WsPullCharge {
+                    #[cfg(all(test, celld_internal_tests))]
+                    bytes,
+                    #[cfg(all(test, celld_internal_tests))]
+                    queued_bytes: self.queued_bytes.clone(),
+                    _permit: Some(permit),
+                },
+            })
+            .map_err(|error| error.0.frame)
+    }
+
+    /// Queue the one terminal event without waiting for data capacity.
+    ///
+    /// The shared state orders the close against a data sender that already
+    /// owns capacity. Closing the semaphore wakes every sender that still waits
+    /// for capacity, so a stopped isolate cannot keep a host socket task alive.
+    pub fn send_close(&self, code: u16, reason: String, was_clean: bool) -> Result<(), WsPull> {
+        let frame = WsPull::Close(code, reason, was_clean);
+        #[cfg(all(test, celld_internal_tests))]
+        let bytes = frame.queue_bytes();
+        let mut state = self.state.lock().unwrap();
+        if state.terminal_sent {
+            return Err(frame);
+        }
+        state.terminal_sent = true;
+        self.capacity.close();
+        #[cfg(all(test, celld_internal_tests))]
+        self.queued_bytes
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+        state
+            .tx
+            .send(QueuedWsPull {
+                frame,
+                _charge: WsPullCharge {
+                    #[cfg(all(test, celld_internal_tests))]
+                    bytes,
+                    #[cfg(all(test, celld_internal_tests))]
+                    queued_bytes: self.queued_bytes.clone(),
+                    _permit: None,
+                },
+            })
+            .map_err(|error| error.0.frame)
+    }
+}
+
+impl WsPullReceiver {
+    async fn recv(&mut self) -> Option<WsPull> {
+        let queued = self.rx.recv().await?;
+        let QueuedWsPull { frame, _charge } = queued;
+        if matches!(&frame, WsPull::Close(..)) {
+            // The sender state prevents a frame from entering behind this one.
+            // Close the receiver as part of consuming the terminal event, so a
+            // later pull observes the end instead of waiting for sender drops.
+            self.rx.close();
+        }
+        drop(_charge);
+        Some(frame)
+    }
+
+    #[cfg(all(test, celld_internal_tests))]
+    fn queued_bytes(&self) -> usize {
+        self.queued_bytes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(all(test, celld_internal_tests))]
+mod input_queue_private {
+    include!(env!("CELLD_INTERNAL_WEBSOCKET_TESTS"));
+}
 
 /// One socket's inbound queue. Shared so an op can await it without holding
 /// the registry lock; one isolate polls a given socket serially.
@@ -85,10 +277,8 @@ type WsPullQueue = Arc<tokio::sync::Mutex<WsPullReceiver>>;
 type WsPullRegistry = std::sync::Mutex<HashMap<u64, WsPullQueue>>;
 
 /// Inbound queues for isolate-polled sockets, keyed by wsId.
-static WS_PULL: OnceLock<WsPullRegistry> = OnceLock::new();
-
-fn ws_pull() -> &'static WsPullRegistry {
-    WS_PULL.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+fn ws_pull() -> Arc<WsPullRegistry> {
+    asyncrt::services().websockets().pull.clone()
 }
 
 pub fn ws_pull_register(id: u64, rx: WsPullReceiver) {
@@ -130,7 +320,7 @@ impl Drop for WorkerWebSocket {
 }
 
 fn prepare_worker_websocket_handoff(id: u64) {
-    let (inbound, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (inbound, receiver) = ws_pull_channel();
     ws_pull_register(id, receiver);
     ws_register_outbound(id, "");
     ws_track_request_socket(id);
@@ -168,7 +358,12 @@ pub(super) fn ws_close_request_sockets(opened: Vec<u64>) {
         // a dropped frame for an unknown id, so ask before sending.
         let open = ws_registry().lock().unwrap().outputs.contains_key(&id);
         if open {
-            ws_emit(id, WsOut::Close(1001, "request ended".into()));
+            // The event's own end, run by its turn: the owner is the context.
+            ws_emit(
+                &current_context(),
+                id,
+                WsOut::Close(1001, "request ended".into()),
+            );
         }
         ws_pull_unregister(id);
         ws_unregister(id);
@@ -257,11 +452,22 @@ impl WsRegistry {
         }
     }
 }
+/// Every piece of one instance's WebSocket state.
+///
+/// A socket's id is allocated by `next_id` here, so an id identifies a socket
+/// only within one instance. Each map a socket reaches must therefore belong
+/// to the same instance: a map that stayed process-wide would be shared by
+/// the sockets that two instances both numbered, and a second instance is not
+/// hypothetical — the private build runs one per test runtime, and a
+/// per-isolate or per-generation instance in production would inherit the
+/// collision.
 pub(crate) struct WebSocketService {
     registry: Arc<std::sync::Mutex<WsRegistry>>,
     regular_counts: Arc<std::sync::Mutex<HashMap<String, usize>>>,
     next_id: AtomicU64,
     auto_responses: Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
+    pull: Arc<WsPullRegistry>,
+    flush: Arc<WsFlushState>,
 }
 
 impl Default for WebSocketService {
@@ -271,6 +477,8 @@ impl Default for WebSocketService {
             regular_counts: Arc::new(std::sync::Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
             auto_responses: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            pull: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            flush: Arc::new(WsFlushState::default()),
         }
     }
 }
@@ -457,37 +665,197 @@ fn ws_channel(id: u64) -> celld_logic::Channel {
     }
 }
 
-static WS_DEFERRED: OnceLock<std::sync::Mutex<HashMap<u64, Vec<WsOut>>>> = OnceLock::new();
+/// The frames one instance holds behind its output gates, and the flushes
+/// that own them.
+///
+/// The three fields are one invariant, so they are one value: a socket has a
+/// queue exactly while a flush counted in `flushes` will drain it, and a
+/// count that falls must notify `done`. Held together, no caller can take the
+/// queue of one instance of the services and the count of another.
+#[derive(Default)]
+struct WsFlushState {
+    /// Frames held back because the handler that produced them has written
+    /// something not yet durable, one queue per socket.
+    ///
+    /// A socket with a queue has a flush already scheduled, and every later
+    /// frame for that socket joins the queue rather than overtaking it: a
+    /// socket's frames must arrive in the order the script sent them.
+    /// Ordering is a property of one socket, which is what the key says.
+    ///
+    /// Owned by the services, not by a thread. It is filled inside the
+    /// isolate and drained by an op, and an op runs on the host runtime — so
+    /// a thread-local queue was filled on one thread and taken, empty, on
+    /// another. The frames never left the process, and because the queue
+    /// stayed non-empty every later frame joined them.
+    deferred: std::sync::Mutex<HashMap<u64, Vec<WsOut>>>,
+    /// How many flushes still hold frames for a socket. A count, not a flag:
+    /// one flush can finish and drain its queue while a later frame starts
+    /// another.
+    flushes: std::sync::Mutex<HashMap<u64, usize>>,
+    done: tokio::sync::Notify,
+}
 
-/// Frames held back because the handler that produced them has written
-/// something not yet durable, one queue per socket.
+impl WsFlushState {
+    /// Send `out` on `id`, or hold it behind the socket's gate.
+    ///
+    /// `gated` is the core's answer for this frame's event. A socket that
+    /// already holds frames joins them whatever that answer is, so a later
+    /// frame cannot overtake an earlier one.
+    ///
+    /// Returns the guard for the flush this frame started, and only then, so
+    /// the caller cannot spawn a second flush for a queue that already has
+    /// one and cannot spawn none for a queue that has none. The count is
+    /// taken while the queue lock is held: a teardown that reads the count
+    /// must not observe a queued frame with no flush behind it.
+    fn emit_or_defer(
+        self: &Arc<Self>,
+        registry: &std::sync::Mutex<WsRegistry>,
+        id: u64,
+        out: WsOut,
+        gated: bool,
+    ) -> Option<WsFlushGuard> {
+        // Held until this frame is either queued or sent. A flush runs on
+        // another thread, so releasing between the check and the send would
+        // let it drain its queue in between, putting a later frame ahead of
+        // an earlier one.
+        let mut deferred = self.deferred.lock().unwrap();
+        let already_deferring = deferred.contains_key(&id);
+        if !gated && !already_deferring {
+            ws_emit_ordered(&mut deferred, registry, std::iter::once((id, out)));
+            return None;
+        }
+        deferred.entry(id).or_default().push(out);
+        (!already_deferring).then(|| {
+            *self.flushes.lock().unwrap().entry(id).or_default() += 1;
+            WsFlushGuard {
+                state: self.clone(),
+                id,
+            }
+        })
+    }
+
+    /// Release the frames one flush held, or replace them with a close.
+    ///
+    /// `held` is what the gate answered. `Err` means the frames describe a
+    /// write the fleet may never have, so they must not be delivered.
+    /// Dropping them and leaving the socket open is not an option -- a
+    /// WebSocket is an ordered stream, and a peer cannot see a hole in one.
+    /// It would read the frames on either side of the gap as consecutive.
+    ///
+    /// Close instead. A truncated stream is something the peer can detect and
+    /// resynchronise from; a silently incomplete one is not. The cell is
+    /// reset underneath this as well, but that is a separate path and this
+    /// must not depend on its timing.
+    fn release(&self, registry: &std::sync::Mutex<WsRegistry>, id: u64, held: Result<(), String>) {
+        // Keep the lock from removal through the registry send. Once the
+        // entry is absent, another release would otherwise look direct and
+        // overtake these frames.
+        let mut deferred = self.deferred.lock().unwrap();
+        let frames = deferred.remove(&id).unwrap_or_default();
+        match held {
+            Err(_) => ws_emit_ordered(
+                &mut deferred,
+                registry,
+                std::iter::once((
+                    id,
+                    WsOut::Close(
+                        1011,
+                        "celld could not prove the write behind this message durable".to_string(),
+                    ),
+                )),
+            ),
+            Ok(()) => ws_emit_ordered(
+                &mut deferred,
+                registry,
+                frames.into_iter().map(|out| (id, out)),
+            ),
+        }
+    }
+
+    /// Wait until no flush holds frames for `id` any more.
+    async fn await_flushes(&self, id: u64) {
+        loop {
+            // Registered before the count is read. A flush that finishes in
+            // between must find a waiter to wake, or this parks forever on a
+            // notification that already happened.
+            let notified = self.done.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.flushes.lock().unwrap().contains_key(&id) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Wait until no flush of this instance still owns deferred frames.
+    async fn await_all_flushes(&self) {
+        loop {
+            // Register before observing the map, exactly as the per-socket
+            // wait does. The final guard can otherwise notify between the
+            // empty check and waiter registration, leaving shutdown parked
+            // forever.
+            let notified = self.done.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.flushes.lock().unwrap().is_empty() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// The flush state of the services the caller runs under.
 ///
-/// A socket with a queue has a flush already scheduled, and every later frame
-/// for that socket joins the queue rather than overtaking it: a socket's
-/// frames must arrive in the order the script sent them. Ordering is a
-/// property of one socket, which is what the key says.
-///
-/// Process-wide, not thread-local. It is filled inside the isolate and
-/// drained by an op, and an op runs on the host runtime — so a thread-local
-/// queue was filled on one thread and taken, empty, on another. The frames
-/// never left the process, and because the queue stayed non-empty every
-/// later frame joined them.
+/// A flush task outlives the dispatch that spawned it and runs on a runtime
+/// with no services of its own, so every caller that hands work to one
+/// resolves the state here first and moves it in. Resolving inside the task
+/// would answer from whichever instance that runtime reaches, which is the
+/// process-wide sharing this state exists to end.
+fn ws_flush_state() -> Arc<WsFlushState> {
+    asyncrt::services().websockets().flush.clone()
+}
+
+/// One held queue and the flush that owns it, for a test that stands in for
+/// the durability ticket. Holding the guard is what keeps the socket's
+/// teardown wait honest while the queue exists.
+#[cfg(celld_internal_tests)]
 #[doc(hidden)]
-pub fn ws_deferred() -> &'static std::sync::Mutex<HashMap<u64, Vec<WsOut>>> {
-    WS_DEFERRED.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+pub struct WsHeldFlush(WsFlushGuard);
+
+/// Hold `out` behind `id`'s gate exactly as a gated frame does, and return
+/// the flush the frame started. `None` when the socket already holds frames,
+/// because then an earlier flush owns the queue.
+#[cfg(celld_internal_tests)]
+#[doc(hidden)]
+pub fn ws_defer_frame(id: u64, out: WsOut) -> Option<WsHeldFlush> {
+    let flush = ws_flush_state();
+    let registry = ws_registry();
+    flush
+        .emit_or_defer(&registry, id, out, true)
+        .map(WsHeldFlush)
 }
 
-static WS_FLUSHES: OnceLock<std::sync::Mutex<HashMap<u64, usize>>> = OnceLock::new();
-
-/// How many flushes still hold frames for a socket. A count, not a flag: one
-/// flush can finish and drain its queue while a later frame starts another.
-fn ws_flushes() -> &'static std::sync::Mutex<HashMap<u64, usize>> {
-    WS_FLUSHES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+/// How many frames this instance holds for `id`.
+#[cfg(celld_internal_tests)]
+#[doc(hidden)]
+pub fn ws_deferred_count(id: u64) -> usize {
+    ws_flush_state()
+        .deferred
+        .lock()
+        .unwrap()
+        .get(&id)
+        .map_or(0, Vec::len)
 }
 
-static WS_FLUSH_DONE: OnceLock<tokio::sync::Notify> = OnceLock::new();
-fn ws_flush_done() -> &'static tokio::sync::Notify {
-    WS_FLUSH_DONE.get_or_init(tokio::sync::Notify::new)
+/// Release a held flush as a settled durability ticket does, then count it
+/// out. Consuming the guard is what makes the two happen together.
+#[cfg(celld_internal_tests)]
+#[doc(hidden)]
+pub fn ws_release_flush(held: WsHeldFlush) {
+    let registry = ws_registry();
+    held.0.state.release(&registry, held.0.id, Ok(()));
 }
 
 /// Counts one flush out on every exit path, including the ones that run no
@@ -497,20 +865,26 @@ fn ws_flush_done() -> &'static tokio::sync::Notify {
 /// falls whether it finished, failed, or never ran. It cannot help a flush
 /// that is merely parked -- nothing drops, so nothing runs -- which is what
 /// the teardown wait is bounded for.
-struct WsFlushGuard(u64);
+///
+/// It carries the state rather than resolving it on drop, because the drop
+/// can run on a runtime that answers with another instance, or with none.
+struct WsFlushGuard {
+    state: Arc<WsFlushState>,
+    id: u64,
+}
 
 impl Drop for WsFlushGuard {
     fn drop(&mut self) {
         {
-            let mut flushes = ws_flushes().lock().unwrap();
-            if let Some(count) = flushes.get_mut(&self.0) {
+            let mut flushes = self.state.flushes.lock().unwrap();
+            if let Some(count) = flushes.get_mut(&self.id) {
                 *count -= 1;
                 if *count == 0 {
-                    flushes.remove(&self.0);
+                    flushes.remove(&self.id);
                 }
             }
         }
-        ws_flush_done().notify_waiters();
+        self.state.done.notify_waiters();
     }
 }
 
@@ -524,22 +898,26 @@ impl Drop for WsFlushGuard {
 /// its proof does, and an unprovable one still resolves the flush through its
 /// fail-closed arm.
 pub async fn ws_await_flushes(id: u64) {
-    loop {
-        // Registered before the count is read. A flush that finishes in
-        // between must find a waiter to wake, or this parks forever on a
-        // notification that already happened.
-        let notified = ws_flush_done().notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        if !ws_flushes().lock().unwrap().contains_key(&id) {
-            return;
-        }
-        notified.await;
-    }
+    ws_flush_state().await_flushes(id).await;
 }
 
-fn ws_emit(id: u64, out: WsOut) {
-    let context = current_context();
+/// Wait until no WebSocket flush of these services still owns deferred
+/// frames.
+///
+/// Shutdown calls this after the cell handoff has settled every output gate
+/// and before connection tasks can unregister their sockets. Waiting per
+/// socket cannot enforce that ordering because socket teardown deliberately
+/// skips its gate wait once the node is draining.
+#[doc(hidden)]
+pub async fn ws_await_all_flushes() {
+    ws_flush_state().await_all_flushes().await;
+}
+
+/// Send or hold one frame. `context` is the event the sending JavaScript
+/// belongs to: the continuation's own for a V8 entry point, so a reaction of
+/// cell A that runs inside another event's checkpoint is captured by and
+/// gated against A, not the checkpoint's owner.
+fn ws_emit(context: &IoContext, id: u64, out: WsOut) {
     let mut capture = context.ws_capture.lock().unwrap();
     if !capture.is_empty() && ws_channel(id) == celld_logic::Channel::WsHibernatable {
         capture.last_mut().unwrap().push((id, out));
@@ -552,90 +930,50 @@ fn ws_emit(id: u64, out: WsOut) {
     // held. Waiting on the DURABILITY ticket instead has no such cycle -- it
     // is resolved by the replicator, which does not need this event loop -- so
     // the frame can be held without deadlocking the script that sent it.
-    let gate = egress_gate_request(ws_channel(id));
-    // Held until this frame is either queued or sent. A flush runs on another
-    // thread, so releasing here would let it drain its queue between the check
-    // below and the send, putting a later frame ahead of an earlier one.
-    let mut deferred = ws_deferred().lock().unwrap();
-    let already_deferring = deferred.contains_key(&id);
+    let gate = egress_gate_request(context, ws_channel(id));
+    // Resolved here, on the thread the frame was sent from, and moved into the
+    // flush below. The flush runs on a runtime that has no services of its
+    // own, so a lookup inside it would answer with whichever instance that
+    // runtime reaches — the socket's frames and the socket's registry could
+    // then come from two different instances.
+    let flush = ws_flush_state();
+    let registry = ws_registry();
     // Gated for a read-only frame as well, and deliberately: the frame reveals
     // what the cell holds, so it has to ask the core whether a barrier is open
     // rather than assume its own event opened one. A cell with nothing
     // outstanding answers at once and the queue flushes on the same tick.
-    if gate.is_gated() || already_deferring {
-        deferred.entry(id).or_default().push(out);
-        if !already_deferring {
-            // Counted in while `deferred` is held, so a teardown that reads
-            // the count cannot observe a queued frame with no flush behind it.
-            *ws_flushes().lock().unwrap().entry(id).or_default() += 1;
-            let counted = WsFlushGuard(id);
-            // Detached onto the HOST runtime (`op_handle`) deliberately:
-            // this flush exists precisely to outlive the dispatch that
-            // produced the frames — a writing connect handler's ready frame,
-            // an alarm broadcast — and it awaits a durability ticket that
-            // resolves with no isolate involvement. Both region-owned homes
-            // silently kill it: `asyncrt::enqueue`'s future is aborted when
-            // the dispatch region closes, and the isolate thread's local
-            // request driver stops polling its operation future the moment the
-            // dispatch returns. Either way the frames never left the
-            // process.
-            asyncrt::op_handle().spawn(async move {
-                let _counted = counted;
-                let held = await_egress_gate(gate).await;
-                let mut deferred = ws_deferred().lock().unwrap();
-                let frames = deferred.remove(&id).unwrap_or_default();
-                // Keep the lock from removal through the registry send. Once
-                // the entry is absent, another release would otherwise look
-                // direct and overtake these frames. `ws_emit_batch` reacquires
-                // this mutex, so the lock-aware helper is required here.
-                match held {
-                    // Unprovable: these frames describe a write the fleet may
-                    // never have, so they must not be delivered. Dropping them
-                    // and leaving the socket open is not an option -- a
-                    // WebSocket is an ordered stream, and a peer cannot see a
-                    // hole in one. It would read the frames on either side of
-                    // the gap as consecutive.
-                    //
-                    // Close instead. A truncated stream is something the peer
-                    // can detect and resynchronise from; a silently incomplete
-                    // one is not. The cell is reset underneath this as well,
-                    // but that is a separate path and this must not depend on
-                    // its timing.
-                    Err(_) => {
-                        ws_emit_ordered(
-                            &mut deferred,
-                            std::iter::once((
-                                id,
-                                WsOut::Close(
-                                    1011,
-                                    "celld could not prove the write behind this message durable"
-                                        .to_string(),
-                                ),
-                            )),
-                        );
-                    }
-                    Ok(()) => {
-                        ws_emit_ordered(&mut deferred, frames.into_iter().map(|out| (id, out)));
-                    }
-                }
-            });
-        }
+    let Some(counted) = flush.emit_or_defer(&registry, id, out, gate.is_gated()) else {
         return;
-    }
-    ws_emit_ordered(&mut deferred, std::iter::once((id, out)));
+    };
+    // Detached onto the HOST runtime (`op_handle`) deliberately: this flush
+    // exists precisely to outlive the dispatch that produced the frames — a
+    // writing connect handler's ready frame, an alarm broadcast — and it
+    // awaits a durability ticket that resolves with no isolate involvement.
+    // Both region-owned homes silently kill it: `asyncrt::enqueue`'s future is
+    // aborted when the dispatch region closes, and the isolate thread's local
+    // request driver stops polling its operation future the moment the
+    // dispatch returns. Either way the frames never left the process.
+    asyncrt::op_handle().spawn(async move {
+        let _counted = counted;
+        let held = await_egress_gate(gate).await;
+        flush.release(&registry, id, held);
+    });
 }
 
 /// Emit released frames without crossing a queue that already orders a socket.
 ///
-/// The caller holds `ws_deferred` from the queue check through the registry
-/// send. Otherwise a flush can remove an earlier queue between those two steps,
-/// or a later release can reach the registry before that removed queue does.
-/// A batch can span sockets, so each frame makes the decision independently.
+/// The held queue map is a parameter rather than a lookup, so a caller holds
+/// it from the queue check through the registry send. Otherwise a flush can
+/// remove an earlier queue between those two steps, or a later release can
+/// reach the registry before that removed queue does. A batch can span
+/// sockets, so each frame makes the decision independently. The registry is a
+/// parameter for the same reason the queue is: both must come from the
+/// instance that owns the socket, and a flush cannot look either up.
 fn ws_emit_ordered(
     deferred: &mut HashMap<u64, Vec<WsOut>>,
+    registry: &std::sync::Mutex<WsRegistry>,
     frames: impl IntoIterator<Item = (u64, WsOut)>,
 ) {
-    let registry = ws_registry();
     let mut registry = registry.lock().unwrap();
     for (id, out) in frames {
         match deferred.get_mut(&id) {
@@ -649,8 +987,10 @@ fn ws_emit_ordered(
 /// durability-ticket queue is still present joins that queue, so an Actor
 /// barrier release cannot overtake an earlier frame on the same socket.
 pub fn ws_emit_batch(frames: Vec<(u64, WsOut)>) {
-    let mut deferred = ws_deferred().lock().unwrap();
-    ws_emit_ordered(&mut deferred, frames);
+    let flush = ws_flush_state();
+    let registry = ws_registry();
+    let mut deferred = flush.deferred.lock().unwrap();
+    ws_emit_ordered(&mut deferred, &registry, frames);
 }
 
 /// Close one socket. A forced generation swap closes the regular and
@@ -695,7 +1035,7 @@ pub(super) fn op_ws_send(
         .map(|n| n.value() as u64)
         .unwrap_or(0);
     let data = args.get(1).to_rust_string_lossy(scope);
-    ws_emit(id, WsOut::Text(data));
+    ws_emit(&event_context(scope), id, WsOut::Text(data));
 }
 pub(super) fn op_ws_send_binary(
     scope: &mut v8::PinScope,
@@ -708,7 +1048,7 @@ pub(super) fn op_ws_send_binary(
         .map(|n| n.value() as u64)
         .unwrap_or(0);
     let data = view_bytes(args.get(1)).unwrap_or_default();
-    ws_emit(id, WsOut::Binary(data));
+    ws_emit(&event_context(scope), id, WsOut::Binary(data));
 }
 pub(super) fn op_ws_close(
     scope: &mut v8::PinScope,
@@ -722,7 +1062,7 @@ pub(super) fn op_ws_close(
         .unwrap_or(0);
     let code = args.get(1).uint32_value(scope).unwrap_or(1000) as u16;
     let reason = args.get(2).to_rust_string_lossy(scope);
-    ws_emit(id, WsOut::Close(code, reason));
+    ws_emit(&event_context(scope), id, WsOut::Close(code, reason));
 }
 pub(super) fn op_ws_alloc(
     scope: &mut v8::PinScope,
@@ -783,7 +1123,7 @@ pub(super) fn op_ws_upgrade(
         .map(|(_, value)| value.split(',').map(|p| p.trim().to_string()).collect())
         .unwrap_or_default();
     let pull = cell.is_empty().then(|| {
-        let (pull_tx, pull_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (pull_tx, pull_rx) = ws_pull_channel();
         ws_pull_register(id, pull_rx);
         ws_track_request_socket(id);
         pull_tx
@@ -845,7 +1185,7 @@ pub(super) fn op_ws_next(
         .map(|n| n.value() as u64)
         .unwrap_or(0);
     let queue = ws_pull().lock().unwrap().get(&id).cloned();
-    let async_id = asyncrt::enqueue(async move {
+    let async_id = asyncrt::enqueue_io_context(async move {
         let Some(queue) = queue else {
             return Ok(WsPull::Close(1006, "socket is not registered".into(), false).encode());
         };
@@ -890,7 +1230,7 @@ pub(super) fn op_ws_connect(
     // No cell means a Worker socket: the isolate polls it, so register the
     // queue here on the JS thread and track it against the running request.
     let pull = cell.is_empty().then(|| {
-        let (pull_tx, pull_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (pull_tx, pull_rx) = ws_pull_channel();
         ws_pull_register(id, pull_rx);
         ws_track_request_socket(id);
         pull_tx
@@ -951,7 +1291,7 @@ pub(super) fn op_ws_bind_target(
     // accounted against the isolate holding it, exactly as `op_ws_connect`
     // accounts an outbound one.
     let cell = args.get(2).to_rust_string_lossy(scope);
-    let (pull_tx, pull_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (pull_tx, pull_rx) = ws_pull_channel();
     ws_pull_register(id, pull_rx);
     if cell.is_empty() {
         ws_track_request_socket(id);

@@ -14,6 +14,7 @@ use crate::TXID;
 use async_trait::async_trait;
 
 pub mod bundle;
+pub mod epochs;
 pub mod file;
 pub mod object_store;
 
@@ -46,6 +47,29 @@ pub trait ReplicaClient: Send + Sync {
     /// Reads an LTX file. Returns an `io::ErrorKind::NotFound` error (wrapped)
     /// if the file does not exist.
     async fn open_ltx_file(&self, level: i32, min_txid: TXID, max_txid: TXID) -> Result<Vec<u8>>;
+
+    /// Reads bytes `[offset, offset+len)` of an LTX file. Paged restore fetches
+    /// an object's trailing page index and then single page frames this way,
+    /// without downloading the whole object. `offset` and `len` must lie within
+    /// the object (the caller knows its size from the [`FileInfo`] listing); a
+    /// short object yields the available bytes.
+    ///
+    /// The default reads the whole object and slices it, so a backend without a
+    /// native ranged read still works; a remote backend overrides this with a
+    /// ranged GET so the read cost is proportional to the range, not the object.
+    async fn read_range(
+        &self,
+        level: i32,
+        min_txid: TXID,
+        max_txid: TXID,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>> {
+        let bytes = self.open_ltx_file(level, min_txid, max_txid).await?;
+        let start = (offset as usize).min(bytes.len());
+        let end = start.saturating_add(len as usize).min(bytes.len());
+        Ok(bytes[start..end].to_vec())
+    }
 
     /// Writes an LTX file to the replica and returns its metadata.
     async fn write_ltx_file(

@@ -27,6 +27,10 @@ fn env(name: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
+pub(crate) fn bucket_from_environment() -> Option<String> {
+    env("CELLD_BUCKET").map(|value| value.trim().to_string())
+}
+
 /// Which fleet a command acts on.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FleetFlags {
@@ -55,12 +59,10 @@ impl FleetFlags {
         value: &mut impl FnMut(&str) -> anyhow::Result<String>,
     ) -> anyhow::Result<bool> {
         match argument {
-            // The scheme survives into `Bucket::open`, which parses it to
-            // pick a backend. Only the default `s3://` is stripped, because
-            // a bare name means S3 there too.
-            "--bucket" => {
-                self.bucket = Some(value("--bucket")?.trim_start_matches("s3://").to_string());
-            }
+            // `Bucket::open` is the one parser for the complete spec. Keeping
+            // the spelling intact here prevents CLI paths from disagreeing
+            // about scheme case or changing where the prefix begins.
+            "--bucket" => self.bucket = Some(value("--bucket")?),
             "--endpoint" => self.endpoint = Some(value("--endpoint")?),
             "--region" => self.region = Some(value("--region")?),
             _ => return Ok(false),
@@ -71,13 +73,7 @@ impl FleetFlags {
     /// Fill anything the flags left unset from the environment.
     pub fn with_environment(mut self) -> Self {
         if self.bucket.is_none() {
-            self.bucket = env("CELLD_BUCKET").map(|value| {
-                value
-                    .trim()
-                    .trim_start_matches("s3://")
-                    .trim_end_matches('/')
-                    .to_string()
-            });
+            self.bucket = bucket_from_environment();
         }
         if self.endpoint.is_none() {
             self.endpoint = env("S3_ENDPOINT");

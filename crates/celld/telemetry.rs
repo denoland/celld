@@ -47,6 +47,19 @@ const SCHEMA_VERSION: &str = "v0-unstable";
 /// this only needs to cover a scheduling hiccup, not a flush interval.
 const CHANNEL_CAPACITY: usize = 8_192;
 
+/// One batch remains exporter-owned while it retries. The channel stays
+/// bounded behind it, so an outage can consume this batch and at most
+/// `CHANNEL_CAPACITY` newer events. Five attempts cover a short collector
+/// restart without turning telemetry into an unbounded delivery queue.
+const OTLP_MAX_ATTEMPTS: u32 = 5;
+const OTLP_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
+const OTLP_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// The provider page and the S3 bulk-delete limit are both 1,000. Keeping
+/// them equal lets a sweep delete one page without retaining a second key
+/// collection or splitting one provider page across storage requests.
+const SWEEP_PAGE_SIZE: usize = 1_000;
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Retention {
     Days(u32),
@@ -195,8 +208,7 @@ impl Config {
         .unwrap_or(5 * 1024 * 1024);
         Ok(enabled.then_some(Config {
             sink,
-            bucket_override: get("CELLD_OTEL_BUCKET")?
-                .map(|name| name.trim_start_matches("s3://").to_string()),
+            bucket_override: get("CELLD_OTEL_BUCKET")?,
             otlp_endpoint,
             otlp_headers,
             otlp_timeout,
@@ -218,13 +230,30 @@ pub const KIND_SERVER: u8 = 2;
 pub const KIND_CLIENT: u8 = 3;
 pub const KIND_CONSUMER: u8 = 4;
 
-/// A sampled trace's identity. Existence means "record this one":
-/// `start_trace` answered the sampling question at creation, so a `None`
-/// costs nothing downstream.
+/// A recorded span's identity.
 #[derive(Clone, Copy, Debug)]
 pub struct TraceIds {
     pub trace_id: [u8; 16],
     pub span_id: [u8; 8],
+}
+
+/// The W3C context that crosses request boundaries. This keeps the recording
+/// decision with the ids, so an unsampled context can propagate without any
+/// caller mistaking its existence for permission to record an event.
+#[derive(Clone, Copy, Debug)]
+pub struct TraceContext {
+    pub trace_id: [u8; 16],
+    pub span_id: [u8; 8],
+    pub sampled: bool,
+}
+
+impl TraceContext {
+    pub fn recording_ids(self) -> Option<TraceIds> {
+        self.sampled.then_some(TraceIds {
+            trace_id: self.trace_id,
+            span_id: self.span_id,
+        })
+    }
 }
 
 /// A caller's trace context, extracted from a W3C `traceparent` header.
@@ -237,19 +266,25 @@ pub struct ParentContext {
     pub sampled: bool,
 }
 
-/// Parse `00-<32 hex>-<16 hex>-<2 hex>`. Anything malformed — wrong
-/// shape, all-zero ids, the invalid version — is `None`, and the request
-/// becomes an ordinary root, exactly as if the header were absent.
+/// Parse a W3C `traceparent` value. Anything malformed is `None`, and the
+/// request becomes an ordinary root, exactly as if the header were absent.
 pub fn parse_traceparent(value: &str) -> Option<ParentContext> {
-    let mut parts = value.trim().split('-');
-    let version = parts.next()?;
-    if version.len() != 2 || version.eq_ignore_ascii_case("ff") {
+    let value = value.trim().as_bytes();
+    if value.len() < 55 || value[2] != b'-' || value[35] != b'-' || value[52] != b'-' {
         return None;
     }
-    u8::from_str_radix(version, 16).ok()?;
-    let trace_id: [u8; 16] = unhex(parts.next()?)?;
-    let span_id: [u8; 8] = unhex(parts.next()?)?;
-    let flags = u8::from_str_radix(parts.next()?, 16).ok()?;
+
+    let version = unhex::<1>(&value[..2])?[0];
+    if version == 0xff
+        || (version == 0 && value.len() != 55)
+        || (version != 0 && value.len() > 55 && value[55] != b'-')
+    {
+        return None;
+    }
+
+    let trace_id = unhex(&value[3..35])?;
+    let span_id = unhex(&value[36..52])?;
+    let flags = unhex::<1>(&value[53..55])?[0];
     if trace_id == [0; 16] || span_id == [0; 8] {
         return None;
     }
@@ -260,21 +295,35 @@ pub fn parse_traceparent(value: &str) -> Option<ParentContext> {
     })
 }
 
-/// The header for an outbound request made inside a recorded trace. The
-/// sampled flag is always set: an unrecorded trace has no ids to send.
-pub fn traceparent(ids: &TraceIds) -> String {
-    format!("00-{}-{}-01", hex(&ids.trace_id), hex(&ids.span_id))
+/// The header for an outbound request made inside a propagated context.
+pub fn traceparent(context: &TraceContext) -> String {
+    let flags = if context.sampled { "01" } else { "00" };
+    format!(
+        "00-{}-{}-{flags}",
+        hex(&context.trace_id),
+        hex(&context.span_id)
+    )
 }
 
-fn unhex<const N: usize>(text: &str) -> Option<[u8; N]> {
+fn unhex<const N: usize>(text: &[u8]) -> Option<[u8; N]> {
     if text.len() != N * 2 {
         return None;
     }
     let mut out = [0u8; N];
     for (index, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).ok()?;
+        let high = hex_nibble(text[index * 2])?;
+        let low = hex_nibble(text[index * 2 + 1])?;
+        *byte = high << 4 | low;
     }
     Some(out)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
 }
 
 /// One wide event. Flat on purpose: every field is a Parquet column, and the
@@ -359,13 +408,40 @@ impl Event {
 struct Telemetry {
     tx: tokio::sync::mpsc::Sender<Event>,
     dropped: AtomicU64,
-    /// `sample_ratio` scaled to u64: a trace records when the first eight
-    /// bytes of its trace id land at or under this. Applied to the trace
-    /// id rather than a fresh roll so the decision is consistent for one
-    /// trace across every node that sees it, as the spec's traceidratio
-    /// intends.
-    sample_threshold: u64,
+    sampler: Sampler,
     parent_based: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Sampler {
+    AlwaysOff,
+    /// The number of `u64` decision values that record, starting at zero.
+    TraceIdRatio(u64),
+    AlwaysOn,
+}
+
+impl Sampler {
+    fn from_ratio(ratio: f64) -> Sampler {
+        if ratio == 0.0 {
+            return Sampler::AlwaysOff;
+        }
+        if ratio == 1.0 {
+            return Sampler::AlwaysOn;
+        }
+        // A u64 has 2^64 possible values, which cannot fit in a u64. Keep
+        // the full-range endpoint as a distinct policy and store a count for
+        // every intermediate ratio. An inclusive maximum would add one
+        // sampled value and would make the zero endpoint nonempty again.
+        Sampler::TraceIdRatio((ratio * (u64::MAX as f64 + 1.0)) as u64)
+    }
+
+    fn samples(self, decision: u64) -> bool {
+        match self {
+            Sampler::AlwaysOff => false,
+            Sampler::TraceIdRatio(upper_bound) => decision < upper_bound,
+            Sampler::AlwaysOn => true,
+        }
+    }
 }
 
 static TELEMETRY: OnceLock<Telemetry> = OnceLock::new();
@@ -374,38 +450,42 @@ pub fn active() -> bool {
     TELEMETRY.get().is_some()
 }
 
-/// Decide a new root trace at its creation. `None` means off or
-/// unsampled, and the caller builds nothing at all.
-pub fn start_trace() -> Option<TraceIds> {
+/// Decide a new root trace at its creation. `None` means off or unsampled,
+/// and the caller builds nothing at all.
+pub fn start_trace() -> Option<TraceContext> {
     start_trace_with_parent(None)
 }
 
 /// Decide a trace at its creation, under a foreign parent when the
-/// caller sent one. `None` means off or unsampled.
-pub fn start_trace_with_parent(parent: Option<&ParentContext>) -> Option<TraceIds> {
+/// caller sent one. A rejected foreign parent remains present for W3C
+/// propagation, but a rejected root remains absent to preserve the cheap path.
+pub fn start_trace_with_parent(parent: Option<&ParentContext>) -> Option<TraceContext> {
     let telemetry = TELEMETRY.get()?;
-    let trace_id = decide(
+    let (trace_id, sampled) = decide_with_sampler(
         telemetry.parent_based,
-        telemetry.sample_threshold,
+        telemetry.sampler,
         parent,
         rand::random(),
-    )?;
-    Some(TraceIds {
+    );
+    if !sampled && parent.is_none() {
+        return None;
+    }
+    Some(TraceContext {
         trace_id,
         span_id: rand::random(),
+        sampled,
     })
 }
 
 /// The sampling decision, pure so the semantics are testable: adopt the
 /// parent's trace id either way; `parent_based` defers to its sampled
-/// flag, everything else applies the threshold to the trace id itself.
-#[doc(hidden)]
-pub fn decide(
+/// flag, everything else applies the sampler to the trace id itself.
+fn decide_with_sampler(
     parent_based: bool,
-    threshold: u64,
+    sampler: Sampler,
     parent: Option<&ParentContext>,
     fresh: [u8; 16],
-) -> Option<[u8; 16]> {
+) -> ([u8; 16], bool) {
     let (trace_id, parent_sampled) = match parent {
         Some(parent) => (parent.trace_id, Some(parent.sampled)),
         None => (fresh, None),
@@ -414,29 +494,46 @@ pub fn decide(
         (Some(sampled), true) => sampled,
         _ => {
             let head = u64::from_be_bytes(trace_id[..8].try_into().unwrap());
-            head <= threshold
+            sampler.samples(head)
         }
     };
-    sampled.then_some(trace_id)
+    (trace_id, sampled)
 }
 
-/// Join an in-process parent: same trace, fresh span id, no re-roll —
-/// the parent's existence is the sampling decision, made once at the
-/// trace's root.
-pub fn child_of(parent: &TraceIds) -> Option<TraceIds> {
+/// The sampler is private, so the private suite reaches the decision
+/// through the ratio the configuration carries.
+#[cfg(celld_internal_tests)]
+#[doc(hidden)]
+pub fn decide(
+    parent_based: bool,
+    sample_ratio: f64,
+    parent: Option<&ParentContext>,
+    fresh: [u8; 16],
+) -> ([u8; 16], bool) {
+    decide_with_sampler(
+        parent_based,
+        Sampler::from_ratio(sample_ratio),
+        parent,
+        fresh,
+    )
+}
+
+/// Join an in-process parent: same trace and decision, with a fresh span id.
+pub fn child_of(parent: &TraceContext) -> Option<TraceContext> {
     TELEMETRY.get()?;
-    Some(TraceIds {
+    Some(TraceContext {
         trace_id: parent.trace_id,
         span_id: rand::random(),
+        sampled: parent.sampled,
     })
 }
 
-/// A child's identity inside an already-sampled trace: same trace, fresh
-/// span id. The parent's existence *is* the sampling decision.
-pub fn child_ids(parent: &TraceIds) -> TraceIds {
-    TraceIds {
+/// A child context: same trace and decision, with a fresh span id.
+pub fn child_context(parent: &TraceContext) -> TraceContext {
+    TraceContext {
         trace_id: parent.trace_id,
         span_id: rand::random(),
+        sampled: parent.sampled,
     }
 }
 
@@ -533,7 +630,7 @@ pub fn init(
     let telemetry = Telemetry {
         tx,
         dropped: AtomicU64::new(0),
-        sample_threshold: (config.sample_ratio * u64::MAX as f64) as u64,
+        sampler: Sampler::from_ratio(config.sample_ratio),
         parent_based: config.parent_based,
     };
     if TELEMETRY.set(telemetry).is_err() {
@@ -566,8 +663,8 @@ enum SinkRuntime {
 
 impl SinkRuntime {
     /// Ship one flush interval's events. Encoding runs on the blocking
-    /// pool either way; a failed batch is warned about and lost —
-    /// telemetry never retries into backpressure.
+    /// pool either way. For OTLP, the return value counts records discarded
+    /// after a permanent refusal or retry exhaustion.
     async fn flush(
         &self,
         spans: Vec<Span>,
@@ -575,7 +672,9 @@ impl SinkRuntime {
         node: &str,
         region: &str,
         service: &str,
-    ) {
+    ) -> u64 {
+        let span_count = spans.len() as u64;
+        let log_count = logs.len() as u64;
         match self {
             SinkRuntime::Bucket { bucket, retention } => {
                 let node_ = node.to_string();
@@ -594,7 +693,7 @@ impl SinkRuntime {
                     Ok(bytes) => bytes,
                     Err(error) => {
                         tracing::warn!(%error, "telemetry batch lost: encode failed");
-                        return;
+                        return 0;
                     }
                 };
                 let meta = [
@@ -608,6 +707,7 @@ impl SinkRuntime {
                         tracing::warn!(%error, key, "telemetry batch lost: put failed");
                     }
                 }
+                0
             }
             SinkRuntime::Otlp {
                 client,
@@ -630,35 +730,130 @@ impl SinkRuntime {
                     Ok(bytes) => bytes,
                     Err(error) => {
                         tracing::warn!(%error, "telemetry batch lost: encode failed");
-                        return;
+                        return span_count + log_count;
                     }
                 };
-                for (url, bytes) in [(traces_url, span_bytes), (logs_url, log_bytes)] {
+                let mut dropped = 0;
+                for (url, bytes, count) in [
+                    (traces_url, span_bytes, span_count),
+                    (logs_url, log_bytes, log_count),
+                ] {
                     let Some(bytes) = bytes else { continue };
-                    let mut request = client
-                        .post(url.as_str())
-                        .header("content-type", "application/x-protobuf")
-                        .body(bytes);
-                    for (name, value) in headers {
-                        request = request.header(name.as_str(), value.as_str());
-                    }
-                    match request.send().await {
-                        Ok(response) if response.status().is_success() => {}
-                        Ok(response) => {
-                            tracing::warn!(
-                                status = %response.status(),
-                                url,
-                                "telemetry batch lost: collector refused"
-                            );
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, url, "telemetry batch lost: post failed");
-                        }
+                    if !post_otlp(client, url, headers, bytes.into()).await {
+                        dropped += count;
                     }
                 }
+                dropped
             }
         }
     }
+}
+
+/// Send the same encoded request until the collector accepts it, refuses it
+/// permanently, or the retry budget expires. This future owns only one batch.
+/// While it sleeps, request handling continues and the bounded channel sheds
+/// excess telemetry instead of turning an outage into application backpressure.
+async fn post_otlp(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &[(String, String)],
+    bytes: bytes::Bytes,
+) -> bool {
+    for attempt in 1..=OTLP_MAX_ATTEMPTS {
+        let mut request = client
+            .post(url)
+            .header("content-type", "application/x-protobuf")
+            .body(bytes.clone());
+        for (name, value) in headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        let (error, delay) = match request.send().await {
+            Ok(response) if response.status().is_success() => return true,
+            Ok(response) if retryable_otlp_status(response.status()) => {
+                let status = response.status();
+                let delay =
+                    otlp_response_delay(status, retry_after(&response), otlp_backoff(attempt))
+                        .expect("the retryable status guard supplies a retry delay");
+                (format!("collector returned {status}"), delay)
+            }
+            Ok(response) => {
+                tracing::warn!(
+                    status = %response.status(),
+                    url,
+                    "telemetry batch lost: collector refused permanently"
+                );
+                return false;
+            }
+            Err(error) => (error.to_string(), otlp_backoff(attempt)),
+        };
+        if attempt == OTLP_MAX_ATTEMPTS {
+            tracing::warn!(
+                %error,
+                url,
+                attempts = OTLP_MAX_ATTEMPTS,
+                "telemetry batch lost: OTLP retry budget exhausted"
+            );
+            return false;
+        }
+        tracing::warn!(
+            %error,
+            url,
+            attempt,
+            delay_ms = delay.as_millis(),
+            "telemetry export failed transiently; retrying"
+        );
+        tokio::time::sleep(delay).await;
+    }
+    unreachable!("the nonzero OTLP attempt range always returns")
+}
+
+fn retryable_otlp_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 408 | 429 | 502 | 503 | 504)
+}
+
+fn otlp_response_delay(
+    status: reqwest::StatusCode,
+    retry_after: Option<Duration>,
+    fallback: Duration,
+) -> Option<Duration> {
+    retryable_otlp_status(status).then(|| retry_after.unwrap_or(fallback).min(OTLP_BACKOFF_MAX))
+}
+
+fn retry_after(response: &reqwest::Response) -> Option<Duration> {
+    if !matches!(response.status().as_u16(), 429 | 503) {
+        return None;
+    }
+    let value = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let retry_at = httpdate::parse_http_date(value).ok()?;
+    Some(
+        retry_at
+            .duration_since(SystemTime::now())
+            .unwrap_or_default(),
+    )
+}
+
+fn otlp_backoff(attempt: u32) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(31);
+    let ceiling = OTLP_BACKOFF_INITIAL
+        .saturating_mul(1_u32 << exponent)
+        .min(OTLP_BACKOFF_MAX);
+    let ceiling_ms = ceiling.as_millis() as u64;
+    Duration::from_millis(rand::random::<u64>() % (ceiling_ms + 1))
+}
+
+#[cfg(all(test, celld_internal_tests))]
+mod telemetry_contract {
+    use super::*;
+
+    include!(env!("CELLD_INTERNAL_TELEMETRY_TESTS"));
 }
 
 /// A `spawn_blocking` result unwrapped honestly: the panic and the
@@ -713,13 +908,15 @@ async fn pump(
                 Event::Log(log) => logs.push(log),
             }
         }
-        sink.flush(spans, logs, &node, &region, &service).await;
-        let dropped = TELEMETRY
-            .get()
-            .map(|telemetry| telemetry.dropped.swap(0, Ordering::Relaxed))
-            .unwrap_or(0);
+        let sink_dropped = sink.flush(spans, logs, &node, &region, &service).await;
+        let dropped = sink_dropped.saturating_add(
+            TELEMETRY
+                .get()
+                .map(|telemetry| telemetry.dropped.swap(0, Ordering::Relaxed))
+                .unwrap_or(0),
+        );
         if dropped > 0 {
-            tracing::warn!(dropped, "telemetry shed under load");
+            tracing::warn!(dropped, "telemetry shed");
         }
     }
 }
@@ -746,33 +943,53 @@ pub fn object_key(prefix: &str, node: &str, unix_us: i64) -> String {
 async fn sweep_loop(bucket: Bucket, retention_days: u32, every: Duration) {
     loop {
         let cutoff = cutoff_date(now_unix_us(), retention_days);
-        let mut deleted = 0u64;
-        for prefix in [TRACES_PREFIX, LOGS_PREFIX] {
-            let objects = match bucket.list(&format!("{prefix}/")).await {
-                Ok(objects) => objects,
-                Err(error) => {
-                    tracing::warn!(%error, prefix, "telemetry sweep could not list");
-                    continue;
-                }
-            };
-            for object in objects {
-                let key = object.location.as_ref();
-                if !expired(key, prefix, cutoff) {
-                    continue;
-                }
-                match bucket.delete(key).await {
-                    Ok(()) => deleted += 1,
-                    Err(error) => {
-                        tracing::warn!(%error, key, "telemetry sweep delete failed");
-                    }
-                }
-            }
-        }
+        let deleted = sweep_once(&bucket, cutoff).await;
         if deleted > 0 {
             tracing::info!(deleted, retention_days, "telemetry swept");
         }
         tokio::time::sleep(every).await;
     }
+}
+
+/// One complete retention pass. A page failure ends only that signal's pass,
+/// while deletions completed from its earlier pages remain effective.
+#[doc(hidden)]
+pub async fn sweep_once(bucket: &Bucket, cutoff: (i64, u32, u32)) -> u64 {
+    let mut deleted = 0u64;
+    for prefix in [TRACES_PREFIX, LOGS_PREFIX] {
+        let mut page_token = None;
+        loop {
+            let page = match bucket
+                .objects_page(prefix, page_token, SWEEP_PAGE_SIZE)
+                .await
+            {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::warn!(%error, prefix, "telemetry sweep could not list");
+                    break;
+                }
+            };
+            let next_page = page.page_token;
+            // Retain only the keys this page proves are expired. Fresh and
+            // unparseable descriptions are released before deletion starts.
+            let expired_keys: Vec<String> = page
+                .objects
+                .into_iter()
+                .filter_map(|object| {
+                    let key = object.location.as_ref();
+                    expired(key, prefix, cutoff).then(|| key.to_string())
+                })
+                .collect();
+            if !expired_keys.is_empty() {
+                deleted += bucket.delete_many(&expired_keys).await.len() as u64;
+            }
+            match next_page {
+                Some(token) => page_token = Some(token),
+                None => break,
+            }
+        }
+    }
+    deleted
 }
 
 /// The newest civil date old enough to delete: strictly before

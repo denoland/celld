@@ -15,10 +15,14 @@
 //! - the flusher never touches the request path: it reads the lock-free
 //!   `next_alarm_ms` mirror on the existing 5 s sweep tick.
 use crate::bucket::Bucket;
+use crate::ownership_store::BucketOwnership;
+use celld_logic::wake::elected_hint_needed;
 use celld_logic::wake::parse_entry_key;
 use celld_logic::wake::Op;
 use celld_logic::wake::Step;
 use celld_logic::wake::WakeCore;
+use futures_util::stream::{self, StreamExt as _};
+use std::collections::BTreeSet;
 use std::sync::Mutex;
 use std::time::Duration;
 use tracing::warn;
@@ -35,10 +39,26 @@ pub fn resident_ms() -> i64 {
 }
 
 /// Scan the due wake buckets: used by the boot-time orphan scan and the
-/// periodic waker tick. The whole `wake/` prefix is listed and filtered
-/// locally; entries are deleted as their alarms are consumed, so the listing
-/// stays O(armed entries) plus any entry that `parse_entry_key` rejects with
-/// the fleet-wide scope fence.
+/// periodic waker tick.
+///
+/// A delimiter listing answers with one entry per armed *minute* rather than
+/// one per armed *cell*, and only the minutes that have come due are opened.
+/// Listing the whole `wake/` prefix instead made every tick transfer the
+/// entire future alarm population: measured at ~175 bytes per armed entry per
+/// tick with nothing due at all, so a fleet holding a million scheduled alarms
+/// moved ~175 MB a tick to discover that it had no work, and at 100,000 armed
+/// alarms the scan alone took 5.6 s of every tick (2026-09-01). Entries are
+/// deleted as their alarms are consumed, so a due minute's listing stays
+/// O(due entries) plus any entry in it that `parse_entry_key` rejects with the
+/// fleet-wide scope fence.
+///
+/// The due set is chosen by parsing each bucket, never by stopping early at
+/// the first future-looking one. The keys sort chronologically and S3 returns
+/// them that way, but `object_store` does not promise a sorted listing, and an
+/// entry this scan skips is an alarm that never fires -- a lost wake, which
+/// the module contract above calls the expensive failure. Ordering is
+/// therefore treated as a coincidence rather than a guarantee.
+///
 /// Due entries as (cell, minute_ms). The minute is carried out so a reviving
 /// node can adopt the entry it acted on: without it, a cell whose restored
 /// truth has no alarm leaves the entry that woke it in the bucket forever.
@@ -48,24 +68,112 @@ pub fn resident_ms() -> i64 {
 /// come from a bucket writer that bypassed every route, and deleting on a parse
 /// failure would let one bad listing reap live entries.
 pub async fn due_scan(bucket: &Bucket, now_ms: i64) -> Vec<(String, i64)> {
+    /// Bounded like every other fan-out against the store: a long outage can
+    /// leave one due bucket per minute of backlog, and opening them all at
+    /// once is the thundering herd the eviction bound exists to prevent.
+    const BUCKET_READ_CONCURRENCY: usize = 16;
+
     let mut due = Vec::new();
-    let objects = match bucket.list("wake/").await {
-        Ok(objects) => objects,
+    let minutes = match bucket.common_prefixes("wake/").await {
+        Ok(minutes) => minutes,
         Err(e) => {
-            warn!(error = %e, "wake due scan list failed");
+            warn!(error = %e, "wake due scan bucket listing failed");
             return due;
         }
     };
-    for object in objects {
-        if let Some((minute_ms, cell)) = parse_entry_key(object.location.as_ref()) {
-            if minute_ms <= now_ms {
-                due.push((cell, minute_ms));
+    let overdue: Vec<String> = minutes
+        .into_iter()
+        .filter(|minute| {
+            celld_logic::wake::parse_minute_prefix(minute).is_some_and(|ms| ms <= now_ms)
+        })
+        .collect();
+
+    let mut listings = futures_util::stream::iter(
+        overdue
+            .into_iter()
+            .map(|minute| async move { (bucket.list(&minute).await, minute) }),
+    )
+    .buffer_unordered(BUCKET_READ_CONCURRENCY);
+    while let Some((objects, minute)) = listings.next().await {
+        let objects = match objects {
+            Ok(objects) => objects,
+            Err(e) => {
+                warn!(error = %e, %minute, "wake due scan entry listing failed");
+                continue;
+            }
+        };
+        for object in objects {
+            if let Some((minute_ms, cell)) = parse_entry_key(object.location.as_ref()) {
+                if minute_ms <= now_ms {
+                    due.push((cell, minute_ms));
+                }
             }
         }
     }
     due.sort();
     due.dedup_by(|a, b| a.0 == b.0);
     due
+}
+
+/// Owner records the elected waker reads at once while it sorts the fleet's
+/// due entries. These reads are deliberately outside the activation queue:
+/// they hold no permit, so the node's own alarm wakes and cold requests never
+/// queue behind the fleet's due set, and 32 in flight clears a thousand
+/// entries in about a second of store latency.
+const ELECTED_PROBE_CONCURRENCY: usize = 32;
+
+/// The elected waker's pass over the due entries: the ones this node must
+/// hint with `WakeHintScope::Fleet`.
+///
+/// One owner read per entry, without an activation permit, decides through
+/// `elected_hint_needed` against the node leases the same tick's dead-node
+/// scan read. Before this pass existed, every due entry in the fleet went
+/// through the core's route on every node: an owner read under a permit,
+/// then `Remote`, for cells whose live owners were about to fire the alarm
+/// themselves. A read that fails keeps its entry, because the core's own
+/// resolution is the authority and an entry dropped here on a transient
+/// error would wait a whole tick.
+pub async fn elected_due(
+    ownership: &BucketOwnership,
+    node: &str,
+    live: &BTreeSet<String>,
+    due: Vec<(String, i64)>,
+) -> Vec<(String, i64)> {
+    let probed: Vec<(
+        String,
+        i64,
+        anyhow::Result<Option<celld_logic::OwnerRecord>>,
+    )> = stream::iter(due)
+        .map(|(cell, entry_ms)| async move {
+            let owner = ownership.read_owner(&cell).await;
+            (cell, entry_ms, owner)
+        })
+        .buffer_unordered(ELECTED_PROBE_CONCURRENCY)
+        .collect()
+        .await;
+    let mut failed = 0usize;
+    let mut hinted: Vec<(String, i64)> = probed
+        .into_iter()
+        .filter_map(|(cell, entry_ms, owner)| match owner {
+            Err(_) => {
+                failed += 1;
+                Some((cell, entry_ms))
+            }
+            Ok(record) => {
+                let owner = record.as_ref().and_then(|record| record.node.as_deref());
+                let owner_live = owner.is_some_and(|owner| live.contains(owner));
+                elected_hint_needed(owner, node, owner_live).then_some((cell, entry_ms))
+            }
+        })
+        .collect();
+    if failed > 0 {
+        warn!(
+            failed,
+            "wake probe owner reads failed; those entries are hinted unfiltered"
+        );
+    }
+    hinted.sort();
+    hinted
 }
 
 /// Advisory waker-role lease: one holder per fleet to avoid N nodes polling.

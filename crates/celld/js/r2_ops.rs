@@ -448,6 +448,7 @@ pub(super) fn op_r2_get(
     let key = args.get(1).to_rust_string_lossy(scope);
     let request = serde_json::from_str::<GetRequest>(&args.get(2).to_rust_string_lossy(scope))
         .map_err(|error| format!("invalid R2 get options: {error}"));
+    let stream_service = http_stream_service();
     let id = asyncrt::enqueue(async move {
         let request = request?;
         let range = request
@@ -467,8 +468,9 @@ pub(super) fn op_r2_get(
             })
             .to_string(),
             BlobRead::Hit(blob) => {
-                let stream_id = NEXT_HTTP_STREAM_ID.fetch_add(1, Ordering::Relaxed);
-                register_http_stream(stream_id, HttpStreamSource::Stream(blob.body));
+                let stream_id = stream_service
+                    .register_source(HttpStreamSource::Stream(blob.body))
+                    .ok_or_else(|| format!("R2 get: {HTTP_STREAM_REGISTRATION_CLOSED}"))?;
                 serde_json::json!({
                     "state": "hit",
                     "object": object_json(&key, &blob.meta, Some(blob.range)),

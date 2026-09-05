@@ -9,6 +9,42 @@
 use celld_logic::OwnershipOnEvict;
 use rand::RngCore as _;
 
+/// Validate one node name before it enters a storage key, a local path, or a
+/// peer message. All three surfaces use this same restricted identity.
+pub(crate) fn validate_node_name(node: &str) -> anyhow::Result<()> {
+    if celld_logic::peer::valid_identity(node) {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "must be a safe node name of 1 to 128 ASCII letters, numbers, dots, dashes, or underscores"
+        )
+    }
+}
+
+/// The default bound on concurrent cold activations for a machine with this
+/// many hardware threads: eight per thread, at least 16, at most 128.
+///
+/// A cold activation is object-store latency, not compute. Measured on GCS
+/// from a 4-vCPU node (2026-09-01), the route was ~100 ms of round trips
+/// (owner read 25 ms, ownership CAS 60 ms, restore 10 ms) and ~10 ms of CPU,
+/// so a bound equal to the thread count admitted 35-40 activations a second
+/// per node whatever the client offered, and 1,000 hibernated alarms due in
+/// one minute were 29 s late at the tail (issue #42 found the same ceiling
+/// on two-core nodes). Eight per thread keeps the CPU share of the route
+/// below one core per thread at full duty (measured 30 % of four vCPUs at
+/// 16 slots, 43 % at 64); the floor keeps a one- or two-thread node from
+/// serializing an I/O-bound path; the cap is the point past which more
+/// concurrent cold I/O can itself become an object-store storm, and it is
+/// the value the previous default already capped at.
+pub fn default_max_activations(available_parallelism: usize) -> usize {
+    const PER_THREAD: usize = 8;
+    const FLOOR: usize = 16;
+    const CAP: usize = 128;
+    available_parallelism
+        .saturating_mul(PER_THREAD)
+        .clamp(FLOOR, CAP)
+}
+
 pub fn random_node_session_id() -> String {
     let mut bytes = [0_u8; 16];
     crate::asyncrt::rng("session").fill_bytes(&mut bytes);
@@ -42,6 +78,18 @@ pub fn random_process_generation() -> String {
 /// Concurrent outbound WebSockets one cell may hold
 /// (`CELLD_MAX_OUTBOUND_WEBSOCKETS`).
 pub const DEFAULT_MAX_OUTBOUND_WEBSOCKETS: usize = 32;
+
+/// Backoff between dead-owner log recovery retries. One second keeps a
+/// waiting takeover responsive to the sweep finishing without hammering
+/// the recovery lock.
+pub const DEFAULT_OWNER_LOG_RECOVERY_BACKOFF_MS: u64 = 1_000;
+
+/// Recovery retry cycles before a takeover request fails. 240 cycles at
+/// the default backoff covers the ~155 s dead-leader sweep measured for
+/// a thousand-cell owner with a wide margin;
+/// clients bound their own waits far earlier, so the cap only fires on
+/// a recovery that is truly wedged.
+pub const DEFAULT_OWNER_LOG_RECOVERY_ATTEMPTS: u32 = 240;
 
 pub const DEFAULT_LOCAL_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -134,4 +182,9 @@ pub fn local_cache_max_bytes_from_environment() -> anyhow::Result<Option<u64>> {
         DEFAULT_LOCAL_CACHE_MAX_BYTES,
     )?;
     Ok((bytes > 0).then_some(bytes))
+}
+
+#[cfg(all(test, celld_internal_tests))]
+mod internal_tests {
+    include!(env!("CELLD_INTERNAL_MACHINE_TESTS"));
 }

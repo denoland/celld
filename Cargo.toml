@@ -60,6 +60,7 @@ fastwebsockets = { version = "=0.8.1", default-features = false, features = ["up
 flate2 = "1"
 futures-util = "0.3"
 getrandom = "0.3"
+glob = "0.3"
 hex = "0.4"
 # The two node:crypto KDFs. Both crates already reach this build without a
 # line here -- `pbkdf2` through `pkcs5`, `hkdf` through `elliptic-curve` --
@@ -68,7 +69,13 @@ hkdf = "0.12"
 hmac = "0.12"
 pbkdf2 = "0.12"
 http-body-util = "0.1"
+# hyper also accepts h2 releases before 0.4.18, which retain the remotely
+# triggerable resource-exhaustion advisory. Keep a direct floor here because a
+# lockfile-only update does not preserve that security boundary when resolved.
+h2 = "0.4.18"
 hyper = { version = "1", features = ["client", "server", "http1"] }
+httpdate = "1"
+lol_html = "3.0"
 hyper-util = { version = "0.1", features = ["tokio"] }
 libc = "0.2"
 lz4_flex = { version = "0.11", features = ["frame"] }
@@ -82,11 +89,11 @@ object_store = { version = "0.12", default-features = false }
 # schema ever grows nested columns.
 parquet = { version = "59.2.0", default-features = false, features = ["zstd"] }
 p256 = { version = "0.13", features = ["ecdh", "ecdsa", "pkcs8"] }
-# The other NIST curves the Workers key surface accepts. Parsing and JWK
-# only -- signing stays on P-256, so neither needs `ecdsa`. Versions follow
-# deno's workspace.
-p384 = { version = "0.13", features = ["ecdh", "pkcs8"] }
-p521 = { version = "0.13", features = ["ecdh", "pkcs8"] }
+# The other NIST curves the Workers key surface accepts. Node-compatible key
+# derivation and signatures use them beside the Web Crypto parsing surface.
+# Versions follow deno's workspace.
+p384 = { version = "0.13", features = ["ecdh", "ecdsa", "pkcs8"] }
+p521 = { version = "0.13", features = ["ecdh", "ecdsa", "pkcs8"] }
 # Encrypted PKCS#8, for private keys that arrive password-protected. `rsa`
 # already pulls pkcs8 in; naming it here adds the pkcs5 cipher suite on top.
 # Feature set follows deno's ext/node_crypto.
@@ -101,6 +108,10 @@ dsa = "0.6"
 # CRC32/CRC32C/CRC64-NVME for DigestStream. Cloudflare accepts these
 # alongside the real digests because S3 and the AWS SDKs checksum with them.
 crc = "3"
+# LTX uses CRC-64/GO-ISO for every file and for snapshot page checksums. The
+# generic `crc` crate above does not use the SIMD folding path that large-cell
+# restore needs.
+crc-fast = { version = "1.10", default-features = false, features = ["std"] }
 percent-encoding = "2"
 proptest = "1"
 rand = "0.8"
@@ -110,7 +121,7 @@ rsa = { version = "0.9", features = ["sha2"] }
 rusqlite = "0.31"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 sha1 = "0.10"
 sha2 = "0.10"
 # sqlite-vec is pre-v1, and its Rust binding is outside its compatibility
@@ -119,12 +130,13 @@ sqlite-vec = "=0.1.9"
 subtle = "2"
 tempfile = "3"
 thiserror = "2"
-# `stats` is what makes `stats.allocated` and `stats.resident` readable. The
-# pressure classifier needs their difference: the pages jemalloc keeps but no
-# cell uses. Without it a node that sheds its whole working set stays latched
-# on an RSS number the allocator, not celld, controls.
+# `stats` makes `stats.allocated` and `stats.resident` readable. The pressure
+# classifier needs their difference: the pages jemalloc keeps but no cell uses.
+# `background_threads` makes the shipped allocator purge those freed pages on
+# its timer. Runtime enablement alone failed in the Linux image, so the cgroup
+# hard-cap latch stayed closed after a node shed its cells.
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
-tikv-jemallocator = { version = "0.6", features = ["stats"] }
+tikv-jemallocator = { version = "0.6", features = ["background_threads", "stats"] }
 tokio = "1"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 tokio-stream = "0.1"

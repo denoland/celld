@@ -97,7 +97,8 @@ impl VerifyError {
 impl PeerAuth {
     pub fn new(key: [u8; 32], source: impl Into<String>) -> anyhow::Result<Self> {
         let source = source.into();
-        validate_identity(&source).context("invalid peer authentication source")?;
+        crate::machine::validate_node_name(&source)
+            .context("invalid peer authentication source")?;
         Ok(Self {
             key,
             source,
@@ -140,7 +141,7 @@ impl PeerAuth {
         body: &[&[u8]],
         target: &str,
     ) -> anyhow::Result<axum::http::HeaderMap> {
-        validate_identity(target).context("invalid peer authentication target")?;
+        crate::machine::validate_node_name(target).context("invalid peer authentication target")?;
         let timestamp = now_ms()?;
         let mut nonce = [0_u8; 16];
         rand::rngs::OsRng.fill_bytes(&mut nonce);
@@ -190,7 +191,9 @@ impl PeerAuth {
         }
         let source = header(headers, HEADER_SOURCE).ok_or(VerifyError::Unauthorized)?;
         let target = header(headers, HEADER_TARGET).ok_or(VerifyError::Unauthorized)?;
-        if validate_identity(source).is_err() || validate_identity(target).is_err() {
+        if crate::machine::validate_node_name(source).is_err()
+            || crate::machine::validate_node_name(target).is_err()
+        {
             return Err(VerifyError::Unauthorized);
         }
         let timestamp = header(headers, HEADER_TIMESTAMP)
@@ -333,16 +336,6 @@ pub fn validate_response(headers: &axum::http::HeaderMap) -> anyhow::Result<()> 
 
 fn header<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name)?.to_str().ok()
-}
-
-fn validate_identity(value: &str) -> anyhow::Result<()> {
-    if celld_logic::peer::valid_identity(value) {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "identity must contain only ASCII letters, numbers, dot, dash, or underscore"
-        ))
-    }
 }
 
 fn now_ms() -> anyhow::Result<u64> {

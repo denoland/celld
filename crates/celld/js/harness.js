@@ -369,6 +369,7 @@ globalThis.Response = class Response {
 // every Request construction, which is the HTTP hot path.
 const __HTTP_METHODS = new Set(
   ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]);
+const __FETCH_REDIRECT_MODES = new Set(["follow", "manual", "error"]);
 globalThis.Request = class Request {
   constructor(input, init = {}) {
     const prior = input instanceof Request ? input : null;
@@ -455,7 +456,12 @@ globalThis.Request = class Request {
       ? stream
       : ["GET", "HEAD"].includes(this.method)
         ? null : new CelldBodyStream(this);
-    this.redirect = init.redirect || (prior ? prior.redirect : "follow");
+    this.redirect = String(init.redirect === undefined
+      ? (prior ? prior.redirect : "follow")
+      : init.redirect);
+    if (!__FETCH_REDIRECT_MODES.has(this.redirect)) {
+      throw new TypeError(`Invalid redirect mode: ${this.redirect}`);
+    }
     const cf = init.cf === undefined
       ? (prior ? prior.cf : undefined) : init.cf;
     if (cf !== undefined) this.cf = cf;
@@ -536,10 +542,33 @@ const __fmt = (a) => a.map((x) => {
   if (x instanceof Error) return x.stack || (x.name + ": " + x.message);
   try { return JSON.stringify(x); } catch { return String(x); }
 }).join(" ");
+const __consoleNoop = () => {};
 globalThis.console = {
-  log: (...a) => __log(__fmt(a)), info: (...a) => __log(__fmt(a)),
-  error: (...a) => __log("ERROR " + __fmt(a)), warn: (...a) => __log("WARN " + __fmt(a)),
-  debug() {}, trace() {}, group() {}, groupEnd() {}, table() {},
+  debug: (...a) => __log(__fmt(a)),
+  error: (...a) => __log("ERROR " + __fmt(a)),
+  info: (...a) => __log(__fmt(a)),
+  log: (...a) => __log(__fmt(a)),
+  warn: (...a) => __log("WARN " + __fmt(a)),
+  clear: __consoleNoop,
+  count: __consoleNoop,
+  group: __consoleNoop,
+  table: __consoleNoop,
+  trace: __consoleNoop,
+  assert: __consoleNoop,
+  countReset: __consoleNoop,
+  dir: __consoleNoop,
+  dirxml: __consoleNoop,
+  groupCollapsed: __consoleNoop,
+  groupEnd: __consoleNoop,
+  profile: __consoleNoop,
+  profileEnd: __consoleNoop,
+  time: __consoleNoop,
+  timeEnd: __consoleNoop,
+  timeLog: __consoleNoop,
+  timeStamp: __consoleNoop,
+  createTask: () => {
+    throw new Error("console.createTask() is not implemented");
+  },
 };
 
 // async-op shims: outbound fetch + timers, driven by the host event loop.
@@ -562,13 +591,54 @@ const __subrequestBody = async (req, absent = false) => {
   req.body.getReader();
   return { body: new Uint8Array(), streamId };
 };
+// A data: URL carries its response inline; RFC 2397 percent-decoding
+// happens byte-wise, so a payload that is deliberately invalid UTF-8
+// survives to the consumer (HTMLRewriter's own suite depends on it).
+const __dataUrlResponse = (url) => {
+  // The URL parser strips leading and trailing C0 controls and spaces
+  // before doing anything else; a literal trailing space in a data: URL
+  // is therefore not part of the payload, while an encoded %20 is.
+  url = url.replace(/^[\x00-\x20]+/, "").replace(/[\x00-\x20]+$/, "");
+  const match = /^data:([^,]*),([\s\S]*)$/.exec(url);
+  if (!match) throw new TypeError("Invalid data: URL");
+  let [, meta, payload] = match;
+  const base64 = /;base64$/i.test(meta);
+  if (base64) meta = meta.replace(/;base64$/i, "");
+  let bytes;
+  if (base64) {
+    const bin = atob(payload);
+    bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  } else {
+    const out = [];
+    for (let i = 0; i < payload.length; i++) {
+      const c = payload[i];
+      if (c === "%" && /^[0-9A-Fa-f]{2}$/.test(payload.slice(i + 1, i + 3))) {
+        out.push(parseInt(payload.slice(i + 1, i + 3), 16));
+        i += 2;
+      } else {
+        out.push(payload.charCodeAt(i) & 0xff);
+      }
+    }
+    bytes = Uint8Array.from(out);
+  }
+  return new Response(bytes, {
+    headers: { "content-type": meta || "text/plain;charset=US-ASCII" },
+  });
+};
 globalThis.fetch = async (input, init) => {
+  const rawUrl = typeof input === "string" ? input : input?.url;
+  if (typeof rawUrl === "string" && rawUrl.startsWith("data:")) {
+    return __dataUrlResponse(rawUrl);
+  }
   const req = new Request(input, init);
   // `fetch(url, { headers: { Upgrade: "websocket" } })` is the other way
   // Cloudflare opens an outbound socket, and the one most examples use.
   if ((req.headers.get("upgrade") ?? "").toLowerCase() === "websocket") {
     return await __fetchWebSocketUpgrade(req);
   }
+  // The caller's signal, never the incoming request's own.
+  const signal = req._signalForSubrequests;
+  if (signal?.aborted) throw signal.reason;
   // The bytes go to the host as a typed array, the same way every other
   // subrequest op takes a body. Encoding them as a JSON number array cost
   // roughly ten times the body in transient allocation, and it corrupted
@@ -580,11 +650,36 @@ globalThis.fetch = async (input, init) => {
   // for two appends and put celld's casing on the wire in place of the
   // author's. `op_fetch` builds the request with `RequestBuilder::header`,
   // which appends, so repeats survive.
-  const r = JSON.parse(await __op_fetch(
-    req.method, req.url, body,
-    JSON.stringify(req.headers.__celldHeaderList), req.redirect,
-    streamId,
-  ));
+  let raw;
+  try {
+    const dispatch = __op_fetch(
+      req.method, req.url, body,
+      JSON.stringify(req.headers.__celldHeaderList), req.redirect,
+      streamId, signal != null,
+    );
+    if (signal) {
+      // An abort and the response can cross, leaving a body stream nobody
+      // reads holding its upstream connection until the sweeper expires it.
+      // Every arm is silenced because the caller already owns both outcomes.
+      dispatch.then((late) => {
+        if (!signal.aborted) return;
+        const abandoned = JSON.parse(late).streamId;
+        if (abandoned !== undefined) __http_stream_cancel(abandoned);
+      }, () => {}).catch(() => {});
+    }
+    raw = await (signal ? __awaitCancellableDoCall(dispatch, signal) : dispatch);
+  } catch (error) {
+    // An abort is the caller's reason, not a network error, so it skips
+    // every translation below.
+    if (signal?.aborted && error === signal.reason) throw error;
+    // The Fetch API represents a redirect refusal as a network error, which
+    // rejects with TypeError. Keep the host message for diagnostics.
+    if (req.redirect === "error") {
+      throw new TypeError(error?.message ?? String(error));
+    }
+    throw error;
+  }
+  const r = JSON.parse(raw);
   const response = new Response(
     new CelldHttpBodyStream(r.streamId),
     { status: r.status, headers: r.headers },
@@ -593,7 +688,7 @@ globalThis.fetch = async (input, init) => {
   return response;
 };
 globalThis.__fetchWebSocketUpgrade = async (req) => {
-  const scope = __actorEventStack[__actorEventStack.length - 1] || "";
+  const scope = __currentActorScope();
   const id = __ws_alloc();
   const socket = __makeSocket(id);
   socket._outbound = true;
@@ -647,8 +742,11 @@ globalThis.__makeAssetsBinding = (script) => ({
       req.url,
       JSON.stringify(Array.from(req.headers)),
     ));
+    const responseBody = r.streamId !== undefined
+      ? new CelldHttpBodyStream(r.streamId)
+      : r.body !== undefined ? r.body : Uint8Array.from(r.bodyBytes || []);
     const response = new Response(
-      new CelldHttpBodyStream(r.streamId),
+      responseBody,
       { status: r.status, headers: r.headers },
     );
     response.url = req.url;
@@ -1109,15 +1207,67 @@ globalThis.__makeR2Bucket = (binding, bucketName) => ({
     return __r2Multipart(binding, bucketName, name, { value: id, host });
   },
 });
+// Tear down an upstream body the caller has given up on. The host source goes
+// first, because that drops the upstream connection and `ReadableStream.cancel`
+// rejects on the locked stream a reader holds. Erroring the stream then gives
+// the reader the caller's reason instead of the registry's "expired or is not
+// registered", which reads as an engine fault.
+const __aiCancelBody = (response, reason) => {
+  const body = response?.body;
+  if (body?.__celldStreamId === undefined) return;
+  __http_stream_cancel(body.__celldStreamId);
+  body._controller?.error(reason);
+};
+// Workers AI passes a third argument to `run()`. `returnRawResponse` hands the
+// caller an unconsumed Response for a streaming completion, whatever its
+// status; parsing stays the default, and only that default rejects a non-2xx
+// status. `fetch` covers the signal up to the response head, after which the
+// body is a host stream, so the raw path installs its own abort listener.
 globalThis.__makeAiBinding = (url) => ({
-  async run(model, input) {
+  async run(model, input, options) {
+    const signal = options?.signal;
     const response = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ model, input }),
+      signal,
     });
-    if (!response.ok) throw new Error(`AI binding returned ${response.status}`);
-    return response.json();
+    // The raw path returns ahead of every status test, so no arrangement of
+    // this function can convert a non-2xx response into a throw. Workers AI
+    // hands the error Response back as well, and the status is the only thing
+    // an OpenAI-compatible client has to classify the failure with. A throw
+    // reaches such a client as a failed fetch, which it reports as a connection
+    // error and retries, so a permanent 403 becomes an unbounded retry loop.
+    // The body stays unconsumed here, because the caller owns it.
+    if (options?.returnRawResponse) {
+      if (signal) {
+        signal.addEventListener(
+          "abort", () => __aiCancelBody(response, signal.reason), { once: true });
+      }
+      return response;
+    }
+    if (!response.ok) {
+      // Draining the body is the work `__aiCancelBody` did here before, so the
+      // cancel stays only for a read that fails and leaves the source live.
+      // `fetch` covers the signal to the response head only, so the read is
+      // raced: an upstream that stalls its error body must not hang a caller.
+      const read = response.text().catch((error) => {
+        __aiCancelBody(response, error);
+        return "";
+      });
+      const detail = signal
+        ? await __raceCallerAbort(
+          read, signal, () => __aiCancelBody(response, signal.reason))
+        : await read;
+      // An upstream body is unbounded and this message reaches a log.
+      const suffix = detail ? `: ${detail.slice(0, 512)}` : "";
+      throw new Error(`AI binding returned ${response.status}${suffix}`);
+    }
+    const parse = response.json();
+    return signal
+      ? await __raceCallerAbort(
+        parse, signal, () => __aiCancelBody(response, signal.reason))
+      : await parse;
   },
 });
 // A host timer op resolves once, so an interval arms a new one after every
@@ -1270,13 +1420,29 @@ class SqlCursor {
   [Symbol.iterator]() { return this; }
 }
 class SqlStorage {
-  constructor(scope) { this._scope = scope; }
+  // The state is what the abort guard in `exec` reads; a storage built
+  // without one would bypass the guard silently.
+  constructor(scope, state, storage) {
+    if (!state) throw new TypeError("SqlStorage requires its DurableObjectState");
+    this._scope = scope;
+    this._state = state;
+    this._storage = storage;
+  }
   prepare(query) {
+    this._storage._assertTransactionActive("sql.prepare");
     const storage = this;
     const source = String(query);
     return (...binds) => storage.exec(source, ...binds);
   }
   exec(query, ...binds) {
+    this._storage._assertTransactionActive("sql.exec");
+    // A callback that outlived its block runs on an object that was reset,
+    // whose replacement uses the same connection: a statement from it
+    // would land in the replacement's state. The KV surface drops such
+    // writes silently; SQL refuses aloud, since a cursor can carry reads.
+    if (this._state._aborted) {
+      throw new Error("the Durable Object was reset; this event's storage is closed");
+    }
     const encode = (value) => {
       if (value instanceof ArrayBuffer)
         return { __celld_bytes: Array.from(new Uint8Array(value)) };
@@ -1291,11 +1457,15 @@ class SqlStorage {
     ));
   }
   ingest(input) {
+    this._storage._assertTransactionActive("sql.ingest");
     const result = JSON.parse(__sql_ingest(this._scope, String(input)));
     if (result.error) throw new Error("SQL error: " + result.error);
     return result;
   }
-  get databaseSize() { return __sql_database_size(this._scope); }
+  get databaseSize() {
+    this._storage._assertTransactionActive("sql.databaseSize");
+    return __sql_database_size(this._scope);
+  }
   setMaxPageCountForTest(pages) {
     if (typeof __sql_set_max_page_count_for_test !== "function")
       throw new Error("setMaxPageCountForTest is only available in tests");
@@ -1366,6 +1536,7 @@ class SyncKvStorage {
     this._root = storage._transactionRoot;
   }
   get(key) {
+    this._storage._assertTransactionActive("kv.get");
     key = String(key);
     return __unwrapStored(__readStoredValue(
       this._storage._scope, key,
@@ -1374,6 +1545,7 @@ class SyncKvStorage {
     ));
   }
   put(key, value) {
+    this._storage._assertTransactionActive("kv.put");
     key = String(key);
     try {
       __storage_put(this._storage._scope, key, value);
@@ -1383,9 +1555,11 @@ class SyncKvStorage {
     }
   }
   delete(key) {
+    this._storage._assertTransactionActive("kv.delete");
     return __storage_delete(this._storage._scope, String(key));
   }
   list(options = {}) {
+    this._storage._assertTransactionActive("kv.list");
     const generation = ++this._root._syncKvListGeneration;
     const cursor = __storage_sync_list_start(
       this._storage._scope, JSON.stringify(options),
@@ -1405,7 +1579,7 @@ class DurableObjectStorage {
   ) {
     this._scope = scope;
     this._state = state;
-    this.sql = new SqlStorage(scope);
+    this.sql = new SqlStorage(scope, state, this);
     this._transactionRoot = transactionRoot || this;
     this._transactionDepth = transactionDepth;
     this._transactionControl = transactionControl;
@@ -1417,13 +1591,30 @@ class DurableObjectStorage {
     this._kv = new SyncKvStorage(this);
   }
   get kv() { return this._kv; }
+  _transactionStatus() {
+    let status = null;
+    for (let control = this._transactionControl; control; control = control.parent) {
+      if (control.rolledBack) return "rolled back";
+      if (control.committed) status = "committed";
+    }
+    return status;
+  }
+  _assertTransactionActive(operation) {
+    const status = this._transactionStatus();
+    if (status) throw new Error("Cannot " + operation + "() on " + status + " transaction");
+  }
   _flushPendingPuts() {
+    // An admitted put can resume after its boundary flushed and ended the
+    // transaction. Its promise completes without flushing a later scope.
+    if (this._transactionStatus()) return false;
     if (this._state && this._state._aborted) return false;
     __storage_flush_pending_puts(this._scope);
     return true;
   }
   async get(k) {
-    await Promise.resolve();
+    this._assertTransactionActive("get");
+    // Transaction operations reach SQLite before their caller can roll back.
+    if (!this._transactionControl) await Promise.resolve();
     if (!this._flushPendingPuts()) return;
     const key = Array.isArray(k) ? JSON.stringify(k) : String(k);
     return __readStoredValue(this._scope, key, () => {
@@ -1435,6 +1626,7 @@ class DurableObjectStorage {
     });
   }
   async put(k, val) {
+    this._assertTransactionActive("put");
     if (typeof k === "string") {
       try {
         __storage_queue_put(this._scope, k, val);
@@ -1472,7 +1664,8 @@ class DurableObjectStorage {
     this._flushPendingPuts();
   }
   async delete(k) {
-    await Promise.resolve();
+    this._assertTransactionActive("delete");
+    if (!this._transactionControl) await Promise.resolve();
     if (!this._flushPendingPuts()) return;
     if (Array.isArray(k)) {
       if (k.length === 0) return 0;
@@ -1481,33 +1674,56 @@ class DurableObjectStorage {
     return __storage_delete(this._scope, k);
   }
   async list(options = {}) {
-    await Promise.resolve();
+    this._assertTransactionActive("list");
+    if (!this._transactionControl) await Promise.resolve();
     if (!this._flushPendingPuts()) return new Map();
     return __unwrapStoredMap(__storage_list(
       this._scope, JSON.stringify(options), __storedSentinel));
   }
   async deleteAll() {
-    await Promise.resolve();
+    this._assertTransactionActive("deleteAll");
+    if (!this._transactionControl) await Promise.resolve();
     if (!this._flushPendingPuts()) return;
     __storage_delete_all(this._scope, __cell.deleteAllDeletesAlarm);
   }
+  // Resolves once every write this cell committed before the call is
+  // proven durable, by the proof the output gate requires before it releases
+  // an egress. Workerd resolves when the pending writes have completed; on
+  // celld the local file is a cache, so "completed" is "proven". The host op
+  // rejects when that proof fails or times out, so an application never
+  // treats a lost write as safe.
   async sync() {
+    this._assertTransactionActive("sync");
     await Promise.resolve();
-    this._flushPendingPuts();
+    const status = this._transactionStatus();
+    // An admitted sync can resume after transactionSync commits or rolls
+    // back. Its boundary settled the queued puts, so prove the surviving
+    // state without flushing a later transaction through this handle. A
+    // new call after that boundary still fails the entry guard above.
+    if (this._state?._aborted || (status === null && !this._flushPendingPuts()))
+      throw new Error(
+        "storage.sync: " + this._scope + " was aborted; the object is no " +
+        "longer running");
+    await __storage_sync(this._scope);
   }
   async setAlarm(t) {
-    await Promise.resolve();
+    this._assertTransactionActive("setAlarm");
+    if (!this._transactionControl) await Promise.resolve();
     if (!this._flushPendingPuts()) return;
+    if (this._state?._facetDepth > 0)
+      throw new Error("Facets currently cannot set alarms.");
     __alarm_set(this._scope, t instanceof Date ? t.getTime() : Number(t));
   }
   async getAlarm() {
-    await Promise.resolve();
+    this._assertTransactionActive("getAlarm");
+    if (!this._transactionControl) await Promise.resolve();
     if (!this._flushPendingPuts()) return null;
     const v = __alarm_get(this._scope);
     return v === null ? null : v;
   }
   async deleteAlarm() {
-    await Promise.resolve();
+    this._assertTransactionActive("deleteAlarm");
+    if (!this._transactionControl) await Promise.resolve();
     if (!this._flushPendingPuts()) return;
     __alarm_delete(this._scope);
   }
@@ -1545,57 +1761,174 @@ class DurableObjectStorage {
     const control = this._transactionControl;
     if (!control)
       throw new TypeError("rollback() must be called on a transaction");
-    if (!control.rolledBack) {
-      control.rollback();
-      control.rolledBack = true;
-    }
+    if (control.rolledBack) return;
+    this._assertTransactionActive("rollback");
+    control.rollback();
+    control.rolledBack = true;
   }
   transactionSync(f) {
+    this._assertTransactionActive("transactionSync");
     const savepoint = this._transactionStart();
-    const control = {
-      rolledBack: false,
-      rollback: () => this._transactionRollback(savepoint, true),
-    };
+    const control = this._newTransactionControl(savepoint);
     try {
       const value = f(this._transactionView(control));
-      if (!control.rolledBack) this._transactionCommit(savepoint);
+      if (!control.rolledBack) {
+        this._transactionCommit(savepoint);
+        control.committed = true;
+      }
       return value;
     } catch (error) {
       if (!control.rolledBack) {
-        try { this._transactionRollback(savepoint); } catch {}
+        try {
+          this._transactionRollback(savepoint);
+          control.rolledBack = true;
+        } catch (rollbackError) {
+          this._abortAfterFailedRollback(rollbackError, error);
+        }
       }
       throw error;
+    }
+  }
+  _newTransactionControl(savepoint) {
+    return {
+      rolledBack: false,
+      committed: false,
+      parent: this._transactionControl,
+      rollback: () => this._transactionRollback(savepoint, true),
+    };
+  }
+  async _runTransactionWith(f, savepoint, control) {
+    try {
+      const value = await f(this._transactionView(control));
+      if (!control.rolledBack) {
+        this._transactionCommit(savepoint);
+        control.committed = true;
+      }
+      return value;
+    } catch (error) {
+      if (!control.rolledBack) {
+        // The flag records a rollback that happened, not one that was
+        // attempted: a rollback that fails leaves the savepoint open, and a
+        // later transaction on the same connection would commit its writes.
+        // Nothing can be said about the connection then, so the object is
+        // aborted rather than left to serve from it.
+        try {
+          this._transactionRollback(savepoint);
+          control.rolledBack = true;
+        } catch (rollbackError) {
+          this._abortAfterFailedRollback(rollbackError, error);
+        }
+      }
+      throw error;
+    }
+  }
+  // `cause` is the failure that led to the rollback; the abort's error keeps
+  // it, so a debugger can walk back to the callback's own throw. The
+  // rollback failure is reported even when the object is already aborted,
+  // as it is after a block's limit: the abort then changes nothing, and the
+  // log line is the only trace the failure leaves.
+  _abortAfterFailedRollback(rollbackError, cause) {
+    // Inside a catch, so the log must not become the throw that leaves it:
+    // the slot release after the caller's rethrow depends on that.
+    try { console.error("transaction rollback failed", rollbackError); } catch {}
+    const state = this._transactionRoot._state;
+    if (state && !state._aborted) {
+      state.abort(
+        new Error(
+          "a transaction rollback failed: " + __describeFailure(rollbackError),
+          { cause },
+        ),
+      );
     }
   }
   async _runTransaction(f) {
     const savepoint = this._transactionStart();
-    const control = {
-      rolledBack: false,
-      rollback: () => this._transactionRollback(savepoint, true),
-    };
-    try {
-      const value = await f(this._transactionView(control));
-      if (!control.rolledBack) this._transactionCommit(savepoint);
-      return value;
-    } catch (error) {
-      if (!control.rolledBack) {
-        try { this._transactionRollback(savepoint); } catch {}
-      }
-      throw error;
-    }
+    return this._runTransactionWith(f, savepoint, this._newTransactionControl(savepoint));
   }
   async transaction(f) {
+    this._assertTransactionActive("transaction");
     if (this._transactionDepth > 0) return this._runTransaction(f);
+    // Workerd runs the callback under blockConcurrencyWhile: the input gate
+    // shuts, so no other event starts in the object while the transaction is
+    // open. Without it another event's reads saw uncommitted rows, its
+    // writes joined the open transaction on the same connection, and a
+    // rollback discarded a write celld had already acknowledged (#714). The
+    // callback's failure is caught inside the block: a failed transaction
+    // rolls back and rejects, and must not reset the object the way a failed
+    // critical section does.
+    //
+    // The tail orders transactions one event starts concurrently, which the
+    // gate does not separate. Its slot is taken here, in call order: taken
+    // inside the block it would be taken in the order the gate woke the
+    // callers, which is not theirs to keep. It is released inside the block,
+    // when the callback has settled, and not when the block has: a second
+    // transaction the same event starts while the first runs rides the
+    // outer hold as a nested block, and the outer block waits for nested
+    // ones before it releases, so a slot held until the block's end would
+    // wait on itself.
     const root = this._transactionRoot;
     const previous = root._transactionTail;
     let release;
     root._transactionTail = new Promise((resolve) => { release = resolve; });
-    await previous;
+    let control = null;
+    let started = false;
+    let abandoned = null;
+    const guarded = async () => {
+      started = true;
+      try {
+        await previous;
+        // The block ended while this waited for its slot, or the object was
+        // reset under it by an enclosing block that failed: the caller has
+        // its rejection and the gate is open again, so starting the
+        // transaction now would run it beside whatever the object serves.
+        if (abandoned !== null) return { error: abandoned };
+        if (root._state._aborted) {
+          return { error: new Error("the Durable Object was reset before the transaction started") };
+        }
+        // The start is a host op that can fail like any other statement, and
+        // a failure there is the transaction's to report, not the block's:
+        // a throw that escaped here would reset the object.
+        try {
+          const savepoint = this._transactionStart();
+          control = this._newTransactionControl(savepoint);
+          return { value: await this._runTransactionWith(f, savepoint, control) };
+        } catch (error) {
+          return { error };
+        }
+      } finally {
+        release();
+      }
+    };
+    let outcome;
     try {
-      return await this._runTransaction(f);
-    } finally {
-      release();
+      outcome = await root._state.blockConcurrencyWhile(guarded);
+    } catch (error) {
+      // The block itself failed: its limit ended the callback while it still
+      // ran, or the block ahead of it failed and this one never started. A
+      // transaction the callback still holds would otherwise stay open on
+      // the connection the object's replacement uses, and the callback's
+      // late commit would carry the replacement's writes with it. Roll it
+      // back now, unless the callback's continuation committed in the same
+      // tick the limit won; the callback's own commit is skipped from here
+      // on. The slot stays with the callback until it settles: the callback
+      // still runs on the connection, and a transaction started beside it
+      // would interleave with its remaining statements. A block that failed
+      // before the callback started holds nothing, so its slot is released
+      // here or nothing ever would.
+      abandoned = error;
+      if (control && !control.rolledBack && !control.committed) {
+        try {
+          control.rollback();
+          control.rolledBack = true;
+        } catch (rollbackError) {
+          this._abortAfterFailedRollback(rollbackError, error);
+        }
+      }
+      if (!started) release();
+      throw error;
     }
+    if ("error" in outcome) throw outcome.error;
+    return outcome.value;
   }
 }
 class DurableObjectId {
@@ -1639,41 +1972,224 @@ const __durableObjectRoutingError = (error) => {
 };
 // A cell's input gate as the isolate sees it, for the one delivery
 // point that is inside the isolate rather than in front of it: an
-// RPC stub op. `shut` counts the blocks that have asked for the gate
-// and is raised synchronously, so no window exists in which a block
-// has started and the isolate still thinks the cell is open.
-// `holder` names the block actually running — a second block that is
-// still queued has raised `shut` but holds nothing.
+// RPC stub op. `events` records every block that has asked for the
+// gate, so no window exists in which a block has started and the
+// isolate still thinks the cell is open. `holder` names the block
+// actually running; another event can still be queued.
 //
 // A stub minted while a block runs carries that block's token and
 // re-enters it instead of queueing behind it. That is Workerd's
 // `IoContext::makeReentryCallback`, and without it a callback the
 // block itself sent out could never come back.
 const __cellBlocks = new Map();
-const __blockEnter = (scope) => {
+const __blockEnter = (scope, event, owner) => {
+  let settleReady;
+  let rejectReady;
+  const ready = new Promise((resolve, reject) => {
+    settleReady = resolve;
+    rejectReady = reject;
+  });
+  const record = {
+    owner,
+    reaction: String(__io_context_id()),
+    actorEvent: __currentActorEvent(),
+    retired: false,
+    ready,
+    settleReady,
+    rejectReady,
+  };
   const block = __cellBlocks.get(scope);
-  if (block !== undefined) return (block.shut++, block);
-  const fresh = { shut: 1, holder: null };
+  if (block !== undefined) {
+    block.events.set(event, record);
+    return { block, record };
+  }
+  const fresh = {
+    holder: null,
+    events: new Map([[event, record]]),
+  };
   __cellBlocks.set(scope, fresh);
-  return fresh;
+  return { block: fresh, record };
 };
-const __blockLeave = (scope, block) => {
-  block.holder = null;
-  if (--block.shut === 0) __cellBlocks.delete(scope);
+const __blockLeave = (scope, block, event) => {
+  if (!block.events.delete(event)) return;
+  if (block.holder === event) block.holder = null;
+  if (block.events.size === 0 && __cellBlocks.get(scope) === block)
+    __cellBlocks.delete(scope);
 };
+const __durableClassMeta = new WeakMap();
+let __nextFacetOwner = 1;
+const __makeDurableObjectClass = (idPromise, name, options = {}) => {
+  const value = {};
+  __durableClassMeta.set(value, {
+    idPromise,
+    name: name === null || name === undefined ? "default" : String(name),
+    props: options?.props,
+  });
+  return value;
+};
+class DurableObjectFacets {
+  constructor(state) {
+    this._state = state;
+    this._owner = String(__nextFacetOwner++);
+    this._next = 1;
+    this._running = new Map();
+    this._barriers = new Map();
+  }
+  _validName(name) {
+    name = String(name);
+    if (new TextEncoder().encode(name).length > 256)
+      throw new TypeError("Facet name is too long (max 256 characters).");
+    return name;
+  }
+  get(name, getStartupOptions) {
+    name = this._validName(name);
+    if (this._state._facetDepth >= 3)
+      throw new Error(
+        "Facet nesting depth limit exceeded. The maximum depth including the root Durable Object is 4.");
+    if (typeof getStartupOptions !== "function")
+      throw new TypeError("The facet startup callback must be a function.");
+    let record = this._running.get(name);
+    if (record !== undefined) return record.stub;
+    // Each run gets a distinct host scope. An aborted request can still have
+    // a pending continuation, so reusing its scope would let that continuation
+    // enter the replacement instance after the abort barrier opens.
+    record = {
+      aborted: false,
+      error: undefined,
+      owner: this._owner + ":" + this._next++,
+      started: null,
+      stub: null,
+    };
+    const barrier = this._barriers.get(name);
+    const start = () => record.started ??= Promise.resolve(barrier)
+      .then(getStartupOptions)
+      .then(async (options) => {
+        const meta = __durableClassMeta.get(options?.class);
+        if (meta === undefined)
+          throw new TypeError(
+            "FacetStartupOptions.class must be a DurableObjectClass.");
+        const loader = await meta.idPromise;
+        const id = options.id instanceof DurableObjectId
+          ? options.id.toString()
+          : options.id === undefined ? this._state.id.toString() : String(options.id);
+        return [loader, meta.name, id, meta.props];
+      });
+    const invoke = async (operation) => {
+      if (record.aborted) throw record.error;
+      return operation(await start());
+    };
+    const target = {};
+    // Methods share the loaded-worker RPC transport. A facet stub is not
+    // awaitable, and a property is a single callable pipeline node.
+    const session = {
+      get: () => Promise.reject(new Error(
+        "Awaitable properties on facets are not supported yet.")),
+      call: (path, args) => invoke(async ([loader, className, id, props]) => {
+        if (path.length !== 1)
+          throw new Error(
+            "Pipelined property paths on facets are not supported yet.");
+        return __rpcDes(await __facet_rpc(
+          loader, className, this._state._scope, record.owner, name, id,
+          JSON.stringify(props ?? null), path[0], __rpcOut(args, false)));
+      }),
+    };
+    // Arrow closures retain the manager because `target.fetch`'s method
+    // receiver is the target object, not the DurableObjectFacets instance.
+    const manager = this;
+    target.fetch = async function(input, init) {
+      return invoke(async ([loader, className, id, props]) => {
+        const req = new Request(input, init);
+        const headers = JSON.stringify(req.headers.__celldHeaderList);
+        const { body, streamId } = await __subrequestBody(req);
+        const response = JSON.parse(await __facet_fetch(
+          loader, className, manager._state._scope, record.owner, name, id,
+          JSON.stringify(props ?? null), req.url, req.method, body, headers, streamId));
+        const responseBody = response.streamId !== undefined
+          ? new CelldHttpBodyStream(response.streamId)
+          : response.body !== undefined ? response.body
+          : Uint8Array.from(response.bodyBytes || []);
+        return __wrapServiceResponse(new Response(responseBody, {
+          status: response.status,
+          headers: response.headers,
+        }), req.url);
+      });
+    };
+    record.stub = new Proxy(target, {
+      get(base, prop) {
+        if (prop === "then") return undefined;
+        if (Reflect.has(base, prop)) return Reflect.get(base, prop);
+        if (typeof prop !== "string") return undefined;
+        return __makeNode(session, [prop], null);
+      },
+    });
+    this._running.set(name, record);
+    return record.stub;
+  }
+  _abort(name, reason) {
+    name = this._validName(name);
+    const record = this._running.get(name);
+    if (record === undefined) return Promise.resolve();
+    record.aborted = true;
+    record.error = reason;
+    this._running.delete(name);
+    const barrier = record.started === null ? Promise.resolve() : record.started
+      .then(([loader, className]) =>
+        __facet_abort(
+          loader, className, this._state._scope, record.owner, name), () => {});
+    this._barriers.set(name, barrier);
+    const clear = () => {
+      if (this._barriers.get(name) === barrier) this._barriers.delete(name);
+    };
+    barrier.then(clear, clear);
+    return barrier;
+  }
+  abort(name, reason) {
+    this._abort(name, reason);
+  }
+  delete(name) {
+    name = this._validName(name);
+    const barrier = this._abort(name, new Error("Facet was deleted.")).then(() =>
+      __facet_delete(this._state._scope, name));
+    this._barriers.set(name, barrier);
+    const clear = () => {
+      if (this._barriers.get(name) === barrier) this._barriers.delete(name);
+    };
+    // Keep a failed delete as the name's barrier. Clearing it would let the
+    // next get reload the image which the failed operation did not delete.
+    barrier.then(clear, () => {});
+  }
+  _release() {
+    for (const name of Array.from(this._running.keys()))
+      this._abort(name, new Error("The parent Durable Object was released."));
+  }
+}
+// The reason a failed critical section gives its waiters. It must not throw:
+// it runs where a throw would skip the gate's release, and a value with no
+// string form, such as `Object.create(null)`, is a legal thing to throw.
+function __describeFailure(error) {
+  try {
+    return String((error && error.message) || error);
+  } catch {
+    return "critical section failed";
+  }
+}
 class DurableObjectState {
   constructor(scope) {
     this._scope = scope;
     this._aborted = false;
     this.storage = new DurableObjectStorage(scope, this);
+    this.facets = new DurableObjectFacets(this);
     this._gate = Promise.resolve();
     this._blockDepth = 0;
+    const facet = __cell.facetConfigs[scope];
+    this._facetDepth = facet?.depth ?? 0;
     const separator = scope.indexOf(":");
     const className = separator < 0 ? scope : scope.slice(0, separator);
-    const value = separator < 0 ? scope : scope.slice(separator + 1);
+    const value = facet?.id ?? (separator < 0 ? scope : scope.slice(separator + 1));
     this.id = new DurableObjectId(
       className, value, __cell.idNames[scope],
     );
+    this.props = facet?.props;
   }
   // Workerd's DurableObjectState.exports (actor-state.h): the same
   // loopback surface as ctx.exports on stateless entrypoints.
@@ -1685,7 +2201,20 @@ class DurableObjectState {
       throw new Error(
         "blockConcurrencyWhile() calls are nested too deeply.",
       );
-    if (this._blockDepth > 0) return this._runConcurrencyBlock(f);
+    if (this._blockDepth > 0) {
+      // A nested block rides the outer hold. One the outer body starts and
+      // does not await would outlive that hold, and a `transaction()`
+      // started that way is the shape that mattered: the outer block
+      // returned, the gate opened, and another event wrote into the still
+      // open transaction (#714). The outer block drains these before it
+      // releases, so the hold lasts as long as any block under it. A nested
+      // block that fails resets the object as any block does, and the outer
+      // release must carry that failure, or the waiters would be admitted to
+      // an object that no longer exists: the drain records it.
+      const nested = this._runConcurrencyBlock(f);
+      (this._nestedBlocks ||= []).push(nested.then(() => null, __describeFailure));
+      return nested;
+    }
     // The host owns the gate (celld_logic::gate::InputGate). It replaces a
     // promise chain that could only order blocks against each other; the
     // gate sits at the delivery points, so nothing else is delivered to this
@@ -1706,12 +2235,19 @@ class DurableObjectState {
     // queue behind the first. Calling this inside the async body instead
     // costs one microtask, and an event delivered in that window walks
     // straight into the critical section.
-    const block = __blockEnter(this._scope);
-    const acquired = __gate_acquire(this._scope);
+    const [eventText, owner, acquired] = __gate_acquire(this._scope);
+    const event = Number(eventText);
+    const { block, record } = __blockEnter(this._scope, event, owner);
     const next = (async () => {
       try {
-        // The op answers a string; the gate keys events by number.
-        const event = Number(await acquired);
+        await acquired;
+        // A shutdown can retire the promise reaction while another event
+        // owns this queued acquisition. The owner still has to consume its
+        // ticket, but the retired callback must not run.
+        if (record.retired) {
+          __gate_release(this._scope, event, owner, null);
+          return;
+        }
         block.holder = event;
         // A critical section that fails resets the actor, so whatever queued
         // behind its gate must be refused rather than handed to the reset
@@ -1722,15 +2258,27 @@ class DurableObjectState {
         try {
           return await this._runConcurrencyBlock(f);
         } catch (error) {
-          failure = String((error && error.message) || error);
+          failure = __describeFailure(error);
           throw error;
         } finally {
-          __gate_release(this._scope, event, failure);
+          // Nested blocks are drained only after a body that returned: a
+          // body that failed has reset the object, its waiters are refused
+          // whatever the nested blocks do, and waiting for them would only
+          // delay the refusal and a transaction's rollback behind it. Each
+          // nested block has its own limit, so a drain is bounded by the
+          // last one started, as workerd's nested critical sections are.
+          while (failure === null && this._nestedBlocks && this._nestedBlocks.length > 0) {
+            for (const nestedFailure of await Promise.all(this._nestedBlocks.splice(0))) {
+              if (nestedFailure !== null && failure === null) failure = nestedFailure;
+            }
+          }
+          this._nestedBlocks = undefined;
+          __gate_release(this._scope, event, owner, failure);
         }
       } finally {
         // Also on a rejected `acquired`: the block ahead failed, this one
         // never ran, and the cell must not stay shut on its behalf.
-        __blockLeave(this._scope, block);
+        __blockLeave(this._scope, block, event);
       }
     })();
     // `_ready()` awaits this. The host gate stops *other* events, but a
@@ -1738,7 +2286,12 @@ class DurableObjectState {
     // being delivered, so nothing external can hold that event back — the
     // promise does. Concurrent blocks within one event go through
     // `_blockDepth` above and never reach here.
-    this._gate = next;
+    this._gate = Promise.all([this._gate, record.ready]).then(() => undefined);
+    // `_ready()` observes the original promise. This extra handler prevents
+    // a constructor-time rejection from becoming unhandled before an event
+    // reaches `_ready()`.
+    this._gate.catch(() => {});
+    next.then(record.settleReady, record.rejectReady);
     return next;
   }
   _runConcurrencyBlock(f) {
@@ -1781,6 +2334,7 @@ class DurableObjectState {
     );
   }
   _resetAfterConcurrencyFailure(error) {
+    if (this._aborted) return;
     this._aborted = true;
     __storage_cancel_pending_puts(this._scope);
     const instance = __cell.instances[this._scope];
@@ -1790,11 +2344,11 @@ class DurableObjectState {
     // event) the failure breaks the actor, as Workerd joins it
     // into the on-abort promise; a direct event keeps reset-only
     // semantics — its caller sees the rejection itself.
-    if (__actorEventStack[__actorEventStack.length - 1] !==
-        this._scope)
+    if (__currentActorScope() !== this._scope)
       __actorBreak(this._scope, error);
   }
   abort(reason) {
+    if (this._aborted) return;
     this._aborted = true;
     __storage_cancel_pending_puts(this._scope);
     const instance = __cell.instances[this._scope];
@@ -1806,8 +2360,7 @@ class DurableObjectState {
     // Direct host-dispatched event on this actor: the uncatchable
     // terminate_execution path. Under a same-isolate stub caller,
     // termination would unwind the caller too, so break in JS.
-    if (__actorEventStack[__actorEventStack.length - 1] ===
-        this._scope) {
+    if (__currentActorScope() === this._scope) {
       __actor_abort(this._scope, message);
       return;
     }
@@ -1817,6 +2370,14 @@ class DurableObjectState {
   _ready() { return this._gate; }
   getWebSockets(tag) {
     return JSON.parse(__ws_list(this._scope, tag)).map((row) => __socketFromRow(row));
+  }
+  getTags(ws) {
+    if (!(ws instanceof WebSocket) || !ws._hibernatable) {
+      throw new Error(
+        "you must call 'acceptWebSocket()' before attempting to access " +
+        "the tags of a WebSocket.");
+    }
+    return Array.from(ws._tags);
   }
   acceptWebSocket(ws, tags = []) {
     if (__heap_over_admission_share())
@@ -1903,6 +2464,31 @@ async function _readyInstance(scope) {
   return inst;
 }
 const __actorEventStack = [];
+const __currentActorEvent = () => {
+  const context = String(__io_context_id());
+  if (context === "") return undefined;
+  for (let index = __actorEventStack.length - 1; index >= 0; index--) {
+    const event = __actorEventStack[index];
+    if (event.context === context) return event;
+  }
+  return undefined;
+};
+const __currentActorScope = () => __currentActorEvent()?.scope ?? "";
+const __beginActorEvent = (scope) => {
+  const event = { scope, context: String(__io_context_id()) };
+  __actorEventStack.push(event);
+  return event;
+};
+const __endActorEvent = (event) => {
+  const index = __actorEventStack.lastIndexOf(event);
+  if (index >= 0) __actorEventStack.splice(index, 1);
+};
+const __endActorEventsForContext = (context) => {
+  for (let index = __actorEventStack.length - 1; index >= 0; index--) {
+    if (__actorEventStack[index].context === context)
+      __actorEventStack.splice(index, 1);
+  }
+};
 const __incomingRequestSignals = new Map();
 const __abortSignal = (signal, reason) => {
   if (signal.aborted) return;
@@ -1924,13 +2510,53 @@ globalThis.__registerIncomingRequest = (requestId, request) => {
 globalThis.__finishIncomingRequest = (requestId) => {
   __incomingRequestSignals.delete(String(requestId));
 };
-globalThis.__endTerminatedActorEvent = (scope) => {
-  for (let index = __actorEventStack.length - 1; index >= 0; index--) {
-    if (__actorEventStack[index] === scope) {
-      __actorEventStack.splice(index, 1);
-      return;
+globalThis.__retireInputGateContext = (context) => {
+  for (const [scope, block] of __cellBlocks) {
+    const retired = [...block.events].filter(([, record]) =>
+      record.owner === context || record.reaction === context
+    );
+    if (retired.length === 0) continue;
+    const holder = retired.find(([event]) => block.holder === event);
+    if (holder === undefined) {
+      // A queued callback has not changed the actor. Remove only that
+      // callback, and let an unrelated holder continue with the same state.
+      for (const [event, record] of retired) {
+        record.retired = true;
+        record.settleReady();
+        block.events.delete(event);
+        if (record.actorEvent !== undefined)
+          __endActorEvent(record.actorEvent);
+      }
+      if (block.events.size === 0 && __cellBlocks.get(scope) === block)
+        __cellBlocks.delete(scope);
+      continue;
     }
+    // A running callback changed this actor and cannot reach its own
+    // `finally`. Reset the actor, and release the host gate when the context
+    // that started the callback differs from the turn that owns its work.
+    const [holderEvent, holderRecord] = holder;
+    __gate_release(
+      scope,
+      holderEvent,
+      holderRecord.owner,
+      "the cell's critical section ended without releasing",
+    );
+    const instance = __cell.instances[scope];
+    if (instance !== undefined) instance.__celldState._aborted = true;
+    __storage_cancel_pending_puts(scope);
+    if (instance !== undefined && __cell.instances[scope] === instance)
+      delete __cell.instances[scope];
+    for (const record of block.events.values()) {
+      record.retired = true;
+      record.settleReady();
+      if (record.actorEvent !== undefined)
+        __endActorEvent(record.actorEvent);
+    }
+    // The old actor cannot run any block `finally`. A later event creates an
+    // instance whose ready promise contains none of this actor's work.
+    if (__cellBlocks.get(scope) === block) __cellBlocks.delete(scope);
   }
+  __endActorEventsForContext(context);
 };
 // Race a pending dispatch against the caller's abort signal: on abort,
 // run `abandon` (which reaches the target's side) and reject with the
@@ -2138,6 +2764,9 @@ globalThis.__makeLoader = () => {
     const stub = {
       getEntrypoint(name = null, _options = {}) {
         return makeEntrypoint(idPromise, name === null ? "default" : name);
+      },
+      getDurableObjectClass(name = null, options = {}) {
+        return __makeDurableObjectClass(idPromise, name, options);
       },
       dispose: drop,
     };
@@ -2475,7 +3104,7 @@ const __newEntry = (target) => {
   // the stub can queue on that cell's input gate. `section` is the
   // critical section running at lift time, if any — an op on this
   // stub re-enters it rather than queueing behind it.
-  const scope = __actorEventStack[__actorEventStack.length - 1];
+  const scope = __currentActorScope() || undefined;
   const entry = {
     id: __nextStubId++, target, refs: 1, ctx: __ctxNow(), scope,
     section: __cellBlocks.get(scope)?.holder ?? null,
@@ -2507,19 +3136,15 @@ const __actorBreak = (scope, reason) => {
 // Storage is not here — `stop_cell` closes it host-side — and sockets
 // live in the host registry, so a hibernated cell keeps them.
 const __cellRelease = (scope) => {
+  __cell.instances[scope]?.ctx?.facets?._release();
   delete __cell.instances[scope];
   delete __cell.idNames[scope];
+  delete __cell.facetConfigs[scope];
   __brokenActors.delete(scope);
-  // An abandoned block never runs `__blockLeave`, leaving `shut` above
-  // zero for a scope with no critical section. This is an invariant
-  // rather than a fix: an eviction cannot abandon a block, because the
-  // block holds the cell's gate and a cell with an event in flight is
-  // not given back. Only a stop that waits for nobody -- a fence, a
-  // reset, a clean reload -- reaches it, and by then the only reader
-  // left is a stub minted in the next epoch, which reads `holder` for
-  // one microtask before the next acquire overwrites it. Cheap to hold,
-  // and it keeps the rule whole: the release drops everything this
-  // isolate keys by the scope.
+  // An abandoned block can never run `__blockLeave`. A normal eviction
+  // cannot abandon a block because its event keeps the cell in flight. A
+  // stop that waits for nobody can, so the release drops every block record
+  // together with the other state for this residency.
   __cellBlocks.delete(scope);
   // An entry holds `target`, which can be an object the released
   // instance owns. Dropping it ends that reachability; `released` is
@@ -3801,7 +4426,7 @@ globalThis.__dispatchTo = async (
   if (requestId !== null)
     __incomingRequestSignals.set(
       String(requestId), requestController.signal);
-  __actorEventStack.push(scope);
+  const actorEvent = __beginActorEvent(scope);
   try {
     const dispatch = (async () => {
       const inst = await _readyInstance(scope);
@@ -3840,8 +4465,7 @@ globalThis.__dispatchTo = async (
   } finally {
     if (requestId !== null)
       __incomingRequestSignals.delete(String(requestId));
-    if (__actorEventStack[__actorEventStack.length - 1] === scope)
-      __actorEventStack.pop();
+    __endActorEvent(actorEvent);
   }
 };
 const __rpcTargetMethod = async (scope, method) => {
@@ -3864,7 +4488,7 @@ const __rpcTargetMethod = async (scope, method) => {
 // on use anywhere else. Callee exceptions cross in
 // the error envelope on every flavor.
 globalThis.__dispatchRpc = async (scope, method, args) => {
-  __actorEventStack.push(scope);
+  const actorEvent = __beginActorEvent(scope);
   try {
     // A string is the legacy JSON flavor; bytes are V8 structured clone.
     // Answer in kind.
@@ -3891,8 +4515,7 @@ globalThis.__dispatchRpc = async (scope, method, args) => {
       }
     })());
   } finally {
-    if (__actorEventStack[__actorEventStack.length - 1] === scope)
-      __actorEventStack.pop();
+    __endActorEvent(actorEvent);
   }
 };
 // Invoke a method on a named WorkerEntrypoint. Instances are cached per
@@ -4197,7 +4820,7 @@ globalThis.__wsStub = (wsId) => ({
   close: (code = 1000, reason = "") => __ws_close(wsId, code, reason),
 });
 globalThis.__wsOpen = async (scope, wsId, protocol) => {
-  __actorEventStack.push(scope);
+  const actorEvent = __beginActorEvent(scope);
   try {
     const inst = await _readyInstance(scope);
     const socket = inst.__celldState._socket(wsId);
@@ -4206,12 +4829,11 @@ globalThis.__wsOpen = async (scope, wsId, protocol) => {
     socket.readyState = WebSocket.READY_STATE_OPEN;
     socket.dispatchEvent(new Event("open"));
   } finally {
-    if (__actorEventStack[__actorEventStack.length - 1] === scope)
-      __actorEventStack.pop();
+    __endActorEvent(actorEvent);
   }
 };
 globalThis.__wsMessage = async (scope, wsId, msg) => {
-  __actorEventStack.push(scope);
+  const actorEvent = __beginActorEvent(scope);
   try {
     const inst = await _readyInstance(scope);
     const socket = inst.__celldState._socket(wsId);
@@ -4220,12 +4842,11 @@ globalThis.__wsMessage = async (scope, wsId, msg) => {
     else if (typeof inst.webSocketMessage === "function")
       await inst.webSocketMessage(socket, msg);
   } finally {
-    if (__actorEventStack[__actorEventStack.length - 1] === scope)
-      __actorEventStack.pop();
+    __endActorEvent(actorEvent);
   }
 };
 globalThis.__wsBinary = async (scope, wsId, data) => {
-  __actorEventStack.push(scope);
+  const actorEvent = __beginActorEvent(scope);
   try {
     const inst = await _readyInstance(scope);
     const socket = inst.__celldState._socket(wsId);
@@ -4235,12 +4856,11 @@ globalThis.__wsBinary = async (scope, wsId, data) => {
     else if (typeof inst.webSocketMessage === "function")
       await inst.webSocketMessage(socket, bytes);
   } finally {
-    if (__actorEventStack[__actorEventStack.length - 1] === scope)
-      __actorEventStack.pop();
+    __endActorEvent(actorEvent);
   }
 };
 globalThis.__wsClosed = async (scope, wsId, code, reason, wasClean) => {
-  __actorEventStack.push(scope);
+  const actorEvent = __beginActorEvent(scope);
   try {
     const inst = await _readyInstance(scope);
     const socket = inst.__celldState._socket(wsId);
@@ -4257,20 +4877,18 @@ globalThis.__wsClosed = async (scope, wsId, code, reason, wasClean) => {
     else if (typeof inst.webSocketClose === "function")
       await inst.webSocketClose(socket, code, reason, wasClean);
   } finally {
-    if (__actorEventStack[__actorEventStack.length - 1] === scope)
-      __actorEventStack.pop();
+    __endActorEvent(actorEvent);
   }
 };
 // called by celld's scheduler when an alarm is due. Returns a promise.
 globalThis.__fireAlarm = async (scope, scheduledTime, retryCount) => {
-  __actorEventStack.push(scope);
+  const actorEvent = __beginActorEvent(scope);
   try {
     const inst = await _readyInstance(scope);
     if (typeof inst.alarm !== "function") return;
     await inst.alarm({ scheduledTime, retryCount, isRetry: retryCount > 0 });
   } finally {
-    if (__actorEventStack[__actorEventStack.length - 1] === scope)
-      __actorEventStack.pop();
+    __endActorEvent(actorEvent);
   }
 };
 // The reserved cron cell. It is not a user class: celld registers it under
@@ -4392,6 +5010,7 @@ globalThis.__cell = {
   crons: [],
   workflows: {},
   instances: {},
+  facetConfigs: {},
   env: {},
   idNames: {},
   namespaceKeys: {},
@@ -4616,7 +5235,7 @@ class __KvNamespaceCell {
   // whenever the sweeper next runs. The read path filters and the sweep only
   // reclaims space, so the two can never disagree about which side of the
   // boundary a key is on.
-  async __kvGet({ keys, withMetadata, now }) {
+  async __kvGet({ keys, withMetadata, withExpiration = false, now }) {
     const sql = this._open();
     const out = [];
     for (const key of keys) {
@@ -4647,6 +5266,10 @@ class __KvNamespaceCell {
       }
       const entry = { key, found: true, value, tag: row.tag };
       if (withMetadata) entry.metadata = row.metadata ?? null;
+      // These fields describe one row snapshot. The operator bulk export must
+      // not combine a value from this read with an expiration from an earlier
+      // listing when a concurrent put replaces the key between both calls.
+      if (withExpiration) entry.expiration = row.expires_at ?? null;
       out.push(entry);
     }
     return out;
@@ -5019,6 +5642,7 @@ class __KvNamespaceCell {
           const [row] = await this.__kvGet({
             keys: [String(body.key)],
             withMetadata: true,
+            withExpiration: true,
             now,
           });
           result = row.found
@@ -5027,6 +5651,7 @@ class __KvNamespaceCell {
               ...__kvOperatorValue(row.value),
               tag: row.tag,
               metadata: row.metadata ?? null,
+              expiration: row.expiration,
             }
             : { found: false };
           break;
@@ -5414,7 +6039,58 @@ const __QUEUE_STATS = "__queue_stats";
 const __QUEUE_TRANSFER_RECEIPTS = "__queue_transfer_receipts";
 const __queueEncoder = new TextEncoder();
 
+// Independent send() calls share the same economics as sendBatch() without
+// changing the public promise boundary. The first call opens a four-millisecond
+// owner-local group by default; later cell events append their already-copied
+// entries, and park on their own promise. One event commits the bounded group,
+// and every response still trails that commit through the ordinary output
+// gate. The three caps bound heap retention and keep the persisted transaction
+// inside the public sendBatch limits.
+const __QUEUE_PRODUCER_GROUP_CALLS = 64;
+const __QUEUE_PRODUCER_GROUP_MESSAGES = 100;
+const __QUEUE_PRODUCER_GROUP_BYTES = 256_000;
+
 const __queueError = (message) => new Error("QUEUE_ERROR: " + String(message));
+// A Queue message id is a UUIDv7 (RFC 9562): 48 bits of enqueue time, a
+// 12-bit sequence inside that millisecond, and 62 random bits. It keeps the
+// UUID shape a consumer can parse, and it sorts in enqueue order, so the
+// UNIQUE index on `id` appends. A random v4 id made every grouped send
+// transaction dirty one index leaf per message (about 1.6 WAL frames per
+// 64-byte message) and turned every passive checkpoint into a random write
+// across the whole backlog, which is what made a deep Queue's checkpoint
+// cost grow with its backlog. The sequence never moves backwards inside one
+// process, so a clock step only widens the gap between consecutive ids.
+let __queueIdMs = 0;
+let __queueIdSeq = 0;
+function __queueMessageId(now) {
+  if (now > __queueIdMs) {
+    __queueIdMs = now;
+    __queueIdSeq = 0;
+  } else {
+    __queueIdSeq += 1;
+    if (__queueIdSeq > 0xfff) {
+      __queueIdMs += 1;
+      __queueIdSeq = 0;
+    }
+  }
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  const ms = __queueIdMs;
+  bytes[0] = Math.floor(ms / 0x10000000000) & 0xff;
+  bytes[1] = Math.floor(ms / 0x100000000) & 0xff;
+  bytes[2] = (ms >>> 24) & 0xff;
+  bytes[3] = (ms >>> 16) & 0xff;
+  bytes[4] = (ms >>> 8) & 0xff;
+  bytes[5] = ms & 0xff;
+  bytes[6] = 0x70 | (__queueIdSeq >> 8);
+  bytes[7] = __queueIdSeq & 0xff;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  let hex = "";
+  for (let i = 0; i < 16; i++) hex += bytes[i].toString(16).padStart(2, "0");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${
+    hex.slice(16, 20)
+  }-${hex.slice(20)}`;
+}
 const __queueLimits = () => __cell.queueLimits;
 const __queuePolicy = (request) =>
   JSON.parse(__queue_policy(JSON.stringify(request)));
@@ -5515,6 +6191,7 @@ class __QueueCell {
     this.ctx = ctx;
     this.queue = ctx.id.name;
     this._ready = false;
+    this._producerGroup = null;
   }
 
   _open() {
@@ -5826,7 +6503,7 @@ class __QueueCell {
     };
   }
 
-  async _rearm(now = Date.now()) {
+  async _rearm(now = Date.now(), waitForWake = false) {
     const sql = this._open();
     const consumer = __cell.queueConsumers?.[this.queue];
     const paused = this._paused();
@@ -5948,29 +6625,85 @@ class __QueueCell {
       throw __queueError("the Queue sweep deadline is invalid");
     }
     if (armAt === null) await this.ctx.storage.deleteAlarm();
-    else await this.ctx.storage.setAlarm(armAt);
+    else if (waitForWake) {
+      await __queue_alarm_set_wait(this.ctx.storage._scope, armAt);
+    } else await this.ctx.storage.setAlarm(armAt);
   }
 
-  async __queueSend({ entries }) {
+  _newProducerGroup() {
+    const group = {
+      calls: [],
+      entries: [],
+      bytes: 0,
+      flushing: false,
+      timer: null,
+    };
+    this._producerGroup = group;
+    group.timer = setTimeout(() => {
+      void this._flushProducerGroup(group);
+    }, __queueLimits().producerGroupMs);
+    return group;
+  }
+
+  async _flushProducerGroup(group) {
+    if (group.flushing) return;
+    group.flushing = true;
+    if (this._producerGroup === group) this._producerGroup = null;
+    if (group.timer !== null) {
+      clearTimeout(group.timer);
+      group.timer = null;
+    }
+
     const now = Date.now();
-    const sql = this._open();
-    this.ctx.storage.transactionSync(() => {
-      for (const entry of entries) {
-        sql.exec(
-          `INSERT INTO ${__QUEUE_MESSAGES}
-             (id, body, content_type, size, enqueued_at, visible_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          crypto.randomUUID(),
-          entry.body,
-          entry.contentType,
-          entry.size,
-          now,
-          now + entry.delaySeconds * 1000,
-        );
+    try {
+      const sql = this._open();
+      this.ctx.storage.transactionSync(() => {
+        for (const entry of group.entries) {
+          sql.exec(
+            `INSERT INTO ${__QUEUE_MESSAGES}
+               (id, body, content_type, size, enqueued_at, visible_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            __queueMessageId(now),
+            entry.body,
+            entry.contentType,
+            entry.size,
+            now,
+            now + entry.delaySeconds * 1000,
+          );
+        }
+      });
+      await this._rearm(now, true);
+      const metrics = this._metrics(now);
+      if (typeof __test_queue_producer_group === "function") {
+        __test_queue_producer_group(group.calls.length, group.entries.length);
+      }
+      for (const call of group.calls) call.resolve(metrics);
+    } catch (error) {
+      for (const call of group.calls) call.reject(error);
+    }
+  }
+
+  __queueSend({ entries }) {
+    const bytes = entries.reduce((total, entry) => total + entry.size, 0);
+    return new Promise((resolve, reject) => {
+      let group = this._producerGroup;
+      if (group !== null &&
+          (group.calls.length + 1 > __QUEUE_PRODUCER_GROUP_CALLS ||
+            group.entries.length + entries.length > __QUEUE_PRODUCER_GROUP_MESSAGES ||
+            group.bytes + bytes > __QUEUE_PRODUCER_GROUP_BYTES)) {
+        void this._flushProducerGroup(group);
+        group = null;
+      }
+      if (group === null) group = this._newProducerGroup();
+      group.calls.push({ resolve, reject });
+      group.entries.push(...entries);
+      group.bytes += bytes;
+      if (group.calls.length === __QUEUE_PRODUCER_GROUP_CALLS ||
+          group.entries.length === __QUEUE_PRODUCER_GROUP_MESSAGES ||
+          group.bytes === __QUEUE_PRODUCER_GROUP_BYTES) {
+        void this._flushProducerGroup(group);
       }
     });
-    await this._rearm(now);
-    return this._metrics(now);
   }
 
   __queueMetrics() {
@@ -8675,23 +9408,37 @@ globalThis.__cf = {
   exports: {},
   get env() { return globalThis.__cell.env; },
 };
-// Pass-through proxy standing in for unsupported node:* builtins: callable,
-// constructable, and every property returns itself — so bundle evaluation
-// never crashes on a builtin the fetch path doesn't actually exercise.
-globalThis.__nodeStub = new Proxy(function () {}, {
-  get: (_t, p) => {
-    // Never masquerade as a thenable. `await` probes `.then`; returning
-    // the callable proxy here creates a promise that can never settle.
-    if (p === "then") return undefined;
-    // coerce cleanly in string/number contexts so evaluation never throws
-    if (p === Symbol.toPrimitive || p === "toString" || p === "valueOf") return () => "";
-    if (p === Symbol.toStringTag) return "NodeStub";
-    if (p === Symbol.iterator) return function* () {};
-    return globalThis.__nodeStub;
-  },
-  apply: () => globalThis.__nodeStub,
-  construct: () => globalThis.__nodeStub,
-});
+// Proxy standing in for unsupported node:*/cloudflare:* builtins. Property
+// walks stay inert — real bundles reference these at module scope, and
+// evaluation must not crash on a builtin the fetch path never exercises —
+// but a call or construct throws: the compat contract is "reject at first
+// use", and the old silent pass-through turned a missing builtin into a
+// wrong result far from the cause. Memoized by dotted path so repeated
+// reads keep identity (`mod.foo === mod.foo`).
+const __stubCache = new Map();
+globalThis.__nodeStubFor = (path) => {
+  let stub = __stubCache.get(path);
+  if (stub) return stub;
+  stub = new Proxy(function () {}, {
+    get: (_t, p) => {
+      // Never masquerade as a thenable. `await` probes `.then`; returning
+      // a callable here creates a promise that can never settle.
+      if (p === "then") return undefined;
+      // coerce cleanly in string/number contexts so evaluation never throws
+      if (p === Symbol.toPrimitive || p === "toString" || p === "valueOf")
+        return () => "";
+      if (p === Symbol.toStringTag) return "NodeStub";
+      if (p === Symbol.iterator) return function* () {};
+      if (typeof p !== "string") return undefined;
+      return globalThis.__nodeStubFor(path + "." + p);
+    },
+    apply() { throw new Error(path + " is not implemented in celld"); },
+    construct() { throw new Error(path + " is not implemented in celld"); },
+  });
+  __stubCache.set(path, stub);
+  return stub;
+};
+globalThis.__nodeStub = globalThis.__nodeStubFor("node builtin");
 if (!globalThis.Event) {
   globalThis.Event = class Event {
     // Private fields: stored in the object itself, so an Event costs no
@@ -8795,6 +9542,27 @@ if (!globalThis.ExtendableEvent) {
     }
   };
 }
+// An event-handler IDL attribute occupies one listener-list position. Replacing
+// its callback must retain that position, or listeners added after `onabort`
+// run before it and observe an order that differs from the web platform.
+const __eventHandlerEntry = Symbol("eventHandlerEntry");
+const __getEventHandler = (target, type) =>
+  (target._listeners.get(type) || [])
+    .find((entry) => entry[__eventHandlerEntry])?.callback ?? null;
+const __setEventHandler = (target, type, callback) => {
+  const list = target._listeners.get(type) || [];
+  const entry = list.find((item) => item[__eventHandlerEntry]);
+  if (typeof callback !== "function") {
+    if (entry) list.splice(list.indexOf(entry), 1);
+    return;
+  }
+  if (entry) {
+    entry.callback = callback;
+  } else {
+    list.push({ callback, once: false, [__eventHandlerEntry]: true });
+    target._listeners.set(type, list);
+  }
+};
 if (!globalThis.EventTarget) {
   globalThis.EventTarget = class EventTarget {
     constructor() { this._listeners = new Map(); }
@@ -8853,7 +9621,10 @@ if (!globalThis.EventTarget) {
         else item.callback.handleEvent(event);
       }
       const handler = this["on" + event.type];
-      if (!event._stopImmediate && typeof handler === "function")
+      const hasEventHandler = (this._listeners.get(event.type) || [])
+        .some((item) => item[__eventHandlerEntry]);
+      if (!hasEventHandler && !event._stopImmediate &&
+          typeof handler === "function")
         handler.call(this, event);
       event._end();
       return !event.defaultPrevented;
@@ -8930,6 +9701,22 @@ if (!globalThis.DOMException) {
       Object.defineProperty(globalThis.DOMException, name, d);
       Object.defineProperty(globalThis.DOMException.prototype, name, d);
     }
+    // The legacy `code` member maps the error name to its constant, per
+    // WebIDL; names outside the table (and every modern name) are 0.
+    const legacy = {
+      IndexSizeError: 1, HierarchyRequestError: 3, WrongDocumentError: 4,
+      InvalidCharacterError: 5, NoModificationAllowedError: 7,
+      NotFoundError: 8, NotSupportedError: 9, InUseAttributeError: 10,
+      InvalidStateError: 11, SyntaxError: 12, InvalidModificationError: 13,
+      NamespaceError: 14, InvalidAccessError: 15, TypeMismatchError: 17,
+      SecurityError: 18, NetworkError: 19, AbortError: 20,
+      URLMismatchError: 21, QuotaExceededError: 22, TimeoutError: 23,
+      InvalidNodeTypeError: 24, DataCloneError: 25,
+    };
+    Object.defineProperty(globalThis.DOMException.prototype, "code", {
+      get() { return legacy[this.name] ?? 0; },
+      enumerable: true, configurable: true,
+    });
   }
 }
 if (!globalThis.AbortSignal) {
@@ -8970,6 +9757,20 @@ if (!globalThis.AbortSignal) {
       return c.signal;
     }
   };
+  Object.defineProperty(globalThis.AbortSignal.prototype, "onabort", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      if (!(this instanceof globalThis.AbortSignal))
+        throw new TypeError("Illegal invocation");
+      return __getEventHandler(this, "abort");
+    },
+    set(value) {
+      if (!(this instanceof globalThis.AbortSignal))
+        throw new TypeError("Illegal invocation");
+      __setEventHandler(this, "abort", value);
+    },
+  });
   globalThis.AbortController = class AbortController {
     constructor() { this.signal = new AbortSignal(__abortBrand); }
     abort(reason = new DOMException("This operation was aborted", "AbortError")) {
@@ -9374,16 +10175,28 @@ if (!globalThis.ErrorEvent) {
 }
 // Web API globals a real bundle references at module scope but that the
 // prelude doesn't provide. Stub as empty classes (guarded so we never
-// clobber a real prelude implementation). Enough to LOAD; runtime use of
-// an unimplemented one is a separate gap.
+// clobber a real prelude implementation). Enough to LOAD; every name in
+// this first list has a real implementation elsewhere, so the empty class
+// only exists for the load-order window.
 for (const n of ["WebSocket", "EventTarget", "Event", "MessageEvent",
-  "CloseEvent", "ErrorEvent", "EventSource", "MessageChannel",
-  "MessagePort", "BroadcastChannel", "SubtleCrypto", "TransformStream",
+  "CloseEvent", "ErrorEvent", "SubtleCrypto", "TransformStream",
   "ReadableStream", "WritableStream", "ReadableStreamDefaultReader",
   "WritableStreamDefaultWriter",
   "ByteLengthQueuingStrategy", "CountQueuingStrategy",
-  "TextEncoderStream", "TextDecoderStream", "FileReader"]) {
+  "TextEncoderStream", "TextDecoderStream"]) {
   if (!globalThis[n]) globalThis[n] = class {};
+}
+// These have no implementation anywhere in celld. An empty class would
+// let `new BroadcastChannel(...)` hand back an inert object that fails
+// far from the cause; the compat contract is "reject at first use", so
+// the name loads but construction throws. (EventSource, MessageChannel,
+// and MessagePort are real; their scripts run after the harness.)
+for (const n of ["BroadcastChannel", "FileReader"]) {
+  if (!globalThis[n]) globalThis[n] = class {
+    constructor() {
+      throw new Error(n + " is not implemented in celld");
+    }
+  };
 }
 globalThis.__sockets = new Map();
 globalThis.WebSocket = class WebSocket extends EventTarget {
@@ -9457,7 +10270,7 @@ globalThis.WebSocket = class WebSocket extends EventTarget {
       // a hibernated cell. A Worker socket has no cell: the isolate polls it,
       // and it lives and dies with the request, which is the lifetime
       // Cloudflare gives one too.
-      const scope = __actorEventStack[__actorEventStack.length - 1] || "";
+      const scope = __currentActorScope();
       this._polled = !scope;
       const requested = typeof protocols === "string"
         ? [protocols]
@@ -9582,7 +10395,7 @@ globalThis.WebSocket = class WebSocket extends EventTarget {
         __ws_bind_target(
           this._id,
           JSON.stringify(this._boundTarget),
-          __actorEventStack[__actorEventStack.length - 1] || "",
+          __currentActorScope(),
         );
       }
       this.readyState = WebSocket.READY_STATE_OPEN;
@@ -9767,8 +10580,57 @@ globalThis.WebSocketPair = function WebSocketPair() {
     },
   };
 };
-if (!globalThis.performance)
-  globalThis.performance = { now: () => Date.now(), timeOrigin: 0, mark() {}, measure() {} };
+// Cloudflare exposes the time of the last I/O, not a clock that advances
+// while JavaScript runs. Keep Date and performance on one turn timestamp so
+// neither becomes a timing side channel and the two APIs cannot disagree.
+const __NativeDate = Date;
+let __ioTimestamp = 0;
+const __CloudflareDate = function Date(...args) {
+  if (new.target) {
+    return Reflect.construct(
+      __NativeDate,
+      args.length === 0 ? [__ioTimestamp] : args,
+      new.target,
+    );
+  }
+  return new __NativeDate(__ioTimestamp).toString();
+};
+Object.defineProperties(__CloudflareDate, {
+  length: { value: 7 },
+  prototype: { value: __NativeDate.prototype },
+  now: {
+    value: () => __ioTimestamp,
+    writable: true,
+    configurable: true,
+  },
+  parse: {
+    value: __NativeDate.parse,
+    writable: true,
+    configurable: true,
+  },
+  UTC: {
+    value: __NativeDate.UTC,
+    writable: true,
+    configurable: true,
+  },
+});
+Object.defineProperty(__NativeDate.prototype, "constructor", {
+  value: __CloudflareDate,
+  writable: true,
+  configurable: true,
+});
+globalThis.Date = __CloudflareDate;
+globalThis.performance = {
+  now: () => __ioTimestamp,
+  timeOrigin: 0,
+  mark() {},
+  measure() {},
+};
+Object.defineProperty(globalThis, "__advanceIoTime", {
+  value(timestamp) {
+    __ioTimestamp = timestamp;
+  },
+});
 if (!globalThis.navigator) globalThis.navigator = {
   userAgent: "Cloudflare-Workers", hardwareConcurrency: 1,
   language: "en", languages: ["en"],
@@ -9780,39 +10642,183 @@ if (!globalThis.scheduler)
     wait: (ms) => new Promise((resolve) => setTimeout(resolve, Number(ms) || 0)),
   };
 if (!globalThis.structuredClone) {
+  const structuredCloneRandom = $$randomValues;
   globalThis.structuredClone = (value, options) => {
-    const seen = new Map();
-    const clone = (input) => {
+    const transfer = options?.transfer === undefined
+      ? [] : Array.from(options.transfer);
+    const seen = new Set();
+    for (let index = 0; index < transfer.length; index++) {
+      const item = transfer[index];
+      if (!(item instanceof ArrayBuffer))
+        throw new DOMException(
+          `Value at index ${index} is not transferable`, "DataCloneError");
+      if (item.detached)
+        throw new DOMException(
+          `ArrayBuffer at index ${index} is already detached`,
+          "DataCloneError");
+      if (seen.has(item))
+        throw new DOMException(
+          `ArrayBuffer at index ${index} is a duplicate`, "DataCloneError");
+      seen.add(item);
+    }
+
+    // Blob, File, CryptoKey, and DOMException are JavaScript-backed in Cells,
+    // so V8 does not see the native host objects that Deno registers with its
+    // serializer. Replace only those objects before the V8 pass, then restore
+    // them after it. A per-call random token prevents an application object
+    // from being mistaken for a temporary record after deserialization.
+    const hostMarker = "__celldStructuredCloneHost";
+    const hostTokenBytes = new Uint32Array(4);
+    structuredCloneRandom(hostTokenBytes);
+    const hostToken = Array.from(hostTokenBytes).join(":");
+    const projected = new Map();
+    const passesThroughV8 = (input) =>
+      input instanceof Date || input instanceof RegExp ||
+      input instanceof Error || input instanceof ArrayBuffer ||
+      input instanceof WebAssembly.Module ||
+      (typeof SharedArrayBuffer === "function" &&
+       input instanceof SharedArrayBuffer) ||
+      ArrayBuffer.isView(input);
+    const project = (input) => {
       if (input === null || typeof input !== "object") return input;
-      if (seen.has(input)) return seen.get(input);
-      if (input instanceof Date) return new Date(input.getTime());
-      if (input instanceof ArrayBuffer) return input.slice(0);
-      if (ArrayBuffer.isView(input))
-        return new input.constructor(input.buffer.slice(
-          input.byteOffset, input.byteOffset + input.byteLength,
-        ));
+      if (projected.has(input)) return projected.get(input);
+
+      let record;
+      if (typeof File === "function" && input instanceof File) {
+        record = { [hostMarker]: hostToken, kind: "File" };
+        projected.set(input, record);
+        record.bytes = input._bytes;
+        record.type = input.type;
+        record.name = input.name;
+        record.lastModified = input.lastModified;
+        return record;
+      }
+      if (typeof Blob === "function" && input instanceof Blob) {
+        record = { [hostMarker]: hostToken, kind: "Blob" };
+        projected.set(input, record);
+        record.bytes = input._bytes;
+        record.type = input.type;
+        return record;
+      }
+      if (typeof CryptoKey === "function" && input instanceof CryptoKey) {
+        record = { [hostMarker]: hostToken, kind: "CryptoKey" };
+        projected.set(input, record);
+        record.type = input.type;
+        record.algorithm = input.algorithm;
+        record.extractable = input.extractable;
+        record.usages = input.usages;
+        record.material = input.__celldMaterial;
+        return record;
+      }
+      if (input instanceof DOMException) {
+        record = { [hostMarker]: hostToken, kind: "DOMException" };
+        projected.set(input, record);
+        record.message = input.message;
+        record.name = input.name;
+        return record;
+      }
+      // These types do not have the Web IDL Serializable marker. Reject them
+      // instead of exposing their JavaScript implementation as a plain object.
+      if ((typeof URL === "function" && input instanceof URL) ||
+          (typeof URLSearchParams === "function" &&
+           input instanceof URLSearchParams) ||
+          (typeof Headers === "function" && input instanceof Headers) ||
+          (typeof FormData === "function" && input instanceof FormData) ||
+          (typeof Request === "function" && input instanceof Request) ||
+          (typeof Response === "function" && input instanceof Response) ||
+          (typeof MessagePort === "function" && input instanceof MessagePort))
+        throw new DOMException(
+          "Cannot clone object of unsupported type.", "DataCloneError");
+      if (Array.isArray(input)) {
+        record = new Array(input.length);
+        projected.set(input, record);
+        for (const key of Object.keys(input)) record[key] = project(input[key]);
+        return record;
+      }
       if (input instanceof Map) {
-        const out = new Map(); seen.set(input, out);
-        for (const [k, v] of input) out.set(clone(k), clone(v));
-        return out;
+        record = new Map();
+        projected.set(input, record);
+        for (const [key, entry] of input)
+          record.set(project(key), project(entry));
+        return record;
       }
       if (input instanceof Set) {
-        const out = new Set(); seen.set(input, out);
-        for (const v of input) out.add(clone(v));
-        return out;
+        record = new Set();
+        projected.set(input, record);
+        for (const entry of input) record.add(project(entry));
+        return record;
       }
-      const out = Array.isArray(input) ? [] : Object.create(Object.getPrototypeOf(input));
-      seen.set(input, out);
-      for (const key of Reflect.ownKeys(input)) out[key] = clone(input[key]);
-      return out;
+      if (passesThroughV8(input)) return input;
+
+      record = {};
+      projected.set(input, record);
+      for (const key of Object.keys(input)) record[key] = project(input[key]);
+      return record;
     };
-    const result = clone(value);
-    // Transfer semantics: the source buffer is detached. The clone
-    // above already copied its bytes, which is what the spec's
-    // "transferred" clone observes.
-    for (const item of (options && options.transfer) || []) {
-      if (item instanceof ArrayBuffer) item.transfer();
+
+    // Deno delegates the general graph to V8 and normalizes its clone error.
+    // Cells already exposes the V8 value serializer for storage and RPC, so
+    // one encode/decode preserves native internal slots, cycles, and shared
+    // backing stores without a second JavaScript object walker.
+    let result;
+    try {
+      result = __structured_clone(project(value));
+    } catch (error) {
+      if (error instanceof TypeError)
+        throw new DOMException(error.message, "DataCloneError");
+      throw error;
     }
+
+    const revived = new Map();
+    const revive = (input) => {
+      if (input === null || typeof input !== "object") return input;
+      if (revived.has(input)) return revived.get(input);
+
+      let output;
+      switch (input[hostMarker] === hostToken ? input.kind : undefined) {
+        case "Blob":
+          output = new Blob([input.bytes], { type: input.type });
+          revived.set(input, output);
+          return output;
+        case "File":
+          output = new File([input.bytes], input.name, {
+            type: input.type, lastModified: input.lastModified,
+          });
+          revived.set(input, output);
+          return output;
+        case "CryptoKey":
+          output = new CryptoKey(
+            input.type, input.algorithm, input.extractable,
+            input.usages, input.material);
+          revived.set(input, output);
+          return output;
+        case "DOMException":
+          output = new DOMException(input.message, input.name);
+          revived.set(input, output);
+          return output;
+      }
+      revived.set(input, input);
+      if (Array.isArray(input)) {
+        for (const key of Object.keys(input)) input[key] = revive(input[key]);
+      } else if (input instanceof Map) {
+        const entries = Array.from(input);
+        input.clear();
+        for (const [key, entry] of entries)
+          input.set(revive(key), revive(entry));
+      } else if (input instanceof Set) {
+        const entries = Array.from(input);
+        input.clear();
+        for (const entry of entries) input.add(revive(entry));
+      } else if (!passesThroughV8(input)) {
+        for (const key of Object.keys(input)) input[key] = revive(input[key]);
+      }
+      return input;
+    };
+    result = revive(result);
+    // Validate the complete list and clone the value before detaching any
+    // source. A later invalid entry therefore cannot leave an earlier buffer
+    // detached after the operation fails.
+    for (const item of transfer) item.transfer();
     return result;
   };
 }
@@ -9847,7 +10853,7 @@ if (!globalThis.process) globalThis.process = {
   on() {}, once() {}, off() {}, emit() {}, hrtime: () => [0, 0],
 };
 globalThis.process.exit = (code = 0) => {
-  const actorScope = __actorEventStack[__actorEventStack.length - 1] || "";
+  const actorScope = __currentActorScope();
   if (actorScope) {
     const instance = __cell.instances[actorScope];
     if (instance?.__celldState)
@@ -9883,14 +10889,320 @@ globalThis.__beginEvent = (props = __defaultProps) => {
   return __entrypointContext(props);
 };
 globalThis.__endEvent = () => __event_end();
-// fs stub that behaves like a no-filesystem env: reads throw ENOENT and
-// existsSync is false, so the common `try { readFileSync } catch (ENOENT)`
-// fallbacks in real deps (e.g. pi-agent config) take their default path.
-const __enoent = () => { const e = new Error("ENOENT: no filesystem"); e.code = "ENOENT"; throw e; };
-globalThis.__fs = new Proxy({}, { get: (_t, p) => {
-  if (p === "existsSync") return () => false;
-  if (["readFileSync", "readdirSync", "statSync", "lstatSync", "realpathSync", "readlinkSync"].includes(p)) return __enoent;
-  return globalThis.__nodeStub;
+// Workerd's writable filesystem is memory-backed and request-scoped. The
+// native IoContext owns the directory tree; this facade supplies Node's path,
+// error, Promise, and Stats shapes without exposing a host filesystem.
+const __fsPath = (value) => {
+  if (value instanceof URL) {
+    if (value.protocol !== "file:") {
+      const error = new TypeError('The URL must be of scheme file');
+      error.code = "ERR_INVALID_URL_SCHEME";
+      throw error;
+    }
+    value = decodeURIComponent(value.pathname);
+  } else if (globalThis.Buffer?.isBuffer(value)) {
+    value = value.toString();
+  } else if (typeof value !== "string") {
+    const error = new TypeError(
+      'The "path" argument must be of type string or an instance of Buffer or URL',
+    );
+    error.code = "ERR_INVALID_ARG_TYPE";
+    throw error;
+  }
+  if (value.includes("\0")) {
+    const error = new TypeError('The argument "path" must not contain null bytes');
+    error.code = "ERR_INVALID_ARG_VALUE";
+    throw error;
+  }
+  const absolute = value.startsWith("/") ? value : process.cwd() + "/" + value;
+  const parts = [];
+  for (const part of absolute.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  return "/" + parts.join("/");
+};
+const __fsError = (code, syscall, path) => {
+  const e = new Error(`${code}: ${syscall} '${path}'`);
+  e.errno = { EPERM: -1, ENOENT: -2, EEXIST: -17, ENOTDIR: -20 }[code];
+  e.code = code;
+  e.syscall = syscall;
+  e.path = path;
+  return e;
+};
+const __enoent = (path = "") => { throw __fsError("ENOENT", "open", path); };
+const __fsStatsBadge = Symbol("fs.Stats");
+class __FsStats {
+  constructor(badge, kind, size, bigint) {
+    if (badge !== __fsStatsBadge) throw new TypeError("Illegal constructor");
+    const file = kind === 3;
+    this.dev = 0;
+    this.ino = 0;
+    // A bundle file is 0o100444 and a writable temporary directory is 0o40666,
+    // matching the mode values workerd's fs-stat-test.js asserts.
+    this.mode = (file ? 0o100000 : 0o40000) | 0o444 | (kind === 2 ? 0o222 : 0);
+    this.nlink = 1;
+    this.uid = 0;
+    this.gid = 0;
+    this.rdev = 0;
+    this.size = size;
+    this.blksize = 0;
+    this.blocks = 0;
+    this.atimeMs = this.mtimeMs = this.ctimeMs = this.birthtimeMs = 0;
+    this.atime = new Date(0);
+    this.mtime = new Date(0);
+    this.ctime = new Date(0);
+    this.birthtime = new Date(0);
+    Object.defineProperty(this, "__kind", { value: file ? "file" : "directory" });
+    if (bigint) {
+      for (const name of [
+        "dev", "ino", "mode", "nlink", "uid", "gid", "rdev", "size",
+        "blksize", "blocks", "atimeMs", "mtimeMs", "ctimeMs", "birthtimeMs",
+      ]) this[name] = BigInt(this[name]);
+      this.atimeNs = 0n;
+      this.mtimeNs = 0n;
+      this.ctimeNs = 0n;
+      this.birthtimeNs = 0n;
+    }
+  }
+  isFile() { return this.__kind === "file"; }
+  isDirectory() { return this.__kind === "directory"; }
+  isBlockDevice() { return false; }
+  isCharacterDevice() { return false; }
+  isSymbolicLink() { return false; }
+  isFIFO() { return false; }
+  isSocket() { return false; }
+}
+const __fsOptions = (options, names) => {
+  if (options === undefined) return {};
+  if (options === null || typeof options !== "object") {
+    const error = new TypeError('The "options" argument must be of type object');
+    error.code = "ERR_INVALID_ARG_TYPE";
+    throw error;
+  }
+  for (const name of names) {
+    if (options[name] !== undefined && typeof options[name] !== "boolean") {
+      const error = new TypeError(`The "options.${name}" property must be of type boolean`);
+      error.code = "ERR_INVALID_ARG_TYPE";
+      throw error;
+    }
+  }
+  return options;
+};
+const __fsMkdirSync = (value, options = {}) => {
+  const path = __fsPath(value);
+  if (typeof options === "number") options = { mode: options };
+  options = __fsOptions(options, ["recursive"]);
+  const result = __vfs_mkdir(path, options.recursive === true);
+  if (result && !result.startsWith("/")) throw __fsError(result, "mkdir", path);
+  return result || undefined;
+};
+const __fsStatSync = (value, options, syscall = "stat") => {
+  const path = __fsPath(value);
+  options = __fsOptions(options, ["bigint", "throwIfNoEntry"]);
+  const [kind, size] = __vfs_stat(path);
+  if (!kind) {
+    if (options.throwIfNoEntry === false) return undefined;
+    throw __fsError("ENOENT", syscall, path);
+  }
+  return new __FsStats(__fsStatsBadge, kind, size, options.bigint === true);
+};
+const __fsLstatSync = (value, options) => __fsStatSync(value, options, "lstat");
+const __fsRealpathSync = (value) => {
+  const path = __fsPath(value);
+  if (!__vfs_stat(path)[0]) throw __fsError("ENOENT", "realpath", path);
+  return path;
+};
+const __fsExistsSync = (value) => {
+  try { return __vfs_stat(__fsPath(value))[0] !== 0; }
+  catch { return false; }
+};
+// Node returns a Buffer unless an encoding is given, as a string or as
+// `options.encoding`. Only `utf8` is decoded here; any other encoding falls
+// through to Buffer's own decoder.
+const __fsReadFileSync = (value, options) => {
+  const path = __fsPath(value);
+  const encoding = typeof options === "string" ? options : options?.encoding;
+  const bytes = __vfs_read_file(path);
+  if (bytes === undefined) {
+    // A directory read fails differently from a missing path, so the stat
+    // decides which error the caller sees.
+    if (__vfs_stat(path)[0]) throw __fsError("EISDIR", "read", path);
+    throw __fsError("ENOENT", "open", path);
+  }
+  const buffer = Buffer.from(bytes);
+  return encoding ? buffer.toString(encoding) : buffer;
+};
+// `fs.constants`, with the four access modes from workerd's
+// `src/node/internal/internal_fs_constants.ts`. The table carries only the
+// modes `access` reads. Every other constant belongs to an operation the
+// virtual filesystem does not implement, and that operation already fails
+// loudly at the unimplemented-builtin stub, so publishing its constants would
+// only make a caller build a mode for a call it cannot make.
+const __fsConstants = Object.freeze({ F_OK: 0, X_OK: 1, W_OK: 2, R_OK: 4 });
+// Node validates a mode before it reaches the filesystem, so a bad mode is an
+// argument error and never a filesystem error. The range is the union of the
+// four access modes, which is what workerd's `validateMode` allows.
+const __fsMode = (mode) => {
+  if (mode === undefined) return __fsConstants.F_OK;
+  if (typeof mode !== "number") {
+    const error = new TypeError('The "mode" argument must be of type number');
+    error.code = "ERR_INVALID_ARG_TYPE";
+    throw error;
+  }
+  if (!Number.isInteger(mode) || mode < 0 || mode > 7) {
+    const error = new RangeError(
+      `The value of "mode" is out of range. It must be >= 0 && <= 7. Received ${mode}`,
+    );
+    error.code = "ERR_OUT_OF_RANGE";
+    throw error;
+  }
+  return mode;
+};
+// `access` reports what the virtual filesystem can do and not a POSIX
+// permission, so it follows workerd's `accessSyncImpl`: no file is executable,
+// therefore `X_OK` always fails, and an unwritable path fails exactly like a
+// missing one, so a caller cannot tell the two apart. Kind 2 is the writable
+// tree; see `op_vfs_stat`.
+const __fsAccessSync = (value, mode) => {
+  const path = __fsPath(value);
+  mode = __fsMode(mode);
+  const [kind] = __vfs_stat(path);
+  const denied = mode & __fsConstants.X_OK
+    || !kind
+    || (mode & __fsConstants.W_OK && kind !== 2);
+  if (denied) throw __fsError("ENOENT", "access", path);
+};
+// The callback forms run the same synchronous core as `fs.promises`.
+// Validation and the operation are separate arguments, not one function,
+// because they fail differently: an argument error throws, and only a
+// filesystem error reaches the callback. One combined body would route both to
+// the callback and hide a caller's bug behind an error it did not expect.
+//
+// `validate()` runs before the callback check, which is workerd's order: each
+// entry point in `internal_fs_callback.ts` validates its path and its options,
+// and only then calls `callWithSingleArgCallback`. Node checks the callback
+// first, so a call that has a bad path and no callback reports the path here
+// and reports the callback in Node. Both are `ERR_INVALID_ARG_TYPE`, and the
+// runtime follows workerd.
+const __fsDeliver = (validate, run, callback, deliver) => {
+  validate();
+  if (typeof callback !== "function") {
+    const error = new TypeError('The "cb" argument must be of type function');
+    error.code = "ERR_INVALID_ARG_TYPE";
+    throw error;
+  }
+  let result;
+  try {
+    result = run();
+  } catch (error) {
+    // A callback delivered in this turn would let a caller observe the result
+    // before its own call returned, which Node never does.
+    queueMicrotask(() => callback(error));
+    return;
+  }
+  queueMicrotask(() => deliver(result));
+};
+// An operation with a result calls back with `(error, result)`, and one
+// without calls back with `(error)` alone. Workerd splits the two the same way
+// (`callWithSingleArgCallback` and `callWithErrorOnlyCallback`), because a
+// caller can read `arguments.length` and see the difference.
+const __fsCallback = (validate, run, callback) =>
+  __fsDeliver(validate, run, callback, (result) => callback(null, result));
+const __fsErrorOnlyCallback = (validate, run, callback) =>
+  __fsDeliver(validate, run, callback, () => callback(null));
+// Node accepts `(path, callback)` or `(path, options, callback)` everywhere.
+const __fsCallbackArgs = (options, callback) =>
+  typeof options === "function" ? [undefined, options] : [options, callback];
+const __fsAccess = (value, mode, callback) => {
+  [mode, callback] = __fsCallbackArgs(mode, callback);
+  __fsErrorOnlyCallback(
+    () => { __fsPath(value); __fsMode(mode); },
+    () => __fsAccessSync(value, mode),
+    callback,
+  );
+};
+const __fsStat = (value, options, callback) => {
+  [options, callback] = __fsCallbackArgs(options, callback);
+  __fsCallback(
+    () => { __fsPath(value); __fsOptions(options, ["bigint", "throwIfNoEntry"]); },
+    () => __fsStatSync(value, options),
+    callback,
+  );
+};
+const __fsLstat = (value, options, callback) => {
+  [options, callback] = __fsCallbackArgs(options, callback);
+  __fsCallback(
+    () => { __fsPath(value); __fsOptions(options, ["bigint", "throwIfNoEntry"]); },
+    () => __fsLstatSync(value, options),
+    callback,
+  );
+};
+const __fsRealpath = (value, options, callback) => {
+  [options, callback] = __fsCallbackArgs(options, callback);
+  __fsCallback(
+    () => __fsPath(value),
+    () => __fsRealpathSync(value),
+    callback,
+  );
+};
+const __fsReadFile = (value, options, callback) => {
+  [options, callback] = __fsCallbackArgs(options, callback);
+  __fsCallback(
+    () => __fsPath(value),
+    () => __fsReadFileSync(value, options),
+    callback,
+  );
+};
+const __fsMkdir = (value, options, callback) => {
+  [options, callback] = __fsCallbackArgs(options, callback);
+  __fsCallback(
+    () => {
+      __fsPath(value);
+      // A number is the mode, which `mkdirSync` validates but does not apply.
+      if (typeof options !== "number") __fsOptions(options, ["recursive"]);
+    },
+    () => __fsMkdirSync(value, options),
+    callback,
+  );
+};
+globalThis.__fsPromises = {
+  // The promise form validates inside the promise, so an argument error
+  // rejects instead of throwing. Workerd makes the same split, because a
+  // caller of a promise API has no synchronous frame to catch.
+  async access(...args) { return __fsAccessSync(...args); },
+  async mkdir(...args) { return __fsMkdirSync(...args); },
+  async stat(...args) { return __fsStatSync(...args); },
+  async lstat(...args) { return __fsLstatSync(...args); },
+  async realpath(...args) { return __fsRealpathSync(...args); },
+  async readFile(...args) { return __fsReadFileSync(...args); },
+};
+const __fsSurface = {
+  Stats: __FsStats,
+  constants: __fsConstants,
+  promises: globalThis.__fsPromises,
+  accessSync: __fsAccessSync,
+  access: __fsAccess,
+  existsSync: __fsExistsSync,
+  mkdirSync: __fsMkdirSync,
+  statSync: __fsStatSync,
+  lstatSync: __fsLstatSync,
+  realpathSync: __fsRealpathSync,
+  readFileSync: __fsReadFileSync,
+  stat: __fsStat,
+  lstat: __fsLstat,
+  realpath: __fsRealpath,
+  readFile: __fsReadFile,
+  mkdir: __fsMkdir,
+};
+globalThis.__fs = new Proxy(__fsSurface, { get: (target, p) => {
+  if (Reflect.has(target, p)) return Reflect.get(target, p);
+  if (["readdirSync", "readlinkSync"].includes(p)) return __enoent;
+  // Writable file contents and every mutation remain explicit unsupported
+  // surfaces until a failing application seam requires them.
+  if (typeof p !== "string") return undefined;
+  return globalThis.__nodeStubFor("node:fs." + p);
 }});
 const __bridgeResponseStream = (body, requestControllers) => {
   const streamId = __response_stream_create();

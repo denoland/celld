@@ -20,6 +20,22 @@ fn malformed(what: &str) -> Error {
     Error::Other(format!("bundle: {what}").into())
 }
 
+fn split_data_and_footer(bundle: &[u8]) -> Result<(&[u8], &[u8])> {
+    if bundle.len() < 8 {
+        return Err(malformed("shorter than its trailer"));
+    }
+    let (rest, magic) = bundle.split_at(bundle.len() - 4);
+    if magic != MAGIC {
+        return Err(malformed("bad magic"));
+    }
+    let (rest, len_bytes) = rest.split_at(rest.len() - 4);
+    let len = u32::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
+    if rest.len() < len {
+        return Err(malformed("footer overruns the object"));
+    }
+    Ok(rest.split_at(rest.len() - len))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BundleRow {
     pub cell: String,
@@ -76,19 +92,7 @@ pub fn encode(entries: &[BundleEntry]) -> Result<Vec<u8>> {
 
 /// The rows, from a complete bundle object.
 pub fn decode_rows(bundle: &[u8]) -> Result<Vec<BundleRow>> {
-    if bundle.len() < 8 {
-        return Err(malformed("shorter than its trailer"));
-    }
-    let (rest, magic) = bundle.split_at(bundle.len() - 4);
-    if magic != MAGIC {
-        return Err(malformed("bad magic"));
-    }
-    let (rest, len_bytes) = rest.split_at(rest.len() - 4);
-    let len = u32::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
-    if rest.len() < len {
-        return Err(malformed("footer overruns the object"));
-    }
-    let mut footer = &rest[rest.len() - len..];
+    let (_, mut footer) = split_data_and_footer(bundle)?;
     let mut rows = Vec::new();
     while !footer.is_empty() {
         if footer.len() < 2 {
@@ -121,12 +125,14 @@ pub fn decode_rows(bundle: &[u8]) -> Result<Vec<BundleRow>> {
 
 /// One row's verbatim L0 bytes out of a complete bundle object.
 pub fn slice<'a>(bundle: &'a [u8], row: &BundleRow) -> Result<&'a [u8]> {
-    let start = row.offset as usize;
+    let (data, _) = split_data_and_footer(bundle)?;
+    let start = usize::try_from(row.offset).map_err(|_| malformed("row overflows"))?;
+    let len = usize::try_from(row.len).map_err(|_| malformed("row overflows"))?;
     let end = start
-        .checked_add(row.len as usize)
+        .checked_add(len)
         .ok_or_else(|| malformed("row overflows"))?;
-    if end > bundle.len() {
-        return Err(malformed("row overruns the object"));
+    if end > data.len() {
+        return Err(malformed("row overruns the data section"));
     }
-    Ok(&bundle[start..end])
+    Ok(&data[start..end])
 }

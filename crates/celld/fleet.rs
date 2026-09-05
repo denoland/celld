@@ -8,7 +8,7 @@
 
 //! Production bucket deployment adapters reused by the clean-sheet host.
 
-use crate::bucket::{Bucket, CasVerdict};
+use crate::bucket::{Bucket, StorageProbeVerdict};
 use crate::deploy;
 use crate::js::{ModuleSource, WorkerConfigOptions};
 use crate::ownership_store::NodeLeaseWire;
@@ -261,46 +261,57 @@ async fn probe_storage(out: &mut Output, bucket: &Bucket, read_only: bool) -> an
     }
 }
 
-/// Test the conditional write before a node serves, and refuse to start
-/// when the store proves it cannot fence.
+/// Test the required conditional writes and ranged reads before a node serves,
+/// and refuse to start when the store proves it cannot support celld.
 ///
 /// The two probe outcomes get different answers on purpose. A violation
-/// is a property of the store: it never clears, and a node that serves
-/// anyway can share a cell with a second owner. Refusing to start turns
-/// the restart loop such a store otherwise produces into one message.
+/// is a property of the store: it never clears. A node that serves anyway can
+/// share a cell with another owner or fail when it reads stored cell data.
+/// Refusing to start reports the permanent problem before either failure.
 ///
-/// An ambiguous error is not that. `put_cas` runs with retries off, so a
-/// single slow or dropped connection at boot answers `Err`. The lease
-/// machinery already handles a transient fault, and a node must not
-/// refuse to start over one.
+/// An ambiguous error is not that. `put_cas` runs with transport retries off,
+/// so a slow or dropped connection answers `Err`. The complete probe retries
+/// with a fresh key twice, then preserves the existing warn-and-serve result.
 ///
 /// `managed` reports the refusal to the Managed Control Plane, the way
 /// [`validate_managed_bucket`] reports its own failures. Without it an
 /// enrolled installation that refuses to serve leaves only local stderr
 /// behind, so the operator who most needs the reason cannot read it.
 pub async fn probe_storage_before_serving(bucket: &Bucket, managed: bool) -> anyhow::Result<()> {
-    match bucket.probe_cas_steps().await {
-        Ok(CasVerdict::Conformant) => Ok(()),
-        Ok(CasVerdict::Violation(reason)) => {
-            if managed {
-                crate::control_plane::report_managed_runtime_state(
-                    crate::control_plane::ManagedRuntimeState::StorageContractViolated,
+    const ATTEMPTS: usize = 3;
+    for attempt in 1..=ATTEMPTS {
+        match bucket.probe_startup_storage_steps().await {
+            Ok(StorageProbeVerdict::Conformant) => return Ok(()),
+            Ok(StorageProbeVerdict::Violation(reason)) => {
+                if managed {
+                    crate::control_plane::report_managed_runtime_state(
+                        crate::control_plane::ManagedRuntimeState::StorageContractViolated,
+                    );
+                }
+                bail!(
+                    "the bucket does not keep the storage contract, so celld cannot serve cells \
+                     safely on it: {reason}. Set CELLD_STORAGE_PROBE=0 to start without this test"
+                )
+            }
+            Err(error) if attempt < ATTEMPTS => {
+                tracing::warn!(
+                    attempt,
+                    attempts = ATTEMPTS,
+                    error = format!("{error:#}"),
+                    "could not verify the bucket storage contract; retrying"
                 );
             }
-            bail!(
-                "the bucket does not keep the conditional-write contract, so celld cannot own \
-                 cells safely on it: {reason}. Set CELLD_STORAGE_PROBE=0 to start without this \
-                 test"
-            )
-        }
-        Err(error) => {
-            tracing::warn!(
-                error = format!("{error:#}"),
-                "could not verify the bucket conditional write; starting anyway"
-            );
-            Ok(())
+            Err(error) => {
+                tracing::warn!(
+                    attempts = ATTEMPTS,
+                    error = format!("{error:#}"),
+                    "could not verify the bucket storage contract; starting anyway"
+                );
+                return Ok(());
+            }
         }
     }
+    unreachable!("the storage probe loop always returns on its last attempt")
 }
 
 pub async fn diagnose(
@@ -445,13 +456,18 @@ async fn diagnose_checks(
             .load
             .in_use_bytes
             .map_or_else(|| "unknown".to_string(), |bytes| bytes.to_string());
+        let owned_cells = node
+            .load
+            .owned_cells
+            .map_or_else(|| "unknown".to_string(), |cells| cells.to_string());
         out.row(&Check::ok(
             format!("peer {} at {}", node.node, node.addr),
             format!(
-                "(signed direct probe) protocol={} resident_cells={} \
+                "(signed direct probe) protocol={} owned_cells={} resident_cells={} \
                  websockets={} rss_bytes={} in_use_bytes={} cpu_percent={:.2} fds={}/{} \
                  pressured={} shed_cells={} restoring={} load_age_ms={}",
                 node.peer_protocol,
+                owned_cells,
                 node.load.resident_cells,
                 node.load.host_websockets,
                 rss_bytes,
@@ -535,7 +551,7 @@ pub(crate) fn resolve_storage_location(
             .filter(|value| !value.trim().is_empty())
     };
     if bucket.is_none() {
-        *bucket = env("CELLD_BUCKET").map(|value| value.trim_start_matches("s3://").to_string());
+        *bucket = crate::cli_options::bucket_from_environment();
     }
     if endpoint.is_none() {
         *endpoint = env("S3_ENDPOINT");
@@ -545,6 +561,11 @@ pub(crate) fn resolve_storage_location(
         .or_else(|| env("AWS_REGION"))
         .or_else(|| env("AWS_DEFAULT_REGION"))
         .unwrap_or_else(|| "us-east-1".to_string())
+}
+
+#[cfg(all(test, celld_internal_tests))]
+mod internal_tests {
+    include!(env!("CELLD_INTERNAL_FLEET_TESTS"));
 }
 
 pub async fn run_deploy(arguments: Vec<String>) -> anyhow::Result<()> {
@@ -726,8 +747,26 @@ async fn load_worker_at_pointer(
     }
     crate::protocol::validate_required_features(&manifest.required_features)?;
     crate::protocol::validate_queue_manifest(&manifest)?;
+    let prefix = &pointer.prefix;
+    let mut fetched =
+        futures_util::future::try_join_all(manifest.modules.iter().map(|module| async move {
+            let key = format!("{prefix}/{}", module.name);
+            let bytes = get_bytes(bucket, &key).await?;
+            module.verify(&bytes)?;
+            anyhow::Ok((module, bytes))
+        }))
+        .await?;
     let src = match manifest.main_module.as_deref() {
-        Some(main) => get_string(bucket, &format!("{}/{main}", pointer.prefix)).await?,
+        Some(main) => {
+            let position = fetched
+                .iter()
+                .position(|(module, _)| module.name == main)
+                .with_context(|| {
+                    format!("main module {main:?} is absent from the manifest module list")
+                })?;
+            let (_, bytes) = fetched.remove(position);
+            String::from_utf8(bytes.into()).context("deployment main module is not UTF-8")?
+        }
         None if manifest.assets.is_some() => {
             // Ingress is handled by the immutable asset resolver. Keeping a
             // synthetic Worker makes the runtime construction path uniform
@@ -737,18 +776,6 @@ async fn load_worker_at_pointer(
         }
         None => bail!("deployment has neither a main module nor assets"),
     };
-    let prefix = &pointer.prefix;
-    let fetched = futures_util::future::try_join_all(
-        manifest
-            .modules
-            .iter()
-            .filter(|module| manifest.main_module.as_deref() != Some(module.name.as_str()))
-            .map(|module| async move {
-                let key = format!("{prefix}/{}", module.name);
-                anyhow::Ok((module, get_bytes(bucket, &key).await?))
-            }),
-    )
-    .await?;
     let mut modules = Vec::new();
     for (module, bytes) in fetched {
         let entry = match module.kind {

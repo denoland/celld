@@ -58,6 +58,9 @@ pub enum Error {
     /// Underlying I/O error.
     #[error("io error: {0}")]
     Io(#[from] io::Error),
+    /// The object store refused the credential (HTTP 403).
+    #[error("the object store refused the credential")]
+    Forbidden,
 
     /// Any other error not yet given a dedicated variant.
     #[error("{0}")]

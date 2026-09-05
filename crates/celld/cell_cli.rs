@@ -122,6 +122,11 @@ pub(crate) fn list_options_from_arguments(
         }
     }
     options.bounds.validate()?;
+    if let Some(class) = options.class.as_deref() {
+        if class.contains(':') || !celld_logic::cell::valid_cell_scope(class) {
+            bail!("a cell class must use ASCII letters, digits, and `_ - . $`, not {class:?}");
+        }
+    }
     if let Some(after) = options.bounds.after.as_deref() {
         if !celld_logic::cell::valid_cell_scope(after) {
             bail!("--after takes a cell scope this command printed, not {after:?}");
@@ -202,10 +207,14 @@ async fn run_list(arguments: Vec<String>) -> anyhow::Result<()> {
     });
     let started = std::time::Instant::now();
     let class = options.class.clone();
+    let prefix = class
+        .as_deref()
+        .map_or_else(|| "cells/".to_string(), |class| format!("cells/{class}:"));
 
     let listed = list(&mut out, &options.bounds, |resume, want| {
         let store = &store;
         let class = class.clone();
+        let prefix = prefix.clone();
         // The store resumes from a child of `cells/`, while the cursor an
         // operator sees is the scope. The two differ by the prefix, and
         // passing the scope raw silently matches nothing, which reads as a
@@ -218,7 +227,7 @@ async fn run_list(arguments: Vec<String>) -> anyhow::Result<()> {
         };
         async move {
             let page = store
-                .common_prefixes_page("cells/", start_after.as_deref(), token, want)
+                .common_prefixes_page(&prefix, start_after.as_deref(), token, want)
                 .await
                 .context("enumerate Durable Object instances")?;
             Ok(Page {

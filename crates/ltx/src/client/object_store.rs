@@ -30,12 +30,17 @@ use std::sync::Arc;
 
 use chrono::{DateTime, SecondsFormat};
 use futures_util::stream::{StreamExt, TryStreamExt};
-use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
+use object_store::aws::{
+    AmazonS3, AmazonS3Builder, AmazonS3ConfigKey, AwsAuthorizer, AwsCredential,
+};
+use object_store::client::HttpRequestBody;
 use object_store::path::Path as ObjPath;
 use object_store::{
-    Attribute, AttributeValue, Attributes, ClientOptions, ObjectStore, PutMultipartOptions,
-    PutOptions, PutPayload, RetryConfig,
+    Attribute, AttributeValue, Attributes, ClientOptions, GetOptions, GetRange, ObjectStore,
+    PutMultipartOptions, PutOptions, PutPayload, RetryConfig,
 };
+
+use crate::paged::RangeReader;
 
 use crate::error::{Error, Result};
 use crate::ltx::{self, FileInfo};
@@ -283,6 +288,12 @@ impl ObjectStoreConfig {
     /// Pod Identity, and instance metadata from the process environment. Set
     /// both fields to keep a caller's own credentials authoritative.
     pub fn build_store(&self) -> Result<Arc<dyn ObjectStore>> {
+        Ok(self.build_s3()?)
+    }
+
+    /// The concrete S3 store, kept beside the erased one so the paged fault
+    /// path can borrow its credential.
+    fn build_s3(&self) -> Result<Arc<AmazonS3>> {
         if self.bucket.is_empty() {
             return Err(Error::Other("s3: bucket name is required".into()));
         }
@@ -545,6 +556,9 @@ fn match_filebase(host: &str) -> Option<String> {
 /// s3/replica_client.go:322-477), so construction is infallible and race-free.
 pub struct ObjectStoreClient {
     store: tokio::sync::OnceCell<Arc<dyn ObjectStore>>,
+    /// The concrete store when this client built its own; `with_store`
+    /// leaves it empty, and the paged reader is then unavailable.
+    s3: tokio::sync::OnceCell<Arc<AmazonS3>>,
     config: ObjectStoreConfig,
 }
 
@@ -562,6 +576,7 @@ impl ObjectStoreClient {
     pub fn new(config: ObjectStoreConfig) -> Self {
         ObjectStoreClient {
             store: tokio::sync::OnceCell::new(),
+            s3: tokio::sync::OnceCell::new(),
             config,
         }
     }
@@ -573,6 +588,7 @@ impl ObjectStoreClient {
         cell.set(store).ok();
         ObjectStoreClient {
             store: cell,
+            s3: tokio::sync::OnceCell::new(),
             config,
         }
     }
@@ -580,8 +596,104 @@ impl ObjectStoreClient {
     /// Get-or-build the inner store, once.
     async fn store(&self) -> Result<&Arc<dyn ObjectStore>> {
         self.store
-            .get_or_try_init(|| async { self.config.build_store() })
+            .get_or_try_init(|| async {
+                let s3 = self.config.build_s3()?;
+                self.s3.set(s3.clone()).ok();
+                Ok(s3 as Arc<dyn ObjectStore>)
+            })
             .await
+    }
+
+    /// A blocking ranged reader over this client's objects for the paged
+    /// VFS. It snapshots the store's credential now (an async fetch on the
+    /// caller's runtime) so each fault can sign its own request on whatever
+    /// thread SQLite is on, with no runtime in the loop.
+    pub async fn blocking_range_reader(&self) -> Result<Box<dyn RangeReader>> {
+        let config = &self.config;
+        // Only native S3 is read by a signed request of our own; any other
+        // store — the deterministic simulation's, a directory, memory —
+        // is read through the store on a helper thread.
+        let store = self.store().await?;
+        if !store.to_string().starts_with("AmazonS3") {
+            return Ok(Box::new(StoreRangeReader::new(
+                store.clone(),
+                config.path.clone(),
+            )));
+        }
+        // celld's per-cell clients share one pre-built store (`with_store`),
+        // so there is no concrete store to borrow a provider from; the static
+        // keys the config carries are the credential. Only an ambient
+        // credential chain needs the provider, and that needs a store this
+        // client built itself.
+        let mut provider = None;
+        let credential = if !config.access_key_id.is_empty() {
+            Arc::new(AwsCredential {
+                key_id: config.access_key_id.clone(),
+                secret_key: config.secret_access_key.clone(),
+                token: (!config.session_token.is_empty()).then(|| config.session_token.clone()),
+            })
+        } else {
+            self.store().await?;
+            let s3 = self.s3.get().ok_or_else(|| {
+                Error::Other(
+                    "paged reads over an ambient credential chain need a store this client built"
+                        .into(),
+                )
+            })?;
+            provider = Some(s3.credentials().clone());
+            s3.credentials()
+                .get_credential()
+                .await
+                .map_err(map_os_error)?
+        };
+        let region = if config.region.is_empty() {
+            DEFAULT_REGION.to_string()
+        } else {
+            config.region.clone()
+        };
+        // Mirror the store's own addressing so the signed host matches what
+        // the bucket expects: virtual-hosted unless path-style was forced.
+        let base = if config.endpoint.is_empty() {
+            format!("https://{}.s3.{region}.amazonaws.com", config.bucket)
+        } else if config.force_path_style {
+            format!(
+                "{}/{}",
+                config.endpoint.trim_end_matches('/'),
+                config.bucket
+            )
+        } else {
+            let (scheme, host) = config
+                .endpoint
+                .split_once("://")
+                .ok_or_else(|| Error::Other("s3: endpoint has no scheme".into()))?;
+            format!(
+                "{scheme}://{}.{}",
+                config.bucket,
+                host.trim_end_matches('/')
+            )
+        };
+        let tls = ureq::tls::TlsConfig::builder()
+            .disable_verification(config.skip_verify)
+            .build();
+        // A fault runs on the caller's thread — for the actor's queries the
+        // node's core — so this budget is how long one slow object read can
+        // stall every cell on the node. A normal fault is 65-200 ms; 10 s is
+        // fifty times that, and the single retry below bounds a stall at
+        // about 20 s instead of the 90 s three 30 s attempts allowed.
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(FAULT_TIMEOUT))
+            .http_status_as_error(false)
+            .tls_config(tls)
+            .build()
+            .new_agent();
+        Ok(Box::new(S3RangeReader {
+            credential: std::sync::RwLock::new(credential),
+            provider,
+            region,
+            base,
+            prefix: config.path.clone(),
+            agent,
+        }))
     }
 
     /// Returns whether the replica epoch prefix contains an object.
@@ -618,6 +730,24 @@ impl ObjectStoreClient {
     /// Root prefix for delete-all: `{path}/`. (s3/replica_client.go:1114).
     fn root_prefix(&self) -> String {
         format!("{}/", self.config.path)
+    }
+
+    /// The highest transaction any level holds, from one listing of the
+    /// whole path. A caller that only needs the watermark, such as a log
+    /// recovery deciding which gathered rows the bucket already covers, pays
+    /// one round trip here instead of one per level.
+    pub async fn max_txid_all_levels(&self) -> Result<TXID> {
+        let store = self.store().await?;
+        let prefix = ObjPath::from(self.root_prefix());
+        let mut listed = store.list(Some(&prefix));
+        let mut max = TXID(0);
+        while let Some(meta) = listed.try_next().await.map_err(map_os_error)? {
+            let name = meta.location.filename().unwrap_or("");
+            if let Ok((_, max_txid)) = ltx::parse_filename(name) {
+                max = max.max(max_txid);
+            }
+        }
+        Ok(max)
     }
 }
 
@@ -708,6 +838,34 @@ impl ReplicaClient for ObjectStoreClient {
         Ok(bytes.to_vec())
     }
 
+    async fn read_range(
+        &self,
+        level: i32,
+        min_txid: TXID,
+        max_txid: TXID,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>> {
+        let store = self.store().await?;
+        let key = ObjPath::from(self.ltx_key(level, min_txid, max_txid));
+        let options = GetOptions {
+            range: Some(GetRange::Bounded(offset..offset.saturating_add(len))),
+            ..Default::default()
+        };
+        let result = match store.get_opts(&key, options).await {
+            Ok(r) => r,
+            Err(object_store::Error::NotFound { .. }) => {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("replica: get range {key}: not found"),
+                )));
+            }
+            Err(e) => return Err(map_os_error(e)),
+        };
+        let bytes = result.bytes().await.map_err(map_os_error)?;
+        Ok(bytes.to_vec())
+    }
+
     async fn write_ltx_file(
         &self,
         level: i32,
@@ -754,19 +912,35 @@ impl ReplicaClient for ObjectStoreClient {
                 .put_multipart_opts(&key, options)
                 .await
                 .map_err(|e| Error::Other(format!("replica: upload to {key}: {e}").into()))?;
-            // Upload in fixed-size parts (each ≥ 5 MiB except possibly the last,
-            // matching object_store's part-size requirement).
-            for chunk in data.chunks(part_size.max(MULTIPART_THRESHOLD)) {
-                upload
-                    .put_part(PutPayload::from(chunk.to_vec()))
-                    .await
-                    .map_err(|e| {
-                        Error::Other(format!("replica: upload part to {key}: {e}").into())
-                    })?;
+            // Keep every fallible step inside one result. Otherwise, a new
+            // early return can leave completed parts in the storage service.
+            let upload_result: Result<()> = async {
+                // Upload in fixed-size parts (each ≥ 5 MiB except possibly the
+                // last, matching object_store's part-size requirement).
+                for chunk in data.chunks(part_size.max(MULTIPART_THRESHOLD)) {
+                    upload
+                        .put_part(PutPayload::from(chunk.to_vec()))
+                        .await
+                        .map_err(|e| {
+                            Error::Other(format!("replica: upload part to {key}: {e}").into())
+                        })?;
+                }
+                upload.complete().await.map_err(|e| {
+                    Error::Other(format!("replica: complete upload to {key}: {e}").into())
+                })?;
+                Ok(())
             }
-            upload.complete().await.map_err(|e| {
-                Error::Other(format!("replica: complete upload to {key}: {e}").into())
-            })?;
+            .await;
+            if let Err(upload_error) = upload_result {
+                if let Err(abort_error) = upload.abort().await {
+                    tracing::warn!(
+                        %abort_error,
+                        key = %key,
+                        "failed LTX multipart upload could not be aborted"
+                    );
+                }
+                return Err(upload_error);
+            }
         }
 
         Ok(FileInfo {
@@ -891,4 +1065,220 @@ pub mod internal {
     pub fn map_os_error(error: object_store::Error) -> Error {
         super::map_os_error(error)
     }
+}
+
+/// Bytes the SigV4 canonical URI leaves unencoded, plus the segment
+/// delimiter: A-Z a-z 0-9 `-` `.` `_` `~` and `/`.
+const KEY_ENCODE_SET: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~')
+    .remove(b'/');
+
+/// One ranged read's budget on the fault path (see the agent below).
+const FAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The paged VFS's fault-path reader: a SigV4-signed ranged GET over a
+/// blocking socket. See [`RangeReader`] for why it must not touch a runtime.
+///
+/// The credential is the snapshot taken at activation; a credential that
+/// rotates during a long residency makes later faults fail with 403, which
+/// surfaces as an I/O error on that read. Refreshing it needs the async
+/// provider and belongs to a re-activation, not to a fault.
+/// The fault path over any [`ObjectStore`] that is not native S3: the
+/// deterministic simulation's store, a directory, a memory store. Reads run
+/// on one helper thread with its own runtime; the calling thread blocks on
+/// the reply, which is the fault path's contract. The helper is a thread,
+/// not a task on any caller's runtime, so the same-runtime deadlocks that
+/// sank every bridge on the fleet do not apply (`refresh_aws_credential`
+/// takes the same shape).
+pub struct StoreRangeReader {
+    requests: std::sync::mpsc::Sender<RangeRequest>,
+    prefix: String,
+}
+
+struct RangeRequest {
+    key: String,
+    offset: u64,
+    len: u64,
+    reply: std::sync::mpsc::Sender<Result<Vec<u8>>>,
+}
+
+impl StoreRangeReader {
+    pub fn new(store: Arc<dyn ObjectStore>, prefix: String) -> Self {
+        let (requests, inbox) = std::sync::mpsc::channel::<RangeRequest>();
+        std::thread::Builder::new()
+            .name("paged-store-reader".into())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("paged store reader runtime");
+                for request in inbox {
+                    let path = ObjPath::from(request.key);
+                    let range = request.offset..request.offset + request.len;
+                    let out = runtime
+                        .block_on(store.get_range(&path, range))
+                        .map(|bytes| bytes.to_vec())
+                        .map_err(map_os_error);
+                    let _ = request.reply.send(out);
+                }
+            })
+            .expect("spawn the paged store reader");
+        Self { requests, prefix }
+    }
+}
+
+impl RangeReader for StoreRangeReader {
+    fn read_range(&self, info: &FileInfo, offset: u64, len: u64) -> Result<Vec<u8>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let filename = ltx::format_filename(info.min_txid, info.max_txid);
+        let key = format!("{}/{:04x}/{filename}", self.prefix, info.level);
+        let (reply, inbox) = std::sync::mpsc::channel();
+        let stopped = || Error::Other("the paged store reader stopped".into());
+        self.requests
+            .send(RangeRequest {
+                key,
+                offset,
+                len,
+                reply,
+            })
+            .map_err(|_| stopped())?;
+        inbox.recv().map_err(|_| stopped())?
+    }
+}
+
+pub struct S3RangeReader {
+    credential: std::sync::RwLock<Arc<AwsCredential>>,
+    /// The store's provider when the credential came from an ambient chain
+    /// (STS, instance roles), which rotates; `None` for static keys.
+    provider: Option<object_store::aws::AwsCredentialProvider>,
+    region: String,
+    base: String,
+    prefix: String,
+    agent: ureq::Agent,
+}
+
+impl S3RangeReader {
+    fn get(&self, url: &str, offset: u64, len: u64) -> Result<Vec<u8>> {
+        let mut signed = http::Request::builder()
+            .method("GET")
+            .uri(url)
+            .header("range", format!("bytes={offset}-{}", offset + len - 1))
+            .body(HttpRequestBody::empty())
+            .map_err(|e| Error::Other(format!("paged: build request: {e}").into()))?;
+        let credential = self.credential.read().unwrap().clone();
+        AwsAuthorizer::new(&credential, "s3", &self.region).authorize(&mut signed, None);
+        let mut request = self.agent.get(url);
+        for (name, value) in signed.headers() {
+            // ureq sets Host from the URL itself, identically to the signed
+            // value; setting it again is refused.
+            if name != http::header::HOST {
+                let value = value
+                    .to_str()
+                    .map_err(|e| Error::Other(format!("paged: header: {e}").into()))?;
+                request = request.header(name.as_str(), value);
+            }
+        }
+        let mut response = request
+            .call()
+            .map_err(|e| Error::Io(std::io::Error::other(format!("paged get: {e}"))))?;
+        if response.status() == http::StatusCode::FORBIDDEN {
+            return Err(Error::Forbidden);
+        }
+        if response.status() != http::StatusCode::PARTIAL_CONTENT {
+            // S3's error body names the code and, for a signature mismatch,
+            // the canonical request it computed — the only way to see it.
+            let status = response.status();
+            let detail = response
+                .body_mut()
+                .with_config()
+                .limit(8192)
+                .read_to_string()
+                .unwrap_or_default();
+            // Not transient: the retry below is for transport errors only.
+            return Err(Error::Other(
+                format!("paged get: {status} for range {offset}+{len} of {url}: {detail}").into(),
+            ));
+        }
+        let body = response
+            .body_mut()
+            .with_config()
+            // ureq's limit is exclusive; the length check below is the real
+            // bound.
+            .limit(len + 1)
+            .read_to_vec()
+            .map_err(|e| Error::Io(std::io::Error::other(format!("paged body: {e}"))))?;
+        if body.len() as u64 != len {
+            return Err(Error::Io(std::io::Error::other(format!(
+                "paged get: short range body {} of {len}",
+                body.len()
+            ))));
+        }
+        Ok(body)
+    }
+}
+
+impl RangeReader for S3RangeReader {
+    fn read_range(&self, info: &FileInfo, offset: u64, len: u64) -> Result<Vec<u8>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let filename = ltx::format_filename(info.min_txid, info.max_txid);
+        // SigV4's canonical URI percent-encodes every byte outside the
+        // unreserved set — a `:` in a cell name is `%3A` — and R2 canonicalizes
+        // what it receives. Signing the raw path therefore signs a different
+        // string than the bucket checks (every fault a 403), so the path is
+        // encoded before it is signed, and sent encoded.
+        let key = format!("{}/{:04x}/{filename}", self.prefix, info.level);
+        let key = percent_encoding::utf8_percent_encode(&key, KEY_ENCODE_SET);
+        let url = format!("{}/{key}", self.base);
+        // A transport hiccup on a 4KiB read is cheap to retry; a status
+        // failure is not transient and returns at once.
+        let mut attempt = 0;
+        let mut refreshed = false;
+        loop {
+            match self.get(&url, offset, len) {
+                Ok(body) => return Ok(body),
+                // A rotated ambient credential fails with 403; take a fresh
+                // one from the provider once, then treat a second 403 as
+                // final.
+                Err(Error::Forbidden) if !refreshed && self.provider.is_some() => {
+                    refreshed = true;
+                    match refresh_aws_credential(self.provider.as_ref().unwrap()) {
+                        Some(fresh) => *self.credential.write().unwrap() = fresh,
+                        None => return Err(Error::Forbidden),
+                    }
+                }
+                Err(error) if attempt < 1 && matches!(error, Error::Io(_)) => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(100 * attempt));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+/// Fetches a fresh credential from an ambient provider, from a thread that
+/// is not on any runtime: the fault path runs on whatever thread SQLite is
+/// on, which may be a runtime worker where `block_on` panics, so the async
+/// provider is driven on a helper thread with its own runtime.
+pub fn refresh_aws_credential(
+    provider: &object_store::aws::AwsCredentialProvider,
+) -> Option<Arc<AwsCredential>> {
+    let provider = provider.clone();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        runtime.block_on(provider.get_credential()).ok()
+    })
+    .join()
+    .ok()
+    .flatten()
 }

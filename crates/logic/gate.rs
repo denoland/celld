@@ -36,21 +36,15 @@
 //! delivery attempt takes it. Modelling it twice bought nothing and cost the
 //! two structures agreeing.
 //!
-//! # Why acquiring cannot fail
+//! # Acquiring and releasing a hold
 //!
-//! [`acquire`](InputGate::acquire) panics if another event holds the gate,
-//! and that is not optimism. Acquiring happens *during* an event, and an
-//! event only runs because a delivery point found the gate open. So a second
-//! event cannot be running to acquire second. Nested blocks within one event
-//! are counted, not refused, because that event already holds it.
+//! [`acquire`](InputGate::acquire) refuses an event while another event
+//! holds the gate. The shell queues the refused caller and retries when
+//! the gate opens. Nested holds within one event are counted, so releasing
+//! an inner hold does not admit another event into the outer section.
 //!
-//! This property is what makes the mechanism small, and losing it is what
-//! wedged cells before: while acquiring was asynchronous, a cell could
-//! deliver a second event in the window between a block starting and the
-//! gate shutting. That event then had to *wait* for a gate held by an event
-//! suspended beneath it on the stack, which nothing could ever release.
-//! Acquiring is therefore synchronous with the JS call that asks for it, and
-//! the panic is what says so.
+//! Abandoning a hold invalidates its event id. A delayed release for that
+//! id changes nothing, even when another event has acquired the gate.
 //!
 //! This is the decision half. The shell owns the delivery points and asks
 //! [`is_open`](InputGate::is_open) at each one; it never decides who runs.
@@ -113,33 +107,39 @@ impl InputGate {
         }
     }
 
-    /// One of `event`'s blocks ended. The gate opens when the last one does.
+    /// One of `event`'s blocks ended. Return true only if it opens the gate.
     ///
-    /// # Panics
-    ///
-    /// If `event` does not hold the gate. Opening a gate somebody else
-    /// depends on is worse than stopping.
-    pub fn release(&mut self, event: EventId) {
-        match self.holder {
-            Some(holder) if holder == event => {}
-            Some(holder) => panic!("input gate held by event {holder}, released by {event}"),
-            None => panic!("input gate released by {event} while open"),
+    /// A callback can finish after its hold was abandoned, including after
+    /// another event took the gate. That stale release changes nothing:
+    /// panicking can abort the process from a JS callback, and decrementing
+    /// the new holder's count would admit events into its critical section.
+    #[must_use]
+    pub fn release(&mut self, event: EventId) -> bool {
+        if self.holder != Some(event) {
+            return false;
         }
         self.outstanding -= 1;
         if self.outstanding == 0 {
             self.holder = None;
+            return true;
         }
+        false
     }
 
-    /// The holder died — terminated, cancelled, or timed out — and will
-    /// never release.
+    /// `event` died — terminated, cancelled, or timed out — and will never
+    /// release. Answers whether it was the holder that this call abandoned.
     ///
     /// Without this a request killed mid-block shuts its cell's gate
-    /// forever, and the cell accepts nothing again. JS `finally` covers
-    /// every ordinary exit, a throw included; this covers the one exit that
-    /// runs no JS.
-    pub fn abandon(&mut self) {
+    /// forever, and the cell accepts nothing again. The event identity is
+    /// required because another event can already be running when the holder
+    /// dies. Abandoning that other event must not open this gate.
+    #[must_use]
+    pub fn abandon(&mut self, event: EventId) -> bool {
+        if self.holder != Some(event) {
+            return false;
+        }
         self.holder = None;
         self.outstanding = 0;
+        true
     }
 }

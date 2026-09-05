@@ -404,6 +404,7 @@ impl AssetResolver {
                 headers: vec![("content-type".into(), "text/plain; charset=utf-8".into())],
                 websocket: None,
                 write_position: None,
+                observed_position: None,
             });
         }
         let path = url::Url::parse(url).context("invalid assets binding URL")?;
@@ -455,6 +456,7 @@ impl AssetResolver {
                 .collect(),
             websocket: None,
             write_position: None,
+            observed_position: None,
         })
     }
 
@@ -1366,7 +1368,7 @@ fn validate_index(index: &AssetIndex, reference: &AssetManifestRef) -> anyhow::R
     }
     let mut total = 0_u64;
     for (path, entry) in &index.entries {
-        if decode_path(path).as_deref() != Some(path.as_str())
+        if !is_canonical_asset_path(path)
             || path == "/"
             || asset_blob_key(&entry.sha256).is_none()
             || entry.bytes > 25 * 1024 * 1024
@@ -1407,6 +1409,13 @@ fn decode_path(path: &str) -> Option<String> {
         return None;
     }
     Some(decoded)
+}
+
+/// A stored path must survive request-path decoding unchanged. The deployer
+/// uses this same predicate because publishing an index with a second decoded
+/// spelling would make every node reject the complete deployment.
+pub(crate) fn is_canonical_asset_path(path: &str) -> bool {
+    decode_path(path).as_deref() == Some(path)
 }
 
 fn route_pattern_matches(pattern: &str, path: &str) -> bool {

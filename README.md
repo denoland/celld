@@ -2,9 +2,11 @@
 
 Self-hosted, distributed **Durable Objects**.
 
-celld is an open-source daemon that runs Cloudflare Workers and Durable
-Objects on your own machines. Each object is a cell: a named server with
-its own SQLite database. celld stores the long-term state in a bucket
+celld is an open-source daemon that runs a Cloudflare Workers application
+on your own machines: Workers, Durable Objects, KV, Queues, D1, R2,
+Workflows, Cron Triggers, and static assets, deployed from the
+`wrangler.json` that you already have. Each object is a cell: a named
+server with its own SQLite database. celld stores the long-term state in a bucket
 that you own — S3-compatible, Google Cloud Storage, or Azure Blob
 Storage — and needs no serving control plane and no consensus service.
 A cell that nothing is serving costs almost nothing. Learn more at
@@ -32,6 +34,30 @@ Before a takeover restores a cell, celld recovers an open log from the
 prior owner, so the bucket holds the long-term state and nodes stay
 replaceable. See [what celld guarantees](docs/guarantees.md) for the
 complete protocol.
+
+## What runs on celld
+
+celld runs the programmatic Workers platform: the runtime, and each binding
+that Cloudflare builds on Workers and Durable Objects. A KV namespace, a
+queue, a D1 database, a Workflow, and the R2 index are each a cell, so
+they get the same lease, the same replication, and the same failover as a
+Durable Object. Each row links to a project that deploys as-is:
+
+| service | example |
+| --- | --- |
+| Workers: fetch handlers, service bindings, JS RPC, Node.js compat | [`hello`](examples/hello) |
+| Durable Objects: SQLite storage, alarms, hibernating WebSockets | [`counter`](examples/counter) |
+| KV: list, metadata, expiration, bulk import | [`kv`](examples/kv) |
+| Queues: producers, batching consumers, retries, dead letters | [docs](docs/cloudflare-compat.md#queues) |
+| D1: SQL databases, batches, migrations | [`d1`](examples/d1) |
+| R2: reads, writes, lists, multipart uploads | [`r2`](examples/r2) |
+| Workflows: durable steps, sleeps, events, pause and restart | [`workflow`](examples/workflow) |
+| Cron Triggers: one run for each occurrence across the fleet | [`cron`](examples/cron) |
+| Static assets: asset-only or with a Worker, `_headers`, `_redirects` | [docs](docs/cloudflare-compat.md#static-assets) |
+
+A product that needs the Cloudflare network, a GPU, or a browser farm is out
+of scope. The [Cloudflare compatibility](docs/cloudflare-compat.md) page
+lists each gap in the services above.
 
 ## Install
 
@@ -102,6 +128,11 @@ Worker port. Use `celld dev --host IP` to select a different interface. A
 non-loopback IP exposes the Worker listener to the network, and the internal
 operator listener stays on loopback. The command keeps the application state
 in `.celld/dev`, so a later invocation uses the same durable data.
+
+The state also survives a configuration change, and celld does not migrate it,
+so an object can keep a value that the new configuration rejects. The failure
+then looks unrelated to the change. Use `celld dev --clean` to delete
+`.celld/dev` before the server starts and run from an empty local state.
 
 The default display highlights the application URL and hides the node
 warning and information logs. Use `celld dev --logs` to show these logs.
@@ -210,9 +241,9 @@ celld diagnose --bucket s3://my-cells-bucket
 
 The report keeps checking after an individual failure and distinguishes
 expired records, malformed or unsafe advertise addresses, unreachable peers,
-and incompatible protocols. It also prints each node's coarse resident-cell,
-WebSocket, RSS, CPU, file-descriptor, pressure, and shedding sample. Pass one
-or more `--peer NODE_ID` options to restrict the check.
+and incompatible protocols. It also prints each node's coarse owned-cell,
+resident-cell, WebSocket, RSS, CPU, file-descriptor, pressure, and shedding
+sample. Pass one or more `--peer NODE_ID` options to restrict the check.
 
 `celld cell list` lists the Durable Object instances in the fleet bucket:
 
@@ -239,6 +270,9 @@ that owns the database:
 celld d1 migrations apply ledger --bucket s3://my-cells-bucket
 ```
 
+The migration file extension is ASCII case-insensitive, so `.sql` and `.SQL`
+files are migrations. The command ignores a file with a different extension.
+
 `celld kv` reads and writes a deployed KV namespace. Its bulk commands use the
 Wrangler file format, so a Wrangler export can migrate directly into celld:
 
@@ -263,6 +297,18 @@ CELLD_MAX_RESIDENT_CELLS=1000 \
 celld --bucket s3://my-cells-bucket --listen 0.0.0.0:8080 \
   --internal-listen 10.0.0.12:8081 --advertise node-a.internal:8081
 ```
+
+celld balances ownership across the fleet. Every node reads a shared fleet
+sample every five seconds. One node refreshes the sample from the node
+leases, so each refresh reads each lease once for the fleet. The node with
+the most owned cells per unit of weight hands at most 32 hibernated cells
+per sample to the peer that is furthest below its share. A hibernated cell moves as one record write, and
+its parked hibernatable WebSockets close with code 1012 so the clients
+reconnect to the new owner. A resident cell moves only after idle eviction
+hibernates it (`CELLD_IDLE_EVICT_S`). Set `CELLD_PLACEMENT_WEIGHT` to give a
+node a larger or a smaller share than its CPU count, and set
+`CELLD_REBALANCE_INTERVAL_MS=0` to disable balancing. `POST /rebalance/pause`
+on the internal listener of any node pauses the fleet.
 
 celld enables a memory-pressure threshold at 80% of the available memory by
 default. Set `CELLD_MAX_RSS_MB` to change the threshold, or set it to `0` to

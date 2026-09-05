@@ -12,12 +12,22 @@
 //! `scope -> Connection` map: `open` on activate, `close` on evict. The
 //! `scope` column survives from the single-db era and still keys rows, but a
 //! db now holds exactly one cell.
+use anyhow::Context as _;
 use rusqlite::{Connection, OptionalExtension};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+#[cfg(all(test, celld_internal_tests))]
+pub(crate) fn poison_sql_for_test(scope: &str, error: &str) {
+    sql_critical_errors(|errors| {
+        errors
+            .borrow_mut()
+            .insert(scope.to_string(), error.to_string());
+    });
+}
 
 /// The storage of every cell one isolate hosts.
 ///
@@ -57,6 +67,77 @@ pub struct Cells {
 struct OpenCell {
     connection: Connection,
     epoch: u64,
+    backing: StorageBacking,
+    persisted_position: u64,
+    /// The committed-write position the first event of this activation
+    /// started at. celld's own activation writes sit at or below it, so a
+    /// read-only answer reports what it observed only above it, and a reader
+    /// on a cell no handler has written asks for no proof.
+    published_position: Option<u64>,
+}
+
+enum StorageBacking {
+    File {
+        path: String,
+        root_scope: String,
+        facet_path: Vec<String>,
+    },
+    Embedded {
+        root_path: String,
+        root_scope: String,
+        facet_path: Vec<String>,
+        /// The root cell's gate sample, see [`StorageIdentity::root_position`].
+        root_position: u64,
+        root_observed: Option<u64>,
+    },
+}
+
+#[derive(Clone)]
+pub(crate) struct StorageIdentity {
+    pub root_path: String,
+    pub root_scope: String,
+    pub facet_path: Vec<String>,
+    pub epoch: u64,
+    /// A committed-write position of `root_scope`, sampled in the isolate that
+    /// holds the root database.
+    ///
+    /// A facet is not a cell: its writes land in the root cell's database, so
+    /// an egress it raises must pass the root cell's output gate. The facet's
+    /// isolate holds no connection to the root database and therefore cannot
+    /// name a position in the root cell's space, so the sample travels with
+    /// the facet.
+    ///
+    /// The sample is a lower bound, and it stays one: [`flush_embedded`] copies
+    /// the facet's image on a second connection to the root database file, so
+    /// the root cell's own connection never counts those frames and a re-sample
+    /// after the copy reports the same number. Order covers them, not
+    /// arithmetic. The copy commits to the root database file before the egress
+    /// takes its ticket, and the replicator answers a ticket with a sync that
+    /// started after it, so the sync that proves this ticket uploads a file
+    /// that already holds the facet's write.
+    ///
+    /// The position is therefore a coverage claim, not a wait condition: the
+    /// core acknowledges only a proof that reaches it, so a lower bound makes
+    /// the core credit itself with less coverage than the sync obtained, never
+    /// with more.
+    pub root_position: u64,
+    /// What a read-only answer of `root_scope` reports as observed at the same
+    /// moment. A facet's read-only egress carries it, so a commit the facet
+    /// can reveal is held exactly as the root cell's own reader holds it.
+    pub root_observed: Option<u64>,
+}
+
+/// The cell an embedded facet's outbound effects gate against, and the sample
+/// that names what they can reveal. See [`StorageIdentity::root_position`].
+#[derive(Clone)]
+pub(crate) struct RootGate {
+    pub cell: String,
+    /// The epoch the root cell was resident at when the sample was taken. The
+    /// core refuses a ticket that names another epoch, so a facet image that
+    /// outlived a reset cannot acknowledge a discarded write.
+    pub epoch: u64,
+    pub position: u64,
+    pub observed: Option<u64>,
 }
 
 /// A cached `PRAGMA schema_version`, and the two things that can invalidate
@@ -326,6 +407,12 @@ pub fn schema(c: &Connection) -> anyhow::Result<()> {
     c.execute(
         "CREATE TABLE IF NOT EXISTS _cf_METADATA \
          (scope TEXT PRIMARY KEY, actor_name TEXT)",
+        [],
+    )?;
+    c.execute(
+        "CREATE TABLE IF NOT EXISTS _cf_FACETS \
+         (scope TEXT NOT NULL, path TEXT NOT NULL, image BLOB NOT NULL, \
+          PRIMARY KEY(scope,path)) WITHOUT ROWID",
         [],
     )?;
     let alarm_columns = {
@@ -644,27 +731,62 @@ pub fn open(scope: &str, path: &str) -> anyhow::Result<()> {
 }
 
 pub fn open_with_compat(scope: &str, path: &str, sqlite_vec: bool) -> anyhow::Result<()> {
-    open_at_epoch(scope, path, 1, sqlite_vec)
+    open_at_epoch(scope, path, 1, None, sqlite_vec)
 }
 
 /// Open a production cell database with the epoch that authorized the
-/// activation.
+/// activation. A paged restore leaves the file sparse behind a fault-in VFS,
+/// so the activation's `vfs` must reach every connection: a plain open reads
+/// the holes as zeros and SQLite reports a malformed database.
 pub(crate) fn open_at_epoch(
     scope: &str,
     path: &str,
     epoch: u64,
+    vfs: Option<&str>,
     sqlite_vec: bool,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(epoch > 0, "a cell activation epoch must be positive");
-    finish_open(scope, Connection::open(path)?, epoch, sqlite_vec)
+    let connection = match vfs {
+        Some(vfs) => {
+            Connection::open_with_flags_and_vfs(path, rusqlite::OpenFlags::default(), vfs)?
+        }
+        None => Connection::open(path)?,
+    };
+    finish_open(
+        scope,
+        connection,
+        epoch,
+        sqlite_vec,
+        StorageBacking::File {
+            path: path.to_string(),
+            root_scope: scope.to_string(),
+            facet_path: Vec::new(),
+        },
+    )
 }
 
 #[cfg(celld_internal_tests)]
 pub fn open_with_fault_vfs_for_test(scope: &str, path: &str) -> anyhow::Result<()> {
-    finish_open(scope, crate::fault::open_database(path)?, 1, false)
+    finish_open(
+        scope,
+        crate::fault::open_database(path)?,
+        1,
+        false,
+        StorageBacking::File {
+            path: path.to_string(),
+            root_scope: scope.to_string(),
+            facet_path: Vec::new(),
+        },
+    )
 }
 
-fn finish_open(scope: &str, c: Connection, epoch: u64, sqlite_vec: bool) -> anyhow::Result<()> {
+fn finish_open(
+    scope: &str,
+    c: Connection,
+    epoch: u64,
+    sqlite_vec: bool,
+    backing: StorageBacking,
+) -> anyhow::Result<()> {
     if sqlite_vec {
         register_vec0_extension(&c)?;
     }
@@ -700,12 +822,16 @@ fn finish_open(scope: &str, c: Connection, epoch: u64, sqlite_vec: bool) -> anyh
     close_sql_cursors(scope);
     close_sql_statement_cache(scope);
     sql_critical_errors(|errors| errors.borrow_mut().remove(scope));
+    let persisted_position = total_changes(&c) + schema_version(&c);
     dbs(|d| {
         d.borrow_mut().insert(
             scope.to_string(),
             OpenCell {
                 connection: c,
                 epoch,
+                backing,
+                persisted_position,
+                published_position: None,
             },
         )
     });
@@ -745,6 +871,256 @@ fn with_mut<T>(scope: &str, f: impl FnOnce(&mut Connection) -> T) -> Option<T> {
 /// Return the epoch installed with the active cell database.
 pub(crate) fn activation_epoch(scope: &str) -> Option<u64> {
     dbs(|d| d.borrow().get(scope).map(|cell| cell.epoch))
+}
+
+/// The identity a facet of `scope` inherits, including the root cell's gate
+/// sample. A file-backed cell samples its own connection here, which is the
+/// only place a position in the root cell's space can be read; an embedded
+/// scope passes on the sample it was given, because its isolate cannot take
+/// one.
+pub(crate) fn storage_identity(scope: &str) -> Option<StorageIdentity> {
+    let sample = write_position(scope);
+    let observed = observed_position(scope, sample);
+    dbs(|databases| {
+        databases.borrow().get(scope).map(|cell| {
+            let (root_path, root_scope, facet_path, root_position, root_observed) =
+                match &cell.backing {
+                    StorageBacking::File {
+                        path,
+                        root_scope,
+                        facet_path,
+                    } => (
+                        path.clone(),
+                        root_scope.clone(),
+                        facet_path.clone(),
+                        sample.unwrap_or(0),
+                        observed,
+                    ),
+                    StorageBacking::Embedded {
+                        root_path,
+                        root_scope,
+                        facet_path,
+                        root_position,
+                        root_observed,
+                    } => (
+                        root_path.clone(),
+                        root_scope.clone(),
+                        facet_path.clone(),
+                        *root_position,
+                        *root_observed,
+                    ),
+                };
+            StorageIdentity {
+                root_path,
+                root_scope,
+                facet_path,
+                epoch: cell.epoch,
+                root_position,
+                root_observed,
+            }
+        })
+    })
+}
+
+pub(crate) fn is_embedded(scope: &str) -> bool {
+    dbs(|databases| {
+        databases
+            .borrow()
+            .get(scope)
+            .is_some_and(|cell| matches!(cell.backing, StorageBacking::Embedded { .. }))
+    })
+}
+
+/// The gate an event of `scope` must pass, when `scope` is an embedded facet.
+/// `None` for a cell, which gates against itself.
+pub(crate) fn embedded_root_gate(scope: &str) -> Option<RootGate> {
+    dbs(|databases| {
+        let databases = databases.borrow();
+        let cell = databases.get(scope)?;
+        let StorageBacking::Embedded {
+            root_scope,
+            root_position,
+            root_observed,
+            ..
+        } = &cell.backing
+        else {
+            return None;
+        };
+        Some(RootGate {
+            cell: root_scope.clone(),
+            epoch: cell.epoch,
+            position: *root_position,
+            observed: *root_observed,
+        })
+    })
+}
+
+/// Take the root cell's gate sample of a facet that is already open, so the
+/// egress of this call is held against what the root cell had committed when
+/// the call left it, not against what it had committed when the facet first
+/// opened. A parent at another epoch is not refreshed: the facet's image
+/// belongs to the epoch it loaded at, and a ticket that named the new epoch
+/// could acknowledge a write the reset that ended the old one discarded.
+pub(crate) fn refresh_embedded_root(scope: &str, parent: &StorageIdentity) {
+    dbs(|databases| {
+        let mut databases = databases.borrow_mut();
+        let Some(cell) = databases.get_mut(scope) else {
+            return;
+        };
+        if cell.epoch != parent.epoch {
+            return;
+        }
+        if let StorageBacking::Embedded {
+            root_position,
+            root_observed,
+            ..
+        } = &mut cell.backing
+        {
+            *root_position = parent.root_position;
+            *root_observed = parent.root_observed;
+        }
+    });
+}
+
+fn owned_sqlite_data(bytes: &[u8]) -> anyhow::Result<rusqlite::serialize::OwnedData> {
+    let pointer = unsafe { rusqlite::ffi::sqlite3_malloc64(bytes.len() as u64) }.cast::<u8>();
+    let pointer = std::ptr::NonNull::new(pointer)
+        .ok_or_else(|| anyhow::anyhow!("allocate an embedded facet database"))?;
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer.as_ptr(), bytes.len());
+        Ok(rusqlite::serialize::OwnedData::from_raw_nonnull(
+            pointer,
+            bytes.len(),
+        ))
+    }
+}
+
+pub(crate) fn open_embedded(
+    scope: &str,
+    parent: &StorageIdentity,
+    name: &str,
+    sqlite_vec: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(parent.facet_path.len() < 3, "Facet nesting depth limit exceeded. The maximum depth including the root Durable Object is 4.");
+    let mut facet_path = parent.facet_path.clone();
+    facet_path.push(name.to_string());
+    let path = serde_json::to_string(&facet_path)?;
+    let root = Connection::open(&parent.root_path)?;
+    let image = root
+        .query_row(
+            "SELECT image FROM _cf_FACETS WHERE scope=?1 AND path=?2",
+            rusqlite::params![parent.root_scope, path],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()?;
+    let mut connection = Connection::open_in_memory()?;
+    if let Some(image) = image {
+        connection.deserialize(
+            rusqlite::DatabaseName::Main,
+            owned_sqlite_data(&image)?,
+            false,
+        )?;
+        // A runtime incarnation has a unique scope so a continuation from an
+        // aborted instance cannot enter its replacement. The SQLite image is
+        // one logical facet, so move the legacy per-cell keys to that new
+        // scope before application code can read them.
+        let transaction = connection.transaction()?;
+        for table in ["_cf_KV", "_cf_ALARM", "_cf_METADATA"] {
+            transaction.execute(&format!("UPDATE {table} SET scope=?1"), [scope])?;
+        }
+        transaction.commit()?;
+    }
+    finish_open(
+        scope,
+        connection,
+        parent.epoch,
+        sqlite_vec,
+        StorageBacking::Embedded {
+            root_path: parent.root_path.clone(),
+            root_scope: parent.root_scope.clone(),
+            facet_path,
+            root_position: parent.root_position,
+            root_observed: parent.root_observed,
+        },
+    )
+}
+
+/// Copy a facet's private in-memory SQLite image into the root actor database.
+/// This runs before the turn releases its native operations, and again before
+/// an in-handler egress takes its output-gate ticket, so an external effect
+/// cannot overtake the image that produced it.
+pub(crate) fn flush_embedded(scope: &str) {
+    let result = dbs(|databases| -> anyhow::Result<()> {
+        let mut databases = databases.borrow_mut();
+        let Some(cell) = databases.get_mut(scope) else {
+            return Ok(());
+        };
+        let StorageBacking::Embedded {
+            root_path,
+            root_scope,
+            facet_path,
+            ..
+        } = &cell.backing
+        else {
+            return Ok(());
+        };
+        let position = total_changes(&cell.connection) + schema_version(&cell.connection);
+        if position == cell.persisted_position {
+            return Ok(());
+        }
+        let image = without_sql_authorizer(&cell.connection, || {
+            cell.connection.serialize(rusqlite::DatabaseName::Main)
+        })
+        .context("serialize the facet database")?
+        .to_vec();
+        let path = serde_json::to_string(facet_path)?;
+        let root = Connection::open(root_path).context("open the root database")?;
+        root.busy_timeout(std::time::Duration::from_secs(5))?;
+        root.execute(
+            "INSERT INTO _cf_FACETS(scope,path,image) VALUES(?1,?2,?3) \
+             ON CONFLICT(scope,path) DO UPDATE SET image=excluded.image",
+            rusqlite::params![root_scope, path, image],
+        )
+        .context("write the facet database image")?;
+        cell.persisted_position = position;
+        Ok(())
+    });
+    if let Err(error) = result {
+        sql_critical_errors(|errors| {
+            errors
+                .borrow_mut()
+                .entry(scope.to_string())
+                .or_insert_with(|| format!("persist facet storage: {error}"));
+        });
+    }
+}
+
+pub(crate) fn delete_embedded(parent: &StorageIdentity, name: &str) -> anyhow::Result<()> {
+    #[cfg(all(test, celld_internal_tests))]
+    anyhow::ensure!(
+        !crate::js::take_embedded_delete_fault_for_test(),
+        "injected facet image delete failure"
+    );
+    let mut facet_path = parent.facet_path.clone();
+    facet_path.push(name.to_string());
+    let mut root = Connection::open(&parent.root_path)?;
+    let paths = {
+        let mut statement = root.prepare("SELECT path FROM _cf_FACETS WHERE scope=?1")?;
+        let rows = statement.query_map([&parent.root_scope], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let transaction = root.transaction()?;
+    for path in paths {
+        let candidate: Vec<String> = serde_json::from_str(&path)?;
+        if candidate.starts_with(&facet_path) {
+            transaction.execute(
+                "DELETE FROM _cf_FACETS WHERE scope=?1 AND path=?2",
+                rusqlite::params![parent.root_scope, path],
+            )?;
+        }
+    }
+    transaction.commit()?;
+    Ok(())
 }
 
 static NEXT_BATCH_SAVEPOINT: AtomicU64 = AtomicU64::new(1);
@@ -842,17 +1218,87 @@ fn schema_version(connection: &Connection) -> u64 {
         .unwrap_or(0) as u64
 }
 
-/// The cell's committed-write position: SQLite's total completed row changes
-/// plus the schema cookie, monotonic for the life of the activation. The
-/// output gate samples it around a handler to tell a write from a read; the
-/// cookie term makes DDL-only mutations (deleteAll, user DDL) count as
-/// writes. Widened only after the gated-frame flush learned to outlive its
-/// dispatch — before that, counting DDL turned every lazily-CREATE-ing
-/// connect handler into a "writer" whose held frames were silently lost.
-/// `None` when the scope has no open connection (a Worker with no Durable
-/// Object storage).
+/// The cell's committed-write position: SQLite's total completed row changes,
+/// data version, and schema cookie, monotonic for the life of the activation.
+/// The output gate samples it around a handler to tell a write from a read.
+/// The data version detects a facet image committed through its private
+/// connection, and the cookie makes DDL-only mutations count as writes.
+/// Widened only after the gated-frame flush learned to outlive its dispatch —
+/// before that, counting DDL turned every lazily-CREATE-ing connect handler
+/// into a "writer" whose held frames were silently lost. `None` when the scope
+/// has no open connection (a Worker with no Durable Object storage).
 pub fn write_position(scope: &str) -> Option<u64> {
-    with(scope, |c| total_changes(c) + schema_cookie(scope, c))
+    with(scope, |c| {
+        total_changes(c) + data_version(c) + schema_cookie(scope, c)
+    })
+}
+
+/// The committed-write position an event starts at. The first sample of an
+/// activation is also the cell's published baseline: `observed_position`
+/// reports nothing at or below it.
+pub fn event_start_position(scope: &str) -> Option<u64> {
+    let position = write_position(scope)?;
+    dbs(|d| {
+        if let Some(cell) = d.borrow_mut().get_mut(scope) {
+            cell.published_position.get_or_insert(position);
+        }
+    });
+    Some(position)
+}
+
+/// The position a read-only answer observed, given `sample` from
+/// `write_position`: the sample when a handler advanced it past the cell's
+/// published baseline, and `None` otherwise. The caller samples once and
+/// derives the write position from the same value, so the two cannot
+/// disagree.
+pub fn observed_position(scope: &str, sample: Option<u64>) -> Option<u64> {
+    let position = sample?;
+    let published = dbs(|d| {
+        d.borrow()
+            .get(scope)
+            .and_then(|cell| cell.published_position)
+    });
+    match published {
+        Some(published) if position <= published => None,
+        _ => Some(position),
+    }
+}
+
+fn data_version(connection: &Connection) -> u64 {
+    connection
+        .prepare_cached("PRAGMA data_version")
+        .and_then(|mut statement| statement.query_row([], |row| row.get::<_, i64>(0)))
+        .unwrap_or(0) as u64
+}
+
+/// What `storage.sync()` samples in its turn, read together from one open
+/// connection. A ticket built from the position alone would name a position
+/// without its epoch, which a reset can satisfy at the wrong epoch, or a
+/// position inside an open transaction, which no proof can cover.
+pub struct SyncSample {
+    /// Whether the connection is inside an explicit `transaction()` or
+    /// `transactionSync()`. Application SQL cannot open one: the authorizer
+    /// refuses `BEGIN` and `SAVEPOINT`, and the batch savepoints this module
+    /// takes never outlive the op that took them. So a connection outside
+    /// autocommit is exactly a storage transaction a handler has not
+    /// finished.
+    pub in_transaction: bool,
+    /// The cell's committed-write position, as `write_position` reports it.
+    pub position: u64,
+    /// The activation epoch the connection was installed with.
+    pub epoch: u64,
+}
+
+/// The `storage.sync()` sample, or `None` when the scope has no open
+/// connection.
+pub fn sync_sample(scope: &str) -> Option<SyncSample> {
+    dbs(|d| {
+        d.borrow().get(scope).map(|cell| SyncSample {
+            in_transaction: !cell.connection.is_autocommit(),
+            position: total_changes(&cell.connection) + schema_cookie(scope, &cell.connection),
+            epoch: cell.epoch,
+        })
+    })
 }
 
 /// The cell's schema cookie, re-read only when something could have moved it.
@@ -2891,14 +3337,50 @@ pub fn put(scope: &str, key: &str, val: &str) {
     });
 }
 
+/// Run an application-visible storage write and preserve a critical SQLite
+/// failure before another API can reuse the connection. SQLite can end an
+/// explicit transaction when a write returns FULL, IOERR, NOMEM, or
+/// INTERRUPT. The caller can catch that statement error, so every write entry
+/// point must reject a later mutation after the transaction has disappeared.
+fn with_application_storage_write<T>(
+    scope: &str,
+    write: impl FnOnce(&mut Connection) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    require_sql_healthy(scope).map_err(anyhow::Error::msg)?;
+    with_mut(scope, |connection| {
+        let started_in_transaction = !connection.is_autocommit();
+        write(connection).inspect_err(|error| {
+            let result_code = error.chain().find_map(|cause| {
+                let rusqlite::Error::SqliteFailure(failure, _) =
+                    cause.downcast_ref::<rusqlite::Error>()?
+                else {
+                    return None;
+                };
+                Some(failure.extended_code)
+            });
+            if let Some(result_code) = result_code {
+                // SAFETY: the handle belongs to this live connection.
+                let database = unsafe { connection.handle() };
+                record_sqlite_operation_failure(
+                    scope,
+                    database,
+                    started_in_transaction,
+                    result_code,
+                    &error.to_string(),
+                );
+            }
+        })
+    })
+    .unwrap_or_else(|| Err(anyhow::anyhow!("no db for {scope}")))
+}
+
 pub fn put_serialized(scope: &str, key: &str, value: &[u8]) -> anyhow::Result<()> {
-    with(scope, |c| {
+    with_application_storage_write(scope, |c| {
         c.prepare_cached(KV_PUT_SQL)?
             .execute(rusqlite::params![scope, key, value])
             .map(|_| ())
             .map_err(Into::into)
     })
-    .unwrap_or_else(|| Err(anyhow::anyhow!("no db for {scope}")))
 }
 
 /// Atomically apply a multi-key put.
@@ -2937,7 +3419,7 @@ pub fn put_many_serialized(scope: &str, entries: &[(String, Vec<u8>)]) -> anyhow
     if entries.is_empty() {
         return with(scope, |_| ()).ok_or_else(|| anyhow::anyhow!("no db for {scope}"));
     }
-    with_mut(scope, |c| {
+    with_application_storage_write(scope, |c| {
         without_sql_authorizer_mut(c, |c| {
             let write = |c: &Connection| -> anyhow::Result<()> {
                 let mut statement = c.prepare_cached(KV_PUT_SQL)?;
@@ -2956,17 +3438,15 @@ pub fn put_many_serialized(scope: &str, entries: &[(String, Vec<u8>)]) -> anyhow
             Ok(())
         })
     })
-    .unwrap_or_else(|| Err(anyhow::anyhow!("no db for {scope}")))
 }
 
 pub fn delete(scope: &str, key: &str) -> anyhow::Result<bool> {
-    with(scope, |c| {
+    with_application_storage_write(scope, |c| {
         c.prepare_cached(KV_DELETE_SQL)?
             .execute([scope, key])
             .map(|n| n > 0)
             .map_err(Into::into)
     })
-    .unwrap_or_else(|| Err(anyhow::anyhow!("no db for {scope}")))
 }
 
 /// Atomically delete multiple keys and return the number that existed.
@@ -2974,7 +3454,7 @@ pub fn delete_many(scope: &str, keys: &[String]) -> anyhow::Result<usize> {
     if keys.is_empty() {
         return with(scope, |_| 0).ok_or_else(|| anyhow::anyhow!("no db for {scope}"));
     }
-    with_mut(scope, |c| {
+    with_application_storage_write(scope, |c| {
         without_sql_authorizer_mut(c, |c| {
             if !c.is_autocommit() {
                 return with_batch_savepoint(c, |c| {
@@ -2999,7 +3479,6 @@ pub fn delete_many(scope: &str, keys: &[String]) -> anyhow::Result<usize> {
             Ok(deleted)
         })
     })
-    .unwrap_or_else(|| Err(anyhow::anyhow!("no db for {scope}")))
 }
 
 /// List a half-open key range in bytewise SQLite text order.
@@ -3120,14 +3599,13 @@ fn require_sql_healthy(scope: &str) -> Result<(), String> {
     }
 }
 
-fn sqlite_operation_failure(
+fn record_sqlite_operation_failure(
     scope: &str,
     database: *mut rusqlite::ffi::sqlite3,
     started_in_transaction: bool,
     result_code: i32,
-    operation: &str,
-) -> anyhow::Error {
-    let error = sqlite_failure(database, operation);
+    error: &str,
+) {
     // The classification is sans-IO (`celld_logic::sqlite`); only the autocommit
     // read is FFI. Pin the reified codes against rusqlite's at COMPILE time, so
     // a drift is a build error, not a debug-only surprise.
@@ -3146,6 +3624,23 @@ fn sqlite_operation_failure(
                 .or_insert_with(|| error.to_string());
         });
     }
+}
+
+fn sqlite_operation_failure(
+    scope: &str,
+    database: *mut rusqlite::ffi::sqlite3,
+    started_in_transaction: bool,
+    result_code: i32,
+    operation: &str,
+) -> anyhow::Error {
+    let error = sqlite_failure(database, operation);
+    record_sqlite_operation_failure(
+        scope,
+        database,
+        started_in_transaction,
+        result_code,
+        &error.to_string(),
+    );
     error
 }
 
@@ -3524,7 +4019,7 @@ pub fn get_actor_name(scope: &str) -> anyhow::Result<Option<String>> {
 /// ActorCache exposes this distinction internally; compatibility flags decide
 /// which form the public JS deleteAll() operation selects.
 pub fn delete_all_with_alarm(scope: &str, delete_alarm: bool) -> anyhow::Result<()> {
-    let result = with(scope, |c| -> anyhow::Result<()> {
+    let result = with_application_storage_write(scope, |c| -> anyhow::Result<()> {
         let mut statement = c.prepare(
             "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
         )?;
@@ -3560,8 +4055,7 @@ pub fn delete_all_with_alarm(scope: &str, delete_alarm: bool) -> anyhow::Result<
             let _ = c.execute_batch("PRAGMA foreign_keys=ON;");
             result
         })
-    })
-    .unwrap_or_else(|| Err(anyhow::anyhow!("no db for {scope}")));
+    });
     if result.is_ok() && delete_alarm {
         publish_alarm(scope);
     }
@@ -3577,7 +4071,7 @@ pub fn delete_all_with_alarm(scope: &str, delete_alarm: bool) -> anyhow::Result<
 // acking. `None` means the write is deferred inside an explicit transaction;
 // the gate runs at that transaction's commit instead.
 pub fn set_alarm(scope: &str, at_ms: i64) -> anyhow::Result<Option<i64>> {
-    with(scope, |c| {
+    with_application_storage_write(scope, |c| {
         c.execute(
             "INSERT INTO _cf_ALARM(scope,at_ms,retry,counted_retry,generation) \
              VALUES(?1,?2,0,0,random()) \
@@ -3587,8 +4081,7 @@ pub fn set_alarm(scope: &str, at_ms: i64) -> anyhow::Result<Option<i64>> {
         )
         .map(|_| ())
         .map_err(Into::into)
-    })
-    .unwrap_or_else(|| Err(anyhow::anyhow!("no db for {scope}")))?;
+    })?;
     Ok(publish_alarm(scope))
 }
 
@@ -3608,12 +4101,11 @@ pub fn get_alarm(scope: &str) -> Option<i64> {
 }
 
 pub fn delete_alarm(scope: &str) -> anyhow::Result<()> {
-    with(scope, |c| {
+    with_application_storage_write(scope, |c| {
         c.execute("DELETE FROM _cf_ALARM WHERE scope=?1", [scope])
             .map(|_| ())
             .map_err(Into::into)
-    })
-    .unwrap_or_else(|| Err(anyhow::anyhow!("no db for {scope}")))?;
+    })?;
     let _ = publish_alarm(scope); // a delete loosens: never gated
     Ok(())
 }
@@ -3708,10 +4200,27 @@ fn alarm_state(scope: &str) -> Option<(i64, i64)> {
 /// restore time, before the isolate opens the scope's `with` connection. Read
 /// only; the connection is dropped before `spawn_cell` opens the same file.
 /// Returns (due_wall_ms, generation, retry, counted_retry); `None` if unarmed.
-pub fn persisted_alarm(db_path: &str, scope: &str) -> Option<(i64, i64, u32, u32)> {
-    let connection =
-        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
+/// A paged restore's file is sparse behind `vfs`; a plain open of it reads
+/// holes and silently drops the alarm. That open must also be read-write:
+/// faulting hydrates the local file, which a read-only descriptor cannot.
+pub fn persisted_alarm(
+    db_path: &str,
+    scope: &str,
+    vfs: Option<&str>,
+) -> Option<(i64, i64, u32, u32)> {
+    let connection = match vfs {
+        Some(vfs) => rusqlite::Connection::open_with_flags_and_vfs(
+            db_path,
+            rusqlite::OpenFlags::default(),
+            vfs,
+        )
+        .ok()?,
+        None => rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .ok()?,
+    };
     connection
         .query_row(
             "SELECT at_ms,generation,retry,counted_retry FROM _cf_ALARM WHERE scope=?1",

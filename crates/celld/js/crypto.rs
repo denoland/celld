@@ -30,6 +30,42 @@ fn rsa_jwk_encode(value: &rsa::BigUint) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_bytes_be())
 }
 
+fn rsa_oaep_padding(hash: &str, label: Vec<u8>) -> Result<rsa::Oaep> {
+    let label = if label.is_empty() {
+        None
+    } else {
+        Some(
+            String::from_utf8(label)
+                .map_err(|_| anyhow!("RSA-OAEP labels must contain UTF-8 bytes"))?,
+        )
+    };
+    macro_rules! padding {
+        ($digest:ty) => {
+            match label {
+                Some(label) => rsa::Oaep::new_with_label::<$digest, _>(label),
+                None => rsa::Oaep::new::<$digest>(),
+            }
+        };
+    }
+    Ok(match hash {
+        "SHA-1" => padding!(sha1::Sha1),
+        "SHA-256" => padding!(sha2::Sha256),
+        "SHA-384" => padding!(sha2::Sha384),
+        "SHA-512" => padding!(sha2::Sha512),
+        other => return Err(anyhow!("unsupported RSA-OAEP hash {other}")),
+    })
+}
+
+fn digest_bytes(hash: &str, data: &[u8]) -> Result<Vec<u8>> {
+    use sha2::Digest as _;
+    Ok(match hash {
+        "SHA-256" => sha2::Sha256::digest(data).to_vec(),
+        "SHA-384" => sha2::Sha384::digest(data).to_vec(),
+        "SHA-512" => sha2::Sha512::digest(data).to_vec(),
+        other => return Err(anyhow!("unsupported ECDSA hash {other}")),
+    })
+}
+
 /// Algorithm OIDs, so a parsed key can say what it is. Same constants as
 /// Node's, via deno's `ext/node_crypto/keys.rs`.
 const RSA_ENCRYPTION_OID: rsa::pkcs8::ObjectIdentifier =
@@ -44,7 +80,6 @@ const SECP521R1_OID: rsa::pkcs8::ObjectIdentifier =
     rsa::pkcs8::ObjectIdentifier::new_unwrap("1.3.132.0.35");
 
 /// The NIST curves celld reads, as (OID, Node's `namedCurve`, JWK `crv`).
-/// Signing stays on P-256; these three are for parsing and JWK.
 const EC_CURVES: &[(rsa::pkcs8::ObjectIdentifier, &str, &str)] = &[
     (SECP256R1_OID, "prime256v1", "P-256"),
     (SECP384R1_OID, "secp384r1", "P-384"),
@@ -232,9 +267,8 @@ fn describe_key(der: &[u8], private: bool) -> Result<ParsedKey> {
             })
         }
         EC_PUBLIC_KEY_OID => {
-            // celld carries P-256 only, matching its Web Crypto surface. A
-            // P-384 key parses far enough to be named, then is refused here
-            // rather than silently treated as something else.
+            // Resolve the curve from the key, so every later operation uses
+            // the matching implementation instead of assuming P-256.
             let curve = curve.ok_or_else(|| anyhow!("EC key has no named curve"))?;
             let named = EC_CURVES
                 .iter()
@@ -618,7 +652,7 @@ fn crypto_operation(operation: &str, args: &serde_json::Value) -> Result<serde_j
         }
         "rsa-pkcs1-sign" => {
             use rsa::pkcs8::DecodePrivateKey;
-            use rsa::signature::{SignatureEncoding, Signer};
+            use rsa::signature::{RandomizedSigner, SignatureEncoding};
             let key = crypto_bytes(args, "key")?;
             let data = crypto_bytes(args, "data")?;
             let hash = args
@@ -630,7 +664,11 @@ fn crypto_operation(operation: &str, args: &serde_json::Value) -> Result<serde_j
             macro_rules! sign {
                 ($hash:ty) => {
                     rsa::pkcs1v15::SigningKey::<$hash>::new(key)
-                        .sign(&data)
+                        // PKCS#1 v1.5 produces the same signature with or
+                        // without randomness. The RNG blinds the private-key
+                        // operation, so its timing does not expose the key.
+                        .try_sign_with_rng(&mut rand::rngs::OsRng, &data)
+                        .map_err(|_| anyhow!("RSA signing failed"))?
                         .to_vec()
                 };
             }
@@ -644,27 +682,61 @@ fn crypto_operation(operation: &str, args: &serde_json::Value) -> Result<serde_j
         }
         // Node's ECDSA signatures are DER by default (`dsaEncoding`), where
         // Web Crypto's are raw r||s.
-        "p256-sign-der" => {
-            use p256::ecdsa::signature::Signer;
-            use p256::pkcs8::DecodePrivateKey;
+        "ec-sign-der" => {
             let key = crypto_bytes(args, "key")?;
             let data = crypto_bytes(args, "data")?;
-            let key = p256::ecdsa::SigningKey::from_pkcs8_der(&key)
-                .map_err(|_| anyhow!("invalid P-256 PKCS#8 key"))?;
-            let signature: p256::ecdsa::Signature = key.sign(&data);
-            Ok(serde_json::json!({ "bytes": signature.to_der().as_bytes().to_vec() }))
+            let hash = args
+                .get("hash")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("SHA-256");
+            let digest = digest_bytes(hash, &data)?;
+            let parsed = describe_key(&key, true)?;
+            let crv = ec_jwk_crv(&parsed)?;
+            macro_rules! sign {
+                ($c:ident) => {{
+                    use $c::ecdsa::signature::hazmat::PrehashSigner;
+                    use $c::pkcs8::DecodePrivateKey;
+                    let secret = $c::SecretKey::from_pkcs8_der(&key)
+                        .map_err(|_| anyhow!("invalid {crv} PKCS#8 key"))?;
+                    let key = $c::ecdsa::SigningKey::from_slice(secret.to_bytes().as_slice())
+                        .map_err(|_| anyhow!("invalid {crv} signing key"))?;
+                    let signature: $c::ecdsa::Signature = key
+                        .sign_prehash(&digest)
+                        .map_err(|_| anyhow!("could not sign with {crv}"))?;
+                    signature.to_der().as_bytes().to_vec()
+                }};
+            }
+            Ok(serde_json::json!({ "bytes": ec_curve!(crv, sign) }))
         }
-        "p256-verify-der" => {
-            use p256::ecdsa::signature::Verifier;
-            use p256::pkcs8::DecodePublicKey;
+        "ec-verify-der" => {
             let key = crypto_bytes(args, "key")?;
             let data = crypto_bytes(args, "data")?;
             let signature = crypto_bytes(args, "signature")?;
-            let key = p256::ecdsa::VerifyingKey::from_public_key_der(&key)
-                .map_err(|_| anyhow!("invalid P-256 SPKI key"))?;
-            let ok = p256::ecdsa::DerSignature::try_from(signature.as_slice())
-                .map(|signature| key.verify(&data, &signature).is_ok())
-                .unwrap_or(false);
+            let hash = args
+                .get("hash")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("SHA-256");
+            let digest = digest_bytes(hash, &data)?;
+            let parsed = describe_key(&key, false)?;
+            let crv = ec_jwk_crv(&parsed)?;
+            macro_rules! verify {
+                ($c:ident) => {{
+                    use $c::ecdsa::signature::hazmat::PrehashVerifier;
+                    use $c::elliptic_curve::sec1::ToEncodedPoint;
+                    use $c::pkcs8::DecodePublicKey;
+                    let public = $c::PublicKey::from_public_key_der(&key)
+                        .map_err(|_| anyhow!("invalid {crv} SPKI key"))?;
+                    let point = public.to_encoded_point(false);
+                    let key = $c::ecdsa::VerifyingKey::from_sec1_bytes(point.as_bytes())
+                        .map_err(|_| anyhow!("invalid {crv} verifying key"))?;
+                    $c::ecdsa::DerSignature::try_from(signature.as_slice())
+                        .ok()
+                        .and_then(|signature| $c::ecdsa::Signature::try_from(signature).ok())
+                        .map(|signature| key.verify_prehash(&digest, &signature).is_ok())
+                        .unwrap_or(false)
+                }};
+            }
+            let ok = ec_curve!(crv, verify);
             Ok(serde_json::json!({ "ok": ok }))
         }
         "p256-verify" => {
@@ -710,44 +782,107 @@ fn crypto_operation(operation: &str, args: &serde_json::Value) -> Result<serde_j
             };
             Ok(serde_json::json!({ "ok": ok }))
         }
-        "rsa-generate" => {
-            use rsa::traits::{PrivateKeyParts, PublicKeyParts};
-            let mut rng = rand::rngs::OsRng;
-            let mut private = rsa::RsaPrivateKey::new(&mut rng, 2048)?;
-            private.precompute()?;
-            let public = rsa::RsaPublicKey::from(&private);
-            let public_jwk = serde_json::json!({
-                "kty": "RSA",
-                "n": rsa_jwk_encode(public.n()),
-                "e": rsa_jwk_encode(public.e()),
-                "alg": "RSA-OAEP-256",
-                "ext": true,
-                "key_ops": ["encrypt"],
-            });
-            let private_jwk = serde_json::json!({
-                "kty": "RSA",
-                "n": rsa_jwk_encode(private.n()),
-                "e": rsa_jwk_encode(private.e()),
-                "d": rsa_jwk_encode(private.d()),
-                "p": rsa_jwk_encode(&private.primes()[0]),
-                "q": rsa_jwk_encode(&private.primes()[1]),
-                "alg": "RSA-OAEP-256",
-                "ext": true,
-                "key_ops": ["decrypt"],
-            });
-            Ok(serde_json::json!({ "publicKey": public_jwk, "privateKey": private_jwk }))
+        // Web Crypto RSA-PSS. Signing takes the caller's salt length —
+        // the spec makes it an explicit parameter — and verification
+        // recovers the salt length from the signature, which accepts
+        // every salt the signer could legally have used.
+        "rsa-pss-sign" => {
+            use rsa::pkcs8::DecodePrivateKey;
+            use rsa::signature::RandomizedSigner;
+            use rsa::signature::SignatureEncoding;
+            let key = crypto_bytes(args, "key")?;
+            let data = crypto_bytes(args, "data")?;
+            let salt_len = args
+                .get("saltLength")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as usize;
+            let hash = args
+                .get("hash")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("SHA-256");
+            let key = rsa::RsaPrivateKey::from_pkcs8_der(&key)
+                .map_err(|_| anyhow!("invalid RSA private key"))?;
+            macro_rules! sign {
+                ($hash:ty) => {
+                    rsa::pss::SigningKey::<$hash>::new_with_salt_len(key, salt_len)
+                        .sign_with_rng(&mut rand::rngs::OsRng, &data)
+                        .to_vec()
+                };
+            }
+            let bytes = match hash {
+                "SHA-256" => sign!(sha2::Sha256),
+                "SHA-384" => sign!(sha2::Sha384),
+                "SHA-512" => sign!(sha2::Sha512),
+                other => return Err(anyhow!("unsupported RSA sign hash {other}")),
+            };
+            Ok(serde_json::json!({ "bytes": bytes }))
+        }
+        "rsa-pss-verify" => {
+            use rsa::pkcs8::DecodePublicKey;
+            use rsa::signature::Verifier;
+            let key = crypto_bytes(args, "key")?;
+            let data = crypto_bytes(args, "data")?;
+            let signature = crypto_bytes(args, "signature")?;
+            let hash = args
+                .get("hash")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("SHA-256")
+                .to_string();
+            let key = rsa::RsaPublicKey::from_public_key_der(&key)
+                .map_err(|_| anyhow!("invalid RSA SPKI key"))?;
+            macro_rules! verify {
+                ($hash:ty) => {{
+                    let key = rsa::pss::VerifyingKey::<$hash>::new(key);
+                    rsa::pss::Signature::try_from(signature.as_slice())
+                        .map(|signature| key.verify(&data, &signature).is_ok())
+                        .unwrap_or(false)
+                }};
+            }
+            let ok = match hash.as_str() {
+                "SHA-256" => verify!(sha2::Sha256),
+                "SHA-384" => verify!(sha2::Sha384),
+                "SHA-512" => verify!(sha2::Sha512),
+                other => return Err(anyhow!("unsupported RSA verify hash {other}")),
+            };
+            Ok(serde_json::json!({ "ok": ok }))
+        }
+        "rsa-oaep-encrypt" => {
+            use rsa::pkcs8::DecodePublicKey;
+            let key = crypto_bytes(args, "key")?;
+            let data = crypto_bytes(args, "data")?;
+            let label = crypto_bytes(args, "label")?;
+            let hash = args
+                .get("hash")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("SHA-256");
+            let key = rsa::RsaPublicKey::from_public_key_der(&key)
+                .map_err(|_| anyhow!("invalid RSA public key"))?;
+            let bytes = key.encrypt(
+                &mut rand::rngs::OsRng,
+                rsa_oaep_padding(hash, label)?,
+                &data,
+            )?;
+            Ok(serde_json::json!({ "bytes": bytes }))
         }
         "rsa-oaep-decrypt" => {
-            let jwk = args.get("jwk").ok_or_else(|| anyhow!("missing RSA JWK"))?;
-            let n = rsa_jwk_uint(jwk, "n")?;
-            let e = rsa_jwk_uint(jwk, "e")?;
-            let d = rsa_jwk_uint(jwk, "d")?;
-            let p = rsa_jwk_uint(jwk, "p")?;
-            let q = rsa_jwk_uint(jwk, "q")?;
-            let mut key = rsa::RsaPrivateKey::from_components(n, e, d, vec![p, q])?;
-            key.precompute()?;
+            use rsa::pkcs8::DecodePrivateKey;
+            let key = crypto_bytes(args, "key")?;
             let data = crypto_bytes(args, "data")?;
-            let bytes = key.decrypt(rsa::Oaep::new::<sha2::Sha256>(), &data)?;
+            let label = crypto_bytes(args, "label")?;
+            let hash = args
+                .get("hash")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("SHA-256");
+            let key = rsa::RsaPrivateKey::from_pkcs8_der(&key)
+                .map_err(|_| anyhow!("invalid RSA private key"))?;
+            // The plain decrypt API omits RSA blinding. Use the randomized
+            // API so repeated attacker-controlled ciphertexts do not expose
+            // the private key through operation timing.
+            let bytes = key.decrypt_blinded(
+                &mut rand::rngs::OsRng,
+                rsa_oaep_padding(hash, label)?,
+                &data,
+            )?;
             Ok(serde_json::json!({ "bytes": bytes }))
         }
         // `createPublicKey` / `createPrivateKey`. Accepts every input shape
@@ -842,10 +977,16 @@ fn crypto_operation(operation: &str, args: &serde_json::Value) -> Result<serde_j
                         .to_vec()
                 }
                 "ec" => {
-                    use p256::pkcs8::DecodePrivateKey;
-                    let key = p256::SecretKey::from_pkcs8_der(&der)
-                        .map_err(|_| anyhow!("invalid P-256 private key"))?;
-                    key.public_key().to_public_key_der()?.as_bytes().to_vec()
+                    let crv = ec_jwk_crv(&parsed)?;
+                    macro_rules! public_from_private {
+                        ($c:ident) => {{
+                            use $c::pkcs8::DecodePrivateKey;
+                            let key = $c::SecretKey::from_pkcs8_der(&der)
+                                .map_err(|_| anyhow!("invalid {crv} private key"))?;
+                            key.public_key().to_public_key_der()?.as_bytes().to_vec()
+                        }};
+                    }
+                    ec_curve!(crv, public_from_private)
                 }
                 "ed25519" => {
                     use ed25519_dalek::pkcs8::DecodePrivateKey;
@@ -1264,6 +1405,23 @@ pub(super) fn op_webcrypto_digest(
     webcrypto_return_bytes(scope, rv, &digest);
 }
 
+// Signing and verification must accept the same HMAC hashes. Separate match
+// tables let MD5 and SHA-224 reach signing while verification returned no JS
+// value, so keep the set in one dispatcher and supply only the operation.
+macro_rules! dispatch_hmac_digest {
+    ($name:expr, $operation:ident) => {
+        match $name {
+            "MD5" => $operation!(md5::Md5),
+            "SHA-1" => $operation!(sha1::Sha1),
+            "SHA-224" => $operation!(sha2::Sha224),
+            "SHA-256" => $operation!(sha2::Sha256),
+            "SHA-384" => $operation!(sha2::Sha384),
+            "SHA-512" => $operation!(sha2::Sha512),
+            _ => return,
+        }
+    };
+}
+
 pub(super) fn op_webcrypto_hmac_sign(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -1286,15 +1444,7 @@ pub(super) fn op_webcrypto_hmac_sign(
             mac.finalize().into_bytes().to_vec()
         }};
     }
-    let signature = match algorithm.as_str() {
-        "MD5" => sign!(md5::Md5),
-        "SHA-1" => sign!(sha1::Sha1),
-        "SHA-224" => sign!(sha2::Sha224),
-        "SHA-256" => sign!(sha2::Sha256),
-        "SHA-384" => sign!(sha2::Sha384),
-        "SHA-512" => sign!(sha2::Sha512),
-        _ => return,
-    };
+    let signature = dispatch_hmac_digest!(algorithm.as_str(), sign);
     webcrypto_return_bytes(scope, rv, &signature);
 }
 
@@ -1506,44 +1656,61 @@ pub(super) fn op_webcrypto_hmac_verify(
             mac.verify_slice(&signature).is_ok()
         }};
     }
-    let valid = match algorithm.as_str() {
-        "SHA-1" => verify!(sha1::Sha1),
-        "SHA-256" => verify!(sha2::Sha256),
-        "SHA-384" => verify!(sha2::Sha384),
-        "SHA-512" => verify!(sha2::Sha512),
-        _ => return,
-    };
+    let valid = dispatch_hmac_digest!(algorithm.as_str(), verify);
     rv.set(v8::Boolean::new(scope, valid).into());
 }
 
-/// AES-GCM for the Web Crypto ops. Two key sizes and three IV lengths, all
-/// instantiated explicitly because the crate fixes both in the type.
+/// AES-GCM for the Web Crypto ops. The key, IV, and tag sizes are instantiated
+/// explicitly because the crate fixes all three in the type.
 ///
 /// Web Crypto permits any IV length; 96 bits is the recommendation, not the
 /// rule, so 128-bit IVs are accepted too. For anything but 96 bits the crate
 /// derives J0 by GHASHing the IV, per NIST SP 800-38D. An empty IV is
 /// rejected in the JS layer, by name, before reaching here.
-fn webcrypto_aes_gcm(key: &[u8], iv: &[u8], data: &[u8], encrypting: bool) -> Option<Vec<u8>> {
-    use aes_gcm::aead::consts::{U12, U16};
-    use aes_gcm::aead::{Aead, KeyInit};
+fn webcrypto_aes_gcm(
+    key: &[u8],
+    iv: &[u8],
+    additional_data: &[u8],
+    data: &[u8],
+    tag_size: usize,
+    encrypting: bool,
+) -> Option<Vec<u8>> {
+    use aes_gcm::aead::consts::{U12, U13, U14, U15, U16};
+    use aes_gcm::aead::{Aead, KeyInit, Payload};
     macro_rules! run {
-        ($aes:ty, $size:ty) => {{
-            type Gcm = aes_gcm::AesGcm<$aes, $size>;
+        ($aes:ty, $nonce_size:ty, $tag_size:ty) => {{
+            type Gcm = aes_gcm::AesGcm<$aes, $nonce_size, $tag_size>;
             let cipher = <Gcm as KeyInit>::new_from_slice(key).ok()?;
-            let nonce = aes_gcm::Nonce::<$size>::from_slice(iv);
+            let nonce = aes_gcm::Nonce::<$nonce_size>::from_slice(iv);
+            let payload = Payload {
+                msg: data,
+                aad: additional_data,
+            };
             if encrypting {
-                cipher.encrypt(nonce, data)
+                cipher.encrypt(nonce, payload)
             } else {
-                cipher.decrypt(nonce, data)
+                cipher.decrypt(nonce, payload)
             }
             .ok()?
         }};
     }
+    macro_rules! by_tag {
+        ($aes:ty, $nonce_size:ty) => {
+            match tag_size {
+                12 => run!($aes, $nonce_size, U12),
+                13 => run!($aes, $nonce_size, U13),
+                14 => run!($aes, $nonce_size, U14),
+                15 => run!($aes, $nonce_size, U15),
+                16 => run!($aes, $nonce_size, U16),
+                _ => return None,
+            }
+        };
+    }
     macro_rules! by_iv {
         ($aes:ty) => {
             match iv.len() {
-                12 => run!($aes, U12),
-                16 => run!($aes, U16),
+                12 => by_tag!($aes, U12),
+                16 => by_tag!($aes, U16),
                 _ => return None,
             }
         };
@@ -1655,10 +1822,9 @@ fn webcrypto_aes_block_mode(
     }
 }
 
-/// `$$aesEncrypt(mode, key, iv, data)` and `$$aesDecrypt(mode, key, iv, data)`
-/// -> Uint8Array. `mode` is the Web Crypto algorithm name, so one pair of ops
-/// serves AES-GCM, AES-CBC and AES-CTR. Every argument the three modes need is
-/// bytes, so none of them marshals through JSON.
+/// `$$aesEncrypt(mode, key, iv, data, additionalData, tagBytes)` and its
+/// decrypt counterpart return a Uint8Array. The last two arguments apply only
+/// to AES-GCM, so one typed-array op pair still serves all three AES modes.
 fn op_webcrypto_aes(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -1666,13 +1832,15 @@ fn op_webcrypto_aes(
     encrypting: bool,
 ) {
     let mode = args.get(0).to_rust_string_lossy(scope);
-    let (Some(key), Some(iv), Some(data)) = (
+    let (Some(key), Some(iv), Some(data), Some(additional_data)) = (
         view_bytes(args.get(1)),
         view_bytes(args.get(2)),
         view_bytes(args.get(3)),
+        view_bytes(args.get(4)),
     ) else {
         return;
     };
+    let tag_size = args.get(5).uint32_value(scope).unwrap_or(16) as usize;
     let throw = |scope: &mut v8::PinScope, error: anyhow::Error| {
         let message = v8::String::new(scope, &format!("crypto: {error}")).unwrap();
         let exception = v8::Exception::error(scope, message);
@@ -1690,7 +1858,9 @@ fn op_webcrypto_aes(
         // no such JS-side error, so they report the cause instead of returning
         // `undefined` for the JS layer to misread.
         AesMode::Gcm => {
-            if let Some(out) = webcrypto_aes_gcm(&key, &iv, &data, encrypting) {
+            if let Some(out) =
+                webcrypto_aes_gcm(&key, &iv, &additional_data, &data, tag_size, encrypting)
+            {
                 webcrypto_return_bytes(scope, rv, &out);
             }
         }

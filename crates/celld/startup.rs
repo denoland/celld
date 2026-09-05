@@ -313,16 +313,7 @@ fn is_dns_name(host: &str) -> bool {
 }
 
 pub fn validate_peer_id(value: &str) -> anyhow::Result<()> {
-    if value.is_empty()
-        || value.len() > 200
-        || value.contains('/')
-        || value.contains('?')
-        || value.contains('#')
-        || value.chars().any(char::is_whitespace)
-    {
-        return Err(anyhow!(
-            "--peer must be one node-session ID without a path or whitespace"
-        ));
-    }
-    Ok(())
+    crate::machine::validate_node_name(value).map_err(|_| {
+        anyhow!("--peer must be one safe node-session ID without a path or whitespace")
+    })
 }

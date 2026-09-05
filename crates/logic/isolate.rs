@@ -28,6 +28,28 @@
 /// Never a thread id — an isolate has no thread.
 pub type IsolateId = usize;
 
+/// One constructed V8 heap in this node process.
+///
+/// Unlike [`IsolateId`], this value is not a pool index. The shell allocates a
+/// fresh value for every worker that it installs, so two script pools and two
+/// application generations cannot make distinct heaps look identical to
+/// node-wide pressure policy.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct HeapId(u64);
+
+impl HeapId {
+    /// Construct an opaque heap identity at a shell or simulator boundary.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl std::fmt::Display for HeapId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// What the shell observes about one isolate.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IsolateLoad {

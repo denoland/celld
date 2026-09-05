@@ -9,6 +9,7 @@
 use crate::bucket::Bucket;
 use crate::{deploy, fleet};
 use anyhow::{bail, Context as _};
+use glob::{MatchOptions, Pattern};
 use notify::{RecursiveMode, Watcher as _};
 use nu_ansi_term::{Color, Style};
 use sha2::{Digest as _, Sha256};
@@ -31,10 +32,72 @@ pub fn open_local_bucket(database: &Path) -> anyhow::Result<Bucket> {
     Bucket::open_dev(database)
 }
 
+#[derive(Debug)]
 struct Options {
     project: Option<PathBuf>,
+    clean: bool,
+    stack: StackOptions,
+}
+
+/// The local state directory of one project.
+///
+/// `--clean` deletes this directory and everything below it. The path is
+/// private and the only constructor takes the project directory that `run`
+/// resolved, so a command-line value can never become the target of the
+/// delete. A newtype carries that rule instead of a comment, because a
+/// `PathBuf` field would let a later caller pass any path and lose nothing at
+/// compile time.
+#[derive(Debug)]
+struct DevState {
+    path: PathBuf,
+}
+
+impl DevState {
+    /// The project-relative location of the local state, and also the suffix
+    /// that `discard` requires before it deletes.
+    const DIRECTORY: &'static str = ".celld/dev";
+
+    fn for_project(project: &Path) -> Self {
+        Self {
+            path: project.join(Self::DIRECTORY),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Delete the local state so the next run starts from nothing. The answer
+    /// reports whether a directory was present, because the console line for
+    /// an empty project must not claim that data was removed.
+    ///
+    /// An absent directory is the wanted result of this command, so it is not
+    /// an error.
+    #[allow(clippy::disallowed_methods)] // Local development state is an operator-owned host path.
+    fn discard(&self) -> anyhow::Result<bool> {
+        // The constructor already guarantees this. The check stays because it
+        // is the tripwire for a future constructor that takes a path: a
+        // recursive delete must never widen by accident.
+        anyhow::ensure!(
+            self.path.ends_with(Self::DIRECTORY),
+            "refusing to discard {}, which is not a celld dev state directory",
+            self.path.display()
+        );
+        match std::fs::remove_dir_all(&self.path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error)
+                .with_context(|| format!("discard local state directory {}", self.path.display())),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct StackOptions {
     listener: SocketAddr,
     logs: bool,
+    watch: bool,
+    watch_ignores: Vec<Pattern>,
 }
 
 struct Store {
@@ -103,12 +166,13 @@ impl Console {
 
 struct ProjectWatcher {
     project: PathBuf,
+    ignored: Vec<Pattern>,
     _watcher: notify::RecommendedWatcher,
     changes: mpsc::UnboundedReceiver<notify::Result<notify::Event>>,
 }
 
 impl ProjectWatcher {
-    fn new(project: &Path) -> anyhow::Result<Self> {
+    fn new(project: &Path, ignored: Vec<Pattern>) -> anyhow::Result<Self> {
         let (sender, changes) = mpsc::unbounded_channel();
         let mut watcher = notify::recommended_watcher(move |event| {
             let _ = sender.send(event);
@@ -119,6 +183,7 @@ impl ProjectWatcher {
             .with_context(|| format!("watch the project directory {}", project.display()))?;
         Ok(Self {
             project: project.to_path_buf(),
+            ignored,
             _watcher: watcher,
             changes,
         })
@@ -148,12 +213,7 @@ impl ProjectWatcher {
                 .await
                 .context("the project watcher stopped")?
             {
-                Ok(event)
-                    if event
-                        .paths
-                        .iter()
-                        .any(|path| !ignored_project_path(&self.project, path)) =>
-                {
+                Ok(event) if relevant_project_event(&self.project, &event, &self.ignored) => {
                     return Ok(())
                 }
                 Ok(_) => {}
@@ -163,7 +223,24 @@ impl ProjectWatcher {
     }
 }
 
-fn ignored_project_path(project: &Path, path: &Path) -> bool {
+fn relevant_project_event(project: &Path, event: &notify::Event, ignored: &[Pattern]) -> bool {
+    // A read is not a change. The inotify backend reports `Access(Open(Any))`
+    // for every file that the bundler and the deploy step read, so a rebuild
+    // produces the events that request the next rebuild and the supervisor
+    // never settles. The path filters cannot close this loop, because the
+    // files that the rebuild reads are the project sources it must watch. A
+    // write still arrives as a `Modify` event, and a `Create` or a `Remove`
+    // event keeps its own kind, so no real change becomes invisible.
+    if matches!(event.kind, notify::EventKind::Access(_)) {
+        return false;
+    }
+    event
+        .paths
+        .iter()
+        .any(|path| !ignored_project_path(project, path, ignored))
+}
+
+fn ignored_project_path(project: &Path, path: &Path, ignored: &[Pattern]) -> bool {
     const IGNORED_DIRECTORIES: &[&str] = &[
         ".cache",
         ".celld",
@@ -175,20 +252,44 @@ fn ignored_project_path(project: &Path, path: &Path) -> bool {
         ".pnpm-store",
         ".svn",
         ".turbo",
+        ".wrangler",
         ".yarn",
         "bower_components",
         "coverage",
         "node_modules",
         "target",
     ];
-    path.strip_prefix(project)
-        .unwrap_or(path)
+    let relative = path.strip_prefix(project).unwrap_or(path);
+    relative
         .components()
         .filter_map(|component| match component {
             std::path::Component::Normal(name) => Some(name),
             _ => None,
         })
         .any(|name| IGNORED_DIRECTORIES.iter().any(|ignored| name == *ignored))
+        || relative.ancestors().any(|candidate| {
+            !candidate.as_os_str().is_empty()
+                && ignored.iter().any(|pattern| {
+                    let options = MatchOptions {
+                        case_sensitive: true,
+                        require_literal_separator: true,
+                        require_literal_leading_dot: true,
+                    };
+                    pattern.matches_path_with(candidate, options)
+                        // A directory creation event arrives before its child
+                        // path. Probe one child so `generated/**` also ignores
+                        // the event that creates `generated` itself.
+                        || pattern.matches_path_with(
+                            &candidate.join("__celld_watch_descendant__"),
+                            options,
+                        )
+                })
+        })
+}
+
+#[cfg(all(test, celld_internal_tests))]
+mod dev_contract {
+    include!(env!("CELLD_INTERNAL_DEV_TESTS"));
 }
 
 struct ShutdownSignals {
@@ -231,10 +332,13 @@ impl ShutdownSignals {
 pub fn print_help() -> anyhow::Result<()> {
     crate::cli_output::Output::new(crate::cli_output::Format::Text).help(
         &format!("celld dev — run an application with persistent local storage\n\n\
-USAGE:\n  celld dev [PROJECT] [--host IP] [--port PORT] [--logs]\n\n\
+USAGE:\n  celld dev [PROJECT] [--host IP] [--port PORT] [--logs] [--no-watch] [--clean]\n\n\
 PROJECT is a directory or a Wrangler config. It defaults to the current\n\
-directory. celld stores all local state in PROJECT/.celld/dev.\n\n\
-OPTIONS:\n  --host IP              Worker listener host (default: 127.0.0.1)\n  --port PORT            Worker listener port (default: {DEFAULT_PORT})\n  --logs                 Show the node warning and information logs\n  -h, --help             Show this help"
+directory. celld stores all local state in PROJECT/.celld/dev, and it keeps\n\
+that state across a restart. A configuration change does not migrate the\n\
+state, so a cell can keep a value that the new configuration rejects. Use\n\
+--clean to start from an empty local state.\n\n\
+OPTIONS:\n  --host IP              Worker listener host (default: 127.0.0.1)\n  --port PORT            Worker listener port (default: {DEFAULT_PORT})\n  --clean                Delete PROJECT/.celld/dev before the server starts\n  --logs                 Show the node warning and information logs\n  --no-watch             Do not rebuild when a project file changes\n  --watch-ignore PATTERN Ignore a project-relative glob; repeat as needed\n  -h, --help             Show this help"
         ),
     )
 }
@@ -243,12 +347,26 @@ fn options_from_arguments(arguments: Vec<String>) -> anyhow::Result<Option<Optio
     let mut project = None;
     let mut host = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let mut port = DEFAULT_PORT;
+    let mut clean = false;
     let mut logs = false;
+    let mut watch = true;
+    let mut watch_ignores = Vec::new();
     let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--help" | "-h" => return Ok(None),
+            "--clean" => clean = true,
             "--logs" => logs = true,
+            "--no-watch" => watch = false,
+            "--watch-ignore" => {
+                let value = arguments
+                    .next()
+                    .context("--watch-ignore requires a value")?;
+                watch_ignores.push(
+                    Pattern::new(&value)
+                        .with_context(|| format!("invalid --watch-ignore pattern {value:?}"))?,
+                );
+            }
             "--host" => {
                 let value = arguments.next().context("--host requires a value")?;
                 host = value
@@ -269,10 +387,18 @@ fn options_from_arguments(arguments: Vec<String>) -> anyhow::Result<Option<Optio
             value => bail!("celld dev accepts one PROJECT, but also received {value:?}"),
         }
     }
+    if !watch && !watch_ignores.is_empty() {
+        bail!("--watch-ignore cannot be used with --no-watch");
+    }
     Ok(Some(Options {
         project,
-        listener: SocketAddr::new(host, port),
-        logs,
+        clean,
+        stack: StackOptions {
+            listener: SocketAddr::new(host, port),
+            logs,
+            watch,
+            watch_ignores,
+        },
     }))
 }
 
@@ -288,26 +414,42 @@ pub async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
     let project = config
         .parent()
         .context("the Wrangler config has no project directory")?;
-    let state = project.join(".celld/dev");
-    prepare_state(&state)?;
+    let state = DevState::for_project(project);
     let console = Console::new();
     console.header();
     console.detail("Project", &config.display().to_string());
-    console.detail("State", &state.display().to_string());
-    if !options.logs {
+    console.detail("State", &state.path().display().to_string());
+    // The delete runs before the directory is recreated, and the console names
+    // the outcome. A developer who reaches for this flag is already unsure
+    // which state the run uses, so a silent delete would answer nothing.
+    if options.clean {
+        let discarded = state.discard()?;
+        console.detail(
+            "Clean",
+            if discarded {
+                "discarded the existing local state"
+            } else {
+                "no local state to discard"
+            },
+        );
+    }
+    prepare_state(state.path())?;
+    if !options.stack.logs {
         console.detail("Logs", "hidden (use --logs)");
+    }
+    if !options.stack.watch {
+        console.detail("Watch", "disabled");
     }
 
     let project_hash = format!(
         "{:x}",
         Sha256::digest(project.as_os_str().as_encoded_bytes())
     );
-    let store = open_store(&state, &console).await?;
+    let store = open_store(state.path(), &console).await?;
     run_stack(
         &config,
-        &state,
-        options.listener,
-        options.logs,
+        state.path(),
+        options.stack,
         &project_hash,
         &store,
         &console,
@@ -355,8 +497,7 @@ async fn deploy_project(config: &Path, store: &Store, logs: bool) -> anyhow::Res
 async fn run_stack(
     config: &Path,
     state: &Path,
-    listener: SocketAddr,
-    logs: bool,
+    options: StackOptions,
     project_hash: &str,
     store: &Store,
     console: &Console,
@@ -369,14 +510,25 @@ async fn run_stack(
     let project = config
         .parent()
         .context("the Wrangler config has no project directory")?;
-    let mut watcher = ProjectWatcher::new(project)?;
+    let mut watcher = options
+        .watch
+        .then(|| ProjectWatcher::new(project, options.watch_ignores))
+        .transpose()?;
 
     console.progress("building the application");
-    deploy_project(config, store, logs).await?;
-    let mut running = start_node(state, listener, logs, project_hash, store, console).await?;
+    deploy_project(config, store, options.logs).await?;
+    let mut running = start_node(
+        state,
+        options.listener,
+        options.logs,
+        project_hash,
+        store,
+        console,
+    )
+    .await?;
 
     loop {
-        match wait_for_node_event(&mut running.child, &mut signals, &mut watcher).await? {
+        match wait_for_node_event(&mut running.child, &mut signals, watcher.as_mut()).await? {
             NodeEvent::Exited(status) => {
                 let _ = running.output.await;
                 if status.success() {
@@ -390,13 +542,21 @@ async fn run_stack(
             }
             NodeEvent::Reload => {
                 console.progress("change detected; rebuilding the application");
-                if let Err(error) = deploy_project(config, store, logs).await {
+                if let Err(error) = deploy_project(config, store, options.logs).await {
                     console.failure(&format!("reload failed: {error:#}"));
                     continue;
                 }
                 console.progress("restarting the application");
                 stop_running_node(running).await;
-                running = start_node(state, listener, logs, project_hash, store, console).await?;
+                running = start_node(
+                    state,
+                    options.listener,
+                    options.logs,
+                    project_hash,
+                    store,
+                    console,
+                )
+                .await?;
             }
         }
     }
@@ -461,6 +621,10 @@ async fn start_node(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+    // `run_stack` normally consumes `RunningNode` through the graceful stop
+    // path. An error or cancellation can instead drop it, so the child must
+    // not outlive the value that proves the supervisor still owns it.
+    command.kill_on_drop(true);
     if !logs {
         // The supervisor still forwards ERROR records and the child's stderr.
         // INFO and WARN records stay hidden until the operator asks for them.
@@ -474,6 +638,26 @@ async fn start_node(
         // mode; otherwise the node can begin a slow fleet handoff before the
         // supervisor asks for the fast same-node preserve path.
         command.as_std_mut().process_group(0);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt as _;
+
+        let supervisor = unsafe { libc::getpid() };
+        // Drop cannot run after SIGKILL or a supervisor crash. Ask the kernel
+        // to kill the node in that case. The parent check closes the race in
+        // which the supervisor exits between `fork` and `prctl`.
+        unsafe {
+            command.as_std_mut().pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() != supervisor {
+                    return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                Ok(())
+            });
+        }
     }
     let mut child = command.spawn().context("start the local celld node")?;
 
@@ -566,7 +750,7 @@ async fn wait_for_node(child: &mut Child, listener: SocketAddr) -> anyhow::Resul
 async fn wait_for_node_event(
     child: &mut Child,
     signals: &mut ShutdownSignals,
-    watcher: &mut ProjectWatcher,
+    watcher: Option<&mut ProjectWatcher>,
 ) -> anyhow::Result<NodeEvent> {
     crate::asyncrt::select! {
         status = child.wait() => {
@@ -574,10 +758,17 @@ async fn wait_for_node_event(
             Ok(NodeEvent::Exited(status))
         }
         _ = signals.received() => Ok(NodeEvent::Shutdown),
-        changed = watcher.changed() => {
+        changed = wait_for_project_change(watcher) => {
             changed?;
             Ok(NodeEvent::Reload)
         }
+    }
+}
+
+async fn wait_for_project_change(watcher: Option<&mut ProjectWatcher>) -> anyhow::Result<()> {
+    match watcher {
+        Some(watcher) => watcher.changed().await,
+        None => std::future::pending().await,
     }
 }
 

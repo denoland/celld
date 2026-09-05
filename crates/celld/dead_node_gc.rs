@@ -23,6 +23,8 @@ struct NodeWire {
     expires_ms: u64,
     #[serde(default, rename = "ownership_index_generation")]
     generation: String,
+    #[serde(default)]
+    probe_public_key: String,
     /// The folded node log: this record IS
     /// the fleet log's root of truth, so retirement must respect its
     /// state and the tombstone must carry it through unchanged.
@@ -33,6 +35,19 @@ struct NodeWire {
     /// the one it fences.
     #[serde(flatten)]
     rest: serde_json::Map<String, serde_json::Value>,
+}
+
+impl NodeWire {
+    /// The process generation, which a record written after part 2 of
+    /// the `ownership_index_generation` retirement (see
+    /// `ownership_store::NodeLeaseWire`) carries only as the probe key.
+    fn generation(&self) -> &str {
+        if self.generation.is_empty() {
+            &self.probe_public_key
+        } else {
+            &self.generation
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -68,7 +83,20 @@ impl DeadNodeGc {
     /// Run one pass while renewing the advisory fleet-waker role. No task is
     /// spawned: the caller's existing wake-loop future polls both work and
     /// renewal, and dropping a lost-role pass cancels remaining I/O.
-    pub async fn run_elected_pass(&mut self, bucket: &Bucket, node: &str, tick_ms: u64) {
+    ///
+    /// Returns the node sessions whose leases were live when the pass began,
+    /// and only when this node held the role for the whole pass. The caller
+    /// uses that as its election result: the fleet-wide wake probe that
+    /// follows runs on the same tick, against the same leases, and only on
+    /// the node that holds the role. `None` means either that another node
+    /// holds the role or that this node lost it mid-pass; both mean "do not
+    /// probe this tick".
+    pub async fn run_elected_pass(
+        &mut self,
+        bucket: &Bucket,
+        node: &str,
+        tick_ms: u64,
+    ) -> Option<BTreeSet<String>> {
         let lease_ttl_ms = tick_ms.saturating_mul(3).min(i64::MAX as u64);
         if !crate::wake::try_hold_waker(
             bucket,
@@ -78,7 +106,7 @@ impl DeadNodeGc {
         )
         .await
         {
-            return;
+            return None;
         }
 
         let renew_ms = (lease_ttl_ms / 3).max(1);
@@ -98,17 +126,18 @@ impl DeadNodeGc {
                         lease_ttl_ms as i64,
                     ).await {
                         warn!("waker lease renewal failed; cancelling dead-node GC");
-                        return;
+                        return None;
                     }
                 },
-                _ = &mut pass => return,
+                live = &mut pass => return Some(live),
             }
         }
     }
 
-    async fn run_pass(&mut self, bucket: &Bucket, tick_ms: u64) {
+    /// One GC pass. Returns the live node sessions the pass observed.
+    async fn run_pass(&mut self, bucket: &Bucket, tick_ms: u64) -> BTreeSet<String> {
         let observed_ms = crate::ownership_store::now_ms();
-        let dead = dead_nodes(bucket, observed_ms).await;
+        let NodeScan { dead, live } = scan_nodes(bucket, observed_ms).await;
         let dead_names: BTreeSet<&str> = dead.iter().map(|record| record.node.as_str()).collect();
         self.swept.retain(|node| dead_names.contains(node.as_str()));
         self.retries
@@ -203,16 +232,34 @@ impl DeadNodeGc {
                 Err(error) => warn!(%node, %error, "dead-node lease retirement failed"),
             }
         }
+        live
     }
 }
 
-async fn dead_nodes(bucket: &Bucket, now_ms: u64) -> Vec<DeadNode> {
+/// The node sessions with a live lease, for a caller that has no GC pass to
+/// take them from (the boot-time wake scan).
+pub async fn live_nodes(bucket: &Bucket, now_ms: u64) -> BTreeSet<String> {
+    scan_nodes(bucket, now_ms).await.live
+}
+
+/// The fleet's node records, split by lease state at one instant.
+struct NodeScan {
+    dead: Vec<DeadNode>,
+    /// Sessions whose record matches its key and whose lease has not
+    /// expired. A record that fails to read is in neither set, so an owner
+    /// named by such a record counts as not live and the wake probe hints
+    /// its cells; the core's own lease read then decides.
+    live: BTreeSet<String>,
+}
+
+async fn scan_nodes(bucket: &Bucket, now_ms: u64) -> NodeScan {
     let mut dead = Vec::new();
+    let mut live = BTreeSet::new();
     let objects = match bucket.list("nodes/").await {
         Ok(objects) => objects,
         Err(error) => {
             warn!(%error, "dead-node scan list failed");
-            return dead;
+            return NodeScan { dead, live };
         }
     };
     for object in objects {
@@ -234,14 +281,17 @@ async fn dead_nodes(bucket: &Bucket, now_ms: u64) -> Vec<DeadNode> {
             {
                 dead.push(DeadNode {
                     node: node.to_string(),
-                    generation: record.generation,
+                    generation: record.generation().to_string(),
                 });
+            }
+            Ok(Some((record, _))) if record.node == node => {
+                live.insert(node.to_string());
             }
             Ok(_) => {}
             Err(error) => warn!(%node, %error, "dead-node scan read failed"),
         }
     }
-    dead
+    NodeScan { dead, live }
 }
 
 async fn cells_indexed_by_nodes(

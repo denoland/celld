@@ -4,7 +4,10 @@
 committed WAL data as L0 LTX segments and reports the captured position. The
 crate can write segments to a filesystem or an object store. It can restore a
 database, compact levels, create a snapshot, and read segments from bundle
-objects.
+objects. It can also open a database by paging: a fault-in SQLite VFS reads
+each page from the segments on first use, through a page map built from the
+segments' own page indexes, and a paged epoch continues the chain it paged
+from.
 
 celld uses this library inside a larger durability protocol. The output gate,
 epoch fencing, replicated node log, and takeover recovery enforce the write

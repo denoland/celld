@@ -1,6 +1,6 @@
 [package]
 name = "celld"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 rust-version = "1.94.1"
 license = "Apache-2.0"
@@ -39,9 +39,12 @@ fastwebsockets.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
+glob.workspace = true
 hkdf.workspace = true
+lol_html.workspace = true
 hmac.workspace = true
 http-body-util.workspace = true
+httpdate.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 md-5.workspace = true
@@ -61,7 +64,7 @@ x25519-dalek.workspace = true
 rand.workspace = true
 regex.workspace = true
 reqwest = { workspace = true, features = ["rustls-tls", "stream", "json"] }
-rusqlite = { workspace = true, features = ["backup", "bundled", "hooks"] }
+rusqlite = { workspace = true, features = ["backup", "bundled", "hooks", "serialize"] }
 sqlite-vec.workspace = true
 rustls.workspace = true
 rsa.workspace = true

@@ -12,7 +12,8 @@
 //! # The implementation contract
 //!
 //! [`Channel`] enumerates every route that can reveal a cell's state. The shell
-//! holds each effect and sends an [`Event::Output`] with its route. This module
+//! holds each effect and sends an [`Event::OutputAt`] with its route and the
+//! release-time monotonic instant. This module
 //! applies one durability rule to every route and returns the same route in an
 //! [`Effect::Release`].
 //!
@@ -22,14 +23,15 @@
 //! | --- | --- |
 //! | enumerate every output route | the [`Channel`] enum |
 //! | apply one rule to every route | the `channel` argument to [`State::output`] |
-//! | bypass the gate when disabled | with `CELLD_OUTPUT_GATE=0`, the shell sends no [`Event::Output`] |
+//! | bypass the gate when disabled | with `CELLD_OUTPUT_GATE=0`, the shell sends no [`Event::OutputAt`] |
 //! | release only revealable state | the output's barrier, or the barrier it trails, has settled |
 //! | let the held effect leave | [`Effect::Release`] with `Ok` |
 //!
 //! **The core does not read the channel.** It stores what the shell gave it and
 //! hands the same value back. A `match` on [`Channel`] inside this module would
-//! split the invariant into six independent rules. Per-channel code belongs in
-//! the shell and is limited to how an effect is held and how it is released.
+//! split the invariant into one independent rule per channel. Per-channel code
+//! belongs in the shell and is limited to how an effect is held and how it is
+//! released.
 //!
 //! # Why one choke point
 //!
@@ -44,7 +46,7 @@
 //! Every channel passes through [`State::output`]. Not every barrier is opened
 //! by one: `alarm_finished` opens its own when a firing's consuming commit is
 //! unproven, owned by [`GateOwner::Alarm`] rather than by an output. An alarm
-//! is not a seventh channel -- it settles by replay into the core, not by
+//! is not a channel -- it settles by replay into the core, not by
 //! release to the shell, so a [`Channel`] variant could not carry it -- but its
 //! barrier lives in the same per-cell map, which is what matters here: a
 //! read-only output trails the newest barrier on its cell without asking who
@@ -56,11 +58,16 @@
 //! unproven write. The alarm now opens a barrier in the same map, so every
 //! reader observes it.
 //!
-//! # Boundary
+//! # A streamed body is more than one output
 //!
-//! A response body that streams is gated once, when the response is released.
-//! Later chunks do not pass again. The model treats a response as atomic, so it
-//! does not see this either.
+//! The model treats a response as atomic, and for a complete response it is:
+//! one release covers every byte. A response whose body streams is not atomic.
+//! The head is released while nothing is pending, and the producer then keeps
+//! running; a chunk it makes later can read a commit another event made after
+//! that release. So the shell takes one ticket per chunk on
+//! [`Channel::Response`], not one ticket for the response. The producer is a
+//! single pump that awaits each chunk's ticket before it asks for the next
+//! chunk, which is what keeps a held chunk from overtaking a released one.
 
 use crate::*;
 
@@ -70,28 +77,127 @@ impl State {
     /// The implementation contract is meant to be checked line by line:
     ///
     /// - `channel` names the route. This function stores it but does not branch
-    ///   on it, so all six channels use one rule.
-    /// - with `CELLD_OUTPUT_GATE=0`, the shell never sends [`Event::Output`].
+    ///   on it, so every channel uses one rule.
+    /// - with `CELLD_OUTPUT_GATE=0`, the shell never sends [`Event::OutputAt`].
     /// - no barrier means that no unproven write remains for this output to
     ///   reveal, so the core emits [`Effect::Release`] with `Ok`.
     ///
     /// A write opens its own barrier and waits for a proof that covers its
-    /// position. A read-only output joins the newest barrier open on its cell,
-    /// because a reader can start after a write commits and before its proof
-    /// lands. Comparing the reader's own start and end positions therefore
-    /// decides nothing.
+    /// position. A read-only output that observed a committed write no
+    /// verified proof covers yet waits for that proof itself: the handler
+    /// that wrote takes its ticket only when it answers, so a reader that
+    /// answers before that finds no barrier for what it read. Otherwise a
+    /// read-only output joins the newest barrier open on its cell, because a
+    /// reader can start after a write commits and before its proof lands.
+    /// Comparing the reader's own start and end positions therefore decides
+    /// nothing.
     pub(crate) fn output(
         &mut self,
         request: RequestId,
         channel: Channel,
         position: Option<u64>,
+        observed: Option<u64>,
+        epoch: Option<Epoch>,
         effects: &mut Vec<Effect>,
     ) {
         let held = Held { request, channel };
-        match position {
-            Some(position) => self.open_write_barrier(held, position, effects),
-            None => self.trail_open_barrier(held, effects),
+        // Authority is checked here, not only at request start: a handler can
+        // start under a live node lease and reach its output after that lease
+        // expired. Releasing then would reveal work a successor owner can
+        // already have replaced.
+        if !self.node_authoritative() {
+            effects.push(Effect::Release {
+                request,
+                channel,
+                result: Err(RequestError::NodeFenced),
+            });
+            return;
         }
+        // A ticket sampled before its request pinned the cell names the epoch
+        // it sampled at. A reset between the sample and the pin discarded that
+        // epoch's unproven writes, and the pin then activated the next epoch:
+        // a proof there covers nothing the ticket asks about, so the ticket
+        // fails rather than acknowledge a discarded write. A request whose
+        // cell is not resident at all fails here too, rather than by the
+        // branch below: the write branch refuses that case itself, but the
+        // read-only branch releases an active request whatever its cell's
+        // phase, and a sampled epoch is a claim this check must settle
+        // instead of leaving it to the reset's request cleanup.
+        if let Some(sampled) = epoch {
+            if self
+                .resident_cell(request)
+                .is_none_or(|(_, current)| current != sampled)
+            {
+                effects.push(Effect::Release {
+                    request,
+                    channel,
+                    result: Err(RequestError::DurabilityUnproven),
+                });
+                return;
+            }
+        }
+        match (position, observed) {
+            (Some(position), _) => self.open_write_barrier(held, position, effects),
+            (None, Some(observed)) => match self.resident_cell(request) {
+                Some((cell, epoch)) if self.proven_covers(&cell, epoch, observed) => {
+                    self.trail_open_barrier(held, effects)
+                }
+                Some((cell, epoch)) => self.hold_observed(held, cell, epoch, observed, effects),
+                // The ticket names a commit no proof covers, on a cell that is
+                // no longer resident to prove it. Fail closed, as a write in
+                // that state does, rather than release what a read-only
+                // ticket on a cell with nothing to prove would release.
+                None => effects.push(Effect::Release {
+                    request,
+                    channel,
+                    result: Err(RequestError::DurabilityUnproven),
+                }),
+            },
+            (None, None) => self.trail_open_barrier(held, effects),
+        }
+    }
+
+    /// Whether a verified proof of this residency, at `epoch`, already covers
+    /// `observed`.
+    fn proven_covers(&self, cell: &CellId, epoch: Epoch, observed: u64) -> bool {
+        self.cells
+            .get(cell)
+            .and_then(|record| record.proven_position)
+            .is_some_and(|(proven_at, proven)| proven_at == epoch && proven >= observed)
+    }
+
+    /// Hold a read-only output that observed a committed write no verified
+    /// proof covers yet. It joins a barrier on its cell whose position covers
+    /// what it observed, and opens one at that position otherwise: the proof
+    /// is then the reader's own, and the writer's later ticket opens a barrier
+    /// a proof already satisfies.
+    fn hold_observed(
+        &mut self,
+        held: Held,
+        cell: CellId,
+        epoch: Epoch,
+        observed: u64,
+        effects: &mut Vec<Effect>,
+    ) {
+        if let Some((_, barrier)) = self.barriers.iter_mut().rev().find(|(_, barrier)| {
+            barrier.cell == cell && barrier.epoch == epoch && barrier.position >= observed
+        }) {
+            barrier.followers.push(held);
+            return;
+        }
+        self.open_write_barrier(held, observed, effects);
+    }
+
+    /// Record a verified proof, so a later read-only output that observed no
+    /// more than `position` at this epoch releases without a proof of its own.
+    fn note_proven(&mut self, cell: &CellId, epoch: Epoch, position: u64) {
+        let Some(record) = self.cells.get_mut(cell) else {
+            return;
+        };
+        record.proven_position = Some(match record.proven_position {
+            Some((proven_at, proven)) if proven_at == epoch => (epoch, proven.max(position)),
+            _ => (epoch, position),
+        });
     }
 
     /// Open the output gate for a local write: hold its output until the
@@ -101,13 +207,7 @@ impl State {
     /// the output fails rather than falsely acknowledging the write.
     fn open_write_barrier(&mut self, held: Held, position: u64, effects: &mut Vec<Effect>) {
         let request = held.request;
-        let resident = self.active_requests.get(&request).and_then(|id| {
-            match self.cells.get(id).map(|cell| &cell.phase) {
-                Some(Phase::Resident { epoch }) => Some((id.clone(), *epoch)),
-                _ => None,
-            }
-        });
-        let Some((cell, epoch)) = resident else {
+        let Some((cell, epoch)) = self.resident_cell(request) else {
             effects.push(Effect::Release {
                 request,
                 channel: held.channel,
@@ -132,6 +232,18 @@ impl State {
             epoch,
             position,
         });
+    }
+
+    /// The cell a live local request runs against, and the epoch it is
+    /// resident at. `None` when the request is not active or its cell is not
+    /// resident.
+    fn resident_cell(&self, request: RequestId) -> Option<(CellId, Epoch)> {
+        self.active_requests.get(&request).and_then(|id| {
+            match self.cells.get(id).map(|cell| &cell.phase) {
+                Some(Phase::Resident { epoch }) => Some((id.clone(), *epoch)),
+                _ => None,
+            }
+        })
     }
 
     /// Hold a read-only output behind the newest barrier open on its cell.
@@ -213,7 +325,7 @@ impl State {
 
     /// Release one withheld output, unpinning it first so the cleanup that
     /// ends -- shedding, eviction -- is queued ahead of the release.
-    fn release_held(
+    pub(crate) fn release_held(
         &mut self,
         held: Held,
         result: Result<(), RequestError>,
@@ -234,6 +346,7 @@ impl State {
             return;
         };
         let result = if proven {
+            self.note_proven(&gate.cell, gate.epoch, gate.position);
             Ok(())
         } else {
             Err(RequestError::DurabilityUnproven)

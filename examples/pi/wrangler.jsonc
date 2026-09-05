@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "pi-celld-repro",
+  "main": "index.js",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "PI_MODEL": "@cf/meta/llama-3.2-1b-instruct"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PI_AGENT",
+        "class_name": "PiAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["PiAgent"]
+    }
+  ]
+}

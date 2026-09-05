@@ -12,8 +12,10 @@ APIs, and Wrangler configuration.
   Storage bucket, or an Azure Blob Storage container. The `celld dev` command
   instead uses a local SQLite object store. A regular node or an operator
   subcommand cannot select this local backend.
-- A node does not rebalance the existing cells when it joins a fleet. Traffic
-  assigns an unowned or released cell to a node with capacity.
+- Ownership balancing counts cells by node weight. It does not measure the
+  CPU or memory that one cell uses, and it moves only hibernated cells, so a
+  fleet without idle eviction balances only the cells that hibernate on
+  their own.
 
 ## Networking and security
 

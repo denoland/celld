@@ -34,6 +34,10 @@ pub struct ReplicaCompactor<'a, C> {
     verify: bool,
     max_files: usize,
     max_input_bytes: u64,
+    /// The epoch's first txid. An epoch that continues a chain it paged in
+    /// starts at its cut, not at 1, so an empty destination level continues
+    /// from here rather than from the first txid that never existed here.
+    base: TXID,
     local_path: Option<PathBuf>,
     host: LtxHost,
 }
@@ -45,12 +49,19 @@ impl<'a, C: ReplicaClient> ReplicaCompactor<'a, C> {
             verify: false,
             max_files: usize::MAX,
             max_input_bytes: u64::MAX,
+            base: TXID(1),
             local_path: None,
             host: LtxHost::default(),
         }
     }
 
     /// Enables a destination-level continuity check after publication.
+    /// The txid the epoch's chain starts at (see the `base` field).
+    pub fn with_base(mut self, base: TXID) -> Self {
+        self.base = base;
+        self
+    }
+
     pub fn with_verification(mut self, verify: bool) -> Self {
         self.verify = verify;
         self
@@ -94,7 +105,7 @@ impl<'a, C: ReplicaClient> ReplicaCompactor<'a, C> {
             .map(|file| file.max_txid)
             .max()
             .unwrap_or(TXID(0));
-        let seek = TXID(previous_max.0.wrapping_add(1));
+        let seek = TXID(previous_max.0.wrapping_add(1).max(self.base.0));
         let source_level = destination_level - 1;
         let available = self
             .client

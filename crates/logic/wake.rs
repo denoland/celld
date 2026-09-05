@@ -47,6 +47,22 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468
 }
 
+/// The due-minute floor a `YYYY-MM-DDTHH:MM` bucket names, in ms.
+fn parse_minute(minute: &str) -> Option<i64> {
+    if minute.len() != 16 {
+        return None;
+    }
+    let y: i64 = minute.get(0..4)?.parse().ok()?;
+    let mo: u32 = minute.get(5..7)?.parse().ok()?;
+    let d: u32 = minute.get(8..10)?.parse().ok()?;
+    let h: i64 = minute.get(11..13)?.parse().ok()?;
+    let mi: i64 = minute.get(14..16)?.parse().ok()?;
+    if minute.get(4..5)? != "-" || minute.get(10..11)? != "T" {
+        return None;
+    }
+    Some((days_from_civil(y, mo, d) * 1440 + h * 60 + mi) * 60_000)
+}
+
 /// Inverse of `entry_key`: (due minute floor in ms, cell scope).
 ///
 /// The scope is the remainder of a bucket key, so it is the one place a scope
@@ -62,16 +78,16 @@ pub fn parse_entry_key(key: &str) -> Option<(i64, String)> {
     if !crate::cell::valid_cell_scope(cell) {
         return None;
     }
-    let y: i64 = minute.get(0..4)?.parse().ok()?;
-    let mo: u32 = minute.get(5..7)?.parse().ok()?;
-    let d: u32 = minute.get(8..10)?.parse().ok()?;
-    let h: i64 = minute.get(11..13)?.parse().ok()?;
-    let mi: i64 = minute.get(14..16)?.parse().ok()?;
-    if minute.get(4..5)? != "-" || minute.get(10..11)? != "T" {
-        return None;
-    }
-    let mins = days_from_civil(y, mo, d) * 1440 + h * 60 + mi;
-    Some((mins * 60_000, cell.to_string()))
+    Some((parse_minute(minute)?, cell.to_string()))
+}
+
+/// The due minute a `wake/YYYY-MM-DDTHH:MM` bucket prefix names, in ms.
+///
+/// A delimiter listing answers with the buckets rather than the keys inside
+/// them, so the waker needs the minute without a cell attached to decide which
+/// buckets have come due.
+pub fn parse_minute_prefix(prefix: &str) -> Option<i64> {
+    parse_minute(prefix.strip_prefix("wake/")?)
 }
 
 /// What the bucket needs for one cell given its committed alarm — the pure
@@ -484,4 +500,22 @@ pub fn should_adopt_hint(tracks: bool, hint_ms: Ms) -> bool {
 /// some other node happens to reclaim.
 pub fn waker_may_claim(held_by_us: bool, expires_ms: Ms, now_ms: Ms) -> bool {
     held_by_us || expires_ms <= now_ms
+}
+
+/// The elected waker's decision for one due entry once it has read the
+/// cell's owner record: does this node need to send the `Fleet` hint?
+///
+/// A live owner fires its own alarms. A resident cell fires from the owner's
+/// timer, and a dormant one wakes from the owner's own due scan, which sends
+/// it an `Owned` hint. The elected waker's hint is for everything else: a
+/// cell nobody owns, a cell whose owner's lease has run out, and a cell this
+/// node owns itself. Hinting a live owner's cell risks nothing (the core never
+/// steals), but it costs the elected node an activation permit and an owner
+/// read per entry, for the whole fleet's due set, every tick.
+pub fn elected_hint_needed(owner: Option<&str>, node: &str, owner_live: bool) -> bool {
+    match owner {
+        None => true,
+        Some(owner) if owner == node => true,
+        Some(_) => !owner_live,
+    }
 }

@@ -27,18 +27,22 @@ enum MetricsBackend {
 
 /// All process-like services owned by one execution domain.
 pub struct HostServices {
+    domain: OnceLock<crate::asyncrt::DomainToken>,
     node_load: OnceLock<Arc<LiveLoad>>,
     wake_entry: crate::js::WakeEntryService,
     websockets: crate::js::WebSocketService,
+    http_streams: Arc<crate::js::HttpStreamService>,
     metrics: MetricsBackend,
 }
 
 impl HostServices {
     pub(crate) fn production() -> Self {
         Self {
+            domain: OnceLock::new(),
             node_load: OnceLock::new(),
             wake_entry: crate::js::WakeEntryService::default(),
             websockets: crate::js::WebSocketService::default(),
+            http_streams: Arc::new(crate::js::HttpStreamService::default()),
             metrics: MetricsBackend::Production(Mutex::new(ProcessLoadSampler::default())),
         }
     }
@@ -46,15 +50,38 @@ impl HostServices {
     #[cfg(celld_internal_tests)]
     pub fn scripted() -> Self {
         Self {
+            domain: OnceLock::new(),
             node_load: OnceLock::new(),
             wake_entry: crate::js::WakeEntryService::default(),
             websockets: crate::js::WebSocketService::default(),
+            http_streams: Arc::new(crate::js::HttpStreamService::default()),
             metrics: MetricsBackend::Scripted(Mutex::new(HostMetricsSample::default())),
         }
     }
 
     pub fn set_node_load(&self, load: Arc<LiveLoad>) {
         let _ = self.node_load.set(load);
+    }
+
+    pub(crate) fn bind_domain(&self, domain: crate::asyncrt::DomainToken) {
+        if let Err(candidate) = self.domain.set(domain) {
+            assert!(
+                self.domain
+                    .get()
+                    .is_some_and(|bound| bound.same_owner(&candidate)),
+                "HostServices cannot belong to more than one execution domain"
+            );
+        }
+        self.http_streams.bind_domain(
+            self.domain
+                .get()
+                .expect("a HostServices domain was just installed")
+                .clone(),
+        );
+    }
+
+    pub(crate) fn domain_token(&self) -> Option<crate::asyncrt::DomainToken> {
+        self.domain.get().cloned()
     }
 
     pub fn node_load(&self) -> Option<Arc<LiveLoad>> {
@@ -67,6 +94,23 @@ impl HostServices {
 
     pub(crate) fn websockets(&self) -> &crate::js::WebSocketService {
         &self.websockets
+    }
+
+    pub(crate) fn http_streams(&self) -> Arc<crate::js::HttpStreamService> {
+        if let Some(domain) = self.domain_token() {
+            self.http_streams.bind_domain(domain);
+        }
+        self.http_streams.clone()
+    }
+
+    #[cfg(all(test, celld_internal_tests))]
+    pub(crate) fn quarantine_http_streams(&self) {
+        self.http_streams.quarantine();
+    }
+
+    #[cfg(all(test, celld_internal_tests))]
+    pub(crate) fn close_http_streams(&self) {
+        self.http_streams.close();
     }
 
     pub fn sample_metrics(&self) -> HostMetricsSample {
