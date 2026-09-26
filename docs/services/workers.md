@@ -37,7 +37,10 @@ for the Cloudflare model.
 An HTTP request invokes the `fetch(request, env, ctx)` handler that the module
 exports as its default export. The handler receives the inbound `Request`, and
 it must return a `Response`. A module can export more handlers, such as
-`scheduled` for a Cron Trigger or `queue` for a Queues consumer. Read the
+`scheduled` for a Cron Trigger or `queue` for a Queues consumer. Each export of
+the main module must be a handler object or a class, as in workerd. A Worker
+whose main module exports a string or a number therefore fails to start. Read
+the
 [handlers documentation](https://developers.cloudflare.com/workers/runtime-apis/handlers/)
 for the complete list, and the
 [fetch handler documentation](https://developers.cloudflare.com/workers/runtime-apis/handlers/fetch/)

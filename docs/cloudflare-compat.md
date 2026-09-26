@@ -128,6 +128,12 @@ The `tail` and `email` handlers are unavailable.
 - RSA-OAEP accepts SHA-1, SHA-256, SHA-384, and SHA-512. A nonempty label must
   contain valid UTF-8.
 - A secret key cannot use `jwk` with `exportKey()` or `wrapKey()`.
+- Ed25519 signs and verifies, and `NODE-ED25519` names the same algorithm. A
+  signature from one spelling verifies under the other.
+- X25519 derives bits and keys. A peer key of a low order gives a shared secret
+  of all zero bytes, so `deriveBits()` rejects that key instead.
+- An Ed25519 or X25519 public key uses its 32-byte point for the `raw` format,
+  so `importKey()` and `exportKey()` both carry the point alone.
 
 ### [Web standards](https://developers.cloudflare.com/workers/runtime-apis/web-standards/)
 

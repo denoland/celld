@@ -299,14 +299,16 @@ impl ObjectStore for LocalStore {
         let result = self.metadata().and_then(|objects| {
             objects
                 .into_iter()
-                .filter(|object| {
-                    prefix.as_ref().is_none_or(|prefix| {
-                        Path::from(object.key.as_str())
-                            .prefix_match(prefix)
-                            .is_some_and(|mut remainder| remainder.next().is_some())
+                .map(|object| object_meta(&object))
+                .filter(|meta| {
+                    meta.as_ref().map_or(true, |meta| {
+                        prefix.as_ref().is_none_or(|prefix| {
+                            meta.location
+                                .prefix_match(prefix)
+                                .is_some_and(|mut remainder| remainder.next().is_some())
+                        })
                     })
                 })
-                .map(|object| object_meta(&object))
                 .collect::<object_store::Result<Vec<_>>>()
         });
         match result {
@@ -320,7 +322,7 @@ impl ObjectStore for LocalStore {
         let mut common_prefixes = BTreeSet::new();
         let mut objects = Vec::new();
         for object in self.metadata()? {
-            let location = Path::from(object.key.as_str());
+            let location = stored_location(&object.key)?;
             let Some(mut remainder) = location.prefix_match(&prefix) else {
                 continue;
             };
@@ -379,9 +381,10 @@ impl PaginatedListStore for LocalStore {
             }
             let common = delimiter.and_then(|delimiter| {
                 remainder.find(delimiter).map(|index| {
-                    Path::from(format!("{prefix}{}{}", &remainder[..index], delimiter))
+                    stored_location(&format!("{prefix}{}{}", &remainder[..index], delimiter))
                 })
             });
+            let common = common.transpose()?;
             if let Some(common) = common {
                 if let Some((last, Some(previous), _)) = entries.last_mut() {
                     if *previous == common {
@@ -460,7 +463,7 @@ fn object_meta(object: &StoredObject) -> object_store::Result<ObjectMeta> {
         .checked_add(Duration::from_millis(object.modified_ms.max(0) as u64))
         .ok_or_else(|| message_error("the object timestamp is outside the system clock range"))?;
     Ok(ObjectMeta {
-        location: Path::from(object.key.as_str()),
+        location: stored_location(&object.key)?,
         last_modified: modified.into(),
         size: object.size,
         e_tag: Some(object.etag.to_string()),
@@ -516,6 +519,15 @@ fn decode_attributes(encoded: &str) -> object_store::Result<Attributes> {
 #[cfg(all(test, celld_internal_tests))]
 mod internal_tests {
     include!(env!("CELLD_INTERNAL_LOCAL_STORE_TESTS"));
+}
+
+/// The [`Path`] a stored key came from. Every key is stored as
+/// `location.to_string()`, which is already percent-encoded, so this parses
+/// that form back. `Path::from` would encode it a second time, and a listed
+/// `přehled.html` would come back as `p%25C5%2599ehled.html`, a key that
+/// names no object (denoland/celld#232).
+fn stored_location(key: &str) -> object_store::Result<Path> {
+    Ok(Path::parse(key)?)
 }
 
 fn db_error(error: impl fmt::Display) -> Error {

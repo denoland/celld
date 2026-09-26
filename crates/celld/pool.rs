@@ -38,6 +38,9 @@ use celld_logic::isolate::Refusal;
 
 use crate::js;
 
+pub use crate::engine_api::AdmitError;
+pub use crate::engine_api::PoolCensus;
+
 /// Heap identity is process-wide because pressure policy compares cells from
 /// every script pool and every draining generation. A counter inside `Pool`
 /// would reproduce the collision this identity prevents. The core treats the
@@ -163,6 +166,9 @@ pub struct Slot {
     /// The index used only inside this pool's placement snapshot and slot
     /// vector. Distinct pools can use the same value.
     pub id: IsolateId,
+    /// This slot, for an op of one of its turns to reach it: a facet of the
+    /// script's own class runs in the isolate of the object that holds it.
+    me: std::sync::Weak<Slot>,
     /// The identity reported to node-wide Actor and pressure policy.
     heap_id: HeapId,
     /// The async gate, holding the isolate it guards. Locking this is what
@@ -190,6 +196,17 @@ pub struct Slot {
     retiring: AtomicBool,
     #[cfg(celld_internal_tests)]
     turn_observations: Mutex<Vec<String>>,
+}
+
+thread_local! {
+    static CURRENT_SLOT: std::cell::RefCell<Option<std::sync::Weak<Slot>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The slot whose turn this thread runs, for an op that must reach its own
+/// isolate again after the turn.
+pub(crate) fn current_slot() -> Option<Arc<Slot>> {
+    CURRENT_SLOT.with_borrow(|slot| slot.as_ref().and_then(std::sync::Weak::upgrade))
 }
 
 impl Slot {
@@ -238,7 +255,10 @@ impl Slot {
             TurnLane::Stateless => "stateless".to_string(),
             TurnLane::Cell(scope) => scope,
         });
-        f(worker)
+        let previous = CURRENT_SLOT.replace(Some(self.me.clone()));
+        let result = f(worker);
+        CURRENT_SLOT.set(previous);
+        result
     }
 
     /// Reserve one event through its complete lifetime, including the reply
@@ -287,7 +307,8 @@ impl Slot {
     /// A dynamic Worker owns exactly one isolate, so it needs no
     /// admission, growth, or retirement policy.
     pub(crate) fn standalone(worker: js::Worker) -> Arc<Self> {
-        Arc::new(Slot {
+        Arc::new_cyclic(|me| Slot {
+            me: me.clone(),
             id: 0,
             heap_id: next_heap_id(),
             worker: tokio::sync::Mutex::new(Some(worker)),
@@ -311,7 +332,8 @@ impl Slot {
 
     #[cfg(all(test, celld_internal_tests))]
     pub(crate) fn vacant_for_request_cancellation_test() -> Arc<Self> {
-        Arc::new(Slot {
+        Arc::new_cyclic(|me| Slot {
+            me: me.clone(),
             id: 0,
             heap_id: HeapId::new(0),
             worker: tokio::sync::Mutex::new(None),
@@ -456,34 +478,6 @@ impl Drop for Residency {
 
 type Build = Box<dyn Fn() -> Result<js::Worker> + Send + Sync>;
 
-/// One pool's isolates by state, as `/state` reports them.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
-pub struct PoolCensus {
-    /// Isolates that accept placement and work.
-    pub live: usize,
-    /// Live isolates that house no cell. The next maintenance pass retires
-    /// them, so a count that persists across passes means the pass is not
-    /// running.
-    pub live_empty: usize,
-    /// Retiring isolates whose heap is still installed, because a turn, a
-    /// request, or a cell holds it.
-    pub retiring: usize,
-    /// Slots whose heap has been freed.
-    pub freed: usize,
-    /// Cells housed across the pool.
-    pub cells: usize,
-    /// Request affiliations across the pool, running or suspended.
-    pub requests: usize,
-    /// Turns in flight across the pool.
-    pub turns: usize,
-    /// Physical memory V8 has committed to the heaps of the isolates a turn
-    /// did not hold at the sample.
-    pub heap_bytes: u64,
-    /// External memory those isolates track: array buffer stores and the
-    /// like, which live outside the V8 heap.
-    pub external_bytes: u64,
-}
-
 pub struct Pool {
     slots: RwLock<Vec<Arc<Slot>>>,
     limits: PoolLimits,
@@ -563,7 +557,8 @@ impl Pool {
         let reusable = slots.iter().position(|slot| slot.is_reusable());
         let id = reusable.unwrap_or(slots.len());
         let heap_id = next_heap_id();
-        let slot = Arc::new(Slot {
+        let slot = Arc::new_cyclic(|me| Slot {
+            me: me.clone(),
             id,
             heap_id,
             worker: tokio::sync::Mutex::new(Some(worker)),
@@ -830,34 +825,6 @@ impl Pool {
         census
     }
 }
-
-/// Refused by policy, or the isolate could not be built. Distinct because the
-/// first is a 503 the caller may retry elsewhere and the second is a fault.
-#[derive(Debug)]
-pub enum AdmitError {
-    Refused(Refusal),
-    Build(anyhow::Error),
-}
-
-impl From<Refusal> for AdmitError {
-    fn from(refusal: Refusal) -> Self {
-        AdmitError::Refused(refusal)
-    }
-}
-
-impl std::fmt::Display for AdmitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AdmitError::Refused(Refusal::NodeFull) => {
-                write!(f, "node is at its stateless request limit")
-            }
-            AdmitError::Refused(Refusal::NodePressured) => write!(f, "node is shedding load"),
-            AdmitError::Build(error) => write!(f, "isolate could not be started: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for AdmitError {}
 
 /// The property the whole design rests on: an isolate and everything hanging
 /// off it can be reached from any tokio worker. This is what `v8::Locker` and

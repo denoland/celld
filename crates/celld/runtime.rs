@@ -11,17 +11,22 @@
 //! starting to externally dispatchable to closed.
 
 use crate::asyncrt;
-use crate::generation::{DeploymentGraph, Generation, GenerationId, GenerationOptions};
+pub(crate) use crate::engine_api::StopMode;
+use crate::generation::{Generation, GenerationId};
 use crate::js::{self, CellJob, CellStorage, HttpResponse, Worker, WorkerConfig};
-use crate::ltx_repl::LtxRepl;
-use crate::replication::{ActivationOptions, StorageCredentials};
-use crate::wake::WakeFlusher;
+
+pub use crate::clean_reload::take_clean_reload_generation;
+pub use crate::clean_reload::write_clean_reload_marker;
+pub use crate::engine_api::admission_wait;
+pub use crate::engine_api::AlarmObserver;
+pub use crate::engine_api::RuntimeFetch;
+pub use crate::engine_api::RuntimeOptions;
+pub use crate::engine_api::ServiceFetch;
+pub use crate::ltx_replication::Replication;
 use anyhow::{anyhow, Context};
 use futures_util::StreamExt as _;
-use serde::{Deserialize, Serialize};
-use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -40,7 +45,6 @@ const REAP_INTERVAL: Duration = Duration::from_secs(30);
 /// blocking run loop's own cap, which exists for the same reason: a client
 /// disconnect is raised on another thread and has nothing to wake this one.
 const CANCELLATION_TICK: Duration = Duration::from_millis(10);
-const CLEAN_RELOAD_MARKER: &str = ".clean-reload.json";
 /// Cell fetches that one target can hold before celld refuses excess work.
 ///
 /// The last nonsaturated Queue step in the AWS partition staircase held
@@ -234,45 +238,6 @@ async fn drive_with_request_cancellation(
     driving.await;
 }
 
-#[derive(Deserialize, Serialize)]
-struct CleanReloadMarker<'a> {
-    node: &'a str,
-    generation: &'a str,
-}
-
-#[derive(Deserialize)]
-struct OwnedCleanReloadMarker {
-    node: String,
-    generation: String,
-}
-
-/// Read the fixed-size certificate left by a clean local shutdown. The node
-/// lease state machine still decides whether the named generation is live and
-/// can be replaced; this local value grants no authority by itself.
-pub fn take_clean_reload_generation(data_dir: &Path, node: &str) -> Option<String> {
-    let path = data_dir.join(CLEAN_RELOAD_MARKER);
-    let filesystem = asyncrt::fs();
-    let bytes = filesystem.read(&path).ok()?;
-    let _ = filesystem.remove_file(&path);
-    let marker: OwnedCleanReloadMarker = serde_json::from_slice(&bytes).ok()?;
-    (marker.node == node).then_some(marker.generation)
-}
-
-pub fn write_clean_reload_marker(
-    data_dir: &Path,
-    node: &str,
-    generation: &str,
-) -> anyhow::Result<()> {
-    let filesystem = asyncrt::fs();
-    filesystem.create_dir_all(data_dir)?;
-    let marker = data_dir.join(CLEAN_RELOAD_MARKER);
-    let temporary = data_dir.join(".clean-reload.tmp");
-    let body = serde_json::to_vec(&CleanReloadMarker { node, generation })?;
-    filesystem.write(&temporary, &body)?;
-    filesystem.rename(&temporary, &marker)?;
-    Ok(())
-}
-
 #[derive(Clone)]
 #[doc(hidden)]
 pub enum RemoteRequestState {
@@ -456,31 +421,6 @@ impl Drop for AlarmRequestGuard {
     }
 }
 
-fn require_cell_scope_capacity(data_dir: &Path) -> anyhow::Result<()> {
-    asyncrt::fs()
-        .create_dir_all(data_dir)
-        .with_context(|| format!("create data directory {}", data_dir.display()))?;
-    let reported = asyncrt::filesystem_name_max(data_dir)
-        .with_context(|| format!("read NAME_MAX for {}", data_dir.display()))?
-        .with_context(|| {
-            format!(
-                "the filesystem does not report NAME_MAX for {}",
-                data_dir.display()
-            )
-        })?;
-    let name_max = usize::try_from(reported).context("NAME_MAX does not fit usize")?;
-    require_cell_scope_name_max(name_max)
-}
-
-pub(crate) fn require_cell_scope_name_max(name_max: usize) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        name_max >= celld_logic::cell::MAX_CELL_SCOPE,
-        "the data filesystem supports {name_max}-byte names, but celld requires {}",
-        celld_logic::cell::MAX_CELL_SCOPE
-    );
-    Ok(())
-}
-
 /// The isolate pool's limits, built from the environment here because the
 /// decision core never reads it.
 ///
@@ -489,18 +429,6 @@ pub(crate) fn require_cell_scope_name_max(name_max: usize) -> anyhow::Result<()>
 /// `observe` reports it, and `isolate::admit` refuses against it. Unset
 /// means unbounded, not unwired — `engine/load-under-pressure.md` measures
 /// `CELLD_MAX_REQUESTS=32` admitting 641 rps against a theoretical 640.
-/// How long a stateless request may wait for a free `max_requests` slot
-/// before it is refused. Zero restores the old refuse-at-once behaviour.
-/// The default is one second: long enough that a saturated node converts
-/// its refusal storm into kernel-buffer queueing, short enough that a
-/// caller learns the truth before it matters.
-pub fn admission_wait() -> std::time::Duration {
-    // Not `env_usize`, which filters zero out — zero is meaningful here.
-    let ms = crate::env_vars::with_default("CELLD_ADMISSION_WAIT_MS", 1000u64)
-        .expect("validated CELLD_ADMISSION_WAIT_MS");
-    std::time::Duration::from_millis(ms)
-}
-
 pub fn pool_limits() -> celld_logic::isolate::PoolLimits {
     const GROW_AT: usize = 2;
     const SHRINK_UNDER: usize = 1;
@@ -618,8 +546,6 @@ struct AdmittedCellRequest {
     permit: CellRequestPermit,
 }
 
-pub type AlarmObserver = Arc<dyn Fn(String, celld_logic::wake::AlarmSnapshot) + Send + Sync>;
-
 /// How a turn's alarm move reaches the host. `drive_cell` calls it with
 /// what `take_alarm_moves` drained; it caches the value on the cell's
 /// handle and forwards a real change to the observer.
@@ -668,23 +594,10 @@ struct CellRegistry {
     published: HashMap<String, CellHandle>,
 }
 
-/// The generations a node can resolve a call against: the one it serves and
-/// the superseded ones whose isolates are still draining.
-///
-/// One value under one lock, because installing the new generation and
-/// keeping the previous one resolvable are the same instant. Held apart,
-/// the window between them resolved an in-flight call from the previous
-/// generation against the new deployment graph.
-struct Generations {
-    current: Arc<Generation>,
-    draining: Vec<Arc<Generation>>,
-}
-
 #[derive(Clone)]
 pub struct RuntimeManager {
-    /// The generations a call can resolve against. A reader takes one
-    /// snapshot and never holds the lock across an await.
-    generations: Arc<std::sync::RwLock<Generations>>,
+    /// What the node's cell runtime holds whichever engine runs the cells.
+    core: crate::cell_runtime::CellRuntime,
     cells: Arc<Mutex<CellRegistry>>,
     alarm_reporter: AlarmReporter,
     /// A peer abort can arrive before the forwarded fetch. The tombstone and
@@ -693,616 +606,29 @@ pub struct RuntimeManager {
     /// Shell alarm tasks keyed by the core firing operation. A shutdown
     /// cancellation must target the firing it observed, not a later retry.
     alarm_requests: Arc<Mutex<AlarmRequestRegistry>>,
-    data_dir: Arc<PathBuf>,
-    replication: Option<Replication>,
-    wake: Option<Arc<WakeFlusher>>,
-    alarm_observer: AlarmObserver,
-    node: Arc<str>,
-    region: Arc<str>,
     max_cell_requests: usize,
 }
 
-/// The Actor's cell-runtime boundary. Ordinary builds contain only the V8 arm.
-#[derive(Clone)]
-pub(crate) enum CellHost {
-    V8(RuntimeManager),
-    #[cfg(all(test, celld_internal_tests))]
-    Scripted(crate::conformance_sim_cell_host::SimCellHost),
-}
-
-#[derive(Clone)]
-pub(crate) enum StopMode {
-    /// Prove the final position, then optionally retain a local base.
-    ///
-    /// `abandon` travels with `preserve_local` because an eviction that could
-    /// be abandoned and an eviction that keeps a local base are the same
-    /// eviction: the one a live node can change its mind about. A drain and a
-    /// fence carry neither.
-    Evict {
-        preserve_local: bool,
-        abandon: Option<Arc<crate::replication::EvictionAbandon>>,
-    },
-    /// Prove the final position and retain it for the successor epoch.
-    Rebase,
-    /// Close without a remote write because the caller lacks authority.
-    CloseInPlace,
-    /// Remove an image whose durability proof failed.
-    Discard,
-}
-
-impl CellHost {
-    pub(crate) fn local_reload_cells(&self) -> anyhow::Result<Vec<celld_logic::LocalCell>> {
-        match self {
-            Self::V8(runtime) => runtime.local_reload_cells(),
-            #[cfg(all(test, celld_internal_tests))]
-            Self::Scripted(runtime) => runtime.local_reload_cells(),
-        }
-    }
-
-    pub(crate) async fn restore_cell(
-        &self,
-        cell: &str,
-        spec: &celld_logic::RestoreSpec,
-    ) -> anyhow::Result<celld_logic::RestoreOutcome> {
-        match self {
-            Self::V8(runtime) => runtime.restore_cell(cell, spec).await,
-            #[cfg(all(test, celld_internal_tests))]
-            Self::Scripted(runtime) => runtime.restore_cell(cell, spec).await,
-        }
-    }
-
-    /// Start a cell's runtime, reporting the isolate that took its realm and
-    /// the application generation that isolate belongs to.
-    pub(crate) async fn start_cell(
-        &self,
-        cell: String,
-        epoch: u64,
-        fresh: bool,
-    ) -> anyhow::Result<(celld_logic::isolate::HeapId, GenerationId)> {
-        match self {
-            Self::V8(runtime) => runtime.start_cell(cell, epoch, fresh).await,
-            // The scripted host maps its deterministic isolate pool to heap
-            // identities on the generation a node boots with; no scripted
-            // world adopts another.
-            #[cfg(all(test, celld_internal_tests))]
-            Self::Scripted(runtime) => runtime
-                .start_cell(cell, epoch, fresh)
-                .await
-                .map(|isolate| (isolate, crate::generation::FIRST_GENERATION)),
-        }
-    }
-
-    /// Take a cell out of its isolate for a generation swap: close its
-    /// application database and give the placement back, and touch nothing
-    /// else. Ownership, the epoch, the replica, and the wake entry all stay.
-    pub(crate) async fn swap_out_cell(&self, cell: &str, epoch: u64) -> anyhow::Result<()> {
-        match self {
-            Self::V8(runtime) => runtime.swap_out_cell(cell, epoch).await,
-            #[cfg(all(test, celld_internal_tests))]
-            Self::Scripted(runtime) => runtime.swap_out_cell(cell, epoch).await,
-        }
-    }
-
-    pub(crate) fn publish_cell(&self, cell: &str, epoch: u64) -> anyhow::Result<()> {
-        match self {
-            Self::V8(runtime) => runtime.publish_cell(cell, epoch),
-            #[cfg(all(test, celld_internal_tests))]
-            Self::Scripted(runtime) => runtime.publish_cell(cell, epoch),
-        }
-    }
-
-    pub(crate) async fn ensure_durable(
-        &self,
-        cell: &str,
-        epoch: u64,
-        revocable: bool,
-    ) -> anyhow::Result<()> {
-        match self {
-            Self::V8(runtime) => runtime.ensure_durable(cell, epoch, revocable).await,
-            // The scripted host owns a real replicator over a real object
-            // store, so it takes the same gate. Letting it skip the gate made
-            // the gate unreachable from the deterministic worlds, which is
-            // why no case noticed when the pre-close check was removed.
-            #[cfg(all(test, celld_internal_tests))]
-            Self::Scripted(runtime) => runtime.ensure_durable(cell, epoch, revocable).await,
-        }
-    }
-
-    pub(crate) async fn await_durable(
-        &self,
-        cell: &str,
-        epoch: u64,
-        position: u64,
-    ) -> anyhow::Result<(u64, celld_logic::ProofSource)> {
-        match self {
-            Self::V8(runtime) => runtime.await_durable(cell, epoch, position).await,
-            #[cfg(all(test, celld_internal_tests))]
-            Self::Scripted(runtime) => runtime.await_durable(cell, epoch, position).await,
-        }
-    }
-
-    pub(crate) async fn stop_cell(
-        &self,
-        cell: &str,
-        epoch: u64,
-        mode: StopMode,
-    ) -> anyhow::Result<()> {
-        match self {
-            Self::V8(runtime) => runtime.stop_cell(cell, epoch, mode).await,
-            #[cfg(all(test, celld_internal_tests))]
-            Self::Scripted(runtime) => runtime.stop_cell(cell, epoch, mode).await,
-        }
-    }
-
-    pub(crate) fn abort_activity(&self, request_id: js::RequestId) {
-        match self {
-            Self::V8(_) => js::abort_request_for_shutdown(request_id),
-            #[cfg(all(test, celld_internal_tests))]
-            Self::Scripted(_) => {}
-        }
-    }
-
-    /// Keep the snapshot and its consumer under the host's reporter lock.
-    /// An activity completion sent after a newer report can otherwise erase it.
-    pub(crate) fn with_alarm<T>(
-        &self,
-        cell: &str,
-        f: impl FnOnce(celld_logic::wake::AlarmSnapshot, bool) -> T,
-    ) -> T {
-        match self {
-            Self::V8(runtime) => runtime
-                .with_alarm_snapshot(cell, |alarm| f(alarm, runtime.alarm_covered(cell, alarm))),
-            #[cfg(all(test, celld_internal_tests))]
-            Self::Scripted(runtime) => runtime.with_alarm(cell, f),
-        }
-    }
-
-    /// Legacy scripted drivers supply their own observations. A host connected
-    /// to the activity path supplies them through the same boundary as V8.
-    pub(crate) fn alarm_observation(
-        &self,
-        cell: &str,
-    ) -> Option<(celld_logic::wake::AlarmSnapshot, bool)> {
-        match self {
-            Self::V8(_) => Some(self.with_alarm(cell, |alarm, covered| (alarm, covered))),
-            #[cfg(all(test, celld_internal_tests))]
-            Self::Scripted(runtime) => runtime
-                .observes_activity_alarms()
-                .then(|| self.with_alarm(cell, |alarm, covered| (alarm, covered))),
-        }
-    }
-
-    /// Make an armed alarm discoverable before a graceful handoff continues.
-    /// The runtime cache and the wake flusher share the reporter ordering, so
-    /// re-reading after the awaited reconcile gives the core one observation
-    /// that cannot overtake the bucket operation it describes.
-    pub(crate) async fn refresh_handoff_alarm_coverage(
-        &self,
-        cell: &str,
-        alarm: celld_logic::wake::AlarmSnapshot,
-    ) -> Option<(celld_logic::wake::AlarmSnapshot, bool)> {
-        #[cfg(all(test, celld_internal_tests))]
-        if matches!(self, Self::Scripted(host) if !host.observes_activity_alarms()) {
-            return None;
-        }
-        if js::publish_observed_wake_entry(cell, alarm).await.is_err() {
-            return None;
-        }
-        self.alarm_observation(cell)
-    }
-
-    pub(crate) async fn fire_alarm(
-        &self,
-        op: celld_logic::OpId,
-        cell: String,
-        scheduled_ms: i64,
-    ) -> anyhow::Result<(celld_logic::wake::AlarmSnapshot, bool, Option<u64>)> {
-        match self {
-            Self::V8(runtime) => runtime.fire_alarm(op, cell, scheduled_ms).await,
-            #[cfg(all(test, celld_internal_tests))]
-            Self::Scripted(runtime) => runtime.fire_alarm(op, cell, scheduled_ms).await,
-        }
-    }
-
-    pub(crate) fn abort_alarm(&self, cell: &str, op: celld_logic::OpId) {
-        match self {
-            Self::V8(runtime) => runtime.abort_alarm(cell, op),
-            #[cfg(all(test, celld_internal_tests))]
-            Self::Scripted(_) => {}
-        }
+/// The engine-neutral half, so a method of either reads as the manager's own.
+impl std::ops::Deref for RuntimeManager {
+    type Target = crate::cell_runtime::CellRuntime;
+    fn deref(&self) -> &crate::cell_runtime::CellRuntime {
+        &self.core
     }
 }
 
-/// Node-level inputs to the cell runtime: everything that outlives an
-/// application generation. What a deployment implies goes through
-/// `Generation::build` instead.
-pub struct RuntimeOptions {
-    pub data_dir: PathBuf,
-    pub replication: Option<Replication>,
-    pub wake: Option<Arc<WakeFlusher>>,
-    pub alarm_observer: AlarmObserver,
-    pub node: String,
-    pub region: String,
-    /// The fleet bucket, where container images live. `None` for a local
-    /// script, which has no bucket and loads images from the engine alone.
-    pub bucket: Option<crate::bucket::Bucket>,
+/// The engine's part of `Generation::build`: V8 starts once per process.
+pub(crate) fn init_engine() {
+    init_v8();
 }
 
-/// A service-binding fetch crossing from a calling isolate into the router.
-pub struct ServiceFetch {
-    /// The caller's application generation; the target is resolved in its
-    /// deployment graph.
-    pub generation: GenerationId,
-    pub script: String,
-    pub entrypoint: Option<crate::WorkerFetchEntrypoint>,
-    pub url: String,
-    pub method: String,
-    pub body: js::RequestBody,
-    pub headers: Vec<(String, String)>,
-    pub cancel: Option<tokio::sync::oneshot::Receiver<()>>,
-}
-
-/// Owned HTTP request crossing from the async shell into a V8 executor.
-pub struct RuntimeFetch {
-    pub url: String,
-    pub method: String,
-    pub body: js::RequestBody,
-    pub headers: Vec<(String, String)>,
-    pub request_id: Option<js::RequestId>,
-    /// Where this call sits in its caller's order for this cell.
-    pub order: Option<js::CallOrder>,
-    /// The dispatching Worker's trace context, so the cell's span joins
-    /// the caller's trace instead of rooting a disconnected one.
-    pub parent: Option<crate::telemetry::TraceContext>,
-}
-
-/// The node's replication engine: the in-process `celld-ltx` replicator,
-/// hidden behind this wrapper so nothing else touches the backend directly.
-#[derive(Clone)]
-pub struct Replication {
-    ltx: Arc<LtxRepl>,
-}
-
-impl Replication {
-    /// See `LtxRepl::set_paged_fleet`: the fleet sampler's answer to whether
-    /// every live lease reads a paged epoch.
-    pub fn set_paged_fleet(&self, ready: bool) -> bool {
-        self.ltx.set_paged_fleet(ready)
-    }
-
-    /// Whether this node would page a large takeover now.
-    pub fn paged_fleet(&self) -> bool {
-        self.ltx.paged_fleet()
-    }
-
-    pub fn start(
-        bucket: crate::bucket::Bucket,
-        watch: &Path,
-        endpoint: Option<String>,
-        region: String,
-        credentials: Option<StorageCredentials>,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            ltx: Arc::new(LtxRepl::start(
-                watch,
-                bucket.backend(),
-                bucket.name,
-                bucket.prefix,
-                endpoint,
-                region,
-                credentials,
-            )?),
-        })
-    }
-
-    /// The log tier installs its shipper and takeover interlock here.
-    pub fn ltx(&self) -> Arc<LtxRepl> {
-        self.ltx.clone()
-    }
-
-    async fn restore(
-        &self,
-        cell: &str,
-        spec: &celld_logic::RestoreSpec,
-    ) -> anyhow::Result<(PathBuf, bool, Option<String>)> {
-        let options = ActivationOptions {
-            cell,
-            epoch: spec.epoch,
-            fresh: spec.fresh,
-            took_over: spec.took_over,
-            resume_local: spec.resume_local,
-            prior: spec.prior.clone(),
-        };
-        let activated = self.ltx.activate(options).await?;
-        Ok((activated.path, activated.restored, activated.vfs))
-    }
-
-    pub fn process_status(&self) -> std::io::Result<Option<std::process::ExitStatus>> {
-        self.ltx.process_status()
-    }
-
-    /// Enforce the byte ceiling on preserved eviction snapshots.
-    ///
-    /// The directory walk is synchronous, so callers must run this on a
-    /// blocking executor rather than the runtime's serving thread.
-    pub fn prune_local_cache(&self, max_bytes: u64) -> std::io::Result<(usize, usize, u64)> {
-        self.ltx.prune_local_cache(max_bytes)
-    }
-
-    pub async fn close_for_reload(&self, cell: &str, epoch: u64) -> anyhow::Result<()> {
-        self.ltx.close_for_reload(cell, epoch).await
-    }
-
-    pub fn local_cells(&self) -> Vec<celld_logic::LocalCell> {
-        self.ltx.local_cells()
-    }
-
-    pub fn prune_stale_live(&self, keep: &BTreeSet<(String, u64)>) -> anyhow::Result<usize> {
-        self.ltx.prune_stale_live(keep)
-    }
-
-    /// Copy the exact published epoch into a private read-only snapshot.
-    pub fn snapshot_active(
-        &self,
-        cell: &str,
-        epoch: u64,
-    ) -> anyhow::Result<Option<crate::replication::RestoredSnapshot>> {
-        self.ltx.snapshot_active(cell, epoch)
-    }
-
-    /// Restore the newest completed replica without claiming or activating it.
-    pub async fn restore_snapshot(
-        &self,
-        cell: &str,
-    ) -> anyhow::Result<Option<crate::replication::RestoredSnapshot>> {
-        self.ltx.restore_snapshot(cell).await
-    }
-
-    /// The eviction gate. `LtxRepl::handoff_gate` holds the reasoning: it
-    /// owns both questions the gate asks, so the V8 host and the scripted
-    /// host cannot drift apart on which one a revocable eviction takes.
-    async fn ensure_durable(&self, cell: &str, epoch: u64, revocable: bool) -> anyhow::Result<()> {
-        self.ltx.handoff_gate(cell, epoch, revocable).await
-    }
-
-    /// The output-gate durability wait: return the committed-write position the
-    /// replica has proved durable, at least covering `position`, and which
-    /// mechanism proved it (the fences differ; see `celld_logic::ProofSource`).
-    /// The replicator batches concurrent writes to one cell behind a
-    /// background sync and reports the real durable position.
-    async fn await_durable(
-        &self,
-        cell: &str,
-        epoch: u64,
-        position: u64,
-    ) -> anyhow::Result<(u64, celld_logic::ProofSource)> {
-        self.ltx.await_durable(cell, epoch, position).await
-    }
-
-    async fn evict(
-        &self,
-        cell: &str,
-        epoch: u64,
-        preserve_local: bool,
-        abandon: Option<&crate::replication::EvictionAbandon>,
-    ) -> anyhow::Result<()> {
-        self.ltx
-            .evict(cell, epoch, preserve_local, abandon)
-            .await
-            .map(|_| ())
-    }
-
-    async fn release(&self, cell: &str, epoch: u64) -> anyhow::Result<()> {
-        self.ltx.release(cell, epoch).await
-    }
-
-    async fn close_in_place(&self, cell: &str, epoch: u64) -> anyhow::Result<()> {
-        self.ltx.close_in_place(cell, epoch).await
-    }
-}
-
-impl Generation {
-    /// Build a deployment into a generation that can serve.
-    ///
-    /// Every script in the graph is compiled and its primary pool warmed, so
-    /// a bundle that does not load, or declares a Durable Object class it
-    /// does not export, fails here — before the generation can take traffic
-    /// — rather than on the first request. The Durable Object classes of
-    /// every script form one flat registry, because `start_cell` resolves a
-    /// cell by the class its scope names and nothing else.
-    ///
-    /// Boot and reload both come through here. There is no other function
-    /// that turns a deployment into runtime state.
-    pub fn build(
-        id: GenerationId,
-        graph: DeploymentGraph,
-        options: GenerationOptions,
-    ) -> anyhow::Result<Self> {
-        let GenerationOptions { node, region } = options;
-        let DeploymentGraph { primary, cohosted } = graph;
-        init_v8();
-
-        // A Queue class is shared by every co-hosted script, but its broker
-        // needs the consumer script rather than whichever script happened to
-        // register `__Queue` first. Resolve one deployment-wide catalog before
-        // constructing any WorkerConfig, then install the same catalog into
-        // every isolate that could host a queue cell.
-        let mut queue_catalog = BTreeMap::new();
-        for (script, consumers) in
-            std::iter::once((&primary.script_name, &primary.options.queue_consumers)).chain(
-                cohosted
-                    .iter()
-                    .map(|target| (&target.script_name, &target.options.queue_consumers)),
-            )
-        {
-            for consumer in consumers {
-                let registration = js::QueueConsumerRegistration {
-                    script: script.clone(),
-                    config: consumer.clone(),
-                };
-                if let Some(previous) = queue_catalog.insert(consumer.queue.clone(), registration) {
-                    return Err(anyhow!(
-                        "queue {:?} is consumed by both {} and {}",
-                        consumer.queue,
-                        previous.script,
-                        script
-                    ));
-                }
-            }
-        }
-        let queue_catalog = queue_catalog.into_values().collect::<Vec<_>>();
-
-        let node: Arc<str> = Arc::from(node);
-        let region: Arc<str> = Arc::from(region);
-        let primary_script = primary.script_name.clone();
-        let version = primary.version.clone();
-        let prefix = primary.prefix.clone();
-        let mut all_containers = Vec::new();
-        let mut fence_image = None;
-        // Only classes the user declared can be a bare-id default. Every
-        // runtime-supplied class rides in `do_classes` so that its namespace
-        // key is minted, and counting one here made adding any D1 binding flip
-        // a one-class project past the `len == 1` condition — every
-        // `/do/<bare-id>` request then failed with "requires exactly one
-        // configured Durable Object class" for a config that still declared
-        // exactly one.
-        //
-        // This asks `deploy::is_reserved_class` rather than naming one class,
-        // because the first version of this filter named `__D1Database` alone
-        // and `__Workflow` walked straight back into the same bug when it
-        // shipped. A fourth reserved class must not be able to do it a third
-        // time.
-        let user_classes: Vec<&String> = primary
-            .options
-            .do_classes
-            .iter()
-            .filter(|class| !crate::deploy::is_reserved_class(class))
-            .collect();
-        let default_do_class =
-            (user_classes.len() == 1).then(|| Arc::from(user_classes[0].as_str()));
-        // Two scripts exporting one class name is genuinely ambiguous and is
-        // refused — but a *reserved* class is not an export, and the two kinds
-        // behave differently:
-        //
-        // `__D1Database` is deliberately shared. Its namespace is fleet-wide so
-        // that several Workers can bind one database and a rename cannot rename
-        // it, so two scripts declaring `d1_databases` address the same cells on
-        // purpose. A D1 cell runs SQL and reads no user code, binding or var,
-        // so whichever config serves it is immaterial and the first wins.
-        // Refusing the second was bug F3: the node exited rather than start.
-        //
-        // A workflow class is script-scoped (`deploy::workflow_class`), so two
-        // scripts produce two distinct names and never reach this branch. If
-        // one ever did, it would be a real collision and must still be refused.
-        let mut cell_configs: HashMap<String, Arc<WorkerConfig>> = HashMap::new();
-        let mut service_pools = HashMap::new();
-        let mut assets = HashMap::new();
-        // Primary first: shared reserved classes retain the first script's
-        // config. Only this script owns ingress and the node's cron schedule;
-        // bindings and runtime construction follow the same path for all scripts.
-        for (index, deployment) in std::iter::once(primary).chain(cohosted).enumerate() {
-            let is_primary = index == 0;
-            let crate::fleet::LoadedDeployment {
-                options,
-                script_name: script,
-                asset_binding,
-                loader_bindings,
-                assets: resolver,
-                services,
-                crons,
-                containers,
-                fence_image: fence,
-                ..
-            } = deployment;
-            all_containers.extend(containers.iter().cloned());
-            fence_image = fence_image.or(fence);
-            if let Some(resolver) = resolver {
-                assets.insert(script.clone(), resolver);
-            }
-            let classes = options.do_classes.clone();
-            let config = Arc::new(
-                WorkerConfig::new(options)
-                    .with_services(services)
-                    .with_asset_binding(asset_binding)
-                    .with_loaders(loader_bindings)
-                    .with_queue_consumers(queue_catalog.clone())
-                    .with_crons(if is_primary { crons } else { Vec::new() })
-                    .with_containers(containers)
-                    .with_generation(id),
-            );
-            let pool = StatelessRuntime::start(config.clone(), node.clone(), region.clone())?;
-            if service_pools.insert(script.clone(), pool).is_some() {
-                return Err(anyhow!("duplicate co-hosted Worker script {script}"));
-            }
-            for class in classes {
-                register_cell_class(&mut cell_configs, class, config.clone(), &|class| {
-                    if is_primary {
-                        anyhow!("duplicate Durable Object class {class}")
-                    } else {
-                        anyhow!(
-                            "Durable Object class {class} is exported by more than one co-hosted script"
-                        )
-                    }
-                })?;
-            }
-            // Cron is runtime-supplied, not a manifest class. Its alarm calls
-            // the primary script's scheduled handler with that script's bindings.
-            if !config.crons.is_empty() {
-                cell_configs.insert(celld_logic::cron::RESERVED_CLASS.to_string(), config);
-            }
-        }
-        let stateless = service_pools[&primary_script].clone();
-        let cell_isolates: HashMap<String, Arc<crate::pool::Pool>> = cell_configs
-            .values()
-            .map(|config| {
-                let build = config.clone();
-                (
-                    config.script_name.clone(),
-                    Arc::new(crate::pool::Pool::new(
-                        pool_limits(),
-                        admission_wait(),
-                        Box::new(move || load_cell_isolate(build.clone())),
-                    )),
-                )
-            })
-            .collect();
-        Ok(Generation {
-            id,
-            version,
-            prefix,
-            script_name: primary_script,
-            stateless,
-            services: service_pools,
-            cell_configs,
-            cell_isolates,
-            default_do_class,
-            assets,
-            containers: all_containers,
-            fence_image,
-        })
-    }
-}
-/// Claim one class name in a deployment's cell registry.
-///
-/// A duplicate is an error for a user class, because `start_cell` resolves a
-/// cell from the class its scope names and two exports of one name are
-/// genuinely ambiguous. A duplicate of a *shared* reserved class is not: see
-/// `deploy::is_shared_reserved_class`. The caller supplies the error so the
-/// message can say whether the collision was inside one script or across two.
-fn register_cell_class(
-    configs: &mut HashMap<String, Arc<WorkerConfig>>,
-    class: String,
-    config: Arc<WorkerConfig>,
-    duplicate: &dyn Fn(&str) -> anyhow::Error,
-) -> anyhow::Result<()> {
-    match configs.entry(class) {
-        Entry::Vacant(slot) => {
-            slot.insert(config);
-            Ok(())
-        }
-        Entry::Occupied(slot) if crate::deploy::is_shared_reserved_class(slot.key()) => Ok(()),
-        Entry::Occupied(slot) => Err(duplicate(slot.key())),
-    }
+/// The isolates a script's cells live in, built from the script's config.
+pub(crate) fn cell_pool(config: Arc<WorkerConfig>) -> Arc<crate::pool::Pool> {
+    Arc::new(crate::pool::Pool::new(
+        pool_limits(),
+        admission_wait(),
+        Box::new(move || load_cell_isolate(config.clone())),
+    ))
 }
 
 /// Wait for one cell fetch reply without retaining the internal receiver after
@@ -1410,14 +736,6 @@ pub(crate) async fn receive_service_fetch_response_for_test(
 }
 
 impl RuntimeManager {
-    pub fn node(&self) -> &str {
-        &self.node
-    }
-
-    pub fn region(&self) -> &str {
-        &self.region
-    }
-
     /// A deployment with no Durable Object classes can never land a Worker fetch
     /// on a cell, so the core's round-robin routing always returns `None`. Lets
     /// the request path skip the core round-trip entirely for stateless workers.
@@ -1451,27 +769,24 @@ impl RuntimeManager {
         } = options;
         let max_cell_requests =
             crate::env_vars::positive_or("CELLD_MAX_CELL_REQUESTS", DEFAULT_MAX_CELL_REQUESTS)?;
-        require_cell_scope_capacity(&data_dir)?;
-        let node: Arc<str> = Arc::from(node);
-        let region: Arc<str> = Arc::from(region);
-        let cells = Arc::new(Mutex::new(CellRegistry::default()));
-        let alarm_reporter = alarm_reporter(&cells, &alarm_observer);
         let generation = Arc::new(generation);
-        let manager = Self {
-            generations: Arc::new(std::sync::RwLock::new(Generations {
-                current: generation.clone(),
-                draining: Vec::new(),
-            })),
-            cells,
-            alarm_reporter,
-            remote_requests: Arc::new(Mutex::new(RemoteRequestRegistry::default())),
-            alarm_requests: Arc::new(Mutex::new(AlarmRequestRegistry::default())),
-            data_dir: Arc::new(data_dir),
+        let core = crate::cell_runtime::CellRuntime::new(
+            generation.clone(),
+            data_dir,
             replication,
             wake,
             alarm_observer,
             node,
             region,
+        )?;
+        let cells = Arc::new(Mutex::new(CellRegistry::default()));
+        let alarm_reporter = alarm_reporter(&cells, &core.alarm_observer);
+        let manager = Self {
+            core,
+            cells,
+            alarm_reporter,
+            remote_requests: Arc::new(Mutex::new(RemoteRequestRegistry::default())),
+            alarm_requests: Arc::new(Mutex::new(AlarmRequestRegistry::default())),
             max_cell_requests,
         };
         manager.watch_generation(&generation);
@@ -1482,54 +797,6 @@ impl RuntimeManager {
         );
         install_container_specs(&generation);
         Ok(manager)
-    }
-
-    /// The generation this node serves now.
-    ///
-    /// A caller that makes more than one decision from it takes the snapshot
-    /// once and uses it throughout: the current generation can change between
-    /// two reads, and a request must see one deployment graph, not two.
-    pub fn generation(&self) -> Arc<Generation> {
-        self.generations
-            .read()
-            .expect("generation lock poisoned")
-            .current
-            .clone()
-    }
-
-    /// The generation an isolate was built for: the current one when the id
-    /// matches, otherwise a superseded generation still draining. Zero — the
-    /// tag of an isolate built outside any generation — and an id whose
-    /// generation has finished draining both resolve to the current one.
-    pub fn generation_by_id(&self, id: GenerationId) -> Arc<Generation> {
-        // One lock over both halves: read separately, a caller from the
-        // previous generation could observe the new one as current before
-        // the previous one was resolvable, find neither, and fall through to
-        // the new graph -- the cross-generation call this exists to prevent.
-        let generations = self.generations.read().expect("generation lock poisoned");
-        if id == 0 || generations.current.id == id {
-            return generations.current.clone();
-        }
-        generations
-            .draining
-            .iter()
-            .find(|generation| generation.id == id)
-            .cloned()
-            .unwrap_or_else(|| generations.current.clone())
-    }
-
-    /// The id the next generation takes: one past the newest this node has
-    /// built, draining generations included, so an id is never reused while
-    /// an isolate still carries it.
-    pub fn next_generation_id(&self) -> GenerationId {
-        let generations = self.generations.read().expect("generation lock poisoned");
-        let draining = generations
-            .draining
-            .iter()
-            .map(|generation| generation.id)
-            .max()
-            .unwrap_or(0);
-        generations.current.id.max(draining) + 1
     }
 
     /// Make `generation` current: the flip.
@@ -1567,17 +834,6 @@ impl RuntimeManager {
         // which every request reads.
         previous.retire();
         next
-    }
-
-    /// The generations still draining, for `/state`. Each one holds its
-    /// isolates until the last cell in them moves, so the caller reads the
-    /// census from the generation and not only its version.
-    pub fn draining_generations(&self) -> Vec<Arc<Generation>> {
-        self.generations
-            .read()
-            .expect("generation lock poisoned")
-            .draining
-            .clone()
     }
 
     /// Spawn the maintenance loop for one generation's cell pools.
@@ -1625,34 +881,6 @@ impl RuntimeManager {
                 }
             }
         });
-    }
-
-    /// Resolve a client-supplied cell id to a scope.
-    ///
-    /// The id arrives from the network, and the scope it becomes is used as a
-    /// path component and as an object-store key, so the charset gate runs
-    /// first. Without it a scope carries its own path segments and `db_path`
-    /// walks out of the data directory through them.
-    ///
-    /// The fleet-wide storage gate runs a second time on the composed scope. A
-    /// bare id takes a class prefix, so the scope that reaches storage is the
-    /// value that must fit.
-    pub fn cell_scope(&self, id: &str) -> anyhow::Result<String> {
-        if !celld_logic::cell::valid_cell_scope(id) {
-            return Err(anyhow!("cell id is not a well-formed scope"));
-        }
-        if id.contains(':') {
-            return Ok(id.to_string());
-        }
-        let generation = self.generation();
-        let class = generation.default_do_class().ok_or_else(|| {
-            anyhow!("a bare cell id requires exactly one configured Durable Object class")
-        })?;
-        let scope = format!("{class}:{id}");
-        if !celld_logic::cell::valid_cell_scope(&scope) {
-            return Err(anyhow!("cell id is not a well-formed scope"));
-        }
-        Ok(scope)
     }
 
     pub async fn fetch_worker(
@@ -1821,8 +1049,9 @@ impl RuntimeManager {
         spec: &celld_logic::RestoreSpec,
     ) -> anyhow::Result<celld_logic::RestoreOutcome> {
         let path = self.db_path(cell, spec.epoch);
+        self.facets.register(cell, spec);
         if let Some(replication) = &self.replication {
-            let (restored_path, restored, vfs) = replication.restore(cell, spec).await?;
+            let (restored_path, restored, vfs) = replication.restore(cell, spec, true).await?;
             if restored_path != path {
                 return Err(anyhow!(
                     "replication restored {} instead of {}",
@@ -1876,20 +1105,6 @@ impl RuntimeManager {
         })
     }
 
-    pub fn replication(&self) -> Option<Replication> {
-        self.replication.clone()
-    }
-
-    /// Read the filesystem inventory after the core has replaced the exact
-    /// clean predecessor lease generation.
-    pub fn local_reload_cells(&self) -> anyhow::Result<Vec<celld_logic::LocalCell>> {
-        let replication = self
-            .replication
-            .as_ref()
-            .context("local reload requires replication")?;
-        Ok(replication.local_cells())
-    }
-
     /// Detach every resident runtime, prove and retain its exact database path,
     /// and remove stale live-named epochs. The caller has already stopped
     /// admission and drained request effects.
@@ -1918,7 +1133,13 @@ impl RuntimeManager {
                     // Keep it registered until the final capture proves the
                     // stopped database position present in the bucket.
                     runtime.swap_out_cell(&cell.id, cell.epoch).await?;
-                    replication.close_for_reload(&cell.id, cell.epoch).await
+                    for facet in runtime.facets.stopping(&cell.id, cell.epoch) {
+                        replication.close_for_reload(&facet, cell.epoch).await?;
+                        runtime.facets.stopped(&cell.id, cell.epoch, &facet);
+                    }
+                    replication.close_for_reload(&cell.id, cell.epoch).await?;
+                    runtime.facets.forget(&cell.id, cell.epoch);
+                    anyhow::Ok(())
                 }
             })
             .buffer_unordered(128);
@@ -1927,41 +1148,6 @@ impl RuntimeManager {
         }
         let pruned = replication.prune_stale_live(&keep)?;
         Ok(pruned)
-    }
-
-    pub fn replication_status(&self) -> std::io::Result<Option<std::process::ExitStatus>> {
-        match &self.replication {
-            Some(replication) => replication.process_status(),
-            None => Ok(None),
-        }
-    }
-
-    pub async fn ensure_durable(
-        &self,
-        cell: &str,
-        epoch: u64,
-        revocable: bool,
-    ) -> anyhow::Result<()> {
-        match &self.replication {
-            Some(replication) => replication.ensure_durable(cell, epoch, revocable).await,
-            None => Ok(()),
-        }
-    }
-
-    /// The output-gate durability wait (see `Replication::await_durable`).
-    /// Returns the proved durable position and its proof source; with no
-    /// replicator every position is trivially durable, and the fleet source
-    /// keeps the gate read-free exactly like the old immediate release.
-    pub async fn await_durable(
-        &self,
-        cell: &str,
-        epoch: u64,
-        position: u64,
-    ) -> anyhow::Result<(u64, celld_logic::ProofSource)> {
-        match &self.replication {
-            Some(replication) => replication.await_durable(cell, epoch, position).await,
-            None => Ok((position, celld_logic::ProofSource::Fleet)),
-        }
     }
 
     /// Take a cell out of its isolate for a generation swap.
@@ -1994,7 +1180,7 @@ impl RuntimeManager {
             // started one, so closing its SQLite cannot land mid-handler.
             slot.turn(|worker| {
                 #[cfg(debug_assertions)]
-                if let Some(error) = injected_swap_release_failure() {
+                if let Some(error) = crate::engine_api::injected_swap_release_failure() {
                     return Err(error);
                 }
                 worker.own_cell(cell, None)
@@ -2192,6 +1378,9 @@ impl RuntimeManager {
         epoch: u64,
         mode: StopMode,
     ) -> anyhow::Result<()> {
+        // No facet opens once the stop begins; the facet loop below stops
+        // the streams this answers again, with any that opened before.
+        self.facets.stopping(cell, epoch);
         if let Some(engine) = crate::container::engine_if_ready() {
             // Only an idle eviction keeps the cell on this node, so only it
             // keeps the container: the next activation here reconnects.
@@ -2246,7 +1435,13 @@ impl RuntimeManager {
             // the isolate once no cell is left in it.
             drop(handle);
         }
-        if let Some(replication) = &self.replication {
+        let Some(replication) = &self.replication else {
+            self.facets.forget(cell, epoch);
+            return Ok(());
+        };
+        // The root and its facets stop in the order `FacetStreams::stop_root`
+        // owns, which a test drives through its failures.
+        let stop_root = || async {
             // Every stop releases the handle, and this does not consult
             // `stopped_runtime`. The replication entry is created by
             // `Effect::Restore` and the registry entry by
@@ -2257,26 +1452,63 @@ impl RuntimeManager {
             // The mode pairs the durability authority with the file outcome.
             // Passing these as independent booleans let cleanup close a proved
             // remote restore in place, where no later activation could use it.
-            match mode {
+            match &mode {
+                // A failed final sync leaves the handle and files in place.
+                // This call is therefore intentionally retryable after the
+                // runtime itself has already stopped. An abandoned one is not:
+                // it returns `EvictionAbandoned`, and the caller ends the stop
+                // instead of trying again.
                 StopMode::Evict {
                     preserve_local,
                     abandon,
-                } => {
-                    // A failed final sync leaves the handle and files in place.
-                    // This call is therefore intentionally retryable after the
-                    // runtime itself has already stopped. An abandoned one is
-                    // not: it returns `EvictionAbandoned`, and the caller ends
-                    // the stop instead of trying again.
-                    replication
-                        .evict(cell, epoch, preserve_local, abandon.as_deref())
-                        .await?;
+                } => replication
+                    .evict(cell, epoch, *preserve_local, abandon.as_deref())
+                    .await
+                    .map(|_| ()),
+                StopMode::Rebase => replication.release(cell, epoch).await,
+                StopMode::CloseInPlace => replication.close_in_place(cell, epoch).await,
+                StopMode::Discard => {
+                    replication.ltx().discard(cell, epoch);
+                    Ok(())
                 }
-                StopMode::Rebase => replication.release(cell, epoch).await?,
-                StopMode::CloseInPlace => replication.close_in_place(cell, epoch).await?,
-                StopMode::Discard => replication.ltx.discard(cell, epoch),
             }
-        }
-        Ok(())
+        };
+        let stop_facet = |facet: String| {
+            let mode = &mode;
+            async move {
+                // A retry after the facet's stream stopped, or after shutdown
+                // took the handle, has nothing left to stop.
+                if !replication.ltx().is_resident(&facet, epoch) {
+                    return Ok(());
+                }
+                match mode {
+                    // A facet keeps no local file past an eviction: its handler
+                    // writes through a connection of its own, which can outlive
+                    // the root's stop, and a preserved file would become the
+                    // next activation's baseline. The root is gone by now, so
+                    // the eviction is not abandoned.
+                    StopMode::Evict { .. } => replication
+                        .evict(&facet, epoch, false, None)
+                        .await
+                        .map(|_| ()),
+                    StopMode::Rebase => replication.release(&facet, epoch).await,
+                    StopMode::CloseInPlace => replication.close_in_place(&facet, epoch).await,
+                    StopMode::Discard => {
+                        replication.ltx().discard(&facet, epoch);
+                        Ok(())
+                    }
+                }
+            }
+        };
+        self.facets
+            .stop_root(
+                cell,
+                epoch,
+                replication.ltx().is_resident(cell, epoch),
+                stop_root,
+                stop_facet,
+            )
+            .await
     }
 
     pub async fn fetch_cell(
@@ -2407,7 +1639,7 @@ impl RuntimeManager {
         self.with_alarm_snapshot(cell, |alarm| f(alarm.at_ms()))
     }
 
-    fn with_alarm_snapshot<T>(
+    pub(crate) fn with_alarm_snapshot<T>(
         &self,
         cell: &str,
         f: impl FnOnce(celld_logic::wake::AlarmSnapshot) -> T,
@@ -2420,15 +1652,6 @@ impl RuntimeManager {
             .map(|handle| handle.alarm)
             .unwrap_or_else(|| celld_logic::wake::AlarmSnapshot::without_wake(None));
         f(alarm)
-    }
-
-    pub fn alarm_covered(&self, cell: &str, alarm: celld_logic::wake::AlarmSnapshot) -> bool {
-        match (alarm.at_ms(), &self.wake) {
-            (None, _) => true,
-            (Some(_), Some(wake)) if self.replication.is_some() => wake.covered(cell, alarm),
-            (Some(_), None) => false,
-            (Some(_), Some(_)) => false,
-        }
     }
 
     pub async fn fire_alarm(
@@ -2467,14 +1690,29 @@ impl RuntimeManager {
             js::abort_request_for_shutdown(request_id);
         }
         let result = receive.await.context("cell isolate dropped alarm result")?;
-        let final_write = drive.await.expect("cell alarm drive task panicked")?;
-        // A cancelled or failed alarm settles its claim in the drive's final
-        // isolate turn. The event reply is itself held behind every wake-entry
-        // arm, so waiting for the drive makes that final cache authoritative
-        // before the core sees completion.
         match result {
-            Ok((alarm, wrote)) => Ok((alarm, self.alarm_covered(&cell, alarm), wrote)),
+            // A handler that returned settled its claim inside its completion
+            // turn (`Answer::Alarm`), so the snapshot and the delta it replied
+            // with are already final and nothing below reads the drive's
+            // position. The drive itself runs on, because a completed cell
+            // event keeps its pending I/O (`completed_cell_event`), exactly as
+            // it does after a fetch answers. Waiting for it here held the
+            // core in `AlarmState::Firing` until the leftover I/O ended or the
+            // operation deadline expired the firing, so an `alarm()` that left
+            // one pending timer — what `AbortSignal.timeout` leaves behind
+            // after its fetch finished — delayed every re-arm by up to
+            // `CELLD_OPERATION_DEADLINE_MS`, and the core booked a handler
+            // that succeeded as a stuck one (denoland/celld#228).
+            Ok((alarm, wrote)) => {
+                watch_detached_alarm_drive(drive, &cell, op);
+                Ok((alarm, self.alarm_covered(&cell, alarm), wrote))
+            }
             Err(error) => {
+                // A cancelled or failed alarm settles its claim in the drive's
+                // final isolate turn. The event reply is itself held behind
+                // every wake-entry arm, so waiting for the drive makes that
+                // final cache authoritative before the core sees completion.
+                let final_write = drive.await.expect("cell alarm drive task panicked")?;
                 // The drive completed its final isolate turn before this
                 // branch. Its alarm cache is therefore authoritative even
                 // when the handler failed: `Some` is the automatic retry or
@@ -2668,20 +1906,6 @@ impl RuntimeManager {
             None,
         ));
         receive.await.context(dropped)?
-    }
-
-    fn db_path(&self, cell: &str, epoch: u64) -> PathBuf {
-        // A runtime without replication has no remote epoch namespace, so it
-        // keeps its only SQLite family at the existing e1 path across logical
-        // ownership epochs. The stable path survives a restart, needs no
-        // multi-file SQLite family move, and remains compatible with older
-        // releases.
-        let epoch = if self.replication.is_some() { epoch } else { 1 };
-        self.data_dir
-            .join(cell)
-            .join("ltx")
-            .join(format!("e{epoch}"))
-            .join("db.sqlite")
     }
 }
 
@@ -3563,30 +2787,6 @@ impl CellIsolateStartupTiming {
 ///
 /// No cells yet: `Worker::own_cell` opens each cell's storage as it is
 /// placed here, because this isolate outlives any of them.
-/// Fail the next release of a generation swap, for the black-box matrix.
-///
-/// A count rather than a latch, so a test can prove the retry reaches
-/// success instead of only proving that it never proceeds. `debug_assertions`
-/// is the gate `CELLD_TEST_CELL_STARTUP_FAILURE` beside it already uses: the
-/// runtime matrix drives the debug binary, which no internal test cfg
-/// reaches, and a release build compiles neither.
-#[cfg(debug_assertions)]
-fn injected_swap_release_failure() -> Option<anyhow::Error> {
-    use std::sync::atomic::AtomicI64;
-
-    static REMAINING: std::sync::OnceLock<AtomicI64> = std::sync::OnceLock::new();
-    let remaining = REMAINING.get_or_init(|| {
-        AtomicI64::new(
-            std::env::var("CELLD_TEST_SWAP_RELEASE_FAILURES")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(0),
-        )
-    });
-    (remaining.fetch_sub(1, Ordering::Relaxed) > 0)
-        .then(|| anyhow!("injected generation swap release failure"))
-}
-
 fn load_cell_isolate(config: Arc<WorkerConfig>) -> anyhow::Result<Worker> {
     #[cfg(debug_assertions)]
     if let Ok(barrier) = std::env::var("CELLD_TEST_CELL_STARTUP_BARRIER") {
@@ -3696,6 +2896,36 @@ pub async fn drive_cell(
         cancellation,
     )
     .await;
+}
+
+/// Let an answered alarm's leftover I/O finish on its own, and report how it
+/// ended.
+///
+/// `fire_alarm` stops waiting for the drive as soon as the handler returns, so
+/// nothing joins the task after that. Without this watcher a panic in the
+/// leftover work, which the former `drive.await` turned into a loud process
+/// panic, would end the task in silence.
+fn watch_detached_alarm_drive(
+    drive: crate::asyncrt::TaskHandle<anyhow::Result<Option<u64>>>,
+    cell: &str,
+    op: celld_logic::OpId,
+) {
+    let cell = cell.to_string();
+    crate::asyncrt::spawn(async move {
+        let failure = match drive.await {
+            Ok(Ok(_)) => return,
+            Ok(Err(error)) => format!("{error:#}"),
+            Err(panic) => panic.to_string(),
+        };
+        tracing::warn!(
+            event = "alarm_leftover_work_failed",
+            scope = %cell,
+            op,
+            failure = %failure,
+            "work an alarm handler left pending ended in a failure"
+        );
+    })
+    .detach();
 }
 
 /// Drive an alarm event and answer the position its final turn reached.

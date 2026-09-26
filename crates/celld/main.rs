@@ -630,6 +630,39 @@ async fn dispatch_gate(app: AppHandle, req: celld::js::GateReq) {
     let _ = req.reply.send(result);
 }
 
+/// A facet stream request from the isolate that runs the facet.
+async fn dispatch_facet(app: AppHandle, req: celld::js::FacetReq) {
+    use celld::js::FacetReq;
+    let Some(runtime) = app.runtime.as_ref() else {
+        let error = || anyhow::anyhow!("no cell runtime");
+        match req {
+            FacetReq::Open { reply, .. } => drop(reply.send(Err(error()))),
+            FacetReq::Delete { reply, .. } => drop(reply.send(Err(error()))),
+            FacetReq::Prove { reply, .. } => drop(reply.send(Err(error()))),
+        }
+        return;
+    };
+    match req {
+        FacetReq::Open {
+            root,
+            epoch,
+            names,
+            reply,
+        } => drop(reply.send(runtime.open_facet(&root, epoch, &names).await)),
+        FacetReq::Delete {
+            root,
+            epoch,
+            names,
+            reply,
+        } => drop(reply.send(runtime.delete_facet(&root, epoch, &names).await)),
+        FacetReq::Prove {
+            stream,
+            epoch,
+            reply,
+        } => drop(reply.send(runtime.prove_facet(&stream, epoch).await)),
+    }
+}
+
 /// Propagates a forwarding-side cancellation over the authenticated peer
 /// protocol. Dropping a Reqwest future does not guarantee that its pooled
 /// HTTP/1 transport closes, so the owner cannot use transport EOF alone.
@@ -1216,7 +1249,7 @@ async fn dispatch_do_call(app: AppHandle, call: DoCallReq) {
                             request_id,
                             if result.is_ok() { "ok" } else { "error" },
                             "local",
-                            app.runtime.as_ref().map_or("", RuntimeManager::node),
+                            app.runtime.as_ref().map_or("", |runtime| runtime.node()),
                         );
                     }
                     break result;
@@ -2359,7 +2392,7 @@ async fn handle_ingress(
         // One snapshot for the asset decision and the Worker it may fall
         // into, so a deployment adopted mid-request cannot serve the new
         // generation's index with the old generation's Worker.
-        let generation = app.runtime.as_ref().map(RuntimeManager::generation);
+        let generation = app.runtime.as_ref().map(|runtime| runtime.generation());
         if let Some(resolver) = generation.as_deref().and_then(Generation::ingress_assets) {
             let path = request.uri().path();
             if !resolver.should_run_worker_first(path) {
@@ -2822,9 +2855,13 @@ async fn internal_log(request: Request<Incoming>, app: AppHandle, path: String) 
             },
             Err(error) => Err(error.into()),
         },
-        "/peer/log/tail" => serde_json::from_slice::<celld::node_log::TailReq>(&body)
-            .map_err(anyhow::Error::from)
-            .map(|req| celld::node_log::encode_tail_resp(&follower.tail(&req))),
+        "/peer/log/tail" => match serde_json::from_slice::<celld::node_log::TailWireReq>(&body) {
+            Ok(req) => match follower.tail(&req.request).await {
+                Ok(response) => req.encode_response(&response),
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error.into()),
+        },
         _ => Err(anyhow::anyhow!("unknown log endpoint")),
     };
     match result {
@@ -4194,7 +4231,7 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
     let fleet_bucket = ready_ownership
         .as_ref()
         .map(|ownership| ownership.bucket_client());
-    let explorer_replication = runtime.as_ref().and_then(RuntimeManager::replication);
+    let explorer_replication = runtime.as_ref().and_then(|runtime| runtime.replication());
     let local_cache_replication = explorer_replication.clone();
     let (websocket_tx, mut websocket_rx) = mpsc::unbounded_channel();
     // The log tier's follower store (crate::node_log): fragments other
@@ -4253,7 +4290,9 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
     let mut durability_owner = DurabilityOwnerSelection::new(follower.clone());
     if let Ownership::Bucket(bucket_ownership) = &actor.ownership {
         if let (Some(replication), Some(spec)) = (
-            app.runtime.as_ref().and_then(RuntimeManager::replication),
+            app.runtime
+                .as_ref()
+                .and_then(|runtime| runtime.replication()),
             settings.bucket.clone(),
         ) {
             let _ = spec;
@@ -4337,6 +4376,16 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
     celld::js::set_do_call_tx(do_call_tx);
     let (gate_tx, mut gate_rx) = mpsc::unbounded_channel();
     celld::js::set_gate_tx(gate_tx);
+    let (facet_tx, mut facet_rx) = mpsc::unbounded_channel();
+    celld::js::set_facet_tx(facet_tx);
+    {
+        let app = app.clone();
+        tokio::spawn(async move {
+            while let Some(req) = facet_rx.recv().await {
+                tokio::spawn(dispatch_facet(app.clone(), req));
+            }
+        });
+    }
     let (rpc_call_tx, mut rpc_call_rx) = mpsc::unbounded_channel();
     celld::js::set_rpc_call_tx(rpc_call_tx);
     let (service_call_tx, mut service_call_rx) = mpsc::unbounded_channel();

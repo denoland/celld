@@ -16,12 +16,10 @@
 use crate::asyncrt;
 use crate::storage;
 use anyhow::{anyhow, Context as _, Result};
-use base64::Engine as _;
-use futures_util::StreamExt as _;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 use v8::{ValueDeserializerHelper, ValueSerializerHelper};
@@ -29,94 +27,137 @@ use v8::{ValueDeserializerHelper, ValueSerializerHelper};
 pub(crate) mod input_gate_lifecycle;
 use input_gate_lifecycle::{CrossEntryGateClaim, CrossEntryGateClaims};
 
+pub use crate::engine_api::answer_ticket;
+pub use crate::engine_api::d1_cell_scope;
+pub(crate) use crate::engine_api::decode_durable_object_id;
+pub(crate) use crate::engine_api::durable_object_id_for_name;
+pub(crate) use crate::engine_api::durable_object_id_hex;
+pub(crate) use crate::engine_api::durable_object_id_hmac;
+pub(crate) use crate::engine_api::durable_object_id_key;
+pub(crate) use crate::engine_api::fail_in_turn_error;
+pub use crate::engine_api::failed_write_position;
+pub use crate::engine_api::handler_budget;
+pub use crate::engine_api::kv_cell_scope;
+pub(crate) use crate::engine_api::namespace_key;
+pub use crate::engine_api::next_do_request_id;
+pub use crate::engine_api::next_request_id;
+pub use crate::engine_api::parse_request_id;
+pub use crate::engine_api::queue_cell_scope;
+pub use crate::engine_api::request_id_string;
+#[cfg(celld_internal_tests)]
+pub use crate::engine_api::workflow_cell_scope_for_test;
+pub use crate::engine_api::CellOverloaded;
+pub use crate::engine_api::Compat;
+pub use crate::engine_api::FailedInTurn;
+pub use crate::engine_api::GatedAnswer;
+pub use crate::engine_api::HttpChunkStream;
+pub use crate::engine_api::HttpResponse;
+pub use crate::engine_api::HttpResponseWebSocket;
+pub use crate::engine_api::ModuleSource;
+pub use crate::engine_api::QueueBatch;
+pub use crate::engine_api::QueueBinding;
+pub use crate::engine_api::QueueContentType;
+pub use crate::engine_api::QueueDispatchResult;
+pub use crate::engine_api::QueueMessage;
+pub use crate::engine_api::QueueMetrics;
+pub use crate::engine_api::QueueOutcome;
+pub use crate::engine_api::QueueRetryBatch;
+pub use crate::engine_api::QueueRetryMessage;
+pub use crate::engine_api::RequestBody;
+pub use crate::engine_api::RequestId;
+pub use crate::engine_api::RpcData;
+pub use crate::engine_api::RpcOutcome;
+pub use crate::engine_api::WorkerConfigOptions;
+pub use crate::engine_api::WorkflowBinding;
+pub use crate::engine_api::WsTarget;
+pub(crate) use crate::engine_api::BARE_NODE_BUILTINS;
+pub use crate::engine_api::CELL_OVERLOAD_ERROR_MARKER;
+#[cfg(celld_internal_tests)]
+pub use crate::host_channels::install_outbound_ws_connector_for_test;
+pub(crate) use crate::host_channels::outbound_ws_tx;
+pub use crate::host_channels::set_asset_call_tx;
+pub use crate::host_channels::set_facet_tx;
+pub use crate::host_channels::set_gate_tx;
+pub use crate::host_channels::set_kv_blob_store;
+pub use crate::host_channels::set_outbound_ws_tx;
+pub use crate::host_channels::set_queue_dispatch_tx;
+pub use crate::host_channels::set_rpc_call_tx;
+pub use crate::host_channels::set_svc_call_tx;
+pub use crate::host_channels::set_svc_rpc_tx;
+pub use crate::host_channels::AssetCallReq;
+pub use crate::host_channels::FacetReq;
+pub use crate::host_channels::GateReq;
+pub use crate::host_channels::QueueDispatchReq;
+pub use crate::host_channels::QueueLeaseRef;
+pub use crate::host_channels::RpcCallReq;
+pub use crate::host_channels::SvcCallReq;
+pub use crate::host_channels::SvcRpcReq;
+#[cfg(celld_internal_tests)]
+pub use crate::host_channels::TestOutboundWsConnector;
+pub(crate) use crate::host_channels::ASSET_CALL_TX;
+pub(crate) use crate::host_channels::FACET_TX;
+pub(crate) use crate::host_channels::GATE_TX;
+pub(crate) use crate::host_channels::QUEUE_DISPATCH_TX;
+pub(crate) use crate::host_channels::RPC_CALL_TX;
+pub(crate) use crate::host_channels::SVC_CALL_TX;
+pub(crate) use crate::host_channels::SVC_RPC_TX;
+pub(crate) use crate::http_streams::claim_http_stream;
+pub(crate) use crate::http_streams::encode_http_response;
+pub(crate) use crate::http_streams::http_stream_read;
+#[cfg(all(test, celld_internal_tests))]
+pub(crate) use crate::http_streams::http_stream_read_source_first_for_test;
+pub(crate) use crate::http_streams::http_stream_service;
+#[cfg(all(test, celld_internal_tests))]
+pub(crate) use crate::http_streams::next_http_stream_chunk;
+pub(crate) use crate::http_streams::prepare_http_stream_tee;
+pub use crate::http_streams::register_body_stream;
+pub(crate) use crate::http_streams::response_stream_close;
+pub(crate) use crate::http_streams::response_stream_write;
+pub(crate) use crate::http_streams::retain_first_http_cleanup_panic;
+#[cfg(all(test, celld_internal_tests))]
+pub(crate) use crate::http_streams::settle_http_stream_read;
+pub use crate::http_streams::take_body_stream;
+#[cfg(all(test, celld_internal_tests))]
+pub(crate) use crate::http_streams::HttpStreamActivityError;
+#[cfg(all(test, celld_internal_tests))]
+pub(crate) use crate::http_streams::HttpStreamActivityKind;
+pub(crate) use crate::http_streams::HttpStreamClaim;
+#[cfg(all(test, celld_internal_tests))]
+pub(crate) use crate::http_streams::HttpStreamEntry;
+pub(crate) use crate::http_streams::HttpStreamService;
+pub(crate) use crate::http_streams::HttpStreamSource;
+#[cfg(all(test, celld_internal_tests))]
+pub(crate) use crate::http_streams::HttpStreamTermination;
+#[cfg(all(test, celld_internal_tests))]
+pub(crate) use crate::http_streams::HttpStreamTerminationReason;
+#[cfg(all(test, celld_internal_tests))]
+pub(crate) use crate::http_streams::HttpSweeperExitGate;
+#[cfg(all(test, celld_internal_tests))]
+pub(crate) use crate::http_streams::HttpTeePump;
+pub(crate) use crate::http_streams::HttpTransferredStream;
+pub use crate::http_streams::RequestBodyGuard;
+pub(crate) use crate::http_streams::ResponseStreamWriter;
+pub(crate) use crate::http_streams::HTTP_STREAM_DONE;
+#[cfg(all(test, celld_internal_tests))]
+pub(crate) use crate::http_streams::HTTP_STREAM_IDLE_TIMEOUT_MS;
+pub(crate) use crate::http_streams::HTTP_STREAM_REGISTRATION_CLOSED;
+#[cfg(all(test, celld_internal_tests))]
+pub(crate) use crate::http_streams::HTTP_TEE_BRANCH_CAPACITY;
+#[cfg(all(test, celld_internal_tests))]
+pub(crate) use crate::http_streams::NEXT_HTTP_STREAM_ID;
+pub use crate::wake_entry::forget_wake_entry;
+pub(crate) use crate::wake_entry::launch_arm_gate;
+pub(crate) use crate::wake_entry::maintain_wake_entry;
+pub(crate) use crate::wake_entry::publish_observed_wake_entry;
+pub use crate::wake_entry::set_arm_gate;
+pub use crate::wake_entry::ArmGate;
+pub(crate) use crate::wake_entry::ArmGateRx;
+pub(crate) use crate::wake_entry::WakeEntryService;
+
 #[cfg(all(test, celld_internal_tests))]
 fn test_host_services() -> Arc<crate::host_services::HostServices> {
     asyncrt::services()
 }
-
-#[cfg(all(test, celld_internal_tests))]
-pub(crate) fn fail_post_checkpoint_facet_flush_for_test() {
-    asyncrt::services()
-        .wake_entry()
-        .fail_post_checkpoint_facet_flush
-        .store(true, Ordering::Release);
-}
-
-#[cfg(all(test, celld_internal_tests))]
-pub(crate) fn fail_next_embedded_delete_for_test() {
-    asyncrt::services()
-        .wake_entry()
-        .fail_next_embedded_delete
-        .store(true, Ordering::Release);
-}
-
-#[cfg(all(test, celld_internal_tests))]
-pub(crate) fn take_embedded_delete_fault_for_test() -> bool {
-    test_host_services()
-        .wake_entry()
-        .fail_next_embedded_delete
-        .swap(false, Ordering::AcqRel)
-}
-
-#[cfg(all(test, celld_internal_tests))]
-fn arm_deferred_facet_eviction_for_test() {
-    test_host_services()
-        .wake_entry()
-        .evict_next_deferred_facet
-        .store(true, Ordering::Release);
-}
-
-#[cfg(all(test, celld_internal_tests))]
-pub(crate) fn take_deferred_facet_eviction_for_test() -> bool {
-    test_host_services()
-        .wake_entry()
-        .evict_next_deferred_facet
-        .swap(false, Ordering::AcqRel)
-}
-
-/// Bare Node builtin specifiers that the bundler leaves for the runtime.
-/// Root entries also match subpaths in esbuild and in module resolution.
-pub(crate) const BARE_NODE_BUILTINS: &[&str] = &[
-    "assert",
-    "async_hooks",
-    "buffer",
-    "child_process",
-    "cluster",
-    "constants",
-    "crypto",
-    "dgram",
-    "diagnostics_channel",
-    "dns",
-    "events",
-    "fs",
-    "fs/promises",
-    "http",
-    "http2",
-    "https",
-    "inspector",
-    "module",
-    "net",
-    "os",
-    "path",
-    "perf_hooks",
-    "process",
-    "punycode",
-    "querystring",
-    "readline",
-    "sqlite",
-    "stream",
-    "string_decoder",
-    "timers",
-    "tls",
-    "tty",
-    "url",
-    "util",
-    "util/types",
-    "v8",
-    "vm",
-    "worker_threads",
-    "zlib",
-];
 
 /// The pending exception text from a TryCatch scope (a macro so it needs no
 /// bound on the crate-private scope traits).
@@ -282,134 +323,6 @@ pub fn enter_call_order(caller: Arc<IoContext>, cell: &str) -> CallOrder {
     }
 }
 
-/// A ticket asking the actor whether an outbound effect may leave the process.
-///
-/// Every in-handler channel takes one: `fetch`, a service binding, a call to
-/// another cell, and a frame on a socket the isolate opened. `position` is
-/// present when the running event wrote through it, absent when the event only
-/// read and the effect must trail whatever the cell already has outstanding.
-pub struct GateReq {
-    pub scope: String,
-    /// The route the held effect would leave by, the position it must see
-    /// proven, and the epoch that position was sampled at. The sample happens
-    /// in the handler's turn, before `dispatch_gate` acquires the request that
-    /// pins the cell; a reset in between discards the sampled write and the
-    /// request would activate the next epoch, so the core refuses a ticket
-    /// whose epoch is not the resident one. The core stores the route and
-    /// hands it back, so the shell can route the release to the adapter
-    /// holding the effect.
-    pub ticket: crate::actor::GateTicket,
-    pub reply: tokio::sync::oneshot::Sender<Result<(), celld_logic::RequestError>>,
-}
-static GATE_TX: OnceLock<tokio::sync::mpsc::UnboundedSender<GateReq>> = OnceLock::new();
-pub fn set_gate_tx(tx: tokio::sync::mpsc::UnboundedSender<GateReq>) {
-    let _ = GATE_TX.set(tx);
-}
-
-/// A service-binding call: `env.NAME.fetch()`. Unlike a Durable Object call
-/// there is no identity to resolve — any isolate running `script` will do — so
-/// the runtime hands this straight to that script's stateless isolate pool.
-pub struct SvcCallReq {
-    /// Fires when the caller's request signal aborts, so the router stops
-    /// waiting on the target instead of leaving the call outstanding.
-    pub cancel: Option<tokio::sync::oneshot::Receiver<()>>,
-    /// The application generation of the calling isolate. The target is
-    /// resolved in that generation's service graph, so a caller built for
-    /// one deployment never reaches a target from another.
-    pub generation: crate::generation::GenerationId,
-    pub script: String,
-    /// A named Worker entrypoint and its props, or the target's default export
-    /// when absent. Keeping both values together prevents a route from losing
-    /// the props that select its authority boundary.
-    pub entrypoint: Option<crate::WorkerFetchEntrypoint>,
-    pub url: String,
-    pub method: String,
-    pub body: RequestBody,
-    /// Owns a streamed body until the target installs its request context.
-    pub body_guard: RequestBodyGuard,
-    pub headers: Vec<(String, String)>,
-    pub reply: tokio::sync::oneshot::Sender<Result<HttpResponse>>,
-}
-static SVC_CALL_TX: OnceLock<tokio::sync::mpsc::UnboundedSender<SvcCallReq>> = OnceLock::new();
-
-/// A Worker assets-binding call. The script name selects the immutable asset
-/// index loaded for that Worker; unlike ingress this never falls back into the
-/// Worker and therefore cannot recurse.
-pub struct AssetCallReq {
-    /// The calling isolate's application generation; see `SvcCallReq`.
-    pub generation: crate::generation::GenerationId,
-    pub script: String,
-    pub url: String,
-    pub method: String,
-    pub headers: Vec<(String, String)>,
-    pub reply: tokio::sync::oneshot::Sender<Result<HttpResponse>>,
-}
-static ASSET_CALL_TX: OnceLock<tokio::sync::mpsc::UnboundedSender<AssetCallReq>> = OnceLock::new();
-
-/// An RPC operation on a named `WorkerEntrypoint` of another script. A call's
-/// arguments and every result cross as V8 structured-clone bytes.
-pub struct SvcRpcReq {
-    /// The calling isolate's application generation; see `SvcCallReq`.
-    pub generation: crate::generation::GenerationId,
-    pub script: String,
-    pub entrypoint: String,
-    /// Structured-clone bytes for the target entrypoint's `ctx.props`.
-    pub props: Vec<u8>,
-    pub operation: crate::WorkerRpcOperation,
-    pub reply: tokio::sync::oneshot::Sender<Result<Vec<u8>>>,
-}
-static SVC_RPC_TX: OnceLock<tokio::sync::mpsc::UnboundedSender<SvcRpcReq>> = OnceLock::new();
-
-/// The persisted identity a consumer settlement must match for one message.
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct QueueLeaseRef {
-    pub message_id: String,
-    pub seq: i64,
-    pub generation: u64,
-}
-
-/// A durable broker batch released through its output gate.
-pub struct QueueDispatchReq {
-    pub scope: String,
-    /// The dispatching queue cell's application generation; see
-    /// `SvcCallReq`.
-    pub generation: crate::generation::GenerationId,
-    pub script: String,
-    pub lease_id: String,
-    pub leases: Vec<QueueLeaseRef>,
-    pub batch: QueueBatch,
-}
-static QUEUE_DISPATCH_TX: OnceLock<tokio::sync::mpsc::UnboundedSender<QueueDispatchReq>> =
-    OnceLock::new();
-/// The fleet bucket used by KV values that are too large for a namespace cell.
-///
-/// The landed R2 binding established the safe pattern: a cloneable bucket
-/// handle can live beside the asynchronous ops, so independent requests do not
-/// queue behind one task that awaits every object-store operation in order.
-static KV_BLOB_STORE: OnceLock<crate::bucket::Bucket> = OnceLock::new();
-
-pub fn set_kv_blob_store(store: crate::bucket::Bucket) {
-    let _ = KV_BLOB_STORE.set(store);
-}
-
-fn kv_blob_store() -> std::result::Result<&'static crate::bucket::Bucket, String> {
-    KV_BLOB_STORE
-        .get()
-        .ok_or_else(|| "KV large values need a fleet bucket".to_string())
-}
-
-pub fn set_svc_rpc_tx(tx: tokio::sync::mpsc::UnboundedSender<SvcRpcReq>) {
-    let _ = SVC_RPC_TX.set(tx);
-}
-pub fn set_svc_call_tx(tx: tokio::sync::mpsc::UnboundedSender<SvcCallReq>) {
-    let _ = SVC_CALL_TX.set(tx);
-}
-pub fn set_queue_dispatch_tx(tx: tokio::sync::mpsc::UnboundedSender<QueueDispatchReq>) {
-    let _ = QUEUE_DISPATCH_TX.set(tx);
-}
-pub fn set_asset_call_tx(tx: tokio::sync::mpsc::UnboundedSender<AssetCallReq>) {
-    let _ = ASSET_CALL_TX.set(tx);
-}
 pub fn set_do_call_tx(tx: tokio::sync::mpsc::UnboundedSender<DoCallReq>) {
     let _ = DO_CALL_TX.set(tx);
 }
@@ -422,57 +335,7 @@ pub fn submit_do_call(call: DoCallReq) -> bool {
     DO_CALL_TX.get().is_some_and(|tx| tx.send(call).is_ok())
 }
 
-/// The arm-time wake-entry gate, output-gate style (matching Durable
-/// Objects): `setAlarm()` resolves optimistically on the committed local
-/// write — it never yields the cell's event scheduling to remote I/O — and
-/// the cell's response edge is withheld until every wake-entry PUT that this
-/// event registered before its response boundary has landed. Invariant: an
-/// arm the caller has OBSERVED acknowledged (received the response) is
-/// covered by a durable entry.
-pub struct ArmGate {
-    pub bucket: crate::bucket::Bucket,
-    pub flusher: Arc<crate::wake::WakeFlusher>,
-}
-
-type ArmGateRx = tokio::sync::oneshot::Receiver<Result<(), String>>;
-
-#[derive(Default)]
-pub(crate) struct WakeEntryService {
-    gate: OnceLock<ArmGate>,
-    #[cfg(celld_internal_tests)]
-    test_pending: Mutex<HashMap<String, Vec<ArmGateRx>>>,
-    #[cfg(celld_internal_tests)]
-    scripted: Mutex<std::collections::VecDeque<ArmGateRx>>,
-    #[cfg(celld_internal_tests)]
-    scripted_by_cell: Mutex<HashMap<String, std::collections::VecDeque<ArmGateRx>>>,
-    #[cfg(celld_internal_tests)]
-    drop_next_gated_reply_task: AtomicBool,
-    #[cfg(all(test, celld_internal_tests))]
-    fail_post_checkpoint_facet_flush: AtomicBool,
-    #[cfg(all(test, celld_internal_tests))]
-    fail_next_embedded_delete: AtomicBool,
-    /// The root and a loaded facet use different isolates, so this test seam
-    /// lives in their shared host service and is consumed by exactly one
-    /// deferred flush.
-    #[cfg(all(test, celld_internal_tests))]
-    evict_next_deferred_facet: AtomicBool,
-    #[cfg(all(test, celld_internal_tests))]
-    egress_gate_samples: Mutex<HashMap<(String, celld_logic::Channel), u64>>,
-}
-
 pub use r2_ops::set_r2_store;
-
-pub fn set_arm_gate(gate: ArmGate) {
-    let _ = asyncrt::services().wake_entry().gate.set(gate);
-}
-
-/// Drop the coverage cache when this node gives up the writer.
-pub fn forget_wake_entry(cell: &str) {
-    let services = asyncrt::services();
-    if let Some(gate) = services.wake_entry().gate.get() {
-        gate.flusher.forget(cell);
-    }
-}
 
 /// Sample the source under its SQLite lock. A missing source cannot grant
 /// publication or cleanup authority; the output gate fails closed for an arm.
@@ -483,35 +346,6 @@ pub(crate) fn observe_alarm(cell: &str, at_ms: Option<i64>) -> celld_logic::wake
     })
 }
 
-/// Ensure coverage only. Retirement additionally requires the host's bound
-/// replication and ownership proof, which the Actor supplies separately.
-pub(crate) async fn publish_observed_wake_entry(
-    cell: &str,
-    alarm: celld_logic::wake::AlarmSnapshot,
-) -> anyhow::Result<()> {
-    let services = asyncrt::services();
-    if let Some(gate) = services.wake_entry().gate.get() {
-        gate.flusher.publish(&gate.bucket, cell, alarm).await?;
-    }
-    Ok(())
-}
-
-pub(crate) async fn maintain_wake_entry(
-    cell: &str,
-    alarm: celld_logic::wake::AlarmSnapshot,
-    host: &impl crate::wake::AlarmHost,
-    ownership: &crate::actor::Ownership,
-    node: &str,
-) -> anyhow::Result<()> {
-    let services = asyncrt::services();
-    if let Some(gate) = services.wake_entry().gate.get() {
-        gate.flusher
-            .maintain(&gate.bucket, cell, alarm, host, ownership, node)
-            .await?;
-    }
-    Ok(())
-}
-
 /// A committed installation needs discovery coverage: launch the entry PUT
 /// and register it against the current event's output gate. No-op when the
 /// bound already covers it or no gate is configured.
@@ -519,46 +353,6 @@ fn spawn_arm_gate(cell: &str, at_ms: i64, context: Option<Arc<IoContext>>) {
     if let Some(rx) = launch_arm_gate(cell, observe_alarm(cell, Some(at_ms))) {
         register_arm_gate_with_current_event(rx, context);
     }
-}
-
-/// Launch the durable PUT and return the response edge that observes it.
-/// Registration is separate because production binds the receiver to a V8
-/// event, while a scripted host binds it to its simulated request.
-pub(crate) fn launch_arm_gate(
-    cell: &str,
-    alarm: celld_logic::wake::AlarmSnapshot,
-) -> Option<ArmGateRx> {
-    let services = asyncrt::services();
-    #[cfg(celld_internal_tests)]
-    if let Some(rx) = services
-        .wake_entry()
-        .scripted_by_cell
-        .lock()
-        .unwrap()
-        .get_mut(cell)
-        .and_then(std::collections::VecDeque::pop_front)
-    {
-        return Some(rx);
-    }
-    #[cfg(celld_internal_tests)]
-    if let Some(rx) = services.wake_entry().scripted.lock().unwrap().pop_front() {
-        return Some(rx);
-    }
-    services.wake_entry().gate.get()?;
-    alarm.at_ms()?;
-    let cell = cell.to_string();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    asyncrt::spawn(async move {
-        let gate = services.wake_entry().gate.get().unwrap();
-        let result = gate
-            .flusher
-            .publish(&gate.bucket, &cell, alarm)
-            .await
-            .map_err(|error| format!("setAlarm wake entry: {error:#}"));
-        let _ = tx.send(result);
-    })
-    .detach();
-    Some(rx)
 }
 
 fn register_arm_gate_with_current_event(gate: ArmGateRx, context: Option<Arc<IoContext>>) {
@@ -672,8 +466,6 @@ pub async fn drain_arm_gates(cell: &str) -> Result<(), String> {
     await_arm_gates(gates).await
 }
 
-pub type RequestId = u128;
-
 #[derive(Clone, Copy)]
 pub struct FetchRequest<'a> {
     pub url: &'a str,
@@ -683,14 +475,6 @@ pub struct FetchRequest<'a> {
     pub request_id: Option<RequestId>,
 }
 
-/// Allocate an id for an ingress or service-binding request so it can be
-/// aborted mid-flight.
-pub fn next_request_id() -> RequestId {
-    next_do_request_id()
-}
-
-static NEXT_DO_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
-static DO_REQUEST_PROCESS_PREFIX: OnceLock<u64> = OnceLock::new();
 static DO_CALL_CANCELS: OnceLock<
     std::sync::Mutex<HashMap<RequestId, tokio::sync::oneshot::Sender<()>>>,
 > = OnceLock::new();
@@ -723,25 +507,6 @@ impl Drop for RpcSignalSubscriptionGuard {
             subscribers.remove(&self.subscription);
         }
     }
-}
-
-#[doc(hidden)]
-pub fn next_do_request_id() -> RequestId {
-    let prefix = *DO_REQUEST_PROCESS_PREFIX.get_or_init(|| {
-        let mut bytes = [0; 8];
-        getrandom::fill(&mut bytes).expect("OS random source unavailable");
-        u64::from_ne_bytes(bytes)
-    });
-    let sequence = NEXT_DO_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-    (u128::from(prefix) << 64) | u128::from(sequence)
-}
-
-pub fn request_id_string(request_id: RequestId) -> String {
-    format!("{request_id:032x}")
-}
-
-pub fn parse_request_id(value: &str) -> Option<RequestId> {
-    u128::from_str_radix(value, 16).ok()
 }
 
 /// Publish `request_id` on a pending call's promise as the token the JS
@@ -793,2015 +558,11 @@ impl Drop for DoCallCancelGuard {
     }
 }
 
-/// An RPC payload crossing the host boundary. JS stubs marshal by V8
-/// structured clone (`V8`), and legacy callers use the JSON envelope (`Json`).
-/// `__dispatchRpc` answers in the flavor it was asked in.
-pub enum RpcData {
-    Json(String),
-    V8(bytes::Bytes),
-}
-
-/// A native Durable Object RPC call (`stub.someMethod(...args)`).
-/// Routing/activation is identical to fetch calls.
-pub struct RpcCallReq {
-    pub scope: String,
-    pub name: Option<String>,
-    pub method: String,
-    pub args: RpcData,
-    pub reply: tokio::sync::oneshot::Sender<Result<RpcData>>,
-}
-static RPC_CALL_TX: OnceLock<tokio::sync::mpsc::UnboundedSender<RpcCallReq>> = OnceLock::new();
-pub fn set_rpc_call_tx(tx: tokio::sync::mpsc::UnboundedSender<RpcCallReq>) {
-    let _ = RPC_CALL_TX.set(tx);
-}
-
-pub struct OutboundWsReq {
-    pub scope: String,
-    pub id: u64,
-    pub url: String,
-    pub protocols: Vec<String>,
-    /// Present for an isolate-polled (Worker) socket. Created and registered
-    /// on the JS thread before the request is sent, so `__ws_next` can never
-    /// run ahead of its own queue.
-    pub pull: Option<WsPullSender>,
-    /// Extra request headers, for the `fetch()` upgrade form.
-    pub headers: Vec<(String, String)>,
-    /// A `fetch()` upgrade wants the whole handshake outcome, including the
-    /// ordinary response a server that declines to upgrade sent instead.
-    pub want_response: bool,
-    /// A socket already upgraded in this process, which this request joins
-    /// instead of dialing `url`. It is the cell end of a Durable Object
-    /// subrequest whose caller kept the client end, so there is no handshake
-    /// to run and no connection to open: the host only has to carry frames
-    /// between two isolates.
-    pub target: Option<WsTarget>,
-    pub reply: tokio::sync::oneshot::Sender<Result<OutboundWsOpen>>,
-}
-
-/// The ordinary HTTP response a server sent instead of upgrading. `fetch()`
-/// returns it verbatim rather than turning it into a connection error.
-pub struct DeclinedUpgrade {
-    pub status: u16,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
-}
-
-/// What an outbound handshake produced.
-pub struct OutboundWsOpen {
-    pub protocol: Option<String>,
-    pub declined: Option<DeclinedUpgrade>,
-}
-static OUTBOUND_WS_TX: OnceLock<tokio::sync::mpsc::UnboundedSender<OutboundWsReq>> =
-    OnceLock::new();
-pub fn set_outbound_ws_tx(tx: tokio::sync::mpsc::UnboundedSender<OutboundWsReq>) {
-    let _ = OUTBOUND_WS_TX.set(tx);
-}
-
-#[cfg(celld_internal_tests)]
-/// An outbound connector scoped to the current internal-test JS thread.
-///
-/// The production connector is process-wide. Installing a test sender there
-/// captures requests from unrelated suites, and those suites have no receiver
-/// that can answer them. The thread-local sender follows the current-thread V8
-/// harnesses, while this handle owns its receiver and removes the sender when
-/// the case ends.
-#[doc(hidden)]
-pub struct TestOutboundWsConnector {
-    requests: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<OutboundWsReq>>,
-    /// A scoped connector must drop on the thread where it installed its sender.
-    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
-}
-
-#[cfg(celld_internal_tests)]
-impl TestOutboundWsConnector {
-    #[doc(hidden)]
-    pub fn requests(
-        &self,
-    ) -> &tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<OutboundWsReq>> {
-        &self.requests
-    }
-}
-
-#[cfg(celld_internal_tests)]
-thread_local! {
-    static TEST_OUTBOUND_WS_TX: RefCell<Option<tokio::sync::mpsc::UnboundedSender<OutboundWsReq>>> =
-        const { RefCell::new(None) };
-}
-
-#[cfg(celld_internal_tests)]
-impl Drop for TestOutboundWsConnector {
-    fn drop(&mut self) {
-        TEST_OUTBOUND_WS_TX.with(|slot| {
-            assert!(
-                slot.borrow_mut().take().is_some(),
-                "test outbound WebSocket connector was not installed",
-            );
-        });
-    }
-}
-
-#[cfg(celld_internal_tests)]
-/// Install the internal-test connector for the current JS thread.
-#[doc(hidden)]
-pub fn install_outbound_ws_connector_for_test() -> TestOutboundWsConnector {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    TEST_OUTBOUND_WS_TX.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        assert!(
-            slot.is_none(),
-            "test outbound WebSocket connector is already installed"
-        );
-        *slot = Some(tx);
-    });
-    TestOutboundWsConnector {
-        requests: tokio::sync::Mutex::new(rx),
-        _not_send: std::marker::PhantomData,
-    }
-}
-
-/// Select the scoped internal-test connector before the production connector.
-fn outbound_ws_tx() -> Option<tokio::sync::mpsc::UnboundedSender<OutboundWsReq>> {
-    #[cfg(celld_internal_tests)]
-    if let Some(tx) = TEST_OUTBOUND_WS_TX.with(|slot| slot.borrow().clone()) {
-        return Some(tx);
-    }
-    OUTBOUND_WS_TX.get().cloned()
-}
-
 static NEXT_TIMER_ID: AtomicU64 = AtomicU64::new(1);
 static TIMER_CANCELS: OnceLock<std::sync::Mutex<HashMap<u64, tokio::sync::oneshot::Sender<()>>>> =
     OnceLock::new();
 fn timer_cancels() -> &'static std::sync::Mutex<HashMap<u64, tokio::sync::oneshot::Sender<()>>> {
     TIMER_CANCELS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-// Keep IDs process-global. A counter in each Domain could reuse an ID from a
-// closed Domain, so a stale caller could read an unrelated new stream.
-static NEXT_HTTP_STREAM_ID: AtomicU64 = AtomicU64::new(1);
-/// What `__http_stream_read` resolves with at end of stream.
-///
-/// The reader identifies the end by type, not by value. A chunk always
-/// resolves as a `Uint8Array`, therefore body bytes can never look like
-/// this marker. The value stays distinctive, so a reader that does compare
-/// the value cannot match a plausible body.
-const HTTP_STREAM_DONE: &str = "__celld_http_stream_end__";
-const HTTP_STREAM_IDLE_TIMEOUT_MS: u64 = 60_000;
-const HTTP_STREAM_REGISTRATION_CLOSED: &str = "the HTTP stream service is closed";
-const HTTP_TEE_BRANCH_CAPACITY: usize = 16;
-const RESPONSE_STREAM_CONSUMER_CANCELED: &str = "response stream consumer canceled";
-const RESPONSE_STREAM_CLOSE_IN_PROGRESS: &str = "response stream close is already in progress";
-enum HttpStreamSource {
-    Response(reqwest::Response),
-    Receiver(tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>),
-    Stream(HttpChunkStream),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-enum HttpStreamTerminationReason {
-    Live = 0,
-    Finished = 1,
-    Cancelled = 2,
-    Expired = 3,
-}
-
-impl HttpStreamTerminationReason {
-    fn from_u8(value: u8) -> Self {
-        match value {
-            0 => Self::Live,
-            1 => Self::Finished,
-            2 => Self::Cancelled,
-            3 => Self::Expired,
-            _ => unreachable!("invalid HTTP stream termination reason {value}"),
-        }
-    }
-}
-
-struct HttpStreamTermination {
-    reason: AtomicU8,
-    waiter: futures_util::task::AtomicWaker,
-}
-
-impl HttpStreamTermination {
-    fn new() -> Self {
-        Self {
-            reason: AtomicU8::new(HttpStreamTerminationReason::Live as u8),
-            waiter: futures_util::task::AtomicWaker::new(),
-        }
-    }
-
-    fn reason(&self) -> HttpStreamTerminationReason {
-        HttpStreamTerminationReason::from_u8(self.reason.load(Ordering::Acquire))
-    }
-
-    /// Commit the reason while the registry lock still linearizes removal.
-    /// Waking is a separate operation because a waker can run arbitrary code.
-    fn commit(&self, reason: HttpStreamTerminationReason) {
-        let _ = self.reason.compare_exchange(
-            HttpStreamTerminationReason::Live as u8,
-            reason as u8,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-    }
-
-    fn poll_reason(
-        &self,
-        context: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<HttpStreamTerminationReason> {
-        let reason = self.reason();
-        if reason != HttpStreamTerminationReason::Live {
-            return std::task::Poll::Ready(reason);
-        }
-        self.waiter.register(context.waker());
-        let reason = self.reason();
-        if reason == HttpStreamTerminationReason::Live {
-            std::task::Poll::Pending
-        } else {
-            std::task::Poll::Ready(reason)
-        }
-    }
-
-    fn take_waiter(&self) -> Option<std::task::Waker> {
-        self.waiter.take()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HttpSourceLeaseMode {
-    Pull,
-    Transfer,
-}
-
-enum HttpStreamSourceSlot {
-    Available(HttpStreamSource),
-    Leased {
-        token: u64,
-        mode: HttpSourceLeaseMode,
-    },
-}
-
-struct HttpStreamEntry {
-    generation: u64,
-    deadline_ms: u64,
-    source: HttpStreamSourceSlot,
-    termination: Arc<HttpStreamTermination>,
-    /// Request contexts that can still read this source. A dispatch guard can
-    /// reclaim the entry only while this is zero.
-    owners: usize,
-    active_writes: usize,
-    active_closes: usize,
-    closing: bool,
-}
-
-struct ResponseStreamWriter {
-    writer: tokio::sync::mpsc::Sender<Result<Vec<u8>, String>>,
-    finished: tokio::sync::watch::Sender<bool>,
-}
-
-impl HttpStreamEntry {
-    fn new(generation: u64, deadline_ms: u64, source: HttpStreamSource) -> Self {
-        Self {
-            generation,
-            deadline_ms,
-            source: HttpStreamSourceSlot::Available(source),
-            termination: Arc::new(HttpStreamTermination::new()),
-            owners: 0,
-            active_writes: 0,
-            active_closes: 0,
-            closing: false,
-        }
-    }
-
-    fn is_expiry_eligible(&self) -> bool {
-        matches!(self.source, HttpStreamSourceSlot::Available(_))
-            && self.owners == 0
-            && self.active_writes == 0
-            && self.active_closes == 0
-    }
-
-    fn is_due(&self, now_ms: u64) -> bool {
-        self.is_expiry_eligible() && now_ms >= self.deadline_ms
-    }
-}
-
-impl ResponseStreamWriter {
-    fn new(
-        writer: tokio::sync::mpsc::Sender<Result<Vec<u8>, String>>,
-        finished: tokio::sync::watch::Sender<bool>,
-    ) -> Self {
-        Self { writer, finished }
-    }
-}
-
-type ResponseStreamCloseWatch = (
-    tokio::sync::mpsc::Sender<Result<Vec<u8>, String>>,
-    tokio::sync::watch::Receiver<bool>,
-);
-
-struct HttpStreamState {
-    closed: bool,
-    next_generation: u64,
-    next_token: u64,
-    sweeper_running: bool,
-    sources: HashMap<u64, HttpStreamEntry>,
-    response_writers: HashMap<u64, ResponseStreamWriter>,
-    #[cfg(all(test, celld_internal_tests))]
-    sweeper_starts: u64,
-    #[cfg(all(test, celld_internal_tests))]
-    sweeper_active: usize,
-    #[cfg(all(test, celld_internal_tests))]
-    sweeper_exit_gate: Option<Arc<HttpSweeperExitGate>>,
-    #[cfg(all(test, celld_internal_tests))]
-    pull_completion_gate: Option<HttpPullCompletionGate>,
-}
-
-pub(crate) struct HttpStreamService {
-    state: std::sync::Mutex<HttpStreamState>,
-    sweeper_notify: Arc<tokio::sync::Notify>,
-    owner: OnceLock<asyncrt::DomainToken>,
-    #[cfg(all(test, celld_internal_tests))]
-    registration_clock_reads: AtomicU64,
-}
-
-#[cfg(all(test, celld_internal_tests))]
-struct HttpPullCompletionGate {
-    stream_id: u64,
-    reached: std::sync::mpsc::SyncSender<()>,
-    release: std::sync::mpsc::Receiver<()>,
-}
-
-#[cfg(all(test, celld_internal_tests))]
-impl HttpPullCompletionGate {
-    fn pause(self) {
-        if self.reached.send(()).is_ok() {
-            let _ = self.release.recv();
-        }
-    }
-}
-
-#[cfg(all(test, celld_internal_tests))]
-struct HttpSweeperExitGate {
-    reached: AtomicBool,
-    released: AtomicBool,
-    waiter: futures_util::task::AtomicWaker,
-}
-
-#[cfg(all(test, celld_internal_tests))]
-impl HttpSweeperExitGate {
-    fn new() -> Self {
-        Self {
-            reached: AtomicBool::new(false),
-            released: AtomicBool::new(false),
-            waiter: futures_util::task::AtomicWaker::new(),
-        }
-    }
-
-    async fn wait(self: Arc<Self>) {
-        self.reached.store(true, Ordering::Release);
-        futures_util::future::poll_fn(|context| {
-            if self.released.load(Ordering::Acquire) {
-                return std::task::Poll::Ready(());
-            }
-            self.waiter.register(context.waker());
-            if self.released.load(Ordering::Acquire) {
-                std::task::Poll::Ready(())
-            } else {
-                std::task::Poll::Pending
-            }
-        })
-        .await;
-    }
-
-    fn release(&self) {
-        self.released.store(true, Ordering::Release);
-        self.waiter.wake();
-    }
-}
-
-#[cfg(all(test, celld_internal_tests))]
-struct HttpSweeperRunGuard {
-    service: Weak<HttpStreamService>,
-}
-
-struct HttpSweeperOwnerGuard {
-    service: Weak<HttpStreamService>,
-    armed: bool,
-}
-
-impl HttpSweeperOwnerGuard {
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for HttpSweeperOwnerGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            if let Some(service) = self.service.upgrade() {
-                service.owner_lost();
-            }
-        }
-    }
-}
-
-#[cfg(all(test, celld_internal_tests))]
-impl Drop for HttpSweeperRunGuard {
-    fn drop(&mut self) {
-        if let Some(service) = self.service.upgrade() {
-            let mut state = service.state.lock().unwrap();
-            state.sweeper_active = state.sweeper_active.saturating_sub(1);
-        }
-    }
-}
-
-#[derive(Default)]
-struct HttpStreamDrain {
-    sources: Vec<(u64, HttpStreamEntry)>,
-    detached_sources: Vec<(u64, HttpStreamSource)>,
-    response_writers: Vec<(u64, ResponseStreamWriter)>,
-}
-
-impl HttpStreamDrain {
-    fn dispose(mut self, propagate_panic: bool) {
-        // A source destructor can panic. HashMap drain order can change across
-        // processes, so ID order makes wakes and the retained panic replayable.
-        self.sources.sort_unstable_by_key(|(id, _)| *id);
-        self.detached_sources.sort_unstable_by_key(|(id, _)| *id);
-        self.response_writers.sort_unstable_by_key(|(id, _)| *id);
-        let mut first_panic = None;
-        for (_, source) in self.sources {
-            if let Some(waiter) = source.termination.take_waiter() {
-                let wake = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    waiter.wake_by_ref();
-                }));
-                if wake.is_err() {
-                    // A waker destructor can also panic. Preserve the wake
-                    // failure and leak this exceptional handle so cleanup can
-                    // continue without a double panic.
-                    std::mem::forget(waiter);
-                } else {
-                    let drop_waiter =
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(waiter)));
-                    retain_first_http_cleanup_panic(&mut first_panic, drop_waiter);
-                }
-                retain_first_http_cleanup_panic(&mut first_panic, wake);
-            }
-            let disposal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(source)));
-            retain_first_http_cleanup_panic(&mut first_panic, disposal);
-        }
-        for (_, source) in self.detached_sources {
-            let disposal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(source)));
-            retain_first_http_cleanup_panic(&mut first_panic, disposal);
-        }
-        for (_, writer) in self.response_writers {
-            let disposal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(writer)));
-            retain_first_http_cleanup_panic(&mut first_panic, disposal);
-        }
-        if let Some(payload) = first_panic {
-            if propagate_panic {
-                std::panic::resume_unwind(payload);
-            }
-            std::mem::forget(payload);
-        }
-    }
-
-    fn dispose_propagating(self) {
-        self.dispose(true);
-    }
-
-    fn dispose_suppressing(self) {
-        self.dispose(false);
-    }
-}
-
-fn retain_first_http_cleanup_panic(
-    first: &mut Option<Box<dyn std::any::Any + Send>>,
-    result: std::thread::Result<()>,
-) {
-    if let Err(payload) = result {
-        if first.is_none() {
-            *first = Some(payload);
-        } else {
-            // The payload is opaque, and its destructor can panic while the
-            // first cleanup failure is already retained.
-            std::mem::forget(payload);
-        }
-    }
-}
-
-fn dispose_http_waiter_suppressing(waiter: Option<std::task::Waker>) {
-    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(waiter))) {
-        std::mem::forget(payload);
-    }
-}
-
-fn run_http_cleanup_from_drop(cleanup: impl FnOnce()) {
-    let already_panicking = std::thread::panicking();
-    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(cleanup)) {
-        if already_panicking {
-            // A cleanup panic cannot replace the panic that already owns this
-            // unwind. The opaque payload is leaked because its destructor can
-            // also panic.
-            std::mem::forget(payload);
-        } else {
-            std::panic::resume_unwind(payload);
-        }
-    }
-}
-
-fn dispose_http_completion(waiter: Option<std::task::Waker>, drain: HttpStreamDrain) {
-    let already_panicking = std::thread::panicking();
-    let mut first_panic = None;
-    retain_first_http_cleanup_panic(
-        &mut first_panic,
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(waiter))),
-    );
-    retain_first_http_cleanup_panic(
-        &mut first_panic,
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drain.dispose_propagating())),
-    );
-    if let Some(payload) = first_panic {
-        if already_panicking {
-            std::mem::forget(payload);
-        } else {
-            std::panic::resume_unwind(payload);
-        }
-    }
-}
-
-impl Default for HttpStreamState {
-    fn default() -> Self {
-        Self {
-            closed: false,
-            next_generation: 1,
-            next_token: 1,
-            sweeper_running: false,
-            sources: HashMap::new(),
-            response_writers: HashMap::new(),
-            #[cfg(all(test, celld_internal_tests))]
-            sweeper_starts: 0,
-            #[cfg(all(test, celld_internal_tests))]
-            sweeper_active: 0,
-            #[cfg(all(test, celld_internal_tests))]
-            sweeper_exit_gate: None,
-            #[cfg(all(test, celld_internal_tests))]
-            pull_completion_gate: None,
-        }
-    }
-}
-
-impl Default for HttpStreamService {
-    fn default() -> Self {
-        Self {
-            state: std::sync::Mutex::new(HttpStreamState::default()),
-            sweeper_notify: Arc::new(tokio::sync::Notify::new()),
-            owner: OnceLock::new(),
-            #[cfg(all(test, celld_internal_tests))]
-            registration_clock_reads: AtomicU64::new(0),
-        }
-    }
-}
-
-enum HttpSweepWait {
-    Deadline(u64),
-    Notification,
-    Exit,
-}
-
-impl HttpStreamService {
-    pub(crate) fn bind_domain(&self, owner: asyncrt::DomainToken) {
-        if let Err(candidate) = self.owner.set(owner) {
-            assert!(
-                self.owner
-                    .get()
-                    .is_some_and(|current| current.same_owner(&candidate)),
-                "one HTTP stream service was bound to two execution Domains"
-            );
-        }
-    }
-
-    fn next_sequence(sequence: &mut u64) -> u64 {
-        let value = *sequence;
-        *sequence = sequence.wrapping_add(1).max(1);
-        value
-    }
-
-    fn expired_error(stream_id: u64) -> String {
-        format!(
-            "HTTP stream {stream_id} expired after {} seconds of inactivity",
-            HTTP_STREAM_IDLE_TIMEOUT_MS / 1_000
-        )
-    }
-
-    fn unknown_error(stream_id: u64) -> String {
-        format!("HTTP stream {stream_id} expired or is not registered")
-    }
-
-    fn termination_result(
-        stream_id: u64,
-        reason: HttpStreamTerminationReason,
-    ) -> Result<Option<Vec<u8>>, String> {
-        match reason {
-            HttpStreamTerminationReason::Finished | HttpStreamTerminationReason::Cancelled => {
-                Ok(None)
-            }
-            HttpStreamTerminationReason::Expired => Err(Self::expired_error(stream_id)),
-            HttpStreamTerminationReason::Live => Err(Self::unknown_error(stream_id)),
-        }
-    }
-
-    fn remove_locked(
-        state: &mut HttpStreamState,
-        stream_id: u64,
-        reason: HttpStreamTerminationReason,
-        drain: &mut HttpStreamDrain,
-    ) -> bool {
-        let Some(source) = state.sources.remove(&stream_id) else {
-            return false;
-        };
-        source.termination.commit(reason);
-        if let Some(writer) = state.response_writers.remove(&stream_id) {
-            drain.response_writers.push((stream_id, writer));
-        }
-        drain.sources.push((stream_id, source));
-        true
-    }
-
-    fn close_locked(state: &mut HttpStreamState, drain: &mut HttpStreamDrain) {
-        state.closed = true;
-        state.sweeper_running = false;
-        let mut ids = state.sources.keys().copied().collect::<Vec<_>>();
-        ids.sort_unstable();
-        for id in ids {
-            Self::remove_locked(state, id, HttpStreamTerminationReason::Cancelled, drain);
-        }
-        debug_assert!(state.response_writers.is_empty());
-    }
-
-    fn registration_clock(
-        &self,
-        state: &mut HttpStreamState,
-        drain: &mut HttpStreamDrain,
-    ) -> Option<(asyncrt::DomainToken, u64)> {
-        #[cfg(all(test, celld_internal_tests))]
-        self.registration_clock_reads.fetch_add(1, Ordering::SeqCst);
-        let owner = self.owner.get()?.clone();
-        match owner.mono_ms() {
-            Ok(now_ms) => Some((owner, now_ms)),
-            Err(_) => {
-                Self::close_locked(state, drain);
-                None
-            }
-        }
-    }
-
-    fn spawn_sweeper(self: &Arc<Self>, owner: &asyncrt::DomainToken) -> bool {
-        let service = Arc::downgrade(self);
-        #[cfg(all(test, celld_internal_tests))]
-        let run_guard = {
-            let mut state = self.state.lock().unwrap();
-            state.sweeper_starts = state.sweeper_starts.saturating_add(1);
-            state.sweeper_active = state.sweeper_active.saturating_add(1);
-            HttpSweeperRunGuard {
-                service: service.clone(),
-            }
-        };
-        let owner_guard = HttpSweeperOwnerGuard {
-            service: service.clone(),
-            armed: true,
-        };
-        let notify = self.sweeper_notify.clone();
-        let sweeper_owner = owner.clone();
-        owner
-            .spawn_detached("http-stream-idle-sweeper", async move {
-                #[cfg(all(test, celld_internal_tests))]
-                let _run_guard = run_guard;
-                let mut owner_guard = owner_guard;
-                http_stream_sweeper(service, notify, sweeper_owner, &mut owner_guard).await;
-            })
-            .is_ok()
-    }
-
-    fn owner_lost(self: &Arc<Self>) {
-        let drain = {
-            let mut state = self.state.lock().unwrap();
-            let mut drain = HttpStreamDrain::default();
-            // Simulation quarantine closes registration before it drops tasks.
-            // Its explicit HTTP phase must remain the only place that drains
-            // sources, so task and timer destructors always run first.
-            if !state.closed {
-                Self::close_locked(&mut state, &mut drain);
-            }
-            drain
-        };
-        self.sweeper_notify.notify_one();
-        drain.dispose_suppressing();
-    }
-
-    #[must_use = "a rejected HTTP stream must not publish an ID"]
-    fn register_source(self: &Arc<Self>, source: HttpStreamSource) -> Option<u64> {
-        let stream_id = NEXT_HTTP_STREAM_ID.fetch_add(1, Ordering::Relaxed);
-        self.register(stream_id, source, None).then_some(stream_id)
-    }
-
-    #[must_use = "a rejected response stream must not publish an ID"]
-    fn register_response_pair(
-        self: &Arc<Self>,
-        receiver: tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
-        writer: ResponseStreamWriter,
-    ) -> Option<u64> {
-        let stream_id = NEXT_HTTP_STREAM_ID.fetch_add(1, Ordering::Relaxed);
-        self.register(
-            stream_id,
-            HttpStreamSource::Receiver(receiver),
-            Some(writer),
-        )
-        .then_some(stream_id)
-    }
-
-    fn register(
-        self: &Arc<Self>,
-        stream_id: u64,
-        source: HttpStreamSource,
-        writer: Option<ResponseStreamWriter>,
-    ) -> bool {
-        let mut candidate_source = Some(source);
-        let mut candidate_writer = writer;
-        let mut drain = HttpStreamDrain::default();
-        let mut owner = None;
-        let mut start_sweeper = false;
-        let accepted = {
-            let mut state = self.state.lock().unwrap();
-            if state.closed {
-                false
-            } else if let Some((bound_owner, now_ms)) =
-                self.registration_clock(&mut state, &mut drain)
-            {
-                Self::remove_locked(
-                    &mut state,
-                    stream_id,
-                    HttpStreamTerminationReason::Cancelled,
-                    &mut drain,
-                );
-                let generation = Self::next_sequence(&mut state.next_generation);
-                let deadline_ms = now_ms.saturating_add(HTTP_STREAM_IDLE_TIMEOUT_MS);
-                state.sources.insert(
-                    stream_id,
-                    HttpStreamEntry::new(generation, deadline_ms, candidate_source.take().unwrap()),
-                );
-                if let Some(writer) = candidate_writer.take() {
-                    state.response_writers.insert(stream_id, writer);
-                }
-                if !state.sweeper_running {
-                    state.sweeper_running = true;
-                    start_sweeper = true;
-                }
-                owner = Some(bound_owner);
-                true
-            } else {
-                false
-            }
-        };
-
-        if !accepted {
-            if let Some(source) = candidate_source.take() {
-                let rejected = HttpStreamEntry::new(0, 0, source);
-                rejected
-                    .termination
-                    .commit(HttpStreamTerminationReason::Cancelled);
-                drain.sources.push((stream_id, rejected));
-            }
-            if let Some(writer) = candidate_writer.take() {
-                drain.response_writers.push((stream_id, writer));
-            }
-        } else if start_sweeper {
-            if !self.spawn_sweeper(owner.as_ref().unwrap()) {
-                self.owner_lost();
-                drain.dispose_suppressing();
-                return false;
-            }
-        } else {
-            self.sweeper_notify.notify_one();
-        }
-        drain.dispose_propagating();
-        accepted
-    }
-
-    fn claim(self: &Arc<Self>, stream_id: u64) -> Option<HttpStreamClaim> {
-        let mut drain = HttpStreamDrain::default();
-        let mut generation = None;
-        {
-            let mut state = self.state.lock().unwrap();
-            if !state.closed {
-                let now_ms = self
-                    .registration_clock(&mut state, &mut drain)
-                    .map(|(_, now_ms)| now_ms);
-                if let Some(now_ms) = now_ms {
-                    if state
-                        .sources
-                        .get(&stream_id)
-                        .is_some_and(|entry| entry.is_due(now_ms))
-                    {
-                        Self::remove_locked(
-                            &mut state,
-                            stream_id,
-                            HttpStreamTerminationReason::Expired,
-                            &mut drain,
-                        );
-                    } else if let Some(stream) = state.sources.get_mut(&stream_id) {
-                        stream.owners = stream.owners.saturating_add(1);
-                        generation = Some(stream.generation);
-                    }
-                }
-            }
-        }
-        if !drain.sources.is_empty() || !drain.response_writers.is_empty() {
-            self.sweeper_notify.notify_one();
-        }
-        drain.dispose_propagating();
-        generation.map(|generation| HttpStreamClaim {
-            service: self.clone(),
-            stream_id,
-            generation,
-            armed: true,
-        })
-    }
-
-    fn release_claim(&self, stream_id: u64, generation: u64) {
-        let mut drain = HttpStreamDrain::default();
-        let mut notify = false;
-        {
-            let mut state = self.state.lock().unwrap();
-            let mut remove = false;
-            if let Some(stream) = state
-                .sources
-                .get_mut(&stream_id)
-                .filter(|stream| stream.generation == generation)
-            {
-                stream.owners = stream.owners.saturating_sub(1);
-                // Checkout consumes one claim before the asynchronous pull
-                // completes. Keep every leased source registered so the pull
-                // can publish its result. An abandoned lease removes itself,
-                // and an available source with no owners can be reclaimed now.
-                remove = stream.owners == 0
-                    && matches!(stream.source, HttpStreamSourceSlot::Available(_));
-                notify = true;
-            }
-            if remove {
-                Self::remove_locked(
-                    &mut state,
-                    stream_id,
-                    HttpStreamTerminationReason::Cancelled,
-                    &mut drain,
-                );
-            }
-        }
-        if notify {
-            self.sweeper_notify.notify_one();
-        }
-        drain.dispose_propagating();
-    }
-
-    fn checkout_source(
-        self: &Arc<Self>,
-        stream_id: u64,
-    ) -> Result<(HttpSourceLease, HttpStreamSource), String> {
-        self.checkout(stream_id, HttpSourceLeaseMode::Pull, None)
-    }
-
-    fn checkout_transfer(
-        self: &Arc<Self>,
-        stream_id: u64,
-        claim_generation: Option<u64>,
-    ) -> Result<HttpTransferredStream, String> {
-        let (lease, source) =
-            self.checkout(stream_id, HttpSourceLeaseMode::Transfer, claim_generation)?;
-        Ok(HttpTransferredStream {
-            inner: http_chunk_stream(source),
-            lease: HttpTransferLease::new(lease),
-            finished: false,
-        })
-    }
-
-    fn checkout(
-        self: &Arc<Self>,
-        stream_id: u64,
-        mode: HttpSourceLeaseMode,
-        claim_generation: Option<u64>,
-    ) -> Result<(HttpSourceLease, HttpStreamSource), String> {
-        let mut drain = HttpStreamDrain::default();
-        let mut checkout = None;
-        let mut error = None;
-        {
-            let mut state = self.state.lock().unwrap();
-            if state.closed {
-                error = Some(Self::unknown_error(stream_id));
-            } else {
-                let now_ms = self
-                    .registration_clock(&mut state, &mut drain)
-                    .map(|(_, now_ms)| now_ms);
-                if let Some(now_ms) = now_ms {
-                    if state
-                        .sources
-                        .get(&stream_id)
-                        .is_some_and(|entry| entry.is_due(now_ms))
-                    {
-                        Self::remove_locked(
-                            &mut state,
-                            stream_id,
-                            HttpStreamTerminationReason::Expired,
-                            &mut drain,
-                        );
-                        error = Some(Self::expired_error(stream_id));
-                    } else if !state.sources.contains_key(&stream_id) {
-                        error = Some(Self::unknown_error(stream_id));
-                    } else {
-                        let token = Self::next_sequence(&mut state.next_token);
-                        let entry = state.sources.get_mut(&stream_id).unwrap();
-                        if claim_generation.is_some_and(|generation| {
-                            generation != entry.generation || entry.owners == 0
-                        }) {
-                            error = Some(Self::unknown_error(stream_id));
-                        } else {
-                            let leased = HttpStreamSourceSlot::Leased { token, mode };
-                            match std::mem::replace(&mut entry.source, leased) {
-                                HttpStreamSourceSlot::Available(source) => {
-                                    if claim_generation.is_some() {
-                                        entry.owners = entry.owners.saturating_sub(1);
-                                    }
-                                    checkout = Some((
-                                        entry.generation,
-                                        token,
-                                        entry.termination.clone(),
-                                        source,
-                                    ));
-                                }
-                                occupied @ HttpStreamSourceSlot::Leased { .. } => {
-                                    entry.source = occupied;
-                                    error = Some(format!(
-                                        "HTTP stream {stream_id} source is checked out"
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    error = Some(Self::unknown_error(stream_id));
-                }
-            }
-        }
-        self.sweeper_notify.notify_one();
-        drain.dispose_propagating();
-        if let Some((generation, token, termination, source)) = checkout {
-            Ok((
-                HttpSourceLease {
-                    service: self.clone(),
-                    stream_id,
-                    generation,
-                    token,
-                    mode,
-                    termination,
-                    settled: false,
-                },
-                source,
-            ))
-        } else {
-            Err(error.unwrap_or_else(|| Self::unknown_error(stream_id)))
-        }
-    }
-
-    fn complete_pull(
-        &self,
-        lease: &HttpSourceLease,
-        source: HttpStreamSource,
-        result: Result<Option<Vec<u8>>, String>,
-    ) -> Result<Option<Vec<u8>>, String> {
-        let mut source = Some(source);
-        let mut drain = HttpStreamDrain::default();
-        #[cfg(all(test, celld_internal_tests))]
-        let mut completion_gate = None;
-        let (answer, waiter) = {
-            let mut state = self.state.lock().unwrap();
-            let reason = lease.termination.reason();
-            let matches = state.sources.get(&lease.stream_id).is_some_and(|entry| {
-                entry.generation == lease.generation
-                    && matches!(
-                        entry.source,
-                        HttpStreamSourceSlot::Leased {
-                            token,
-                            mode: HttpSourceLeaseMode::Pull,
-                        } if token == lease.token
-                    )
-            });
-            let answer = if reason != HttpStreamTerminationReason::Live || !matches {
-                Self::termination_result(lease.stream_id, reason)
-            } else {
-                match result {
-                    Ok(Some(bytes)) => {
-                        let now_ms = self.owner.get().and_then(|owner| owner.mono_ms().ok());
-                        if let Some(now_ms) = now_ms {
-                            let entry = state.sources.get_mut(&lease.stream_id).unwrap();
-                            entry.source = HttpStreamSourceSlot::Available(source.take().unwrap());
-                            entry.deadline_ms = now_ms.saturating_add(HTTP_STREAM_IDLE_TIMEOUT_MS);
-                            Ok(Some(bytes))
-                        } else {
-                            Self::close_locked(&mut state, &mut drain);
-                            Ok(None)
-                        }
-                    }
-                    Ok(None) => {
-                        Self::remove_locked(
-                            &mut state,
-                            lease.stream_id,
-                            HttpStreamTerminationReason::Finished,
-                            &mut drain,
-                        );
-                        Ok(None)
-                    }
-                    Err(error) => {
-                        Self::remove_locked(
-                            &mut state,
-                            lease.stream_id,
-                            HttpStreamTerminationReason::Finished,
-                            &mut drain,
-                        );
-                        Err(error)
-                    }
-                }
-            };
-            // Restoring the source lets a successor lease register a waiter
-            // as soon as this lock opens. Take only this lease's waiter while
-            // the registry still prevents that successor checkout.
-            let waiter = lease.termination.take_waiter();
-            #[cfg(all(test, celld_internal_tests))]
-            if state
-                .pull_completion_gate
-                .as_ref()
-                .is_some_and(|candidate| candidate.stream_id == lease.stream_id)
-            {
-                completion_gate = state.pull_completion_gate.take();
-            }
-            (answer, waiter)
-        };
-        #[cfg(all(test, celld_internal_tests))]
-        if let Some(gate) = completion_gate {
-            gate.pause();
-        }
-        if let Some(source) = source {
-            drain.detached_sources.push((lease.stream_id, source));
-        }
-        self.sweeper_notify.notify_one();
-        // The waiter must be disposed before an arbitrary source destructor.
-        // Both can panic, so catch both cleanups and retain only the first.
-        dispose_http_completion(waiter, drain);
-        answer
-    }
-
-    fn transferred_activity(
-        &self,
-        stream_id: u64,
-        generation: u64,
-        token: u64,
-        termination: &HttpStreamTermination,
-    ) -> Result<(), HttpStreamTerminationReason> {
-        let mut state = self.state.lock().unwrap();
-        let reason = termination.reason();
-        if reason != HttpStreamTerminationReason::Live {
-            return Err(reason);
-        }
-        let Some(entry) = state.sources.get_mut(&stream_id).filter(|entry| {
-            entry.generation == generation
-                && matches!(
-                    entry.source,
-                    HttpStreamSourceSlot::Leased {
-                        token: current,
-                        mode: HttpSourceLeaseMode::Transfer,
-                    } if current == token
-                )
-        }) else {
-            return Err(termination.reason());
-        };
-        let Some(now_ms) = self.owner.get().and_then(|owner| owner.mono_ms().ok()) else {
-            return Err(HttpStreamTerminationReason::Cancelled);
-        };
-        entry.deadline_ms = now_ms.saturating_add(HTTP_STREAM_IDLE_TIMEOUT_MS);
-        Ok(())
-    }
-
-    fn finish_lease(
-        &self,
-        stream_id: u64,
-        generation: u64,
-        token: u64,
-        mode: HttpSourceLeaseMode,
-        termination: &HttpStreamTermination,
-        requested_reason: HttpStreamTerminationReason,
-    ) -> HttpStreamTerminationReason {
-        let mut drain = HttpStreamDrain::default();
-        let winning_reason = {
-            let mut state = self.state.lock().unwrap();
-            let matches = state.sources.get(&stream_id).is_some_and(|entry| {
-                entry.generation == generation
-                    && matches!(
-                        entry.source,
-                        HttpStreamSourceSlot::Leased {
-                            token: current,
-                            mode: current_mode,
-                        } if current == token && current_mode == mode
-                    )
-            });
-            if matches {
-                let committed_reason = termination.reason();
-                let removal_reason = if committed_reason == HttpStreamTerminationReason::Live {
-                    requested_reason
-                } else {
-                    committed_reason
-                };
-                Self::remove_locked(&mut state, stream_id, removal_reason, &mut drain);
-            }
-            let reason = termination.reason();
-            if reason == HttpStreamTerminationReason::Live {
-                HttpStreamTerminationReason::Cancelled
-            } else {
-                reason
-            }
-        };
-        self.sweeper_notify.notify_one();
-        drain.dispose_suppressing();
-        winning_reason
-    }
-
-    fn cancel_lease(&self, lease: &HttpSourceLease) {
-        self.finish_lease(
-            lease.stream_id,
-            lease.generation,
-            lease.token,
-            lease.mode,
-            &lease.termination,
-            HttpStreamTerminationReason::Cancelled,
-        );
-    }
-
-    fn cancel_source(&self, stream_id: u64) {
-        let mut drain = HttpStreamDrain::default();
-        {
-            let mut state = self.state.lock().unwrap();
-            Self::remove_locked(
-                &mut state,
-                stream_id,
-                HttpStreamTerminationReason::Cancelled,
-                &mut drain,
-            );
-        }
-        self.sweeper_notify.notify_one();
-        drain.dispose_propagating();
-    }
-
-    fn begin_activity(
-        self: &Arc<Self>,
-        stream_id: u64,
-        kind: HttpStreamActivityKind,
-    ) -> Result<HttpStreamActivity, HttpStreamActivityError> {
-        let mut drain = HttpStreamDrain::default();
-        let mut acquired = None;
-        let mut error = None;
-        {
-            let mut state = self.state.lock().unwrap();
-            if state.closed {
-                error = Some(HttpStreamActivityError::Closed);
-            } else {
-                let now_ms = self
-                    .registration_clock(&mut state, &mut drain)
-                    .map(|(_, now_ms)| now_ms);
-                if let Some(now_ms) = now_ms {
-                    if state
-                        .sources
-                        .get(&stream_id)
-                        .is_some_and(|entry| entry.is_due(now_ms))
-                    {
-                        Self::remove_locked(
-                            &mut state,
-                            stream_id,
-                            HttpStreamTerminationReason::Expired,
-                            &mut drain,
-                        );
-                        error = Some(HttpStreamActivityError::Gone);
-                    } else {
-                        let endpoints = state
-                            .response_writers
-                            .get(&stream_id)
-                            .map(|writer| (writer.writer.clone(), writer.finished.clone()));
-                        if let (Some(entry), Some((writer, finished))) =
-                            (state.sources.get_mut(&stream_id), endpoints)
-                        {
-                            if entry.closing {
-                                error = Some(HttpStreamActivityError::Closing);
-                            } else {
-                                match kind {
-                                    HttpStreamActivityKind::Write => {
-                                        entry.active_writes = entry.active_writes.saturating_add(1)
-                                    }
-                                    HttpStreamActivityKind::Close => {
-                                        entry.active_closes = entry.active_closes.saturating_add(1);
-                                        entry.closing = true;
-                                    }
-                                }
-                                acquired = Some((writer, finished, entry.generation));
-                            }
-                        }
-                    }
-                } else if state.closed {
-                    error = Some(HttpStreamActivityError::Closed);
-                }
-            }
-        }
-        self.sweeper_notify.notify_one();
-        drain.dispose_propagating();
-        let Some((writer, finished, generation)) = acquired else {
-            return Err(error.unwrap_or(HttpStreamActivityError::Gone));
-        };
-        Ok(HttpStreamActivity {
-            writer,
-            finished,
-            lease: HttpStreamActivityLease {
-                service: self.clone(),
-                stream_id,
-                generation,
-                kind,
-                active: true,
-            },
-        })
-    }
-
-    fn finish_activity(
-        &self,
-        stream_id: u64,
-        generation: u64,
-        kind: HttpStreamActivityKind,
-        remove_writer: bool,
-    ) {
-        let mut removed_writer = None;
-        {
-            let mut state = self.state.lock().unwrap();
-            let now_ms = self.owner.get().and_then(|owner| owner.mono_ms().ok());
-            if let Some(entry) = state
-                .sources
-                .get_mut(&stream_id)
-                .filter(|entry| entry.generation == generation)
-            {
-                match kind {
-                    HttpStreamActivityKind::Write => {
-                        entry.active_writes = entry.active_writes.saturating_sub(1)
-                    }
-                    HttpStreamActivityKind::Close => {
-                        entry.active_closes = entry.active_closes.saturating_sub(1);
-                        entry.closing = false;
-                    }
-                }
-                if let Some(now_ms) = now_ms {
-                    entry.deadline_ms = now_ms.saturating_add(HTTP_STREAM_IDLE_TIMEOUT_MS);
-                }
-                if remove_writer {
-                    removed_writer = state.response_writers.remove(&stream_id);
-                }
-            }
-        }
-        self.sweeper_notify.notify_one();
-        drop(removed_writer);
-    }
-
-    fn abandon_activity(&self, stream_id: u64, generation: u64, kind: HttpStreamActivityKind) {
-        {
-            let mut state = self.state.lock().unwrap();
-            if let Some(entry) = state
-                .sources
-                .get_mut(&stream_id)
-                .filter(|entry| entry.generation == generation)
-            {
-                match kind {
-                    HttpStreamActivityKind::Write => {
-                        entry.active_writes = entry.active_writes.saturating_sub(1)
-                    }
-                    HttpStreamActivityKind::Close => {
-                        entry.active_closes = entry.active_closes.saturating_sub(1);
-                        entry.closing = false;
-                    }
-                }
-            }
-        }
-        // Drop does not read the clock or manufacture activity. It only makes
-        // the previous successful-activity deadline eligible again.
-        self.sweeper_notify.notify_one();
-    }
-
-    fn cancel_activity_pair(&self, stream_id: u64, generation: u64, kind: HttpStreamActivityKind) {
-        let mut drain = HttpStreamDrain::default();
-        {
-            let mut state = self.state.lock().unwrap();
-            let matches = state
-                .sources
-                .get(&stream_id)
-                .is_some_and(|entry| entry.generation == generation);
-            if matches {
-                if let Some(entry) = state.sources.get_mut(&stream_id) {
-                    match kind {
-                        HttpStreamActivityKind::Write => {
-                            entry.active_writes = entry.active_writes.saturating_sub(1)
-                        }
-                        HttpStreamActivityKind::Close => {
-                            entry.active_closes = entry.active_closes.saturating_sub(1)
-                        }
-                    }
-                }
-                Self::remove_locked(
-                    &mut state,
-                    stream_id,
-                    HttpStreamTerminationReason::Cancelled,
-                    &mut drain,
-                );
-            }
-        }
-        self.sweeper_notify.notify_one();
-        drain.dispose_propagating();
-    }
-
-    fn writer_close_watch(&self, stream_id: u64) -> Option<ResponseStreamCloseWatch> {
-        let state = self.state.lock().unwrap();
-        if state.closed {
-            return None;
-        }
-        state
-            .response_writers
-            .get(&stream_id)
-            .map(|stream| (stream.writer.clone(), stream.finished.subscribe()))
-    }
-
-    fn sweep_step(&self, owner: &asyncrt::DomainToken) -> (HttpSweepWait, HttpStreamDrain) {
-        let mut drain = HttpStreamDrain::default();
-        let wait = {
-            let mut state = self.state.lock().unwrap();
-            if state.closed {
-                state.sweeper_running = false;
-                HttpSweepWait::Exit
-            } else if let Ok(now_ms) = owner.mono_ms() {
-                let mut due = state
-                    .sources
-                    .iter()
-                    .filter_map(|(id, entry)| entry.is_due(now_ms).then_some(*id))
-                    .collect::<Vec<_>>();
-                due.sort_unstable();
-                for id in due {
-                    Self::remove_locked(
-                        &mut state,
-                        id,
-                        HttpStreamTerminationReason::Expired,
-                        &mut drain,
-                    );
-                }
-                if state.sources.is_empty() {
-                    state.sweeper_running = false;
-                    HttpSweepWait::Exit
-                } else if let Some(deadline_ms) = state
-                    .sources
-                    .values()
-                    .filter(|entry| entry.is_expiry_eligible())
-                    .map(|entry| entry.deadline_ms)
-                    .min()
-                {
-                    HttpSweepWait::Deadline(deadline_ms)
-                } else {
-                    HttpSweepWait::Notification
-                }
-            } else {
-                Self::close_locked(&mut state, &mut drain);
-                HttpSweepWait::Exit
-            }
-        };
-        (wait, drain)
-    }
-
-    #[cfg(all(test, celld_internal_tests))]
-    fn source_exists_for_test(&self, stream_id: u64) -> bool {
-        self.state.lock().unwrap().sources.contains_key(&stream_id)
-    }
-
-    #[cfg(all(test, celld_internal_tests))]
-    fn writer_exists_for_test(&self, stream_id: u64) -> bool {
-        self.state
-            .lock()
-            .unwrap()
-            .response_writers
-            .contains_key(&stream_id)
-    }
-
-    #[cfg(all(test, celld_internal_tests))]
-    fn termination_for_test(&self, stream_id: u64) -> Option<Arc<HttpStreamTermination>> {
-        self.state
-            .lock()
-            .unwrap()
-            .sources
-            .get(&stream_id)
-            .map(|entry| entry.termination.clone())
-    }
-
-    #[cfg(all(test, celld_internal_tests))]
-    fn lock_is_available_for_test(&self) -> bool {
-        self.state.try_lock().is_ok()
-    }
-
-    #[cfg(all(test, celld_internal_tests))]
-    fn arm_sweeper_exit_for_test(&self) -> Arc<HttpSweeperExitGate> {
-        let gate = Arc::new(HttpSweeperExitGate::new());
-        let mut state = self.state.lock().unwrap();
-        assert!(state.sweeper_exit_gate.replace(gate.clone()).is_none());
-        gate
-    }
-
-    #[cfg(all(test, celld_internal_tests))]
-    fn take_sweeper_exit_gate_for_test(&self) -> Option<Arc<HttpSweeperExitGate>> {
-        self.state.lock().unwrap().sweeper_exit_gate.take()
-    }
-
-    #[cfg(all(test, celld_internal_tests))]
-    fn sweeper_state_for_test(&self) -> (u64, usize, bool) {
-        let state = self.state.lock().unwrap();
-        (
-            state.sweeper_starts,
-            state.sweeper_active,
-            state.sweeper_running,
-        )
-    }
-
-    #[cfg(all(test, celld_internal_tests))]
-    fn registration_clock_reads_for_test(&self) -> u64 {
-        self.registration_clock_reads.load(Ordering::SeqCst)
-    }
-
-    #[cfg(all(test, celld_internal_tests))]
-    fn arm_pull_completion_after_unlock_for_test(
-        &self,
-        stream_id: u64,
-    ) -> (
-        std::sync::mpsc::Receiver<()>,
-        std::sync::mpsc::SyncSender<()>,
-    ) {
-        let (reached_sender, reached_receiver) = std::sync::mpsc::sync_channel(1);
-        let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
-        let gate = HttpPullCompletionGate {
-            stream_id,
-            reached: reached_sender,
-            release: release_receiver,
-        };
-        assert!(self
-            .state
-            .lock()
-            .unwrap()
-            .pull_completion_gate
-            .replace(gate)
-            .is_none());
-        (reached_receiver, release_sender)
-    }
-
-    #[cfg(all(test, celld_internal_tests))]
-    fn closing_for_test(&self, stream_id: u64) -> bool {
-        self.state
-            .lock()
-            .unwrap()
-            .sources
-            .get(&stream_id)
-            .is_some_and(|entry| entry.closing)
-    }
-
-    #[cfg(all(test, celld_internal_tests))]
-    pub(crate) fn quarantine(&self) {
-        self.state.lock().unwrap().closed = true;
-        self.sweeper_notify.notify_one();
-    }
-
-    #[cfg(all(test, celld_internal_tests))]
-    pub(crate) fn close(&self) {
-        let drain = {
-            let mut state = self.state.lock().unwrap();
-            let mut drain = HttpStreamDrain::default();
-            Self::close_locked(&mut state, &mut drain);
-            drain
-        };
-        self.sweeper_notify.notify_one();
-        drain.dispose_propagating();
-    }
-}
-
-impl Drop for HttpStreamService {
-    fn drop(&mut self) {
-        // The final runtime anchor can disappear before an explicit Domain
-        // close. Exclusive access still makes a poisoned registry safe to
-        // drain, so commit every termination before arbitrary cleanup runs.
-        let state = match self.state.get_mut() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let mut drain = HttpStreamDrain::default();
-        Self::close_locked(state, &mut drain);
-        drain.dispose_suppressing();
-    }
-}
-
-async fn http_stream_sweeper(
-    service: Weak<HttpStreamService>,
-    notify: Arc<tokio::sync::Notify>,
-    owner: asyncrt::DomainToken,
-    owner_guard: &mut HttpSweeperOwnerGuard,
-) {
-    loop {
-        // Create the notification future before the registry snapshot. A
-        // registration between the snapshot and the await leaves a permit, so
-        // the sole sweeper cannot sleep through an earlier deadline.
-        let notified = notify.notified();
-        let Some(service) = service.upgrade() else {
-            return;
-        };
-        let (wait, drain) = service.sweep_step(&owner);
-        #[cfg(all(test, celld_internal_tests))]
-        let exit_gate = matches!(wait, HttpSweepWait::Exit)
-            .then(|| service.take_sweeper_exit_gate_for_test())
-            .flatten();
-        drop(service);
-        // An abandoned source can own a panicking destructor. The leak
-        // backstop must still service later entries after that failure.
-        drain.dispose_suppressing();
-        match wait {
-            HttpSweepWait::Exit => {
-                #[cfg(all(test, celld_internal_tests))]
-                if let Some(gate) = exit_gate {
-                    gate.wait().await;
-                }
-                owner_guard.disarm();
-                return;
-            }
-            HttpSweepWait::Notification => notified.await,
-            HttpSweepWait::Deadline(deadline_ms) => {
-                let Ok(sleep) = owner.sleep_until(deadline_ms) else {
-                    return;
-                };
-                crate::asyncrt::select_biased! {
-                    "a registry notification wins a deadline tie so the next sweep uses the refreshed deadline";
-                    _ = notified => {}
-                    _ = sleep => {}
-                }
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum HttpStreamActivityKind {
-    Write,
-    Close,
-}
-
-#[derive(Clone, Copy)]
-enum HttpStreamActivityError {
-    Closed,
-    Gone,
-    Closing,
-}
-
-impl HttpStreamActivityError {
-    fn write_message(self) -> &'static str {
-        match self {
-            Self::Closed => HTTP_STREAM_REGISTRATION_CLOSED,
-            Self::Gone | Self::Closing => RESPONSE_STREAM_CONSUMER_CANCELED,
-        }
-    }
-}
-
-struct HttpStreamActivityLease {
-    service: Arc<HttpStreamService>,
-    stream_id: u64,
-    generation: u64,
-    kind: HttpStreamActivityKind,
-    active: bool,
-}
-
-struct HttpStreamActivity {
-    writer: tokio::sync::mpsc::Sender<Result<Vec<u8>, String>>,
-    finished: tokio::sync::watch::Sender<bool>,
-    lease: HttpStreamActivityLease,
-}
-
-impl HttpStreamActivityLease {
-    fn succeed(mut self, remove_writer: bool) {
-        self.active = false;
-        self.service
-            .finish_activity(self.stream_id, self.generation, self.kind, remove_writer);
-    }
-
-    fn cancel_pair(mut self) {
-        self.active = false;
-        self.service
-            .cancel_activity_pair(self.stream_id, self.generation, self.kind);
-    }
-}
-
-impl Drop for HttpStreamActivityLease {
-    fn drop(&mut self) {
-        if self.active {
-            self.service
-                .abandon_activity(self.stream_id, self.generation, self.kind);
-        }
-    }
-}
-
-struct HttpSourceLease {
-    service: Arc<HttpStreamService>,
-    stream_id: u64,
-    generation: u64,
-    token: u64,
-    mode: HttpSourceLeaseMode,
-    termination: Arc<HttpStreamTermination>,
-    settled: bool,
-}
-
-struct HttpPull {
-    // Struct fields drop in declaration order. Registry removal therefore
-    // commits before an arbitrary checked-out source destructor can re-enter
-    // the service or panic when a pending read future is abandoned.
-    lease: HttpSourceLease,
-    source: HttpStreamSource,
-}
-
-impl Drop for HttpSourceLease {
-    fn drop(&mut self) {
-        // A settled path already took its waiter while it still owned the
-        // registry slot. Taking again here could clear a successor's waiter.
-        if self.settled {
-            return;
-        }
-        let waiter = self.termination.take_waiter();
-        self.service.cancel_lease(self);
-        dispose_http_waiter_suppressing(waiter);
-    }
-}
-
-struct HttpTransferLease {
-    inner: Option<HttpSourceLease>,
-}
-
-impl HttpTransferLease {
-    fn new(lease: HttpSourceLease) -> Self {
-        debug_assert_eq!(lease.mode, HttpSourceLeaseMode::Transfer);
-        Self { inner: Some(lease) }
-    }
-
-    fn termination(&self) -> &HttpStreamTermination {
-        &self.inner.as_ref().unwrap().termination
-    }
-
-    fn stream_id(&self) -> u64 {
-        self.inner.as_ref().unwrap().stream_id
-    }
-
-    fn successful_activity(&self) -> Result<(), HttpStreamTerminationReason> {
-        let lease = self.inner.as_ref().unwrap();
-        let result = lease.service.transferred_activity(
-            lease.stream_id,
-            lease.generation,
-            lease.token,
-            &lease.termination,
-        );
-        dispose_http_waiter_suppressing(lease.termination.take_waiter());
-        result
-    }
-
-    fn finish(
-        &mut self,
-        requested_reason: HttpStreamTerminationReason,
-    ) -> HttpStreamTerminationReason {
-        let mut lease = self.inner.take().unwrap();
-        lease.settled = true;
-        let waiter = lease.termination.take_waiter();
-        let winning_reason = lease.service.finish_lease(
-            lease.stream_id,
-            lease.generation,
-            lease.token,
-            lease.mode,
-            &lease.termination,
-            requested_reason,
-        );
-        dispose_http_waiter_suppressing(waiter);
-        winning_reason
-    }
-}
-
-struct HttpTransferredStream {
-    // The lease drops first, so registry cancellation commits before an
-    // arbitrary source destructor can re-enter the service or panic.
-    lease: HttpTransferLease,
-    inner: HttpChunkStream,
-    finished: bool,
-}
-
-enum HttpTransferredEvent {
-    Chunk(Vec<u8>),
-    Error(String),
-    End,
-    Terminated(HttpStreamTerminationReason),
-}
-
-fn transferred_termination_poll(
-    stream_id: u64,
-    reason: HttpStreamTerminationReason,
-) -> std::task::Poll<Option<Result<Vec<u8>, String>>> {
-    match HttpStreamService::termination_result(stream_id, reason) {
-        Ok(None) => std::task::Poll::Ready(None),
-        Ok(Some(bytes)) => std::task::Poll::Ready(Some(Ok(bytes))),
-        Err(error) => std::task::Poll::Ready(Some(Err(error))),
-    }
-}
-
-impl HttpTransferredStream {
-    fn termination_handle(&self) -> Arc<HttpStreamTermination> {
-        self.lease.inner.as_ref().unwrap().termination.clone()
-    }
-
-    /// Poll the transferred source without committing a natural terminal
-    /// event. A direct consumer commits immediately in `poll_next`. The tee
-    /// pump keeps the lease live until it publishes an error to each live
-    /// branch, so cancellation can interrupt a backpressured terminal send.
-    fn poll_event(
-        &mut self,
-        context: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<HttpTransferredEvent> {
-        debug_assert!(!self.finished);
-        if let std::task::Poll::Ready(reason) = self.lease.termination().poll_reason(context) {
-            return std::task::Poll::Ready(HttpTransferredEvent::Terminated(reason));
-        }
-        match self.inner.as_mut().poll_next(context) {
-            std::task::Poll::Ready(Some(Ok(bytes))) => match self.lease.successful_activity() {
-                Ok(()) => std::task::Poll::Ready(HttpTransferredEvent::Chunk(bytes)),
-                Err(reason) => std::task::Poll::Ready(HttpTransferredEvent::Terminated(reason)),
-            },
-            std::task::Poll::Ready(Some(Err(error))) => {
-                std::task::Poll::Ready(HttpTransferredEvent::Error(error))
-            }
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(HttpTransferredEvent::End),
-            std::task::Poll::Pending => match self.lease.termination().poll_reason(context) {
-                std::task::Poll::Ready(reason) => {
-                    std::task::Poll::Ready(HttpTransferredEvent::Terminated(reason))
-                }
-                std::task::Poll::Pending => std::task::Poll::Pending,
-            },
-        }
-    }
-
-    fn finish(
-        &mut self,
-        requested_reason: HttpStreamTerminationReason,
-    ) -> HttpStreamTerminationReason {
-        let winning_reason = self.lease.finish(requested_reason);
-        self.finished = true;
-        winning_reason
-    }
-
-    fn finish_poll(
-        &mut self,
-        requested_reason: HttpStreamTerminationReason,
-    ) -> std::task::Poll<Option<Result<Vec<u8>, String>>> {
-        let stream_id = self.lease.stream_id();
-        let winning_reason = self.finish(requested_reason);
-        transferred_termination_poll(stream_id, winning_reason)
-    }
-}
-
-impl futures_util::Stream for HttpTransferredStream {
-    type Item = Result<Vec<u8>, String>;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        context: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        if self.finished {
-            return std::task::Poll::Ready(None);
-        }
-        let this = self.as_mut().get_mut();
-        match this.poll_event(context) {
-            std::task::Poll::Ready(HttpTransferredEvent::Chunk(bytes)) => {
-                std::task::Poll::Ready(Some(Ok(bytes)))
-            }
-            std::task::Poll::Ready(HttpTransferredEvent::Error(error)) => {
-                let stream_id = this.lease.stream_id();
-                let winning_reason = this.finish(HttpStreamTerminationReason::Finished);
-                if winning_reason == HttpStreamTerminationReason::Finished {
-                    std::task::Poll::Ready(Some(Err(error)))
-                } else {
-                    transferred_termination_poll(stream_id, winning_reason)
-                }
-            }
-            std::task::Poll::Ready(HttpTransferredEvent::End) => {
-                this.finish_poll(HttpStreamTerminationReason::Finished)
-            }
-            std::task::Poll::Ready(HttpTransferredEvent::Terminated(reason)) => {
-                this.finish_poll(reason)
-            }
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
-    }
-}
-
-struct HttpStreamClaim {
-    service: Arc<HttpStreamService>,
-    stream_id: u64,
-    generation: u64,
-    armed: bool,
-}
-
-impl HttpStreamClaim {
-    fn take_source(mut self) -> Result<HttpChunkStream, String> {
-        let source = self
-            .service
-            .checkout_transfer(self.stream_id, Some(self.generation));
-        if source.is_ok() {
-            self.armed = false;
-        }
-        source.map(|source| Box::pin(source) as HttpChunkStream)
-    }
-}
-
-impl Drop for HttpStreamClaim {
-    fn drop(&mut self) {
-        if self.armed {
-            self.armed = false;
-            let service = self.service.clone();
-            let stream_id = self.stream_id;
-            let generation = self.generation;
-            run_http_cleanup_from_drop(move || {
-                service.release_claim(stream_id, generation);
-            });
-        }
-    }
-}
-
-fn http_stream_service() -> Arc<HttpStreamService> {
-    asyncrt::runtime_services().http_streams()
-}
-
-fn register_http_stream(source: HttpStreamSource) -> Option<u64> {
-    http_stream_service().register_source(source)
-}
-
-fn claim_http_stream(stream_id: u64) -> Option<HttpStreamClaim> {
-    http_stream_service().claim(stream_id)
-}
-
-pub type HttpChunkStream =
-    Pin<Box<dyn futures_util::Stream<Item = Result<Vec<u8>, String>> + Send>>;
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct WsTarget {
-    pub id: u64,
-    pub scope: String,
-    /// A parked tunneled 101 on the calling node (`peer_tunnel::splice`).
-    /// The id is meaningful only in the process that parked it, but it must
-    /// survive the isolate round trip, so it serializes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tunnel: Option<u64>,
-}
-
-/// Encode a host response for the JS side. A text body crosses as a
-/// JS string (cheap, lossless), binary as a byte array, and a streaming body
-/// by id — serializing a Vec<u8> as a JSON number array is the dominant cost
-/// for real DO responses. `ws_target` is carried by the paths that can answer
-/// with a WebSocket upgrade: a Durable Object call and a service-binding call.
-fn encode_http_response(
-    mut response: HttpResponse,
-    ws_target: bool,
-    stream_service: &Arc<HttpStreamService>,
-) -> Result<String, String> {
-    let mut obj = serde_json::json!({
-        "status": response.status,
-        "headers": response.headers,
-    });
-    if ws_target {
-        let target = match response.websocket.as_ref() {
-            Some(HttpResponseWebSocket::Cell(target)) => Some(target),
-            _ => None,
-        };
-        obj["wsTarget"] = serde_json::json!(target);
-    }
-    if let Some(stream) = response.stream.take() {
-        let Some(stream_id) = stream_service.register_source(HttpStreamSource::Stream(stream))
-        else {
-            return Err(HTTP_STREAM_REGISTRATION_CLOSED.into());
-        };
-        obj["streamId"] = serde_json::json!(stream_id);
-    } else {
-        match std::str::from_utf8(&response.body) {
-            Ok(text) => obj["body"] = serde_json::Value::String(text.into()),
-            Err(_) => obj["bodyBytes"] = serde_json::json!(response.body),
-        }
-    }
-    Ok(obj.to_string())
-}
-
-pub enum HttpResponseWebSocket {
-    Cell(WsTarget),
-    Worker(websocket::WorkerWebSocket),
-}
-
-pub struct HttpResponse {
-    pub status: u16,
-    pub body: Vec<u8>,
-    /// A response body forwarded without materializing it in memory.
-    pub stream: Option<HttpChunkStream>,
-    pub headers: Vec<(String, String)>,
-    /// The one WebSocket target that owns this response, if it is an upgrade.
-    pub websocket: Option<HttpResponseWebSocket>,
-    /// The cell's committed-write position after the handler ran, for a local
-    /// Durable Object request. The shell gates the response on durability when
-    /// this advanced past the cell's last seen position. `None` for responses
-    /// with no cell storage (Worker, asset, or proxied remote).
-    pub write_position: Option<u64>,
-    /// The position the answer observed above the cell's published baseline
-    /// when the handler did not write, so the shell can hold a read-only
-    /// response behind the proof of another handler's commit. `None` when the
-    /// cell holds no handler write, or the response has no cell storage.
-    pub observed_position: Option<u64>,
-}
-
-/// The encoding that the queue producer selected for one message body.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum QueueContentType {
-    Text,
-    Bytes,
-    Json,
-    V8,
-}
-
-impl QueueContentType {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Text => "text",
-            Self::Bytes => "bytes",
-            Self::Json => "json",
-            Self::V8 => "v8",
-        }
-    }
-}
-
-/// One message handed from a queue cell to a consumer isolate.
-pub struct QueueMessage {
-    pub id: String,
-    pub timestamp_ms: i64,
-    pub body: Vec<u8>,
-    pub content_type: QueueContentType,
-    pub attempts: u16,
-}
-
-/// The queue state observed when a cell leases a batch.
-pub struct QueueMetrics {
-    pub backlog_count: f64,
-    pub backlog_bytes: f64,
-    pub oldest_message_timestamp_ms: Option<i64>,
-}
-
-/// One leased batch handed to the stateless isolate pool.
-pub struct QueueBatch {
-    pub queue: String,
-    pub messages: Vec<QueueMessage>,
-    pub metrics: QueueMetrics,
-}
-
-/// The batch-wide retry decision made by a queue handler.
-#[derive(Debug, Eq, PartialEq)]
-pub struct QueueRetryBatch {
-    pub retry: bool,
-    pub delay_seconds: Option<i32>,
-}
-
-/// An explicit retry decision made for one message.
-#[derive(Debug, Eq, PartialEq)]
-pub struct QueueRetryMessage {
-    pub msg_id: String,
-    pub delay_seconds: Option<i32>,
-}
-
-/// How the queue handler itself completed. Infrastructure failures still use
-/// the outer `Result`, so a handler exception can preserve earlier acks.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum QueueOutcome {
-    Ok,
-    Exception,
-}
-
-/// The handler outcome and the settlement instructions it made before return.
-#[derive(Debug, Eq, PartialEq)]
-pub struct QueueDispatchResult {
-    pub outcome: QueueOutcome,
-    pub error: Option<String>,
-    pub ack_all: bool,
-    pub retry_batch: QueueRetryBatch,
-    pub explicit_acks: Vec<String>,
-    pub retry_messages: Vec<QueueRetryMessage>,
 }
 
 /// Which alarm a dispatch runs, and who owns its bookkeeping.
@@ -2888,35 +649,6 @@ pub enum CellJob {
     },
 }
 
-/// A cell event that the runtime refuses before application code starts.
-///
-/// The type survives the Rust RPC path. Its display text also survives the V8
-/// promise boundary, so the public ingress can restore the HTTP overload
-/// contract after a Worker forwards the refusal.
-#[doc(hidden)]
-#[derive(Debug)]
-pub struct CellOverloaded;
-
-/// The V8 promise boundary preserves only an error string. Keep the public
-/// overload phrase so a Worker can classify a caught Queue producer refusal.
-/// Also include an opaque marker so unrelated application text cannot restore
-/// an HTTP overload response, and keep the producer and ingress checks on one
-/// value.
-#[doc(hidden)]
-pub const CELL_OVERLOAD_ERROR_MARKER: &str =
-    "celld-internal-cell-overload-7ec38c64-12d7-4ddc-9e77-b63f9dc14130";
-
-impl std::fmt::Display for CellOverloaded {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "cell overload: admission refused ({CELL_OVERLOAD_ERROR_MARKER})"
-        )
-    }
-}
-
-impl std::error::Error for CellOverloaded {}
-
 impl CellJob {
     /// The cell this event addresses, which is also the realm it runs in.
     pub fn scope(&self) -> &str {
@@ -2986,7 +718,6 @@ thread_local! {
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             attempt.error("fetch redirect mode is error")
         })).build().unwrap();
-    static DO_ID_KEYS: RefCell<HashMap<String, [u8; 32]>> = RefCell::new(HashMap::new());
 }
 
 #[derive(Debug)]
@@ -3017,7 +748,10 @@ fn fetch_request_error(error: &reqwest::Error) -> String {
 pub mod websocket;
 pub(crate) use websocket::WebSocketService;
 pub use websocket::*;
-use websocket::{ws_capture_begin, ws_capture_take, ws_close_request_sockets};
+use websocket::{
+    ws_capture_begin, ws_capture_discard, ws_capture_flush_touched, ws_capture_set_promise,
+    ws_capture_take, ws_close_request_sockets,
+};
 
 /// What an outbound effect must trail before it leaves the process.
 ///
@@ -3042,10 +776,14 @@ enum EgressGate {
     /// outstanding, so this asks rather than guesses. The last field is the
     /// activation epoch the sample was taken at.
     ReadOnly(String, celld_logic::Channel, Option<u64>, Option<u64>),
-    /// A facet's write did not reach the root database. No proof of that cell
-    /// can cover it, so the effect fails closed instead of leaving with a
-    /// write nothing can restore. The field is the storage failure.
+    /// A facet's storage failed. No proof can cover its write, so the effect
+    /// fails closed. The field is the storage failure.
     Unpersisted(String),
+    /// An effect of a facet that wrote: the facet's own stream proves the
+    /// write before the root cell's gate verdicts the rest, as workerd's
+    /// facet output gate holds the effect. Fields: the root cell's gate, the
+    /// facet's stream, and the activation epoch.
+    Facet(Box<EgressGate>, String, u64),
 }
 
 impl EgressGate {
@@ -3062,6 +800,7 @@ impl EgressGate {
         match self {
             EgressGate::NoCell | EgressGate::Unpersisted(_) => None,
             EgressGate::Wrote(cell, ..) | EgressGate::ReadOnly(cell, ..) => Some(cell),
+            EgressGate::Facet(root, ..) => root.cell_scope(),
         }
     }
 }
@@ -3138,7 +877,7 @@ fn egress_gate_request(context: &IoContext, channel: celld_logic::Channel) -> Eg
         Err(error) => return EgressGate::Unpersisted(error.to_string()),
     };
     if let Some(root) = frame.root {
-        return facet_egress_gate(&cell, sample, before, root, channel);
+        return facet_egress_gate(&cell, root, channel);
     }
     let epoch = storage::activation_epoch(&cell);
     match sample.filter(|position| *position > before) {
@@ -3162,50 +901,50 @@ fn egress_gate_request(context: &IoContext, channel: celld_logic::Channel) -> Eg
 
 /// Sample an effect raised by an event of an embedded facet.
 ///
-/// A facet is not a cell. Its storage is a private image inside the root
-/// cell's database, and no Worker exports its class under the id `facet_scope`
-/// builds, so a ticket in the facet's name activates a cell that cannot start.
-/// The effect reveals the root cell's state, so it names the root cell, and
-/// the positions come from `RootGate` because this isolate holds no connection
-/// to the root database.
+/// A facet is not a cell: no Worker exports its class under the id
+/// `facet_scope` builds, so a ticket in the facet's name activates a cell
+/// that cannot start. The effect can reveal what the root cell showed the
+/// facet, so it trails the root cell's reader gate with the sample the parent
+/// took for the call; a write of the facet's own is proved on its stream.
 fn facet_egress_gate(
     facet: &str,
-    sample: Option<u64>,
-    before: u64,
     root: storage::RootGate,
     channel: celld_logic::Channel,
 ) -> EgressGate {
-    // A prior facet call can leave an image in the root transaction journal.
-    // Check the structural flush result even for a read-only call, because
-    // that call can reveal the earlier uncommitted image through its effect.
-    let flush = storage::flush_embedded(facet);
     if let Some(error) = storage::sql_critical_error(facet) {
         return EgressGate::Unpersisted(error);
     }
-    if flush == storage::EmbeddedFlush::Deferred {
-        return EgressGate::Unpersisted(
-            "the root transaction has not committed the facet image".to_string(),
-        );
-    }
-    if sample.is_some_and(|position| position > before) {
-        // The write is in the facet's private image and reaches the root
-        // database at turn end, after this effect leaves. Copy it now, so the
-        // proof this ticket waits for is a proof of a database that contains
-        // it. This is the same copy `finish_turn` makes, for the same reason:
-        // an external effect must not overtake the image that produced it.
-        // A copy that failed leaves the write in an image the root database
-        // does not hold, so no proof of that cell covers it. The reply of this
-        // event fails on the same poison; the effect must fail with it rather
-        // than leave on a proof that proves the wrong thing.
-        return EgressGate::Wrote(root.cell, channel, root.position, Some(root.epoch));
-    }
-    // A read-only effect of a facet reveals what the facet read, which the
-    // root cell committed at or below the sample the parent took for this
-    // call. It therefore waits exactly as the root cell's own reader waits.
+    // A process with no output gate has nothing to trail, and a WebSocket
+    // frame must keep its direct path (see `egress_gate_request`).
     if GATE_TX.get().is_none() {
         return EgressGate::NoCell;
     }
-    EgressGate::ReadOnly(root.cell, channel, root.observed, Some(root.epoch))
+    let gate = EgressGate::ReadOnly(root.cell, channel, root.observed, Some(root.epoch));
+    // Any effect can reveal a facet write, this event's or an earlier one's,
+    // so every effect waits for the facet's stream, as workerd's facet
+    // output gate holds it.
+    EgressGate::Facet(Box::new(gate), root.stream, root.epoch)
+}
+
+/// Prove a facet's stream through the host loop, which owns the replicator.
+async fn prove_facet(stream: String, epoch: u64) -> std::result::Result<(), GateRefusal> {
+    // No host loop means no replicator, so nothing can prove the write and
+    // nothing can lose it to a later proof either.
+    let Some(sender) = FACET_TX.get() else {
+        return Ok(());
+    };
+    let (reply, receive) = tokio::sync::oneshot::channel();
+    let request = FacetReq::Prove {
+        stream,
+        epoch,
+        reply,
+    };
+    sender.send(request).map_err(|_| GateRefusal::Dropped)?;
+    match receive.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(GateRefusal::Unpersisted(format!("{error:#}"))),
+        Err(_) => Err(GateRefusal::Dropped),
+    }
 }
 
 /// Why the output gate did not release a ticket.
@@ -3253,7 +992,15 @@ impl std::fmt::Display for GateRefusal {
 /// once when the cell has no barrier open, so an ordinary read pays one actor
 /// hop and no replica write.
 async fn egress_gate_verdict(gate: EgressGate) -> std::result::Result<(), GateRefusal> {
+    let gate = match gate {
+        EgressGate::Facet(root, stream, epoch) => {
+            prove_facet(stream, epoch).await?;
+            *root
+        }
+        gate => gate,
+    };
     let (cell, channel, position, observed, epoch) = match gate {
+        EgressGate::Facet(..) => unreachable!("a facet gate nests no facet gate"),
         EgressGate::NoCell => return Ok(()),
         EgressGate::Unpersisted(error) => return Err(GateRefusal::Unpersisted(error)),
         EgressGate::Wrote(cell, channel, position, epoch) => {
@@ -3756,16 +1503,6 @@ pub fn take_bytes_value_allocation_for_test() -> Option<usize> {
         .and_then(|(_, output)| output)
 }
 
-pub fn handler_budget() -> Duration {
-    static BUDGET: OnceLock<Duration> = OnceLock::new();
-    *BUDGET.get_or_init(|| {
-        Duration::from_secs(
-            crate::env_vars::positive_or("CELLD_HANDLER_BUDGET_S", 300)
-                .expect("validated CELLD_HANDLER_BUDGET_S"),
-        )
-    })
-}
-
 #[cfg(unix)]
 fn clock_nanos(clock: libc::clockid_t) -> Option<u64> {
     // SAFETY: `clock_gettime` initializes the complete `timespec` on success,
@@ -4115,67 +1852,10 @@ impl Engine {
     }
 }
 
-/// Per-worker compatibility switches, derived from the manifest's
-/// compatibility date and flags (Workerd compatibility-date.capnp). `Default`
-/// is every switch off; production derives real values in `main`.
-#[derive(Clone, Copy, Default)]
-pub struct Compat {
-    pub delete_all_deletes_alarm: bool,
-    /// `js_rpc`: RPC on a Durable Object class that does not extend
-    /// `DurableObject` (Workerd worker-rpc.c++ getTargetInfo()).
-    pub js_rpc: bool,
-    /// `fetcher_has_get_put_delete` (off = `fetcher_no_get_put_delete`,
-    /// default on for dates >= 2024-03-26): the deprecated `get()`/`put()`/
-    /// `delete()` HTTP helpers on stubs (Workerd http.c++ Fetcher).
-    pub fetcher_get_put_delete: bool,
-    /// `sqlite_vec`: expose the pre-v1 sqlite-vec extension to SQLite-backed
-    /// Durable Objects. This switch is explicit and has no date default.
-    pub sqlite_vec: bool,
-    /// `websocket_standard_binary_type`: `binaryType` defaults to `"blob"` and
-    /// a binary message arrives as a `Blob`, per the WHATWG default. Without
-    /// it celld keeps the historical `"arraybuffer"`.
-    pub websocket_standard_binary_type: bool,
-    /// Queue bodies default to JSON on compatibility dates after 2024-03-18;
-    /// older deployments retain the V8 structured-clone default.
-    pub queue_json_messages: bool,
-}
-
 /// The resource name the entry module compiles under. It is also the name the
 /// entry module is projected under in `/bundle`, so a stack frame and a bundle
 /// path name the same file.
 const ENTRY_MODULE_NAME: &str = "worker.js";
-
-/// A non-main module the worker's main module may import, tagged by how the
-/// runtime materializes it.
-#[derive(Clone)]
-pub enum ModuleSource {
-    /// UTF-8 content served as `export default "<content>"` (wrangler's Text
-    /// rule), registered under the given specifier verbatim.
-    Text(String),
-    /// JS source compiled as a sibling ES module (Worker Loader multi-module
-    /// bundles), registered under both `name` and `./name`.
-    EsModule(String),
-    /// Wasm bytes served as a module whose default export is the compiled
-    /// `WebAssembly.Module` (Wrangler's `CompiledWasm` rule), registered
-    /// under both `name` and `./name`.
-    Wasm(bytes::Bytes),
-}
-
-/// A Workflow binding keeps the three names distinct across deployment
-/// loading, environment construction, and runtime class injection.
-pub struct WorkflowBinding {
-    pub environment: String,
-    pub workflow: String,
-    pub class: String,
-}
-
-/// One Queue producer binding in a Worker environment.
-#[derive(Clone)]
-pub struct QueueBinding {
-    pub environment: String,
-    pub queue: String,
-    pub delivery_delay: u32,
-}
 
 /// One queue's push consumer after the owning script has been resolved.
 #[derive(Clone)]
@@ -4233,6 +1913,9 @@ struct LoaderEnv {
 
 pub struct WorkerConfig {
     src: String,
+    /// The canonical module name for `src`. Dynamic Workers preserve the
+    /// caller's `mainModule` path so relative imports use its directory.
+    main_module_name: String,
     pub script_name: String,
     /// The construction path that grants Dynamic Worker load semantics.
     /// A script name is caller-controlled, so it cannot prove this origin.
@@ -4250,7 +1933,7 @@ pub struct WorkerConfig {
     /// [[kv]].
     kv_bindings: Vec<(String, String)>,
     queue_bindings: Vec<QueueBinding>,
-    queue_consumers: Vec<QueueConsumerRegistration>,
+    pub(crate) queue_consumers: Vec<QueueConsumerRegistration>,
     /// This script declared a consumer in its own manifest. The deployment-
     /// wide catalog later replaces `queue_consumers` in every isolate, so the
     /// catalog cannot answer whether this particular default export can omit
@@ -4316,23 +1999,6 @@ fn es_module_sources(modules: &[(String, ModuleSource)]) -> impl Iterator<Item =
         ModuleSource::EsModule(source) => Some((name.as_str(), source.as_str())),
         _ => None,
     })
-}
-
-pub struct WorkerConfigOptions {
-    pub src: String,
-    pub script_name: String,
-    pub do_classes: Vec<String>,
-    pub bindings: Vec<(String, String)>,
-    pub r2_bindings: Vec<(String, String)>,
-    pub d1_bindings: Vec<(String, String)>,
-    pub kv_bindings: Vec<(String, String)>,
-    pub queue_bindings: Vec<QueueBinding>,
-    pub queue_consumers: Vec<crate::protocol::QueueConsumerConfig>,
-    pub workflow_bindings: Vec<WorkflowBinding>,
-    pub vars: Vec<(String, String)>,
-    pub node: String,
-    pub modules: Vec<(String, ModuleSource)>,
-    pub compat: Compat,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -4415,6 +2081,7 @@ impl WorkerConfig {
             .collect();
         Self {
             src,
+            main_module_name: ENTRY_MODULE_NAME.to_string(),
             script_name,
             origin: WorkerOrigin::Deployment,
             do_classes,
@@ -4469,6 +2136,11 @@ impl WorkerConfig {
     /// Grant the relaxed load contract used only by a Worker Loader isolate.
     fn into_dynamic_worker(mut self) -> Self {
         self.origin = WorkerOrigin::Dynamic;
+        self
+    }
+
+    fn with_main_module_name(mut self, name: String) -> Self {
+        self.main_module_name = name;
         self
     }
 
@@ -4804,6 +2476,10 @@ struct ActorRuntimeState {
     termination: std::sync::Mutex<Option<ExecutionTermination>>,
     pending_puts: std::sync::Mutex<PendingPuts>,
     io_contexts: std::sync::Mutex<HashMap<u64, Weak<IoContext>>>,
+    /// WebSocket captures that received a frame in the current isolate turn.
+    /// Weak references record every continuation context without extending
+    /// an event's lifetime merely to flush its output.
+    ws_capture_touched: Mutex<Vec<Weak<IoContext>>>,
     egress: EgressPolicy,
     resource_limits: Option<ResourceLimits>,
     tail_reporting: bool,
@@ -5854,6 +3530,13 @@ impl InFlight {
             report.record_failure(format!("{error:#}"));
         }
         if let Some(reply) = self.reply.take() {
+            if matches!(&reply, Answer::WsMessage(_)) {
+                // A failed message has no successful dispatch whose barrier
+                // can authorize its output. Discard the still-active capture
+                // here so rejection, cancellation, and turn failures cannot
+                // leave frames for the turn-end flush to publish.
+                ws_capture_discard(&self.context);
+            }
             if self.trace.is_some_and(|trace| trace.sampled) {
                 self.failure = Some(crate::telemetry::cap_error(error.to_string()));
             }
@@ -6714,8 +4397,11 @@ impl Worker {
 ///    write exposed by the checkpoint, or reject the held response.
 /// 4. **settle again** — the checkpoint may itself have settled the promise,
 ///    or the `waitUntil` aggregate.
-/// 5. **adopt** — only now is the set of ops this request waits on complete.
-/// 6. **close** — close the sockets the request opened, once it has retired.
+/// 5. **flush captured frames** — a `webSocketMessage` handler that has not
+///    answered is suspended, so the frames it has sent so far leave now
+///    rather than at the end of the handler.
+/// 6. **adopt** — only now is the set of ops this request waits on complete.
+/// 7. **close** — close the sockets the request opened, once it has retired.
 ///    A socket the response took over left that set at the handoff.
 ///
 /// Draining before step 2 is the bug that made a streaming handler answer
@@ -6737,40 +4423,8 @@ fn finish_turn(tc: &mut v8::PinScope, entry: &mut InFlight) -> Vec<Op> {
         entry.fail_in_turn(error);
         entry.background = None;
         entry.abandon();
+        ws_capture_flush_touched(tc, &entry.runtime_state);
         return Vec::new();
-    }
-    // `settle` can consume and send the reply before the checkpoint below
-    // exposes a final facet write. Hold an embedded facet's reply in the
-    // event-owned gate set, so a successful response and its image write are
-    // one result. Checking the poison after sending cannot retract the reply.
-    let embedded_reply = entry
-        .scope
-        .as_deref()
-        .is_some_and(|scope| entry.reply.is_some() && storage::is_embedded(scope));
-    // A pending promise cannot send during the first `settle`; if the
-    // checkpoint fulfills it, the second flush still runs before the second
-    // `settle`. Gate only a reply that the first `settle` can consume, so a
-    // long handler does not accumulate one resolved receiver on every turn.
-    let needs_facet_flush_gate = embedded_reply && {
-        let promise = v8::Local::new(tc, &entry.promise);
-        matches!(promise.state(), v8::PromiseState::Fulfilled)
-    };
-    let facet_flush_gate = if needs_facet_flush_gate {
-        let (send, receive) = tokio::sync::oneshot::channel();
-        match entry.context.register_arm_gate(receive) {
-            Ok(()) => Some(send),
-            Err(_) => {
-                entry.fail(anyhow!(
-                    "the facet persistence gate was sealed before settlement"
-                ));
-                None
-            }
-        }
-    } else {
-        None
-    };
-    if let Some(scope) = entry.scope.as_deref() {
-        storage::flush_embedded(scope);
     }
     entry.context.begin_cpu_turn();
     {
@@ -6784,27 +4438,8 @@ fn finish_turn(tc: &mut v8::PinScope, entry: &mut InFlight) -> Vec<Op> {
         entry.fail_in_turn(error);
         entry.background = None;
         entry.abandon();
+        ws_capture_flush_touched(tc, &entry.runtime_state);
         return Vec::new();
-    }
-    if let Some(scope) = entry.scope.as_deref() {
-        #[cfg(all(test, celld_internal_tests))]
-        if storage::is_embedded(scope)
-            && asyncrt::services()
-                .wake_entry()
-                .fail_post_checkpoint_facet_flush
-                .swap(false, Ordering::AcqRel)
-        {
-            storage::poison_sql_for_test(scope, "injected facet image write failure");
-        }
-        storage::flush_embedded(scope);
-    }
-    if let Some(gate) = facet_flush_gate {
-        let result = entry
-            .scope
-            .as_deref()
-            .and_then(storage::sql_critical_error)
-            .map_or(Ok(()), Err);
-        let _ = gate.send(result);
     }
     // `abort()` and `process.exit()` terminate execution without settling
     // the handler's promise, so an entry that only watched the promise would
@@ -6814,11 +4449,18 @@ fn finish_turn(tc: &mut v8::PinScope, entry: &mut InFlight) -> Vec<Op> {
         entry.fail_in_turn(error);
         entry.background = None;
         entry.abandon();
+        ws_capture_flush_touched(tc, &entry.runtime_state);
         return Vec::new();
     }
     settle(tc, entry);
+    // 5. **release what suspended WebSocket handlers have sent** — after the
+    //    settles above, so a handler that answered in this turn keeps the
+    //    whole-batch path its answer carries. The set comes from each capture
+    //    write rather than the turn owner, because the checkpoint can run a
+    //    continuation from another event.
+    ws_capture_flush_touched(tc, &entry.runtime_state);
     let ops = adopt(entry);
-    // 6. **close the request's sockets** — see above.
+    // 7. **close the request's sockets** — see above.
     if entry.retired() {
         entry.context.close_sockets();
     }
@@ -7431,139 +5073,6 @@ pub(crate) fn write_delta(before: Option<u64>, after: Option<u64>) -> Option<u64
     }
 }
 
-/// A handler that failed inside its turn, with the positions that turn
-/// sampled from the cell.
-///
-/// A commit the handler made before it failed is as real as one a successful
-/// handler made: it stays in the local database, unproven, and a read-only
-/// output that followed would trail no barrier and reveal it while a crash can
-/// still lose it. The error answer therefore takes the same write ticket a
-/// success takes.
-///
-/// A handler that committed nothing still reveals what it read, because the
-/// message it throws with can quote it — "insufficient funds: balance is 90"
-/// is an ordinary shape — and that value can be another event's commit that no
-/// proof covers yet. An error answer reveals cell state exactly as a 200 does,
-/// so a read-only failure carries the observed position and the gate holds it
-/// behind the newest barrier, as it holds a read-only success (#765).
-///
-/// The failure the handler reported is the source; this wrapper displays its
-/// message and continues its chain, so a client and a log see the handler's
-/// own words.
-#[derive(Debug)]
-pub struct FailedInTurn {
-    write_position: Option<u64>,
-    observed_position: Option<u64>,
-    source: anyhow::Error,
-}
-
-impl std::fmt::Display for FailedInTurn {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.source)
-    }
-}
-
-impl std::error::Error for FailedInTurn {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        // The wrapped error's own message is this wrapper's display, so the
-        // chain continues below it rather than repeating it. The wrapped
-        // error's own type is therefore not in the chain: a `downcast_ref`
-        // for it, or a `chain()` walk that looks for it, sees this wrapper
-        // instead. Every error that reaches `fail_in_turn_error` today is a
-        // plain message, so nothing looks; a typed handler failure would have
-        // to be matched through `failed_write_position` and its text.
-        let source: &(dyn std::error::Error + 'static) = self.source.as_ref();
-        source.source()
-    }
-}
-
-/// Attach the positions a failing handler's turn sampled, when it has either.
-/// The pair comes from one `gate_positions` call, so an error cannot report a
-/// write and an observation that disagree.
-fn fail_in_turn_error(
-    error: anyhow::Error,
-    positions: (Option<u64>, Option<u64>),
-) -> anyhow::Error {
-    let (write_position, observed_position) = positions;
-    if write_position.is_none() && observed_position.is_none() {
-        return error;
-    }
-    anyhow::Error::new(FailedInTurn {
-        write_position,
-        observed_position,
-        source: error,
-    })
-}
-
-/// The position a failed handler committed before it failed, when it did.
-pub fn failed_write_position(error: &anyhow::Error) -> Option<u64> {
-    error
-        .downcast_ref::<FailedInTurn>()
-        .and_then(|failed| failed.write_position)
-}
-
-/// An answer the shell gates: a success reports the position its writes
-/// reached, and the position it observed when it wrote nothing, in its own
-/// shape.
-pub trait GatedAnswer {
-    fn write_position(&self) -> Option<u64>;
-    fn observed_position(&self) -> Option<u64>;
-}
-
-impl GatedAnswer for HttpResponse {
-    fn write_position(&self) -> Option<u64> {
-        self.write_position
-    }
-
-    fn observed_position(&self) -> Option<u64> {
-        self.observed_position
-    }
-}
-
-impl GatedAnswer for RpcOutcome {
-    fn write_position(&self) -> Option<u64> {
-        self.write_position
-    }
-
-    fn observed_position(&self) -> Option<u64> {
-        self.observed_position
-    }
-}
-
-/// The ticket an answer takes through the output gate, or `None` when it
-/// takes none.
-///
-/// A success always takes one: a write ticket when the handler advanced the
-/// position, and otherwise a read-only ticket that carries what the answer
-/// observed and trails the newest barrier on the cell. A failure raised inside
-/// the handler's turn takes the same two shapes, which [`FailedInTurn`]
-/// reports, because an error message can carry the cell's state as a body can.
-/// A failure raised outside a turn — a budget overrun, a handler waiting on
-/// nothing — took no sample and reports the host's own words, so it reveals
-/// nothing and takes no ticket. The shell reads both arms through this one
-/// function so that no answer site can gate one and forget the other.
-pub fn answer_ticket<T: GatedAnswer>(result: &Result<T>) -> Option<crate::actor::GateTicket> {
-    match result {
-        Ok(answer) => Some(crate::actor::GateTicket::response(
-            answer.write_position(),
-            answer.observed_position(),
-        )),
-        Err(error) => error.downcast_ref::<FailedInTurn>().map(|failed| {
-            crate::actor::GateTicket::response(failed.write_position, failed.observed_position)
-        }),
-    }
-}
-
-/// What a Durable Object RPC method returned, plus the position its writes
-/// reached, so the caller can hold the reply behind durability.
-pub struct RpcOutcome {
-    pub data: RpcData,
-    pub write_position: Option<u64>,
-    /// As on `HttpResponse`: what a read-only reply observed above the cell's
-    /// published baseline.
-    pub observed_position: Option<u64>,
-}
-
 /// What a claimed alarm still owes its bookkeeping.
 ///
 /// `finish_alarm_handler` must run exactly once however the event ends, and
@@ -7628,6 +5137,9 @@ fn start_cell_event<'s>(
     match started {
         Ok(promise) => {
             tc.perform_microtask_checkpoint();
+            if capture_frames {
+                ws_capture_set_promise(&context, v8::Global::new(tc, promise));
+            }
             let entry = InFlight {
                 runtime_state: runtime_state.clone(),
                 promise: v8::Global::new(tc, promise),
@@ -7676,6 +5188,9 @@ fn start_cell_event<'s>(
                 .flatten()
                 .map(|promise| v8::Global::new(tc, promise));
             let failure = crate::telemetry::cap_error(format!("{error:#}"));
+            if matches!(&answer, Answer::WsMessage(_)) {
+                ws_capture_discard(&context);
+            }
             let gated_reply = answer.fail_with_arm_gates(error, context.take_arm_gates());
             let begun = if gated_reply.is_none() && background.is_none() {
                 Begun::Nothing
@@ -8318,13 +5833,13 @@ impl Worker {
             inject_compatibility_flags(scope, compat)?;
             inject_storage_compatibility(scope, compat)?;
 
-            let module = match compile_module(scope, ENTRY_MODULE_NAME, src) {
+            let module = match compile_module(scope, &config.main_module_name, src) {
                 Some(m) => m,
                 None => return Err(anyhow!("compile: {}", exc!(scope))),
             };
             register_stubs(scope, &config); // cloudflare:*/node:* + text modules
             register_wasm_modules(scope, &config.modules);
-            register_loader_modules(scope, &config);
+            register_loader_modules(scope, &config, module);
             module
                 .instantiate_module(scope, resolve_external)
                 .ok_or_else(|| anyhow!("instantiate: {}", exc!(scope)))?;
@@ -8363,6 +5878,22 @@ impl Worker {
                 .get_module_namespace()
                 .to_object(scope)
                 .ok_or_else(|| anyhow!("ns"))?;
+            // workerd reads every export of the main module as a handler or
+            // a class, so a primitive export fails the Worker's start.
+            let names = ns
+                .get_own_property_names(scope, Default::default())
+                .ok_or_else(|| anyhow!("ns names"))?;
+            for index in 0..names.length() {
+                let name = names.get_index(scope, index).unwrap();
+                let value = ns.get(scope, name).unwrap();
+                if !value.is_object() {
+                    return Err(anyhow!(
+                        "Uncaught TypeError: Incorrect type for map entry '{}': the \
+                         provided value is not of type 'function or ExportedHandler'.",
+                        name.to_rust_string_lossy(scope)
+                    ));
+                }
+            }
 
             // register each exported DO class into the harness registry
             for cn in do_classes {
@@ -8588,11 +6119,6 @@ impl Worker {
         Ok(observe_alarm(cell, alarm))
     }
 
-    #[cfg(all(test, celld_internal_tests))]
-    pub(crate) fn evict_next_deferred_facet_for_test(&mut self) {
-        arm_deferred_facet_eviction_for_test();
-    }
-
     /// Collect objects left by cell adoption after an isolate becomes full.
     /// The pool calls this when completed adoptions reach the resident limit,
     /// because collecting after every adoption slows activation.
@@ -8608,15 +6134,14 @@ impl Worker {
         name: &str,
         id: &str,
         props_sc: Vec<u8>,
+        file: (std::path::PathBuf, bool),
     ) -> Result<Option<i64>> {
         let compat = self.inner.as_ref().expect("live worker isolate").compat;
         let (mut locker, _cells) = self.lock();
-        let (must_restore, restored_image) = storage::take_facet_restore(cell);
-        if storage::activation_epoch(cell).is_some() && !must_restore {
+        if storage::activation_epoch(cell).is_some() {
             // The facet is already open, but this call carries a newer sample
             // of the root cell. Take it: the egress of this call must wait for
-            // what the root cell had committed when the call left it, which
-            // includes every image an earlier call flushed.
+            // what the root cell had committed when the call left it.
             storage::refresh_embedded_root(cell, parent);
             return Ok(None);
         }
@@ -8626,9 +6151,7 @@ impl Worker {
         let cs = &mut v8::ContextScope::new(hs, context);
         let tc = std::pin::pin!(v8::TryCatch::new(cs));
         let tc = &mut tc.init();
-        if must_restore {
-            adopt_cell(tc, cell, None, compat)?;
-        }
+        let (path, restored) = file;
         adopt_embedded_cell(
             tc,
             cell,
@@ -8637,7 +6160,8 @@ impl Worker {
             EmbeddedStartup {
                 id,
                 props_sc,
-                restored_image,
+                path,
+                restored,
             },
             compat,
         )
@@ -9357,120 +6881,11 @@ fn op_kv_blob(
     let id = asyncrt::enqueue(async move {
         let (cell, activation_epoch) =
             authority.ok_or_else(|| "KV blob I/O requires active cell storage".to_string())?;
-        let request: serde_json::Value =
-            serde_json::from_str(&request).map_err(|error| format!("invalid request: {error}"))?;
-        let field = |name: &str| -> std::result::Result<String, String> {
-            request
-                .get(name)
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-                .ok_or_else(|| format!("request has no {name}"))
-        };
-        let mode = field("mode")?;
         await_egress_gate(gate).await?;
-        let reply = match mode.as_str() {
-            "prepare" => {
-                let digest = field("digest")?;
-                let reference = celld_logic::kv::BlobRef::v2(activation_epoch, &digest)
-                    .map_err(|error| error.to_string())?
-                    .encode();
-                serde_json::json!({ "reference": reference })
-            }
-            "get" => {
-                let reference = field("reference")?;
-                let reference = celld_logic::kv::BlobRef::parse(&reference)
-                    .map_err(|error| error.to_string())?;
-                if !reference.readable_by(activation_epoch) {
-                    return Err("a KV row references a later ownership epoch".to_string());
-                }
-                let key = reference.object_key(&cell);
-                match kv_blob_store()?
-                    .get(&key)
-                    .await
-                    .map_err(|error| error.to_string())?
-                {
-                    Some((bytes, _etag)) => {
-                        return Ok(asyncrt::OpOut::Bytes(bytes.to_vec()));
-                    }
-                    None => serde_json::json!({ "found": false }),
-                }
-            }
-            "put" => {
-                let bytes = value.ok_or_else(|| "request has no byte view".to_string())?;
-                let reference = field("reference")?;
-                let reference = celld_logic::kv::BlobRef::parse(&reference)
-                    .map_err(|error| error.to_string())?;
-                if !reference.writable_by(activation_epoch) {
-                    return Err("a new KV blob must use the active ownership epoch".to_string());
-                }
-                let key = reference.object_key(&cell);
-                kv_blob_store()?
-                    .put(&key, bytes)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                serde_json::json!({ "ok": true })
-            }
-            "sweep" => {
-                let values = request
-                    .get("live")
-                    .and_then(serde_json::Value::as_array)
-                    .ok_or_else(|| "request has no live blob reference list".to_string())?;
-                let mut live = HashSet::new();
-                for value in values {
-                    let reference = value.as_str().ok_or_else(|| {
-                        "the live blob reference list contains a non-string".to_string()
-                    })?;
-                    let reference = celld_logic::kv::BlobRef::parse(reference)
-                        .map_err(|error| error.to_string())?;
-                    if !reference.readable_by(activation_epoch) {
-                        return Err(
-                            "the live blob reference list contains a later epoch".to_string()
-                        );
-                    }
-                    if matches!(reference, celld_logic::kv::BlobRef::V2 { .. }) {
-                        live.insert(reference.encode());
-                    }
-                }
-                // Mark and sweep, and the model says why it is not a refcount:
-                // a crash between the blob write and the row commit leaves
-                // bytes no count ever counted. The caller includes its pending
-                // references because this end only needs "do not delete these".
-                // Legacy blobs live outside this prefix and remain retained as
-                // the safe migration cost.
-                let prefix = celld_logic::kv::BlobRef::v2_object_prefix(&cell);
-                let listed = kv_blob_store()?
-                    .list(&prefix)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                // Validate the complete listing before issuing one delete. A
-                // malformed key must fail closed instead of turning a parsing
-                // error into partial collection.
-                let mut doomed = Vec::new();
-                for object in listed {
-                    let key = object.location.as_ref().to_string();
-                    let suffix = key.strip_prefix(&prefix).ok_or_else(|| {
-                        "the KV blob listing returned a key outside its prefix".to_string()
-                    })?;
-                    let reference = celld_logic::kv::BlobRef::parse_object_suffix(suffix)
-                        .map_err(|error| error.to_string())?;
-                    if reference.collectable_by(activation_epoch)
-                        && !live.contains(&reference.encode())
-                    {
-                        doomed.push(key);
-                    }
-                }
-                let gone = kv_blob_store()?.delete_many(&doomed).await;
-                if gone.len() != doomed.len() {
-                    return Err(format!(
-                        "{} blob(s) refused deletion",
-                        doomed.len().saturating_sub(gone.len())
-                    ));
-                }
-                serde_json::json!({ "removed": gone.len() })
-            }
-            other => return Err(format!("unknown mode {other}")),
-        };
-        Ok(asyncrt::OpOut::Str(reply.to_string()))
+        match crate::kv_blob::run(&cell, activation_epoch, &request, value).await? {
+            crate::kv_blob::BlobReply::Bytes(bytes) => Ok(asyncrt::OpOut::Bytes(bytes)),
+            crate::kv_blob::BlobReply::Json(reply) => Ok(asyncrt::OpOut::Str(reply.to_string())),
+        }
     });
     rv.set(promise_for(scope, id));
 }
@@ -9495,38 +6910,6 @@ fn rejected_promise<'s>(
     promise.into()
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct QueueDispatchEnvelope {
-    lease_id: String,
-    leases: Vec<QueueLeaseRef>,
-    messages: Vec<QueueWireMessage>,
-    metrics: QueueWireMetrics,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct QueueWireMessage {
-    id: String,
-    timestamp_ms: i64,
-    body_base64: String,
-    content_type: String,
-    attempts: u16,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct QueueWireMetrics {
-    backlog_count: f64,
-    backlog_bytes: f64,
-    oldest_message_timestamp_ms: Option<i64>,
-}
-
-/// `__queue_dispatch(script, queue, envelopeJson)` persists no state itself.
-/// The Queue cell has already installed each lease; this op gates that write,
-/// then hands the batch to the host and returns. Settlement comes back as a
-/// new call to the broker, so the alarm event does not spend the consumer's
-/// admission or handler budget and several leases can run concurrently.
 fn op_queue_dispatch(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -9534,64 +6917,18 @@ fn op_queue_dispatch(
 ) {
     let script = args.get(0).to_rust_string_lossy(scope);
     let queue = args.get(1).to_rust_string_lossy(scope);
-    let envelope: QueueDispatchEnvelope =
-        match serde_json::from_str(&args.get(2).to_rust_string_lossy(scope)) {
-            Ok(envelope) => envelope,
-            Err(error) => {
-                return loader_throw(scope, &format!("invalid Queue dispatch envelope: {error}"))
-            }
-        };
+    let envelope = args.get(2).to_rust_string_lossy(scope);
     let gate = egress_gate_request(&event_context(scope), celld_logic::Channel::Queue);
-    let cell = gate.cell_scope().map(str::to_string);
-    let mut messages = Vec::with_capacity(envelope.messages.len());
-    for message in envelope.messages {
-        let content_type = match message.content_type.as_str() {
-            "text" => QueueContentType::Text,
-            "bytes" => QueueContentType::Bytes,
-            "json" => QueueContentType::Json,
-            "v8" => QueueContentType::V8,
-            other => return loader_throw(scope, &format!("invalid Queue content type {other:?}")),
-        };
-        let body = match base64::engine::general_purpose::STANDARD.decode(&message.body_base64) {
-            Ok(body) => body,
-            Err(error) => {
-                return loader_throw(scope, &format!("invalid Queue message body: {error}"))
-            }
-        };
-        messages.push(QueueMessage {
-            id: message.id,
-            timestamp_ms: message.timestamp_ms,
-            body,
-            content_type,
-            attempts: message.attempts,
-        });
-    }
-    if messages.len() != envelope.leases.len()
-        || messages
-            .iter()
-            .zip(&envelope.leases)
-            .any(|(message, lease)| message.id != lease.message_id)
-    {
-        return loader_throw(
-            scope,
-            "a Queue dispatch must carry one matching lease per message",
-        );
-    }
-    let request = QueueDispatchReq {
-        generation: current_generation(scope),
-        scope: cell.unwrap_or_default(),
+    let cell = gate.cell_scope().map(str::to_string).unwrap_or_default();
+    let request = match crate::queue_policy::dispatch_request(
+        current_generation(scope),
+        cell,
         script,
-        lease_id: envelope.lease_id,
-        leases: envelope.leases,
-        batch: QueueBatch {
-            queue,
-            messages,
-            metrics: QueueMetrics {
-                backlog_count: envelope.metrics.backlog_count,
-                backlog_bytes: envelope.metrics.backlog_bytes,
-                oldest_message_timestamp_ms: envelope.metrics.oldest_message_timestamp_ms,
-            },
-        },
+        queue,
+        &envelope,
+    ) {
+        Ok(request) => request,
+        Err(error) => return loader_throw(scope, &format!("{error:#}")),
     };
     let id = asyncrt::enqueue(async move {
         if request.scope.is_empty() {
@@ -9609,13 +6946,8 @@ fn op_queue_dispatch(
     rv.set(promise_for(scope, id));
 }
 
-/// One synchronous boundary for Queue policy owned by `celld-logic`.
-///
-/// The JavaScript cell owns SQL and presentation. It sends row facts here so
-/// alarm selection, concurrency admission, generation advancement, settlement
-/// fencing, purge classification, retry precedence, and exhaustion have one
-/// production implementation rather than a tested Rust copy beside a different
-/// shipped JavaScript copy.
+/// The Queue policy boundary, `crate::queue_policy::run` behind one
+/// synchronous op.
 fn op_queue_policy(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -9628,227 +6960,11 @@ fn op_queue_policy(
                 return loader_throw(scope, &format!("invalid Queue policy input: {error}"))
             }
         };
-    let integer = |object: &serde_json::Value, name: &str| -> Result<i64> {
-        object
-            .get(name)
-            .and_then(serde_json::Value::as_i64)
-            .ok_or_else(|| anyhow!("Queue policy input has no integer {name}"))
-    };
-    let optional_integer = |object: &serde_json::Value, name: &str| -> Result<Option<i64>> {
-        match object.get(name) {
-            None | Some(serde_json::Value::Null) => Ok(None),
-            Some(value) => value
-                .as_i64()
-                .map(Some)
-                .ok_or_else(|| anyhow!("Queue policy input {name} is not an integer")),
-        }
-    };
-    let result = (|| -> Result<serde_json::Value> {
-        match request.get("op").and_then(serde_json::Value::as_str) {
-            Some("rearm") => Ok(serde_json::json!(celld_logic::queue::rearm(
-                integer(&request, "now")?,
-                optional_integer(&request, "batchDeadline")?,
-                optional_integer(&request, "earliestVisible")?,
-                optional_integer(&request, "earliestLeaseExpiry")?,
-                optional_integer(&request, "nextSweep")?,
-            ))),
-            Some("capacity") => {
-                let active = usize::try_from(integer(&request, "active")?)
-                    .map_err(|_| anyhow!("Queue active concurrency is out of range"))?;
-                let maximum = u16::try_from(integer(&request, "maximum")?)
-                    .map_err(|_| anyhow!("Queue max concurrency is out of range"))?;
-                Ok(serde_json::json!(celld_logic::queue::can_install_lease(
-                    active, maximum,
-                )))
-            }
-            Some("retries") => {
-                let now = integer(&request, "now")?;
-                let entries = request
-                    .get("entries")
-                    .and_then(serde_json::Value::as_array)
-                    .ok_or_else(|| anyhow!("Queue retry policy has no entries"))?;
-                let mut results = Vec::with_capacity(entries.len());
-                for entry in entries {
-                    let seconds = |name: &str| -> Result<Option<u32>> {
-                        optional_integer(entry, name)?
-                            .map(|value| {
-                                u32::try_from(value)
-                                    .map_err(|_| anyhow!("Queue retry {name} is out of range"))
-                            })
-                            .transpose()
-                    };
-                    let attempt = u16::try_from(integer(entry, "attempt")?)
-                        .map_err(|_| anyhow!("Queue retry attempt is out of range"))?;
-                    let max_retries = u16::try_from(integer(entry, "maxRetries")?)
-                        .map_err(|_| anyhow!("Queue maxRetries is out of range"))?;
-                    results.push(serde_json::json!({
-                        "at": celld_logic::queue::retry_at(
-                            now,
-                            seconds("explicitSeconds")?,
-                            seconds("configuredSeconds")?,
-                        ),
-                        "exhausted": celld_logic::queue::exhausted(attempt, max_retries),
-                    }));
-                }
-                Ok(serde_json::Value::Array(results))
-            }
-            Some("expiry") => {
-                let now = integer(&request, "now")?;
-                let entries = request
-                    .get("entries")
-                    .and_then(serde_json::Value::as_array)
-                    .ok_or_else(|| anyhow!("Queue expiry policy has no entries"))?;
-                let mut results = Vec::with_capacity(entries.len());
-                for entry in entries {
-                    let prior_failures = u16::try_from(integer(entry, "priorFailures")?)
-                        .map_err(|_| anyhow!("Queue priorFailures is out of range"))?;
-                    let max_retries = u16::try_from(integer(entry, "maxRetries")?)
-                        .map_err(|_| anyhow!("Queue maxRetries is out of range"))?;
-                    let configured = optional_integer(entry, "configuredSeconds")?
-                        .map(|value| {
-                            u32::try_from(value)
-                                .map_err(|_| anyhow!("Queue retry delay is out of range"))
-                        })
-                        .transpose()?;
-                    let purge = entry
-                        .get("purgeOnSettle")
-                        .and_then(serde_json::Value::as_bool)
-                        .ok_or_else(|| anyhow!("Queue expiry has no purgeOnSettle"))?;
-                    let expired = celld_logic::queue::expire_lease(
-                        now,
-                        prior_failures,
-                        max_retries,
-                        configured,
-                        purge,
-                    );
-                    let action = match expired.action {
-                        celld_logic::queue::ExpiredLeaseAction::RetryAt(at) => {
-                            serde_json::json!({ "kind": "retry", "at": at })
-                        }
-                        celld_logic::queue::ExpiredLeaseAction::Exhausted => {
-                            serde_json::json!({ "kind": "exhausted" })
-                        }
-                        celld_logic::queue::ExpiredLeaseAction::DeletePurged => {
-                            serde_json::json!({ "kind": "delete-purged" })
-                        }
-                    };
-                    results.push(serde_json::json!({
-                        "attempt": expired.attempt,
-                        "action": action,
-                    }));
-                }
-                Ok(serde_json::Value::Array(results))
-            }
-            Some("batch") => {
-                let now = integer(&request, "now")?;
-                let max_batch_size = usize::try_from(integer(&request, "maxBatchSize")?)
-                    .map_err(|_| anyhow!("Queue maxBatchSize is out of range"))?;
-                let rows = request
-                    .get("rows")
-                    .and_then(serde_json::Value::as_array)
-                    .ok_or_else(|| anyhow!("Queue batch policy has no rows"))?;
-                let rows = rows
-                    .iter()
-                    .map(|row| {
-                        let generation = row
-                            .get("leaseGeneration")
-                            .and_then(serde_json::Value::as_str)
-                            .ok_or_else(|| anyhow!("Queue row has no leaseGeneration"))?
-                            .parse::<u64>()
-                            .context("Queue leaseGeneration is invalid")?;
-                        Ok(celld_logic::queue::BatchRow {
-                            seq: integer(row, "seq")?,
-                            visible_at: integer(row, "visibleAt")?,
-                            lease_generation: generation,
-                            leased_until: optional_integer(row, "leasedUntil")?,
-                            purge_on_settle: row
-                                .get("purgeOnSettle")
-                                .and_then(serde_json::Value::as_bool)
-                                .ok_or_else(|| anyhow!("Queue row has no purgeOnSettle"))?,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let plan = celld_logic::queue::batch_plan(now, &rows, max_batch_size)?;
-                Ok(serde_json::json!({
-                    "leases": plan.leases.into_iter().map(|lease| serde_json::json!({
-                        "seq": lease.seq,
-                        "generation": lease.generation.to_string(),
-                        "reclaimed": lease.reclaimed,
-                    })).collect::<Vec<_>>(),
-                    "deletePurged": plan.delete_purged,
-                }))
-            }
-            Some("settlement") => {
-                #[cfg(celld_internal_tests)]
-                QUEUE_SETTLEMENT_POLICY_OBSERVED.with(|observed| observed.set(true));
-
-                let members = |name: &str| -> Result<Vec<celld_logic::queue::LeaseMember<'_>>> {
-                    request
-                        .get(name)
-                        .and_then(serde_json::Value::as_array)
-                        .ok_or_else(|| anyhow!("Queue settlement policy has no {name}"))?
-                        .iter()
-                        .map(|member| {
-                            let string = |field: &str| -> Result<&str> {
-                                member
-                                    .get(field)
-                                    .and_then(serde_json::Value::as_str)
-                                    .ok_or_else(|| {
-                                        anyhow!("Queue settlement member has no {field}")
-                                    })
-                            };
-                            Ok(celld_logic::queue::LeaseMember {
-                                seq: string("seq")?
-                                    .parse::<i64>()
-                                    .context("Queue settlement sequence is invalid")?,
-                                message_id: string("messageId")?,
-                                generation: string("generation")?
-                                    .parse::<u64>()
-                                    .context("Queue settlement generation is invalid")?,
-                            })
-                        })
-                        .collect()
-                };
-                let current = members("current")?;
-                let submitted = members("submitted")?;
-                Ok(serde_json::json!(celld_logic::queue::settlement_matches(
-                    &current, &submitted,
-                )))
-            }
-            Some("purge") => {
-                let now = integer(&request, "now")?;
-                let rows = request
-                    .get("rows")
-                    .and_then(serde_json::Value::as_array)
-                    .ok_or_else(|| anyhow!("Queue purge policy has no rows"))?
-                    .iter()
-                    .map(|row| {
-                        Ok(celld_logic::queue::PurgeRow {
-                            seq: row
-                                .get("seq")
-                                .and_then(serde_json::Value::as_str)
-                                .ok_or_else(|| anyhow!("Queue purge row has no sequence"))?
-                                .parse::<i64>()
-                                .context("Queue purge sequence is invalid")?,
-                            lease_id_present: row
-                                .get("leaseIdPresent")
-                                .and_then(serde_json::Value::as_bool)
-                                .ok_or_else(|| anyhow!("Queue purge row has no lease state"))?,
-                            leased_until: optional_integer(row, "leasedUntil")?,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let plan = celld_logic::queue::purge_plan(now, &rows);
-                Ok(serde_json::json!({
-                    "delete": plan.delete.into_iter().map(|seq| seq.to_string()).collect::<Vec<_>>(),
-                    "markForSettle": plan.mark_for_settle.into_iter().map(|seq| seq.to_string()).collect::<Vec<_>>(),
-                }))
-            }
-            Some(other) => Err(anyhow!("unknown Queue policy operation {other:?}")),
-            None => Err(anyhow!("Queue policy input has no op")),
-        }
-    })();
-    match result {
+    #[cfg(celld_internal_tests)]
+    if request.get("op").and_then(serde_json::Value::as_str) == Some("settlement") {
+        QUEUE_SETTLEMENT_POLICY_OBSERVED.with(|observed| observed.set(true));
+    }
+    match crate::queue_policy::run(&request) {
         Ok(value) => {
             let value = v8::String::new(scope, &value.to_string()).unwrap();
             rv.set(value.into());
@@ -10480,6 +7596,7 @@ fn op_loader_load(
             compat,
         })
         .into_dynamic_worker()
+        .with_main_module_name(main.to_string())
         .with_generation(generation)
         .with_egress(egress)
         .with_resource_limits(limits)
@@ -10635,46 +7752,6 @@ fn op_loader_fetch(
     rv.set(pair.into());
 }
 
-/// Reclaims a streamed request body if a host dispatch fails before the
-/// target installs a request context. A successful dispatch disarms this
-/// fallback because the target context then owns the unread tail.
-pub struct RequestBodyGuard(Option<HttpStreamClaim>);
-
-impl RequestBodyGuard {
-    pub fn of(body: &RequestBody) -> Self {
-        Self(body.stream_id().and_then(claim_http_stream))
-    }
-
-    fn transferred(claim: HttpStreamClaim) -> Self {
-        Self(Some(claim))
-    }
-
-    pub fn disarm(&mut self) {
-        drop(self.0.take());
-    }
-
-    fn take_stream(&mut self, stream_id: u64) -> Result<HttpChunkStream, String> {
-        let Some(claim) = self.0.take() else {
-            return Err(format!("body stream {stream_id} is not registered"));
-        };
-        if claim.stream_id != stream_id {
-            let claimed = claim.stream_id;
-            self.0 = Some(claim);
-            return Err(format!(
-                "body stream {stream_id} does not match ownership claim {claimed}"
-            ));
-        }
-        claim.take_source()
-    }
-}
-
-impl Drop for RequestBodyGuard {
-    fn drop(&mut self) {
-        let claim = self.0.take();
-        run_http_cleanup_from_drop(|| drop(claim));
-    }
-}
-
 /// `__loader_rpc(id, entrypoint, method, argsSc, propsSc, limitsJson)` ->
 /// Promise<Uint8Array>. The loaded-worker analog of `__svc_rpc`: a
 /// named-entrypoint method call whose args and result are V8 structured-clone
@@ -10748,6 +7825,42 @@ fn facet_scope(class_name: &str, parent_scope: &str, owner: &str, name: &str) ->
     format!("{class_name}:{}", durable_object_id_hex(&digest))
 }
 
+/// Activate a facet's stream through the host loop, which owns the
+/// replicator, and answer its database file and whether it was restored.
+async fn open_facet_file(
+    parent: &storage::StorageIdentity,
+    name: &str,
+) -> Result<(std::path::PathBuf, bool), String> {
+    let mut names = parent.facet_path.clone();
+    names.push(name.to_string());
+    let Some(sender) = FACET_TX.get() else {
+        // No host loop runs the replicator, so the file sits beside the
+        // root's database and is named after it, as workerd names a facet
+        // `<id>.<facet>.sqlite`.
+        let stream = crate::engine_api::facet_cell(&parent.root_scope, &names);
+        let facet = stream[parent.root_scope.len()..]
+            .trim_start_matches('/')
+            .replace('/', "-");
+        let root = std::path::Path::new(&parent.root_path);
+        let file = root.file_name().unwrap().to_string_lossy();
+        return Ok((root.with_file_name(format!("{file}.{facet}.sqlite")), false));
+    };
+    let (reply, receive) = tokio::sync::oneshot::channel();
+    let request = FacetReq::Open {
+        root: parent.root_scope.clone(),
+        epoch: parent.epoch,
+        names,
+        reply,
+    };
+    sender
+        .send(request)
+        .map_err(|_| "the facet channel closed".to_string())?;
+    receive
+        .await
+        .map_err(|_| "the facet open was dropped".to_string())?
+        .map_err(|error| format!("open the facet database: {error:#}"))
+}
+
 struct FacetStart {
     class_name: String,
     parent_scope: String,
@@ -10758,11 +7871,68 @@ struct FacetStart {
     parent: storage::StorageIdentity,
 }
 
-async fn prepare_loaded_facet(
-    loaded: tokio::sync::watch::Receiver<LoaderState>,
-    start: FacetStart,
-) -> Result<(Arc<crate::pool::Slot>, String), String> {
-    let slot = loaded_worker_slot(loaded).await?;
+/// A facet ready for one call, with what its reply must wait for.
+struct LoadedFacet {
+    slot: Arc<crate::pool::Slot>,
+    scope: String,
+    stream: String,
+    epoch: u64,
+}
+
+impl LoadedFacet {
+    /// A facet's reply leaves as workerd's facet output gate lets it: after
+    /// every write the facet committed is durable on its own stream. That
+    /// covers an earlier call's write this reply can reveal as well as the
+    /// call's own, and an error reply as well as a result.
+    async fn gate_reply(&self) -> Result<(), String> {
+        prove_facet(self.stream.clone(), self.epoch)
+            .await
+            .map_err(|refusal| format!("facet reply: {refusal}"))
+    }
+}
+
+/// The loader id of a class from the script's own `ctx.exports`. Loaded
+/// Workers' ids start at 1.
+const OWN_SCRIPT_LOADER: u64 = 0;
+
+/// The isolate a facet's class runs in: a loaded Worker's, or, for a class
+/// of the root's own script, the root's own, as workerd runs it.
+enum FacetHost {
+    Loaded(tokio::sync::watch::Receiver<LoaderState>),
+    Own(Arc<crate::pool::Slot>),
+}
+
+impl FacetHost {
+    /// Resolved in the op, while the root's turn names its slot.
+    fn of(loader: u64) -> Result<Self, String> {
+        if loader == OWN_SCRIPT_LOADER {
+            return crate::pool::current_slot()
+                .map(Self::Own)
+                .ok_or_else(|| "facet: no isolate runs this turn".to_string());
+        }
+        loader_registry()
+            .lock()
+            .unwrap()
+            .get(&loader)
+            .map(|entry| Self::Loaded(entry.state.clone()))
+            .ok_or_else(|| "worker loader: unknown worker".to_string())
+    }
+
+    async fn slot(self) -> Result<Arc<crate::pool::Slot>, String> {
+        match self {
+            Self::Loaded(loaded) => loaded_worker_slot(loaded).await,
+            Self::Own(slot) => Ok(slot),
+        }
+    }
+}
+
+async fn prepare_facet(host: FacetHost, start: FacetStart) -> Result<LoadedFacet, String> {
+    let slot = host.slot().await?;
+    let file = open_facet_file(&start.parent, &start.name).await?;
+    let mut names = start.parent.facet_path.clone();
+    names.push(start.name.clone());
+    let stream = crate::engine_api::facet_cell(&start.parent.root_scope, &names);
+    let epoch = start.parent.epoch;
     let scope = facet_scope(
         &start.class_name,
         &start.parent_scope,
@@ -10776,11 +7946,17 @@ async fn prepare_loaded_facet(
             &start.name,
             &start.id,
             start.props_sc,
+            file,
         )
     })
     .await
     .map_err(|error| format!("worker loader facet: {error}"))?;
-    Ok((slot, scope))
+    Ok(LoadedFacet {
+        slot,
+        scope,
+        stream,
+        epoch,
+    })
 }
 
 fn op_facet_rpc(
@@ -10810,16 +7986,11 @@ fn op_facet_rpc(
         }
         Err(error) => return loader_throw(scope, &error.to_string()),
     };
-    let loaded = loader_registry()
-        .lock()
-        .unwrap()
-        .get(&loader)
-        .map(|entry| entry.state.clone());
+    let host = FacetHost::of(loader);
     let trace = current_trace_context(scope);
     let async_id = asyncrt::enqueue(async move {
-        let loaded = loaded.ok_or_else(|| "worker loader: unknown worker".to_string())?;
-        let (slot, facet_scope) = prepare_loaded_facet(
-            loaded,
+        let facet = prepare_facet(
+            host?,
             FacetStart {
                 class_name,
                 parent_scope,
@@ -10834,21 +8005,28 @@ fn op_facet_rpc(
         let (reply, receive) = tokio::sync::oneshot::channel();
         let job = CellJob::Rpc {
             request_id: None,
-            scope: facet_scope,
+            scope: facet.scope.clone(),
             name: None,
             method,
             args: RpcData::V8(call_args.into()),
             reply,
         };
         let driving = tokio::spawn(crate::runtime::drive_cell(
-            slot.affiliate(),
+            facet.slot.affiliate(),
             job,
             None,
             trace,
         ));
-        match receive.await {
+        let replied = receive.await;
+        if replied.is_ok() {
+            facet.gate_reply().await?;
+        }
+        match replied {
             Ok(Ok(outcome)) => match outcome.data {
-                RpcData::V8(bytes) => Ok(Vec::<u8>::from(bytes)),
+                RpcData::V8(bytes) => {
+                    facet.gate_reply().await?;
+                    Ok(Vec::<u8>::from(bytes))
+                }
                 RpcData::Json(_) => Err("facet RPC answered JSON".to_string()),
             },
             Ok(Err(error)) => Err(format!("{error}")),
@@ -10909,17 +8087,12 @@ fn op_facet_fetch(
         }
         Err(error) => return loader_throw(scope, &error.to_string()),
     };
-    let loaded = loader_registry()
-        .lock()
-        .unwrap()
-        .get(&loader)
-        .map(|entry| entry.state.clone());
+    let host = FacetHost::of(loader);
     let trace = current_trace_context(scope);
     let stream_service = http_stream_service();
     let async_id = asyncrt::enqueue(async move {
-        let loaded = loaded.ok_or_else(|| "worker loader: unknown worker".to_string())?;
-        let (slot, facet_scope) = prepare_loaded_facet(
-            loaded,
+        let facet = prepare_facet(
+            host?,
             FacetStart {
                 class_name,
                 parent_scope,
@@ -10934,7 +8107,7 @@ fn op_facet_fetch(
         let (reply, receive) = tokio::sync::oneshot::channel();
         let job = CellJob::Fetch {
             request_id: None,
-            scope: facet_scope,
+            scope: facet.scope.clone(),
             name: None,
             url,
             method,
@@ -10944,14 +8117,19 @@ fn op_facet_fetch(
             order: None,
         };
         let driving = tokio::spawn(crate::runtime::drive_cell(
-            slot.affiliate(),
+            facet.slot.affiliate(),
             job,
             None,
             trace,
         ));
-        match receive.await {
+        let replied = receive.await;
+        if replied.is_ok() {
+            facet.gate_reply().await?;
+        }
+        match replied {
             Ok(Ok(response)) => {
                 body_guard.disarm();
+                facet.gate_reply().await?;
                 encode_http_response(response, false, &stream_service)
             }
             Ok(Err(error)) => Err(format!("{error}")),
@@ -10974,15 +8152,10 @@ fn op_facet_abort(
     let parent_scope = args.get(2).to_rust_string_lossy(scope);
     let owner = args.get(3).to_rust_string_lossy(scope);
     let name = args.get(4).to_rust_string_lossy(scope);
-    let loaded = loader_registry()
-        .lock()
-        .unwrap()
-        .get(&loader)
-        .map(|entry| entry.state.clone());
+    let host = FacetHost::of(loader);
     let facet_scope = facet_scope(&class_name, &parent_scope, &owner, &name);
     let async_id = asyncrt::enqueue(async move {
-        let loaded = loaded.ok_or_else(|| "worker loader: unknown worker".to_string())?;
-        let slot = loaded_worker_slot(loaded).await?;
+        let slot = host?.slot().await?;
         slot.turn(|worker| worker.own_cell(&facet_scope, None))
             .await
             .map_err(|error| format!("abort facet: {error}"))?;
@@ -10994,7 +8167,7 @@ fn op_facet_abort(
 fn op_facet_delete(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue<v8::Value>,
+    mut rv: v8::ReturnValue<v8::Value>,
 ) {
     let parent_scope = args.get(0).to_rust_string_lossy(scope);
     let name = args.get(1).to_rust_string_lossy(scope);
@@ -11008,9 +8181,38 @@ fn op_facet_delete(
         }
         Err(error) => return loader_throw(scope, &error.to_string()),
     };
-    if let Err(error) = storage::delete_embedded(&parent, &name) {
-        loader_throw(scope, &format!("delete facet storage: {error}"));
+    if let Err(error) = storage::delete_legacy_facet(&parent, &name) {
+        return loader_throw(scope, &format!("delete facet storage: {error}"));
     }
+    let mut names = parent.facet_path.clone();
+    names.push(name);
+    let async_id = asyncrt::enqueue(async move {
+        let Some(sender) = FACET_TX.get() else {
+            let (path, _) = open_facet_file(&parent, names.last().unwrap()).await?;
+            for suffix in ["", "-wal", "-shm"] {
+                let mut file = path.clone().into_os_string();
+                file.push(suffix);
+                let _ = asyncrt::fs().remove_file(std::path::Path::new(&file));
+            }
+            return Ok(Vec::new());
+        };
+        let (reply, receive) = tokio::sync::oneshot::channel();
+        let request = FacetReq::Delete {
+            root: parent.root_scope,
+            epoch: parent.epoch,
+            names,
+            reply,
+        };
+        sender
+            .send(request)
+            .map_err(|_| "the facet channel closed".to_string())?;
+        receive
+            .await
+            .map_err(|_| "the facet delete was dropped".to_string())?
+            .map_err(|error| format!("delete facet storage: {error:#}"))?;
+        Ok(Vec::new())
+    });
+    rv.set(promise_for(scope, async_id));
 }
 
 /// `__loader_drop(id)` — evict a loaded worker. Called from a
@@ -11601,18 +8803,9 @@ fn op_fetch(
                     .map(|(name, value)| {
                         (
                             name.as_str().to_string(),
-                            value.to_str().map(str::to_owned).unwrap_or_else(|_| {
-                                // Fetch exposes a response header value as a
-                                // byte string. UTF-8 conversion would merge a
-                                // multibyte sequence, so expand only the
-                                // uncommon header that contains a non-ASCII
-                                // byte.
-                                value
-                                    .as_bytes()
-                                    .iter()
-                                    .map(|&byte| char::from(byte))
-                                    .collect::<String>()
-                            }),
+                            // A header value is decoded as UTF-8 with
+                            // replacement, as workerd decodes it.
+                            String::from_utf8_lossy(value.as_bytes()).into_owned(),
                         )
                     })
                     .collect::<Vec<_>>();
@@ -11687,280 +8880,6 @@ fn op_asset_fetch(
         }
     });
     rv.set(promise_for(scope, id));
-}
-
-/// Take exclusive ownership of a registered request source.
-///
-/// The returned stream removes the registry hop, so its eventual consumer
-/// supplies the backpressure and dropping that consumer cancels the source.
-pub fn take_body_stream(stream_id: u64) -> Result<HttpChunkStream, String> {
-    http_stream_service()
-        .checkout_transfer(stream_id, None)
-        .map(|source| Box::pin(source) as HttpChunkStream)
-}
-
-async fn next_http_stream_chunk(source: &mut HttpStreamSource) -> Result<Option<Vec<u8>>, String> {
-    match source {
-        HttpStreamSource::Response(response) => response
-            .chunk()
-            .await
-            .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
-            .map_err(|error| format!("response stream: {error}")),
-        HttpStreamSource::Receiver(receiver) => match receiver.recv().await {
-            Some(Ok(bytes)) => Ok(Some(bytes)),
-            Some(Err(error)) => Err(error),
-            None => Ok(None),
-        },
-        HttpStreamSource::Stream(stream) => stream.next().await.transpose(),
-    }
-}
-
-fn settle_http_stream_read(
-    mut lease: HttpSourceLease,
-    source: HttpStreamSource,
-    next: Option<Result<Option<Vec<u8>>, String>>,
-) -> Result<Option<Vec<u8>>, String> {
-    lease.settled = true;
-    let service = lease.service.clone();
-    let result = next.unwrap_or_else(|| {
-        HttpStreamService::termination_result(lease.stream_id, lease.termination.reason())
-    });
-    service.complete_pull(&lease, source, result)
-}
-
-/// Build the future used by the JavaScript read op.
-///
-/// Checkout stays synchronous because the op reserves the source before it
-/// enqueues asynchronous work. Internal tests call this constructor so they
-/// exercise the same checkout and completion transitions as the op.
-fn http_stream_read(
-    service: Arc<HttpStreamService>,
-    stream_id: u64,
-) -> impl std::future::Future<Output = Result<Option<Vec<u8>>, String>> + Send + 'static {
-    let checkout = service.checkout_source(stream_id);
-    async move {
-        let (lease, source) = checkout?;
-        let mut pull = HttpPull { lease, source };
-        let termination = pull.lease.termination.clone();
-        let next = crate::asyncrt::select! {
-            result = next_http_stream_chunk(&mut pull.source) => Some(result),
-            _ = futures_util::future::poll_fn(|context| termination.poll_reason(context)) => None,
-        };
-        let HttpPull { lease, source } = pull;
-        settle_http_stream_read(lease, source, next)
-    }
-}
-
-#[cfg(all(test, celld_internal_tests))]
-fn http_stream_read_source_first_for_test(
-    service: Arc<HttpStreamService>,
-    stream_id: u64,
-) -> impl std::future::Future<Output = Result<Option<Vec<u8>>, String>> + Send + 'static {
-    let checkout = service.checkout_source(stream_id);
-    async move {
-        let (lease, source) = checkout?;
-        let mut pull = HttpPull { lease, source };
-        let termination = pull.lease.termination.clone();
-        let next = crate::asyncrt::select_biased! {
-            "the source-first test probe makes a ready source win a termination tie";
-            result = next_http_stream_chunk(&mut pull.source) => Some(result),
-            _ = futures_util::future::poll_fn(|context| termination.poll_reason(context)) => None,
-        };
-        let HttpPull { lease, source } = pull;
-        settle_http_stream_read(lease, source, next)
-    }
-}
-
-async fn response_stream_write(
-    service: Arc<HttpStreamService>,
-    stream_id: u64,
-    bytes: Option<Vec<u8>>,
-) -> Result<(), String> {
-    let Some(bytes) = bytes else {
-        return Err("response stream chunks must be ArrayBuffer views".into());
-    };
-    // Acquire on the first poll. Merely constructing and dropping this
-    // future cannot read the Domain clock or create transient activity.
-    let activity = service
-        .begin_activity(stream_id, HttpStreamActivityKind::Write)
-        .map_err(|error| error.write_message().to_string())?;
-    if activity.writer.send(Ok(bytes)).await.is_err() {
-        activity.lease.cancel_pair();
-        return Err(RESPONSE_STREAM_CONSUMER_CANCELED.into());
-    }
-    activity.lease.succeed(false);
-    Ok(())
-}
-
-async fn response_stream_close(
-    service: Arc<HttpStreamService>,
-    stream_id: u64,
-    error: String,
-) -> Result<(), String> {
-    // Missing and expired writers preserve the producer harness's
-    // idempotent close contract. A live close reservation is different: a
-    // second terminal operation must not race the first one.
-    let activity = match service.begin_activity(stream_id, HttpStreamActivityKind::Close) {
-        Ok(activity) => activity,
-        Err(HttpStreamActivityError::Closed) => return Err(HTTP_STREAM_REGISTRATION_CLOSED.into()),
-        Err(HttpStreamActivityError::Gone) => return Ok(()),
-        Err(HttpStreamActivityError::Closing) => {
-            return Err(RESPONSE_STREAM_CLOSE_IN_PROGRESS.into())
-        }
-    };
-    if error.is_empty() {
-        let _ = activity.finished.send(true);
-    } else {
-        if activity.writer.send(Err(error)).await.is_err() {
-            activity.lease.cancel_pair();
-            return Ok(());
-        }
-        // A cancelled backpressured close must leave the producer watch
-        // open. Publish completion only after the terminal item is queued.
-        let _ = activity.finished.send(true);
-    }
-    activity.lease.succeed(true);
-    Ok(())
-}
-
-/// Move a host response source into a directly-polled stream. No pump task is
-/// needed: the eventual HTTP or JS consumer supplies the backpressure.
-fn http_chunk_stream(source: HttpStreamSource) -> HttpChunkStream {
-    match source {
-        HttpStreamSource::Response(response) => Box::pin(response.bytes_stream().map(|chunk| {
-            chunk
-                .map(|bytes| bytes.to_vec())
-                .map_err(|error| format!("response stream: {error}"))
-        })),
-        HttpStreamSource::Receiver(receiver) => {
-            Box::pin(tokio_stream::wrappers::ReceiverStream::new(receiver))
-        }
-        HttpStreamSource::Stream(stream) => stream,
-    }
-}
-
-/// Host-native tee for an outbound response. Both branches are represented by
-/// stream IDs, so one can be returned through Axum while JS independently
-/// scans the other for observability or usage accounting.
-type HttpTeePump = Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HttpTeeSendOutcome {
-    Sent,
-    BranchClosed,
-    SourceTerminated,
-}
-
-async fn reserve_http_tee_send(
-    sender: &tokio::sync::mpsc::Sender<Result<Vec<u8>, String>>,
-    item: Result<Vec<u8>, String>,
-    termination: &HttpStreamTermination,
-) -> HttpTeeSendOutcome {
-    // Sender::send enqueues before it resolves, so a select cannot retract a
-    // value after cancellation wins. Reserve capacity first, then recheck the
-    // committed source reason before the permit makes the value visible.
-    let reservation = asyncrt::select_biased! {
-        "a capacity reservation wins a tie because termination is rechecked before the send";
-        reservation = sender.reserve() => Some(reservation),
-        _ = futures_util::future::poll_fn(|context| termination.poll_reason(context)) => None,
-    };
-    if termination.reason() != HttpStreamTerminationReason::Live {
-        return HttpTeeSendOutcome::SourceTerminated;
-    }
-    match reservation {
-        Some(Ok(permit)) => {
-            permit.send(item);
-            HttpTeeSendOutcome::Sent
-        }
-        Some(Err(_)) => HttpTeeSendOutcome::BranchClosed,
-        None => HttpTeeSendOutcome::SourceTerminated,
-    }
-}
-
-async fn fan_out_http_tee_item(
-    tx1: &tokio::sync::mpsc::Sender<Result<Vec<u8>, String>>,
-    tx2: &tokio::sync::mpsc::Sender<Result<Vec<u8>, String>>,
-    item: Result<Vec<u8>, String>,
-    termination: &HttpStreamTermination,
-) -> Option<(bool, bool)> {
-    let first = reserve_http_tee_send(tx1, item.clone(), termination).await;
-    if first == HttpTeeSendOutcome::SourceTerminated {
-        return None;
-    }
-    let second = reserve_http_tee_send(tx2, item, termination).await;
-    if second == HttpTeeSendOutcome::SourceTerminated {
-        return None;
-    }
-    Some((
-        first == HttpTeeSendOutcome::Sent,
-        second == HttpTeeSendOutcome::Sent,
-    ))
-}
-
-async fn both_http_tee_receivers_closed(
-    tx1: &tokio::sync::mpsc::Sender<Result<Vec<u8>, String>>,
-    tx2: &tokio::sync::mpsc::Sender<Result<Vec<u8>, String>>,
-) {
-    tx1.closed().await;
-    tx2.closed().await;
-}
-
-fn prepare_http_stream_tee(
-    service: &Arc<HttpStreamService>,
-    mut source: HttpTransferredStream,
-) -> Result<((u64, u64), HttpTeePump), &'static str> {
-    let (tx1, rx1) = tokio::sync::mpsc::channel(HTTP_TEE_BRANCH_CAPACITY);
-    let (tx2, rx2) = tokio::sync::mpsc::channel(HTTP_TEE_BRANCH_CAPACITY);
-    let Some(id1) = service.register_source(HttpStreamSource::Receiver(rx1)) else {
-        return Err(HTTP_STREAM_REGISTRATION_CLOSED);
-    };
-    let Some(id2) = service.register_source(HttpStreamSource::Receiver(rx2)) else {
-        service.cancel_source(id1);
-        return Err(HTTP_STREAM_REGISTRATION_CLOSED);
-    };
-    let termination = source.termination_handle();
-    let pump = Box::pin(async move {
-        loop {
-            // A permanently pending source does not wake when its consumers
-            // disappear. Observe both receivers in the same poll, and prefer
-            // their committed closure when the source is also ready.
-            let event = asyncrt::select_biased! {
-                "closed tee consumers win a tie so the pump cannot read another source item";
-                _ = both_http_tee_receivers_closed(&tx1, &tx2) => None,
-                event = futures_util::future::poll_fn(|context| source.poll_event(context)) => Some(event),
-            };
-            let Some(event) = event else {
-                break;
-            };
-            match event {
-                HttpTransferredEvent::Chunk(bytes) => {
-                    let Some((first, second)) =
-                        fan_out_http_tee_item(&tx1, &tx2, Ok(bytes), &termination).await
-                    else {
-                        break;
-                    };
-                    if !first && !second {
-                        break;
-                    }
-                }
-                HttpTransferredEvent::Error(error) => {
-                    if fan_out_http_tee_item(&tx1, &tx2, Err(error), &termination)
-                        .await
-                        .is_some()
-                    {
-                        source.finish(HttpStreamTerminationReason::Finished);
-                    }
-                    break;
-                }
-                HttpTransferredEvent::End => {
-                    source.finish(HttpStreamTerminationReason::Finished);
-                    break;
-                }
-                HttpTransferredEvent::Terminated(_) => break,
-            }
-        }
-    });
-    Ok(((id1, id2), pump))
 }
 
 fn tee_http_stream(
@@ -12124,56 +9043,6 @@ fn op_response_stream_close(
         Ok(String::new())
     });
     rv.set(promise_for(scope, id));
-}
-
-/// Hand a request body to the isolate as a stream rather than as bytes.
-/// The returned id names the stream for `__http_stream_read`, so the
-/// Worker pulls each chunk off the socket as it asks for it and the host
-/// never holds the whole body.
-pub fn register_body_stream(stream: HttpChunkStream) -> Result<u64, String> {
-    register_http_stream(HttpStreamSource::Stream(stream))
-        .ok_or_else(|| HTTP_STREAM_REGISTRATION_CLOSED.to_string())
-}
-
-/// How an incoming request body reaches the isolate.
-///
-/// A small body crosses as bytes. This costs one copy and no asynchronous
-/// operations, so a common request pays nothing for a stream that it does
-/// not need. A large body, or a body of unknown length, crosses as a
-/// stream id. The peak cost of that body is one chunk, not its length.
-pub enum RequestBody {
-    Bytes(bytes::Bytes),
-    Stream(u64),
-}
-
-impl RequestBody {
-    /// The bytes already in hand, for the paths that hold a whole body.
-    pub fn bytes(&self) -> &[u8] {
-        match self {
-            Self::Bytes(bytes) => bytes,
-            Self::Stream(_) => &[],
-        }
-    }
-
-    pub fn stream_id(&self) -> Option<u64> {
-        match self {
-            Self::Bytes(_) => None,
-            Self::Stream(id) => Some(*id),
-        }
-    }
-
-    fn into_held_bytes(self) -> Option<Vec<u8>> {
-        match self {
-            Self::Bytes(bytes) => Some(bytes.into()),
-            Self::Stream(_) => None,
-        }
-    }
-}
-
-impl From<Vec<u8>> for RequestBody {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self::Bytes(bytes.into())
-    }
 }
 
 /// Timer op behind `setTimeout`: a promise resolving after `ms`.
@@ -12474,201 +9343,6 @@ fn op_timer_cancel(
     if let Some(cancel) = timer_cancels().lock().unwrap().remove(&timer_id) {
         let _ = cancel.send(());
     }
-}
-
-fn durable_object_id_key(namespace_key: &str) -> [u8; 32] {
-    DO_ID_KEYS.with(|keys| {
-        if let Some(key) = keys.borrow().get(namespace_key) {
-            return *key;
-        }
-        use sha2::Digest;
-        let key: [u8; 32] = sha2::Sha256::digest(namespace_key.as_bytes()).into();
-        keys.borrow_mut().insert(namespace_key.to_string(), key);
-        key
-    })
-}
-
-fn durable_object_id_hmac(key: &[u8; 32], input: &[u8]) -> hmac::Hmac<sha2::Sha256> {
-    use hmac::Mac;
-    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(key)
-        .expect("SHA-256 accepts any HMAC key");
-    mac.update(input);
-    mac
-}
-
-/// Ids already derived on this thread, keyed by namespace and name.
-///
-/// `getByName` costs two HMAC-SHA256 rounds, and a profile of `/c/hello`
-/// found them among the largest terms the stateless path does not have —
-/// the same name resolving to the same id, recomputed on every request.
-///
-/// Per thread and unsynchronised, which is sound because the derivation is
-/// a pure function of its inputs: a worker that has not seen a name pays
-/// for it once, and no answer can differ between threads. Bounded because
-/// names come from the application, and cleared wholesale at the cap rather
-/// than evicted one at a time — a cache this cheap to refill does not earn
-/// an LRU.
-const DO_ID_CACHE_MAX: usize = 4096;
-
-fn durable_object_id_for_name(namespace_key: &str, name: &str) -> [u8; 32] {
-    use hmac::Mac;
-
-    thread_local! {
-        static IDS: RefCell<HashMap<(String, String), [u8; 32]>> =
-            RefCell::new(HashMap::new());
-    }
-    let cached = IDS.with(|ids| {
-        ids.borrow()
-            .get(&(namespace_key.to_string(), name.to_string()))
-            .copied()
-    });
-    if let Some(id) = cached {
-        return id;
-    }
-
-    let key = durable_object_id_key(namespace_key);
-    let mut id = [0_u8; 32];
-    let digest = durable_object_id_hmac(&key, name.as_bytes())
-        .finalize()
-        .into_bytes();
-    id[..16].copy_from_slice(&digest[..16]);
-    let digest = durable_object_id_hmac(&key, &id[..16])
-        .finalize()
-        .into_bytes();
-    id[16..].copy_from_slice(&digest[..16]);
-
-    IDS.with(|ids| {
-        let mut ids = ids.borrow_mut();
-        if ids.len() >= DO_ID_CACHE_MAX {
-            ids.clear();
-        }
-        ids.insert((namespace_key.to_string(), name.to_string()), id);
-    });
-    id
-}
-
-/// The key a Durable Object namespace derives its IDs from. D1 uses one
-/// fleet-wide namespace because the database is a resource that several
-/// Workers can bind, and a Worker rename must not rename that database.
-const D1_NAMESPACE_KEY: &str = "cells:v1:d1:__D1Database";
-
-/// The same, for a KV namespace, and for the same reason: several Workers can
-/// bind one namespace, and they must reach one set of cells.
-///
-/// Written out rather than derived from the class name, because these two
-/// strings are addresses. A scheme that computed them would be free to change,
-/// and changing one renames every cell it ever addressed.
-const KV_NAMESPACE_KEY: &str = "cells:v1:kv:__KvNamespace";
-
-/// The fleet-wide namespace for Queue broker cells. The queue name is the
-/// durable resource identity, so a producer and a consumer in different
-/// scripts must derive the same cell id.
-const QUEUE_NAMESPACE_KEY: &str = "cells:v1:queue:__Queue";
-
-/// A shared reserved class addresses one set of cells for the whole fleet; every
-/// other class, reserved or not, is scoped to the script that exports it.
-///
-/// The question is asked once, through `deploy::is_shared_reserved_class`, and
-/// not as a chain of `==` against class names. A reserved class declared shared
-/// there and script-scoped here would silently give each script its own copy of
-/// a resource the configuration says they share -- which is what happened to KV
-/// between its manifest landing and this line being written.
-fn shared_namespace_key(class_name: &str) -> Option<&'static str> {
-    match class_name {
-        crate::deploy::D1_CLASS => Some(D1_NAMESPACE_KEY),
-        crate::deploy::KV_CLASS => Some(KV_NAMESPACE_KEY),
-        crate::deploy::QUEUE_CLASS => Some(QUEUE_NAMESPACE_KEY),
-        _ => {
-            debug_assert!(
-                !crate::deploy::is_shared_reserved_class(class_name),
-                "a shared reserved class needs a fleet-wide namespace key: {class_name}"
-            );
-            None
-        }
-    }
-}
-
-pub(crate) fn namespace_key(script_name: &str, class_name: &str) -> String {
-    match shared_namespace_key(class_name) {
-        Some(shared) => shared.to_string(),
-        None => format!("cells:v1:{}:{script_name}:{class_name}", script_name.len()),
-    }
-}
-
-/// The cell scope a D1 database lives at, for a caller outside any isolate.
-/// `celld d1` addresses a database over the operator route, which takes a
-/// scope, so this derives what `getByName` derives in the harness, from the
-/// same key and the same HMAC.
-pub fn d1_cell_scope(database_identity: &str) -> String {
-    let id = durable_object_id_for_name(D1_NAMESPACE_KEY, database_identity);
-    format!("{}:{}", crate::deploy::D1_CLASS, durable_object_id_hex(&id))
-}
-
-/// The cell scope one shard of a KV namespace lives at, for a caller outside
-/// any isolate. `celld kv` addresses a namespace over the operator route, and
-/// this derives what `getByName` derives in the harness -- from the same key,
-/// the same name, and the same HMAC.
-///
-/// The name comes from `celld_logic::kv::cell_name`, which is also what the
-/// binding is handed at `build_env`. Neither side formats it, because a
-/// formatting disagreement here does not fail: it silently addresses a second,
-/// empty namespace.
-pub fn kv_cell_scope(namespace_id: &str, shard: u32) -> String {
-    let name = celld_logic::kv::cell_name(namespace_id, shard);
-    let id = durable_object_id_for_name(KV_NAMESPACE_KEY, &name);
-    format!("{}:{}", crate::deploy::KV_CLASS, durable_object_id_hex(&id))
-}
-
-/// The Queue broker scope for callers outside a Worker isolate.
-pub fn queue_cell_scope(queue: &str) -> String {
-    let name = celld_logic::queue::cell_name(queue);
-    let id = durable_object_id_for_name(QUEUE_NAMESPACE_KEY, name);
-    format!(
-        "{}:{}",
-        crate::deploy::QUEUE_CLASS,
-        durable_object_id_hex(&id)
-    )
-}
-
-#[cfg(celld_internal_tests)]
-#[doc(hidden)]
-pub fn workflow_cell_scope_for_test(
-    script_name: &str,
-    workflow_name: &str,
-    instance_id: &str,
-) -> String {
-    let class = crate::deploy::workflow_class(script_name);
-    let namespace = namespace_key(script_name, &class);
-    let name = format!("{workflow_name}/{instance_id}");
-    let id = durable_object_id_for_name(&namespace, &name);
-    format!("{class}:{}", durable_object_id_hex(&id))
-}
-
-fn durable_object_id_hex(bytes: &[u8; 32]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(64);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
-}
-
-fn decode_durable_object_id(value: &str) -> Option<[u8; 32]> {
-    if value.len() != 64 {
-        return None;
-    }
-    let mut output = [0_u8; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-        let nibble = |byte| match byte {
-            b'0'..=b'9' => Some(byte - b'0'),
-            b'a'..=b'f' => Some(byte - b'a' + 10),
-            b'A'..=b'F' => Some(byte - b'A' + 10),
-            _ => None,
-        };
-        output[index] = (nibble(pair[0])? << 4) | nibble(pair[1])?;
-    }
-    Some(output)
 }
 
 fn throw_durable_object_id_error(scope: &mut v8::PinScope, message: &str) {
@@ -13823,7 +10497,7 @@ pub struct IoContext {
     /// On the event and not on the thread, because an event outlives the
     /// turn that began it: capture starts in one turn and is taken in a
     /// later one, which tokio may run on a different worker.
-    ws_capture: Mutex<Vec<Vec<(u64, WsOut)>>>,
+    ws_capture: Mutex<Vec<websocket::WsCapture>>,
     /// What each running event's outbound effects gate against, innermost
     /// last. An outbound effect raised during the event consults this: if the
     /// handler has advanced the position, the effect waits for the output gate
@@ -15071,29 +11745,17 @@ fn op_cron_plan(
     let retry = args.get(3).number_value(scope).unwrap_or(0.0) as i64;
     let failed = args.get(4).boolean_value(scope);
 
-    let matching = if fired_ms >= 0 {
-        celld_logic::cron::matching(&crons, fired_ms)
-    } else {
-        Vec::new()
-    };
-    let next = celld_logic::cron::next_across(&crons, now_ms);
-    // The retry backoff is `alarm::alarm_retry`'s, not a second schedule:
-    // a cron that fails behaves like any other failing alarm, except that
-    // `cron_rearm` never lets the backoff outlast the next occurrence.
-    let retry_at = failed
-        .then(|| celld_logic::alarm::alarm_retry(now_ms, retry, retry, true))
-        .flatten();
-    let arm_at = celld_logic::cron::cron_rearm(next, retry_at);
-    // Which of the two the deadline belongs to. `cron_rearm` takes the earlier
-    // and gives a tie to the occurrence, so `armAt` alone cannot say — and the
-    // caller has to know, because a retry owes the expressions of the
-    // occurrence that failed, while a deadline that is an occurrence owes the
-    // expressions that match it.
-    let arm_is_retry = match (arm_at, next) {
-        (Some(at), Some(occurrence)) => at < occurrence,
-        (Some(_), None) => true,
-        (None, _) => false,
-    };
+    let celld_logic::cron::Plan {
+        matching,
+        arm_at,
+        arm_is_retry,
+    } = celld_logic::cron::plan(
+        &crons,
+        (fired_ms >= 0).then_some(fired_ms),
+        now_ms,
+        retry,
+        failed,
+    );
 
     let indices = v8::Array::new(scope, matching.len() as i32);
     for (slot, index) in matching.iter().enumerate() {

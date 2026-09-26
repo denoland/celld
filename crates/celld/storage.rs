@@ -18,47 +18,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-
-#[derive(Clone, Hash, PartialEq, Eq)]
-struct RootTransactionKey {
-    scope: String,
-    epoch: u64,
-}
-
-struct DeferredFacetImage {
-    facet_scope: String,
-    path: String,
-    image: Vec<u8>,
-}
-
-struct RootTransactionLayer {
-    savepoint: String,
-    facets: HashMap<String, DeferredFacetImage>,
-}
-
-// A facet and its root run in different isolates, and each isolate owns a
-// separate `Cells` value. The transaction journal must therefore cross that
-// boundary. Its layers mirror SQLite savepoints: a nested commit merges an
-// image into its parent, and a rollback restores the image below that layer.
-// Writing through the facet's second connection is not an alternative while
-// the root holds `BEGIN IMMEDIATE`; it waits for the root and deadlocks the
-// call which the root transaction is awaiting (#811).
-static ROOT_TRANSACTIONS: OnceLock<Mutex<HashMap<RootTransactionKey, Vec<RootTransactionLayer>>>> =
-    OnceLock::new();
-// A rolled-back image can remain live in the facet isolate after SQLite has
-// discarded its root row. The next call reloads the image before application
-// code runs. Merely leaving `persisted_position` dirty would retry that
-// rolled-back image after the transaction and commit state the caller canceled.
-static FACET_RESTORES: OnceLock<Mutex<HashMap<String, Option<Vec<u8>>>>> = OnceLock::new();
-
-fn root_transactions() -> &'static Mutex<HashMap<RootTransactionKey, Vec<RootTransactionLayer>>> {
-    ROOT_TRANSACTIONS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn facet_restores() -> &'static Mutex<HashMap<String, Option<Vec<u8>>>> {
-    FACET_RESTORES.get_or_init(|| Mutex::new(HashMap::new()))
-}
+use std::sync::Arc;
 
 pub(crate) mod wake_record;
 
@@ -81,15 +41,6 @@ pub(crate) fn alarm_snapshot(scope: &str) -> anyhow::Result<celld_logic::wake::A
         )
     })
     .context("wake snapshot has no open cell")?
-}
-
-#[cfg(all(test, celld_internal_tests))]
-pub(crate) fn poison_sql_for_test(scope: &str, error: &str) {
-    sql_critical_errors(|errors| {
-        errors
-            .borrow_mut()
-            .insert(scope.to_string(), error.to_string());
-    });
 }
 
 /// The storage of every cell one isolate hosts.
@@ -132,7 +83,6 @@ struct OpenCell {
     epoch: u64,
     replicated_wake: bool,
     backing: StorageBacking,
-    persisted_position: u64,
     /// The committed-write position the first event of this activation
     /// started at. celld's own activation writes sit at or below it, so a
     /// read-only answer reports what it observed only above it, and a reader
@@ -146,7 +96,10 @@ enum StorageBacking {
         root_scope: String,
         facet_path: Vec<String>,
     },
+    /// A facet: a database and a replication stream of its own
+    /// (`crate::facet_streams`), opened inside its root's activation.
     Embedded {
+        stream: String,
         root_path: String,
         root_scope: String,
         facet_path: Vec<String>,
@@ -165,25 +118,12 @@ pub(crate) struct StorageIdentity {
     /// A committed-write position of `root_scope`, sampled in the isolate that
     /// holds the root database.
     ///
-    /// A facet is not a cell: its writes land in the root cell's database, so
-    /// an egress it raises must pass the root cell's output gate. The facet's
-    /// isolate holds no connection to the root database and therefore cannot
-    /// name a position in the root cell's space, so the sample travels with
-    /// the facet.
-    ///
-    /// The sample is a lower bound, and it stays one: [`flush_embedded`] copies
-    /// the facet's image on a second connection to the root database file, so
-    /// the root cell's own connection never counts those frames and a re-sample
-    /// after the copy reports the same number. Order covers them, not
-    /// arithmetic. The copy commits to the root database file before the egress
-    /// takes its ticket, and the replicator answers a ticket with a sync that
-    /// started after it, so the sync that proves this ticket uploads a file
-    /// that already holds the facet's write.
-    ///
-    /// The position is therefore a coverage claim, not a wait condition: the
-    /// core acknowledges only a proof that reaches it, so a lower bound makes
-    /// the core credit itself with less coverage than the sync obtained, never
-    /// with more.
+    /// A facet is not a cell: it has no ownership of its own, so an egress it
+    /// raises passes the root cell's output gate, which also holds whatever
+    /// the root revealed to the facet in the call. The facet's isolate holds
+    /// no connection to the root database and therefore cannot name a
+    /// position in the root cell's space, so the sample travels with the
+    /// facet. The facet's own writes are proved on the facet's own stream.
     pub root_position: u64,
     /// What a read-only answer of `root_scope` reports as observed at the same
     /// moment. A facet's read-only egress carries it, so a commit the facet
@@ -196,6 +136,8 @@ pub(crate) struct StorageIdentity {
 #[derive(Clone)]
 pub(crate) struct RootGate {
     pub cell: String,
+    /// The facet's own replication stream, which proves its writes.
+    pub stream: String,
     /// The epoch the root cell was resident at when the sample was taken. The
     /// core refuses a ticket that names another epoch, so a facet image that
     /// outlived a reset cannot acknowledge a discarded write.
@@ -346,7 +288,11 @@ fn sql_critical_errors<T>(f: impl FnOnce(&RefCell<HashMap<String, String>>) -> T
     cells(|c| f(&c.sql_critical_errors))
 }
 
-const SQL_STATEMENT_CACHE_MAX_SIZE: usize = 1024 * 1024;
+/// The heap memory one cell can hold in cached SQL statements. The budget
+/// counts the bytes SQLite reports for each compiled program, and
+/// `finish_open()` disables lookaside on every connection, so a reported byte
+/// is a real heap byte and the budget bounds the cache.
+const SQL_STATEMENT_CACHE_MAX_SIZE: usize = 128 * 1024;
 
 #[derive(Clone, Copy)]
 struct ActiveAlarm {
@@ -922,7 +868,6 @@ fn finish_open(
     close_sql_cursors(scope);
     close_sql_statement_cache(scope);
     sql_critical_errors(|errors| errors.borrow_mut().remove(scope));
-    let persisted_position = total_changes(&c) + schema_version(&c);
     dbs(|d| {
         d.borrow_mut().insert(
             scope.to_string(),
@@ -931,7 +876,6 @@ fn finish_open(
                 epoch,
                 replicated_wake,
                 backing,
-                persisted_position,
                 published_position: None,
             },
         )
@@ -939,11 +883,24 @@ fn finish_open(
     Ok(())
 }
 
+/// The facets of `root` this isolate holds: a facet of the root's own
+/// class runs beside it, and leaves with it.
+pub(crate) fn embedded_facets(root: &str) -> Vec<String> {
+    dbs(|d| {
+        d.borrow()
+            .iter()
+            .filter(|(_, cell)| {
+                matches!(&cell.backing, StorageBacking::Embedded { root_scope, .. }
+                    if root_scope == root)
+            })
+            .map(|(scope, _)| scope.clone())
+            .collect()
+    })
+}
+
 /// Drop `scope`'s connection (evict) so the replicator can release the
 /// file.
 pub fn close(scope: &str) {
-    let transaction_key = root_transaction_key(scope);
-    facet_restores().lock().unwrap().remove(scope);
     close_sync_list_cursors(scope);
     close_sql_cursors(scope);
     close_sql_statement_cache(scope);
@@ -957,9 +914,6 @@ pub fn close(scope: &str) {
     alarm_dirty(|dirty| {
         dirty.borrow_mut().remove(scope);
     });
-    if let Some(key) = transaction_key.as_ref() {
-        abandon_root_transaction(key);
-    }
 }
 
 fn with<T>(scope: &str, f: impl FnOnce(&Connection) -> T) -> Option<T> {
@@ -1008,6 +962,7 @@ pub(crate) fn storage_identity(scope: &str) -> anyhow::Result<Option<StorageIden
                         facet_path,
                         root_position,
                         root_observed,
+                        ..
                     } => (
                         root_path.clone(),
                         root_scope.clone(),
@@ -1028,15 +983,6 @@ pub(crate) fn storage_identity(scope: &str) -> anyhow::Result<Option<StorageIden
     }))
 }
 
-pub(crate) fn is_embedded(scope: &str) -> bool {
-    dbs(|databases| {
-        databases
-            .borrow()
-            .get(scope)
-            .is_some_and(|cell| matches!(cell.backing, StorageBacking::Embedded { .. }))
-    })
-}
-
 /// The gate an event of `scope` must pass, when `scope` is an embedded facet.
 /// `None` for a cell, which gates against itself.
 pub(crate) fn embedded_root_gate(scope: &str) -> Option<RootGate> {
@@ -1044,6 +990,7 @@ pub(crate) fn embedded_root_gate(scope: &str) -> Option<RootGate> {
         let databases = databases.borrow();
         let cell = databases.get(scope)?;
         let StorageBacking::Embedded {
+            stream,
             root_scope,
             root_position,
             root_observed,
@@ -1054,6 +1001,7 @@ pub(crate) fn embedded_root_gate(scope: &str) -> Option<RootGate> {
         };
         Some(RootGate {
             cell: root_scope.clone(),
+            stream: stream.clone(),
             epoch: cell.epoch,
             position: *root_position,
             observed: *root_observed,
@@ -1064,9 +1012,9 @@ pub(crate) fn embedded_root_gate(scope: &str) -> Option<RootGate> {
 /// Take the root cell's gate sample of a facet that is already open, so the
 /// egress of this call is held against what the root cell had committed when
 /// the call left it, not against what it had committed when the facet first
-/// opened. A parent at another epoch is not refreshed: the facet's image
-/// belongs to the epoch it loaded at, and a ticket that named the new epoch
-/// could acknowledge a write the reset that ended the old one discarded.
+/// opened. A parent at another epoch is not refreshed: the facet belongs to
+/// the activation it opened in, and a ticket that named the new epoch could
+/// acknowledge a write the reset that ended the old one discarded.
 pub(crate) fn refresh_embedded_root(scope: &str, parent: &StorageIdentity) {
     dbs(|databases| {
         let mut databases = databases.borrow_mut();
@@ -1101,219 +1049,56 @@ fn owned_sqlite_data(bytes: &[u8]) -> anyhow::Result<rusqlite::serialize::OwnedD
     }
 }
 
-fn root_transaction_key(scope: &str) -> Option<RootTransactionKey> {
-    dbs(|databases| {
-        databases
-            .borrow()
-            .get(scope)
-            .map(|cell| RootTransactionKey {
-                scope: scope.to_string(),
-                epoch: cell.epoch,
-            })
-    })
-}
-
-fn defer_facet_image(
-    root_scope: &str,
-    epoch: u64,
-    facet_scope: &str,
-    path: String,
-    image: Vec<u8>,
-) -> bool {
-    let key = RootTransactionKey {
-        scope: root_scope.to_string(),
-        epoch,
-    };
-    let mut transactions = root_transactions().lock().unwrap();
-    let Some(layer) = transactions
-        .get_mut(&key)
-        .and_then(|layers| layers.last_mut())
-    else {
-        return false;
-    };
-    layer.facets.insert(
-        path.clone(),
-        DeferredFacetImage {
-            facet_scope: facet_scope.to_string(),
-            path,
-            image,
-        },
-    );
-    true
-}
-
-fn pending_facet_image(root_scope: &str, epoch: u64, path: &str) -> Option<Vec<u8>> {
-    let key = RootTransactionKey {
-        scope: root_scope.to_string(),
-        epoch,
-    };
-    root_transactions()
-        .lock()
-        .unwrap()
-        .get(&key)
-        .and_then(|layers| layers.iter().rev().find_map(|layer| layer.facets.get(path)))
-        .map(|facet| facet.image.clone())
-}
-
-fn facet_image_is_deferred(root_scope: &str, epoch: u64, facet_scope: &str) -> bool {
-    let key = RootTransactionKey {
-        scope: root_scope.to_string(),
-        epoch,
-    };
-    root_transactions()
-        .lock()
-        .unwrap()
-        .get(&key)
-        .is_some_and(|layers| {
-            layers.iter().any(|layer| {
-                layer
-                    .facets
-                    .values()
-                    .any(|facet| facet.facet_scope == facet_scope)
-            })
-        })
-}
-
-fn begin_root_transaction(key: RootTransactionKey, nested: bool, savepoint: &str) {
-    let mut transactions = root_transactions().lock().unwrap();
-    let layers = transactions.entry(key).or_default();
-    if !nested {
-        layers.clear();
-    }
-    layers.push(RootTransactionLayer {
-        savepoint: savepoint.to_string(),
-        facets: HashMap::new(),
-    });
-}
-
-fn restore_discarded_facets(
-    remaining: &[RootTransactionLayer],
-    discarded: HashMap<String, DeferredFacetImage>,
-) {
-    let mut restores = facet_restores().lock().unwrap();
-    for (path, facet) in discarded {
-        let image = remaining
-            .iter()
-            .rev()
-            .find_map(|layer| layer.facets.get(&path))
-            .map(|pending| pending.image.clone());
-        restores.insert(facet.facet_scope, image);
-    }
-}
-
-fn finish_root_transaction(
-    key: &RootTransactionKey,
-    nested: bool,
-    savepoint: &str,
-    committed: bool,
-) {
-    let mut transactions = root_transactions().lock().unwrap();
-    let Some(layers) = transactions.get_mut(key) else {
-        return;
-    };
-    let Some(layer) = layers.last() else {
-        transactions.remove(key);
-        return;
-    };
-    // Popping a different layer would detach the facet images from the SQLite
-    // boundary which owns them. Check before the mutation so release builds
-    // cannot silently commit or restore the wrong images.
-    assert_eq!(
-        layer.savepoint, savepoint,
-        "root transaction layer mismatch"
-    );
-    let layer = layers.pop().expect("the checked transaction layer exists");
-    if committed && nested {
-        if let Some(parent) = layers.last_mut() {
-            parent.facets.extend(layer.facets);
-        }
-    } else if !committed {
-        restore_discarded_facets(layers, layer.facets);
-    }
-    if layers.is_empty() {
-        transactions.remove(key);
-    }
-}
-
-fn apply_deferred_facets(key: &RootTransactionKey, connection: &Connection) -> anyhow::Result<()> {
-    let transactions = root_transactions().lock().unwrap();
-    let Some(layers) = transactions.get(key) else {
-        return Ok(());
-    };
-    for facet in layers.iter().flat_map(|layer| layer.facets.values()) {
-        connection
-            .execute(
-                "INSERT INTO _cf_FACETS(scope,path,image) VALUES(?1,?2,?3) \
-                 ON CONFLICT(scope,path) DO UPDATE SET image=excluded.image",
-                rusqlite::params![key.scope, facet.path, facet.image],
-            )
-            .context("write a deferred facet database image")?;
-    }
-    Ok(())
-}
-
-fn abandon_root_transaction(key: &RootTransactionKey) {
-    let layers = root_transactions().lock().unwrap().remove(key);
-    if let Some(layers) = layers {
-        let discarded = layers.into_iter().flat_map(|layer| layer.facets).collect();
-        restore_discarded_facets(&[], discarded);
-    }
-}
-
-/// Take a facet image invalidation left by a rolled-back parent transaction.
-/// The boolean distinguishes a reload from the durable image from no action.
-pub(crate) fn take_facet_restore(scope: &str) -> (bool, Option<Vec<u8>>) {
-    match facet_restores().lock().unwrap().remove(scope) {
-        Some(image) => (true, image),
-        None => (false, None),
-    }
-}
-
+/// Open a facet's own database file, which `crate::facet_streams`
+/// activated at `path`. A facet from before facets had streams of their own
+/// kept its database as an image in a row of its root's `_cf_FACETS`; a
+/// stream replication did not restore takes that image as its first content.
 pub(crate) fn open_embedded(
     scope: &str,
     parent: &StorageIdentity,
     name: &str,
-    restored_image: Option<Vec<u8>>,
+    path: &std::path::Path,
+    restored: bool,
     sqlite_vec: bool,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(parent.facet_path.len() < 3, "Facet nesting depth limit exceeded. The maximum depth including the root Durable Object is 4.");
     let mut facet_path = parent.facet_path.clone();
     facet_path.push(name.to_string());
-    let path = serde_json::to_string(&facet_path)?;
-    let root = Connection::open(&parent.root_path)?;
-    let image = match restored_image {
-        Some(image) => Some(image),
-        None => match pending_facet_image(&parent.root_scope, parent.epoch, &path) {
-            Some(image) => Some(image),
-            // A facet can be evicted after its image enters the root
-            // transaction journal. The durable row is older until COMMIT, so
-            // a replacement must consult the journal before it reads disk.
-            None => root
-                .query_row(
-                    "SELECT image FROM _cf_FACETS WHERE scope=?1 AND path=?2",
-                    rusqlite::params![parent.root_scope, path],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .optional()?,
-        },
-    };
-    let mut connection = Connection::open_in_memory()?;
-    if let Some(image) = image {
-        connection.deserialize(
-            rusqlite::DatabaseName::Main,
-            owned_sqlite_data(&image)?,
-            false,
-        )?;
-        // A runtime incarnation has a unique scope so a continuation from an
-        // aborted instance cannot enter its replacement. The SQLite image is
-        // one logical facet, so move the legacy per-cell keys to that new
-        // scope before application code can read them.
-        let transaction = connection.transaction()?;
-        for table in ["_cf_KV", "_cf_ALARM", "_cf_METADATA"] {
-            transaction.execute(&format!("UPDATE {table} SET scope=?1"), [scope])?;
+    let stream = crate::engine_api::facet_cell(&parent.root_scope, &facet_path);
+    let mut connection = Connection::open(path)?;
+    let empty = connection.query_row("PRAGMA page_count", [], |row| row.get::<_, u64>(0))? == 0;
+    if !restored && empty {
+        let legacy = serde_json::to_string(&facet_path)?;
+        let root = Connection::open(&parent.root_path)?;
+        let image = root
+            .query_row(
+                "SELECT image FROM _cf_FACETS WHERE scope=?1 AND path=?2",
+                rusqlite::params![parent.root_scope, legacy],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        if let Some(image) = image {
+            let mut source = Connection::open_in_memory()?;
+            source.deserialize(
+                rusqlite::DatabaseName::Main,
+                owned_sqlite_data(&image)?,
+                true,
+            )?;
+            rusqlite::backup::Backup::new(&source, &mut connection)?
+                .run_to_completion(i32::MAX, std::time::Duration::ZERO, None)
+                .context("import the facet's legacy image")?;
         }
-        transaction.commit()?;
     }
+    schema(&connection)?;
+    // Each run of a facet has its own scope, so a continuation from an
+    // aborted instance cannot enter its replacement. The database is one
+    // logical facet, so its rows move to this run's scope before
+    // application code can read them.
+    let transaction = connection.unchecked_transaction()?;
+    for table in ["_cf_KV", "_cf_ALARM", "_cf_METADATA"] {
+        transaction.execute(&format!("UPDATE {table} SET scope=?1"), [scope])?;
+    }
+    transaction.commit()?;
     finish_open(
         scope,
         connection,
@@ -1321,6 +1106,7 @@ pub(crate) fn open_embedded(
         false,
         sqlite_vec,
         StorageBacking::Embedded {
+            stream,
             root_path: parent.root_path.clone(),
             root_scope: parent.root_scope.clone(),
             facet_path,
@@ -1330,106 +1116,9 @@ pub(crate) fn open_embedded(
     )
 }
 
-/// Copy a facet's private in-memory SQLite image into the root actor database.
-/// This runs before the turn releases its native operations, and again before
-/// an in-handler egress takes its output-gate ticket, so an external effect
-/// cannot overtake the image that produced it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum EmbeddedFlush {
-    Unchanged,
-    Persisted,
-    Deferred,
-}
-
-pub(crate) fn flush_embedded(scope: &str) -> EmbeddedFlush {
-    let result = dbs(|databases| -> anyhow::Result<EmbeddedFlush> {
-        let mut databases = databases.borrow_mut();
-        let Some(cell) = databases.get_mut(scope) else {
-            return Ok(EmbeddedFlush::Unchanged);
-        };
-        let epoch = cell.epoch;
-        let StorageBacking::Embedded {
-            root_path,
-            root_scope,
-            facet_path,
-            ..
-        } = &cell.backing
-        else {
-            return Ok(EmbeddedFlush::Unchanged);
-        };
-        // serialize() includes an open transaction's uncommitted pages. If
-        // those pages enter the root, a later rollback cannot retract them:
-        // total_changes does not rewind, so the next flush can look clean.
-        // Autocommit remains enabled for an unfinished RETURNING cursor, so
-        // check SQLite's actual write transaction, not only an explicit BEGIN.
-        if has_uncommitted_write(&cell.connection) {
-            return Ok(EmbeddedFlush::Unchanged);
-        }
-        let position = total_changes(&cell.connection) + schema_version(&cell.connection);
-        if position == cell.persisted_position {
-            return Ok(if facet_image_is_deferred(root_scope, epoch, scope) {
-                EmbeddedFlush::Deferred
-            } else {
-                EmbeddedFlush::Unchanged
-            });
-        }
-        let image = without_sql_authorizer(&cell.connection, || {
-            cell.connection.serialize(rusqlite::DatabaseName::Main)
-        })
-        .context("serialize the facet database")?
-        .to_vec();
-        let path = serde_json::to_string(facet_path)?;
-        // A parent transaction holds the root connection's write lock while
-        // it awaits this facet call. A second connection cannot take that
-        // lock, so retain the image with the transaction and install it on
-        // the root connection before COMMIT. A rollback invalidates this
-        // in-memory facet and reloads the image which survived the rollback.
-        if defer_facet_image(root_scope, epoch, scope, path.clone(), image.clone()) {
-            cell.persisted_position = position;
-            return Ok(EmbeddedFlush::Deferred);
-        }
-        let root = Connection::open(root_path).context("open the root database")?;
-        root.busy_timeout(std::time::Duration::from_secs(5))?;
-        root.execute(
-            "INSERT INTO _cf_FACETS(scope,path,image) VALUES(?1,?2,?3) \
-             ON CONFLICT(scope,path) DO UPDATE SET image=excluded.image",
-            rusqlite::params![root_scope, path, image],
-        )
-        .context("write the facet database image")?;
-        cell.persisted_position = position;
-        Ok(EmbeddedFlush::Persisted)
-    });
-    match result {
-        Ok(flush) => {
-            #[cfg(all(test, celld_internal_tests))]
-            if flush == EmbeddedFlush::Deferred
-                && crate::js::take_deferred_facet_eviction_for_test()
-            {
-                // Run after the database-map borrow above ends. The next call
-                // must open the facet again, exactly as an eviction between
-                // this staged flush and the root commit requires.
-                close(scope);
-            }
-            flush
-        }
-        Err(error) => {
-            sql_critical_errors(|errors| {
-                errors
-                    .borrow_mut()
-                    .entry(scope.to_string())
-                    .or_insert_with(|| format!("persist facet storage: {error}"));
-            });
-            EmbeddedFlush::Unchanged
-        }
-    }
-}
-
-pub(crate) fn delete_embedded(parent: &StorageIdentity, name: &str) -> anyhow::Result<()> {
-    #[cfg(all(test, celld_internal_tests))]
-    anyhow::ensure!(
-        !crate::js::take_embedded_delete_fault_for_test(),
-        "injected facet image delete failure"
-    );
+/// Delete the legacy `_cf_FACETS` images of a facet and every facet below it,
+/// so a deleted facet cannot import its old image when it is recreated.
+pub(crate) fn delete_legacy_facet(parent: &StorageIdentity, name: &str) -> anyhow::Result<()> {
     let mut facet_path = parent.facet_path.clone();
     facet_path.push(name.to_string());
     let mut root = Connection::open(&parent.root_path)?;
@@ -1502,22 +1191,20 @@ pub(crate) fn json_to_sql(v: &serde_json::Value) -> rusqlite::types::Value {
     }
 }
 
-const INVALID_UTF8_TEXT: &str = "TEXT result is not valid UTF-8; store arbitrary bytes as a BLOB";
-
-fn sql_text(bytes: &[u8]) -> Result<String, &'static str> {
-    std::str::from_utf8(bytes)
-        .map(str::to_owned)
-        .map_err(|_| INVALID_UTF8_TEXT)
+/// A TEXT value that is not UTF-8 decodes with replacement, as workerd
+/// decodes it; the stored bytes do not change.
+fn sql_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
-fn vref_to_json(v: rusqlite::types::ValueRef) -> Result<serde_json::Value, &'static str> {
+fn vref_to_json(v: rusqlite::types::ValueRef) -> serde_json::Value {
     use rusqlite::types::ValueRef;
     match v {
-        ValueRef::Null => Ok(serde_json::Value::Null),
-        ValueRef::Integer(i) => Ok(serde_json::json!(i)),
-        ValueRef::Real(f) => Ok(serde_json::json!(f)),
-        ValueRef::Text(bytes) => sql_text(bytes).map(serde_json::Value::String),
-        ValueRef::Blob(b) => Ok(serde_json::json!({ "__celld_bytes": b })),
+        ValueRef::Null => serde_json::Value::Null,
+        ValueRef::Integer(i) => serde_json::json!(i),
+        ValueRef::Real(f) => serde_json::json!(f),
+        ValueRef::Text(bytes) => serde_json::Value::String(sql_text(bytes)),
+        ValueRef::Blob(b) => serde_json::json!({ "__celld_bytes": b }),
     }
 }
 
@@ -1559,7 +1246,7 @@ fn schema_version(connection: &Connection) -> u64 {
 /// The cell's committed-write position: SQLite's total completed row changes,
 /// data version, and schema cookie, monotonic for the life of the activation.
 /// The output gate samples it around a handler to tell a write from a read.
-/// The data version detects a facet image committed through its private
+/// The data version detects a legacy facet image deleted through a second
 /// connection, and the cookie makes DDL-only mutations count as writes.
 /// Widened only after the gated-frame flush learned to outlive its dispatch —
 /// before that, counting DDL turned every lazily-CREATE-ing connect handler
@@ -1718,11 +1405,7 @@ fn stored_value(value: rusqlite::types::ValueRef<'_>) -> StoredValue {
         rusqlite::types::ValueRef::Text(bytes) => {
             StoredValue::LegacyJson(String::from_utf8_lossy(bytes).into_owned())
         }
-        value => StoredValue::LegacyJson(
-            vref_to_json(value)
-                .expect("the TEXT arm is handled before JSON conversion")
-                .to_string(),
-        ),
+        value => StoredValue::LegacyJson(vref_to_json(value).to_string()),
     }
 }
 
@@ -1755,10 +1438,7 @@ pub fn sql_exec(scope: &str, query: &str, binds: &[serde_json::Value]) -> Result
             while let Some(row) = rows.next().map_err(|e| e.to_string())? {
                 let mut r = Vec::with_capacity(n);
                 for i in 0..n {
-                    r.push(
-                        vref_to_json(row.get_ref(i).map_err(|e| e.to_string())?)
-                            .map_err(str::to_string)?,
-                    );
+                    r.push(vref_to_json(row.get_ref(i).map_err(|e| e.to_string())?));
                 }
                 out.push(r);
             }
@@ -1912,19 +1592,17 @@ pub enum SqlValue {
     Blob(Vec<u8>),
 }
 
-unsafe fn sql_cursor_row(
-    statement: *mut rusqlite::ffi::sqlite3_stmt,
-) -> Result<Vec<SqlValue>, &'static str> {
+unsafe fn sql_cursor_row(statement: *mut rusqlite::ffi::sqlite3_stmt) -> Vec<SqlValue> {
     let count = rusqlite::ffi::sqlite3_column_count(statement);
     (0..count)
         .map(
             |index| match rusqlite::ffi::sqlite3_column_type(statement, index) {
-                rusqlite::ffi::SQLITE_INTEGER => Ok(SqlValue::Integer(
-                    rusqlite::ffi::sqlite3_column_int64(statement, index),
-                )),
-                rusqlite::ffi::SQLITE_FLOAT => Ok(SqlValue::Real(
-                    rusqlite::ffi::sqlite3_column_double(statement, index),
-                )),
+                rusqlite::ffi::SQLITE_INTEGER => {
+                    SqlValue::Integer(rusqlite::ffi::sqlite3_column_int64(statement, index))
+                }
+                rusqlite::ffi::SQLITE_FLOAT => {
+                    SqlValue::Real(rusqlite::ffi::sqlite3_column_double(statement, index))
+                }
                 rusqlite::ffi::SQLITE_TEXT => {
                     let length = rusqlite::ffi::sqlite3_column_bytes(statement, index) as usize;
                     let pointer = rusqlite::ffi::sqlite3_column_text(statement, index);
@@ -1933,7 +1611,7 @@ unsafe fn sql_cursor_row(
                     } else {
                         std::slice::from_raw_parts(pointer, length)
                     };
-                    sql_text(bytes).map(SqlValue::Text)
+                    SqlValue::Text(sql_text(bytes))
                 }
                 rusqlite::ffi::SQLITE_BLOB => {
                     let length = rusqlite::ffi::sqlite3_column_bytes(statement, index) as usize;
@@ -1944,9 +1622,9 @@ unsafe fn sql_cursor_row(
                     } else {
                         std::slice::from_raw_parts(pointer, length).to_vec()
                     };
-                    Ok(SqlValue::Blob(bytes))
+                    SqlValue::Blob(bytes)
                 }
-                _ => Ok(SqlValue::Null),
+                _ => SqlValue::Null,
             },
         )
         .collect()
@@ -1996,16 +1674,71 @@ fn take_cached_sql_statement(scope: &str, query: &str) -> SqlStatementCacheLooku
     })
 }
 
-fn register_cached_sql_statement(scope: &str, query: &str) -> Option<Arc<str>> {
+/// The memory one cache slot holds: the retained SQL text plus the compiled
+/// program that SQLite keeps alive with the statement. The text alone is a bad
+/// proxy, because a short query over a wide table compiles to tens of KiB, so
+/// a text-length budget admits thousands of statements and bounds nothing.
+fn cached_sql_statement_size(query: &str, statement: *mut rusqlite::ffi::sqlite3_stmt) -> usize {
+    // SAFETY: the caller holds a live statement, and a status read does not
+    // take ownership of it.
+    let used = unsafe {
+        rusqlite::ffi::sqlite3_stmt_status(statement, rusqlite::ffi::SQLITE_STMTSTATUS_MEMUSED, 0)
+    };
+    query.len().saturating_add(used.max(0) as usize)
+}
+
+/// Drop least-recently-used slots until the cell's cache fits its budget, then
+/// remove the cache when it holds nothing. A dropped slot finalizes the
+/// statement it holds, and a later use of that query compiles it again.
+/// `discard_cached_sql_statement()` removes an empty cache too, so the two
+/// paths that can empty a cache leave the same state behind.
+fn evict_cached_sql_statements(caches: &mut HashMap<String, SqlStatementCache>, scope: &str) {
+    let Some(cache) = caches.get_mut(scope) else {
+        return;
+    };
+    while cache.total_size > SQL_STATEMENT_CACHE_MAX_SIZE {
+        let Some(lru) = cache
+            .entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(query, _)| Arc::clone(query))
+        else {
+            break;
+        };
+        if let Some(removed) = cache.entries.remove(&lru) {
+            cache.total_size = cache.total_size.saturating_sub(removed.size);
+        }
+    }
+    if cache.entries.is_empty() {
+        caches.remove(scope);
+    }
+}
+
+fn register_cached_sql_statement(
+    scope: &str,
+    query: &str,
+    statement: *mut rusqlite::ffi::sqlite3_stmt,
+) -> Option<Arc<str>> {
+    let size = cached_sql_statement_size(query, statement);
+    if size > SQL_STATEMENT_CACHE_MAX_SIZE {
+        // A slot above the whole budget can never share the cache. It is the
+        // most recently used slot, so eviction would drop every other slot
+        // before it drops itself, and the next execution would repeat that.
+        // One such query therefore empties the cache of a cell on every call.
+        // The statement stays a one-off instead.
+        return None;
+    }
     sql_statement_caches(|caches| {
         let mut caches = caches.borrow_mut();
         let cache = caches.entry(scope.to_string()).or_default();
         cache.clock = cache.clock.wrapping_add(1);
         let clock = cache.clock;
-        let size = query.len();
         let cache_query: Arc<str> = Arc::from(query);
         cache.total_size = cache.total_size.saturating_add(size);
-        cache.entries.insert(
+        // Install the slot and settle its charge together. A replaced slot that
+        // keeps its charge raises `total_size` above what the cache holds, and
+        // the cache then evicts live slots to pay a debt that does not exist.
+        if let Some(replaced) = cache.entries.insert(
             Arc::clone(&cache_query),
             CachedSqlStatement {
                 statement: std::ptr::null_mut(),
@@ -2013,22 +1746,15 @@ fn register_cached_sql_statement(scope: &str, query: &str) -> Option<Arc<str>> {
                 size,
                 last_used: clock,
             },
-        );
-
-        while cache.total_size > SQL_STATEMENT_CACHE_MAX_SIZE {
-            let Some(lru) = cache
-                .entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_used)
-                .map(|(query, _)| Arc::clone(query))
-            else {
-                break;
-            };
-            if let Some(removed) = cache.entries.remove(&lru) {
-                cache.total_size = cache.total_size.saturating_sub(removed.size);
-            }
+        ) {
+            cache.total_size = cache.total_size.saturating_sub(replaced.size);
         }
-        cache.entries.contains_key(query).then_some(cache_query)
+
+        evict_cached_sql_statements(&mut caches, scope);
+        caches
+            .get(scope)
+            .is_some_and(|cache| cache.entries.contains_key(query))
+            .then_some(cache_query)
     })
 }
 
@@ -2056,16 +1782,45 @@ fn recycle_sql_statement(scope: &str, query: &str, statement: *mut rusqlite::ffi
     let mut retained = false;
     if reusable {
         sql_statement_caches(|caches| {
-            if let Some(entry) = caches
-                .borrow_mut()
-                .get_mut(scope)
-                .and_then(|cache| cache.entries.get_mut(query))
-            {
-                if entry.statement.is_null() {
-                    entry.statement = statement;
-                    retained = true;
-                }
+            let mut caches = caches.borrow_mut();
+            let Some(cache) = caches.get_mut(scope) else {
+                return;
+            };
+            let Some(entry) = cache.entries.get_mut(query) else {
+                return;
+            };
+            if !entry.statement.is_null() {
+                return;
             }
+            // Registration charged the program as SQLite compiled it. A step
+            // can grow the program, so measure the slot here, where the reset
+            // above has released the memory of the run and the size is final.
+            let size = cached_sql_statement_size(query, statement);
+            if size > SQL_STATEMENT_CACHE_MAX_SIZE {
+                // The slot alone exceeds the budget, so keeping it would empty
+                // the cache on every call, as register_cached_sql_statement()
+                // explains. Drop the slot and let the caller finalize. The
+                // stale charge of the slot goes with it, and a left-behind slot
+                // would also report every later use of this query as busy.
+                if let Some(removed) = cache.entries.remove(query) {
+                    cache.total_size = cache.total_size.saturating_sub(removed.size);
+                }
+                if cache.entries.is_empty() {
+                    caches.remove(scope);
+                }
+                return;
+            }
+            entry.statement = statement;
+            let previous = std::mem::replace(&mut entry.size, size);
+            // The slot owns the statement now, and CachedSqlStatement::drop
+            // finalizes it. `retained` therefore means the cache took the
+            // statement, and not that this slot survives the eviction below.
+            retained = true;
+            cache.total_size = cache
+                .total_size
+                .saturating_sub(previous)
+                .saturating_add(size);
+            evict_cached_sql_statements(&mut caches, scope);
         });
     }
     if !retained {
@@ -2236,7 +1991,7 @@ pub(crate) fn sql_cursor_start_values(
                         }
                     }
                     if cache_query.is_none() && !cache_busy && !saw_prefix {
-                        cache_query = register_cached_sql_statement(scope, query);
+                        cache_query = register_cached_sql_statement(scope, query, statement);
                     }
                     let step = rusqlite::ffi::sqlite3_step(statement);
                     return match step {
@@ -2244,17 +1999,7 @@ pub(crate) fn sql_cursor_start_values(
                             // Read metadata after the first step so SQLite has
                             // automatically recompiled an expired cached statement.
                             let columns = sql_cursor_columns(statement);
-                            let row = match sql_cursor_row(statement) {
-                                Ok(row) => row,
-                                Err(error) => {
-                                    discard_in_use_sql_statement(
-                                        scope,
-                                        cache_query.as_deref(),
-                                        statement,
-                                    );
-                                    return Err(anyhow::anyhow!(error));
-                                }
-                            };
+                            let row = sql_cursor_row(statement);
                             Ok((
                                 database,
                                 statement,
@@ -2343,13 +2088,7 @@ pub fn sql_cursor_next(cursor_id: u64) -> Result<(Option<Vec<SqlValue>>, u64), S
             unsafe { rusqlite::ffi::sqlite3_get_autocommit(cursor.database) == 0 };
         let step = unsafe { rusqlite::ffi::sqlite3_step(cursor.statement) };
         match step {
-            rusqlite::ffi::SQLITE_ROW => match unsafe { sql_cursor_row(cursor.statement) } {
-                Ok(row) => Ok((Some(row), 0)),
-                Err(error) => {
-                    cursors.remove(&cursor_id);
-                    Err(error.to_string())
-                }
-            },
+            rusqlite::ffi::SQLITE_ROW => Ok((Some(unsafe { sql_cursor_row(cursor.statement) }), 0)),
             rusqlite::ffi::SQLITE_DONE => {
                 let rows_written = unsafe {
                     total_changes_for_handle(cursor.database).saturating_sub(cursor.changes_before)
@@ -2655,7 +2394,7 @@ unsafe fn d1_row_value(
             } else {
                 std::slice::from_raw_parts(pointer, length)
             };
-            let value = sql_text(bytes).map_err(|_| D1RowValueError::InvalidUtf8Text)?;
+            let value = sql_text(bytes);
             // serde_json escapes quotes, backslashes, and controls when the
             // response crosses into V8. Charge that wire shape now: decoded
             // bytes let NUL-heavy TEXT expand sixfold after the cap passed.
@@ -2702,7 +2441,6 @@ unsafe fn d1_row_value(
 
 enum D1RowValueError {
     ResultLimit,
-    InvalidUtf8Text,
 }
 
 fn d1_result_limit_error() -> String {
@@ -2768,11 +2506,6 @@ unsafe fn d1_step_to_done(
                     let (value, size) = match d1_row_value(statement, index, available) {
                         Ok(value) => value,
                         Err(D1RowValueError::ResultLimit) => {
-                            row_over = true;
-                            break;
-                        }
-                        Err(D1RowValueError::InvalidUtf8Text) => {
-                            stepped.over = Some(INVALID_UTF8_TEXT.to_string());
                             row_over = true;
                             break;
                         }
@@ -3468,7 +3201,6 @@ pub fn transaction_control(
     nested: bool,
     savepoint: &str,
 ) -> Result<Option<i64>, String> {
-    let transaction_key = root_transaction_key(scope);
     if let Some(error) = sql_critical_error(scope) {
         let result = match action {
             "rollback" => Ok(None),
@@ -3481,11 +3213,6 @@ pub fn transaction_control(
         if result.is_ok() && !nested && action == "rollback" {
             publish_alarm_if_transaction_dirty(scope);
         }
-        if result.is_ok() && matches!(action, "rollback" | "rollback_explicit") {
-            if let Some(key) = transaction_key.as_ref() {
-                finish_root_transaction(key, nested, savepoint, false);
-            }
-        }
         return result;
     }
     if nested
@@ -3497,11 +3224,6 @@ pub fn transaction_control(
     }
     let result = with(scope, |connection| {
         without_sql_authorizer(connection, || {
-            if action == "commit" && !nested {
-                if let Some(key) = transaction_key.as_ref() {
-                    apply_deferred_facets(key, connection).map_err(|error| error.to_string())?;
-                }
-            }
             let query = match (action, nested) {
                 ("start", false) => "BEGIN IMMEDIATE".to_string(),
                 ("start", true) => format!("SAVEPOINT {savepoint}"),
@@ -3540,18 +3262,6 @@ pub fn transaction_control(
         })
     })
     .unwrap_or_else(|| Err(format!("no db for {scope}")));
-    if result.is_ok() {
-        if let Some(key) = transaction_key.as_ref() {
-            match action {
-                "start" => begin_root_transaction(key.clone(), nested, savepoint),
-                "commit" => finish_root_transaction(key, nested, savepoint, true),
-                "rollback" | "rollback_explicit" => {
-                    finish_root_transaction(key, nested, savepoint, false)
-                }
-                _ => {}
-            }
-        }
-    }
     let result = result.map(|()| None);
     if result.is_ok() && !nested && matches!(action, "commit" | "rollback" | "rollback_explicit") {
         let published = publish_alarm_if_transaction_dirty(scope);

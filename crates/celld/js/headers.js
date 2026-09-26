@@ -40,10 +40,11 @@ function _lower(name) {
 function _checkValue(value) {
   value = String(value).replace(
     /^[\t\n\r ]+|[\t\n\r ]+$/g, '');
+  // workerd's rule: NUL, LF and CR are invalid; any other code
+  // point passes (a received value is UTF-8 with replacement).
   for (let i = 0; i < value.length; i++) {
     const c = value.charCodeAt(i);
-    if (c === 0 || c === 0x0A || c === 0x0D
-        || c > 0xFF)
+    if (c === 0 || c === 0x0A || c === 0x0D)
       throw new TypeError(
         "Invalid header value");
   }

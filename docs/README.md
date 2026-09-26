@@ -873,6 +873,13 @@ Some upgrades are exceptions:
   start a v0.4.0 binary after that point: a cell that paged in has no
   epoch a v0.4.0 node can restore, and it stays unavailable on that node
   until a v0.4.1 node takes it over.
+- The upgrade from v0.5.1 to v0.6.0 must not use a rolling update when
+  the fleet uses `fleet` durability. Stop every v0.5.1 node, and then start
+  the v0.6.0 nodes. A v0.6.0 node recovers its previous log session only
+  when a follower returns the ranged tail format. A v0.5.1 follower returns
+  the entries-only format, so the v0.6.0 node refuses to start. A fleet
+  that uses `bucket` durability has no followers, so it can use a rolling
+  update.
 
 The internal listener also provides an alpha operator API. `/state`
 reports the node state, and its `node_load` object is the same load sample

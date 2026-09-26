@@ -324,6 +324,9 @@ mod asyncrt_contract_tests {
 }
 pub mod bucket;
 pub mod cell_cli;
+mod cell_host;
+pub mod cell_runtime;
+pub mod clean_reload;
 pub mod cli_options;
 pub mod cli_output;
 pub mod container;
@@ -334,6 +337,7 @@ pub mod deploy;
 pub mod dev;
 pub mod docker;
 pub mod drain_token;
+pub mod engine_api;
 pub mod env_vars;
 #[cfg(celld_internal_tests)]
 #[allow(clippy::disallowed_methods)]
@@ -341,13 +345,18 @@ pub mod env_vars;
 pub mod fault {
     include!(env!("CELLD_INTERNAL_SQLITE_FAULT"));
 }
+pub(crate) mod facet_streams;
 pub mod fleet;
 pub mod generation;
+pub mod host_channels;
 pub mod host_services;
+pub mod http_streams;
 pub mod js;
+pub mod kv_blob;
 pub mod kv_cli;
 pub(crate) mod local_store;
 pub mod ltx_repl;
+pub mod ltx_replication;
 pub mod machine;
 pub mod memory;
 pub mod node_log;
@@ -361,15 +370,19 @@ pub mod pool;
 pub mod protocol;
 pub(crate) mod queue_batching;
 pub mod queue_cli;
+pub mod queue_policy;
 pub mod r2_cli;
+pub(crate) mod r2_store;
 pub mod replication;
 pub mod runtime;
 pub mod startup;
 pub mod storage;
 pub mod telemetry;
 pub mod wake;
+pub mod wake_entry;
 pub mod wake_format;
 pub mod ws_client;
+pub mod ws_registry;
 
 #[cfg(all(test, celld_internal_tests))]
 mod composed_simulation {

@@ -43,8 +43,20 @@
     "ECDSA": "ECDSA",
     "ECDH": "ECDH",
     "ED25519": "Ed25519",
+    // Cloudflare's pre-standard spelling reports itself back, because a
+    // caller that asked with it matches on what it asked for -- which is
+    // what the upstream `eddsa_test` group pins.
+    "NODE-ED25519": "NODE-ED25519",
     "X25519": "X25519",
   };
+  // The one signature algorithm over Curve25519, under both spellings. Its
+  // two names share every host op, so sign, verify and generate look the
+  // algorithm up here rather than testing two strings each.
+  const _ED25519_ALGS = new Set(["ED25519", "NODE-ED25519"]);
+  // The Secure Curves, whose `raw` Web Crypto form is the bare 32-byte
+  // public point rather than a DER document.
+  const _OKP_CURVES = { "ED25519": "Ed25519", "NODE-ED25519": "Ed25519",
+    "X25519": "X25519" };
   // Algorithms whose keys are asymmetric, whatever celld can then *do* with
   // them: import validates the key, and an unsupported operation throws
   // later at sign/verify/encrypt rather than here. Derived from the table
@@ -237,6 +249,30 @@
           "secret", normalized, extractable, usages, { bytes: raw },
         );
       }
+      // A Secure Curves public key has a `raw` form: the 32-byte point on
+      // its own. It is checked before the asymmetric block below, because
+      // that block reads `raw` bytes as a DER document and can only report a
+      // parse failure for them.
+      if (format === "raw" && _OKP_CURVES[name] !== undefined) {
+        const imported = _extra("asym-key-import", {
+          key: Array.from(_toBuf(keyData)),
+          format: "raw",
+          type: _OKP_CURVES[name],
+          visibility: "public",
+          passphrase: null,
+        });
+        return _makeKey(
+          "public",
+          _keyAlgorithm(name, algorithm, imported.keyType, imported.details),
+          extractable,
+          usages,
+          {
+            bytes: Uint8Array.from(imported.der),
+            keyType: imported.keyType,
+            details: imported.details,
+          },
+        );
+      }
       // A JWK's `alg` names the algorithm it was made for. Anything that is
       // not a string is not an algorithm name, and importing it would leave
       // a key claiming to be something it cannot be. Web Crypto ignores a
@@ -285,6 +321,21 @@
     }
 
     async exportKey(format, key) {
+      // The `raw` form of a Secure Curves public key is its 32-byte point.
+      // The branch below answers every `raw` request from the stored bytes,
+      // which for an asymmetric key are its SPKI document -- so without this
+      // arm an X25519 peer key exports as 44 bytes that no counterpart can
+      // read, and nothing reports an error.
+      if (format === "raw" && key?.type === "public" &&
+          (key.__celldMaterial?.keyType === "ed25519" ||
+            key.__celldMaterial?.keyType === "x25519")) {
+        if (!key.extractable) {
+          throw new DOMException("key is not extractable", "InvalidAccessError");
+        }
+        return Uint8Array.from(_extra("asym-key-raw-public", {
+          der: Array.from(key.__celldMaterial.bytes),
+        }).bytes).buffer;
+      }
       if (format === "raw" && key?.__celldMaterial?.bytes) {
         if (!key.extractable) {
           throw new DOMException("key is not extractable", "InvalidAccessError");
@@ -371,17 +422,21 @@
         return out.buffer.slice(
           out.byteOffset, out.byteOffset + out.byteLength);
       }
-      if (name !== "ECDH") {
+      if (name !== "ECDH" && name !== "X25519") {
         throw _notSupported("unsupported derive algorithm: " + name);
       }
       const publicKey = algorithm?.public;
       if (!publicKey || publicKey.type !== "public") {
-        throw new TypeError("ECDH requires a public key in algorithm.public");
+        throw new TypeError(name + " requires a public key in algorithm.public");
       }
-      const shared = Uint8Array.from(_extra("ecdh-derive", {
-        private: Array.from(_toBuf(baseKey.__celldMaterial.bytes)),
-        public: Array.from(_toBuf(publicKey.__celldMaterial.bytes)),
-      }).bytes);
+      // X25519 carries no `namedCurve`, so it cannot ride the curve match
+      // `ecdh-derive` runs; its op is separate for that reason alone. Both
+      // answer the raw shared secret, so everything below is shared.
+      const shared = Uint8Array.from(_extra(
+        name === "X25519" ? "x25519-derive" : "ecdh-derive", {
+          private: Array.from(_toBuf(baseKey.__celldMaterial.bytes)),
+          public: Array.from(_toBuf(publicKey.__celldMaterial.bytes)),
+        }).bytes);
       if (length === null || length === undefined) return shared.buffer;
       const bytes = Number(length) / 8;
       if (!Number.isInteger(bytes) || bytes < 0 || bytes > shared.byteLength) {
@@ -455,6 +510,7 @@
         "RSA-PSS": "rsa",
         "ED25519": "ed25519",
         "NODE-ED25519": "ed25519",
+        "X25519": "x25519",
         "ECDSA": "ec",
         "ECDH": "ec",
       };
@@ -533,7 +589,7 @@
         if (!sig) throw _operationError("HMAC sign failed");
         return sig.buffer.slice(sig.byteOffset, sig.byteOffset + sig.byteLength);
       }
-      const operation = name === "ED25519"
+      const operation = _ED25519_ALGS.has(name)
         ? "ed25519-sign"
         : name === "ECDSA"
           ? "p256-sign"
@@ -571,7 +627,13 @@
           _toBuf(data),
         );
       }
-      const operation = name === "ECDSA"
+      // Ed25519 signs through `ed25519-sign` above, so a key pair that can
+      // be generated and signed with had no way to check its own signature
+      // until this arm existed (denoland/celld#221). The host op is the one
+      // node:crypto's `verify()` already calls.
+      const operation = _ED25519_ALGS.has(name)
+        ? "ed25519-verify"
+        : name === "ECDSA"
         ? "p256-verify"
         : name === "RSASSA-PKCS1-V1_5"
         ? "rsa-pkcs1-verify"

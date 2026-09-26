@@ -354,7 +354,7 @@ pub(crate) trait AlarmHost: Sync {
     ) -> impl std::future::Future<Output = anyhow::Result<(u64, celld_logic::ProofSource)>> + Send + 'a;
 }
 
-impl AlarmHost for crate::runtime::CellHost {
+impl AlarmHost for crate::cell_host::CellHost {
     fn alarm_snapshot(&self, cell: &str) -> anyhow::Result<AlarmSnapshot> {
         Ok(self.with_alarm(cell, |alarm, _| alarm))
     }

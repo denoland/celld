@@ -1,6 +1,6 @@
 [package]
 name = "celld"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.94.1"
 license = "Apache-2.0"

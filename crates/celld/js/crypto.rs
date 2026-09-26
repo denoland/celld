@@ -139,6 +139,57 @@ fn x25519_spki(point: &[u8; 32]) -> Vec<u8> {
     der
 }
 
+/// The 32 bytes of X25519 material inside a PKCS#8 or SPKI document, and the
+/// one place that decides a document really is an X25519 key.
+///
+/// Two failures live here. First, import passes a document through without
+/// re-encoding it, so a worker can hand this module a well-formed document
+/// that names X25519 around a body of any length. Every consumer wants exactly
+/// 32 bytes, and a tail slice on a shorter body panics — which aborts the
+/// process, because a Rust panic cannot unwind through the v8
+/// `FunctionCallback` frame above it. Returning the array makes the length a
+/// property of the value, so no caller has to remember the rule.
+///
+/// Second, X25519 is the one algorithm in this file with no DER codec of its
+/// own, so nothing else checks its algorithm OID. RFC 8410 gives Ed25519 the
+/// identical PKCS#8 and SPKI body shape, and every other algorithm's codec
+/// (`ed25519_dalek::SigningKey::from_pkcs8_der`, the `p*` curves, `rsa`)
+/// rejects a foreign OID for free. Without the check below, `x25519-derive`
+/// would accept an Ed25519 signing key and run its seed as a Montgomery
+/// scalar, which is the Ed25519/X25519 key-reuse mistake the two algorithms
+/// exist apart to prevent.
+fn x25519_material(der: &[u8], private: bool) -> Result<[u8; 32]> {
+    use rsa::pkcs8::der::Decode;
+
+    let raw = if private {
+        let info = rsa::pkcs8::PrivateKeyInfo::from_der(der)
+            .map_err(|_| anyhow!("invalid X25519 private key"))?;
+        if info.algorithm.oid != X25519_OID {
+            return Err(anyhow!("not an X25519 private key"));
+        }
+        // RFC 8410 wraps the scalar in a second OCTET STRING inside the
+        // PKCS#8 privateKey field, so that header comes off before the
+        // length test.
+        rsa::pkcs8::der::asn1::OctetStringRef::from_der(info.private_key)
+            .map_err(|_| anyhow!("invalid X25519 private key"))?
+            .as_bytes()
+            .to_vec()
+    } else {
+        let info = rsa::pkcs8::SubjectPublicKeyInfoRef::from_der(der)
+            .map_err(|_| anyhow!("invalid X25519 public key"))?;
+        if info.algorithm.oid != X25519_OID {
+            return Err(anyhow!("not an X25519 public key"));
+        }
+        info.subject_public_key
+            .as_bytes()
+            .ok_or_else(|| anyhow!("invalid X25519 public key"))?
+            .to_vec()
+    };
+    raw.as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("an X25519 key must be 32 bytes"))
+}
+
 /// The JWK `crv` for a parsed EC key, from the `namedCurve` its details
 /// already carry.
 fn ec_jwk_crv(parsed: &ParsedKey) -> Result<&'static str> {
@@ -309,11 +360,19 @@ fn describe_key(der: &[u8], private: bool) -> Result<ParsedKey> {
                 }),
             })
         }
-        X25519_OID => Ok(ParsedKey {
-            kind: "x25519",
-            der: der.to_vec(),
-            details: serde_json::json!({}),
-        }),
+        X25519_OID => {
+            // Classify by the OID *and* the body. Import passes a document
+            // through without re-encoding it, so without this call a
+            // well-formed PKCS#8 naming X25519 around an empty OCTET STRING
+            // becomes a `ParsedKey` of kind x25519 that holds no key, and
+            // every consumer then has to re-check a length the type claims.
+            x25519_material(der, private)?;
+            Ok(ParsedKey {
+                kind: "x25519",
+                der: der.to_vec(),
+                details: serde_json::json!({}),
+            })
+        }
         other => Err(anyhow!(
             "unsupported key algorithm {other}; celld implements RSA, EC P-256 and Ed25519"
         )),
@@ -612,6 +671,26 @@ fn crypto_operation(operation: &str, args: &serde_json::Value) -> Result<serde_j
             }
             Ok(serde_json::json!({ "bytes": ec_curve!(crv, derive) }))
         }
+        // X25519 key agreement, the Secure Curves half of `deriveBits`. The
+        // secret is the raw 32-byte point with no KDF applied, so it answers
+        // a null `length` the same way `ecdh-derive` does for a NIST curve.
+        // The two ops stay separate because X25519 has no `namedCurve` and no
+        // `elliptic_curve` codec, so nothing in the macro above applies.
+        "x25519-derive" => {
+            let private = crypto_bytes(args, "private")?;
+            let public = crypto_bytes(args, "public")?;
+            let secret = x25519_dalek::StaticSecret::from(x25519_material(&private, true)?);
+            let point = x25519_dalek::PublicKey::from(x25519_material(&public, false)?);
+            let shared = secret.diffie_hellman(&point);
+            // A low-order peer point drives the result to all zeroes, which
+            // carries none of our scalar: both sides would agree on a secret
+            // the attacker also knows. Web Crypto names this failure, so it
+            // must not reach the caller as bytes.
+            if !shared.was_contributory() {
+                return Err(anyhow!("X25519 derived a non-contributory shared secret"));
+            }
+            Ok(serde_json::json!({ "bytes": shared.as_bytes().to_vec() }))
+        }
         "ed25519-sign" => {
             use ed25519_dalek::pkcs8::DecodePrivateKey;
             use ed25519_dalek::Signer;
@@ -902,6 +981,36 @@ fn crypto_operation(operation: &str, args: &serde_json::Value) -> Result<serde_j
             let (der, is_private) = if format == "jwk" {
                 let jwk = args.get("key").ok_or_else(|| anyhow!("missing JWK"))?;
                 (key_from_jwk(jwk, want_private)?, want_private)
+            } else if format == "raw" {
+                // Web Crypto's `raw` format for the Secure Curves: a public
+                // key is its 32-byte point, with no structure around it. The
+                // curve therefore cannot be read off the bytes and arrives in
+                // `type`. Only a public key has a `raw` form, so `visibility`
+                // is not consulted.
+                let key = crypto_bytes(args, "key")?;
+                let curve = args
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let point: [u8; 32] = key
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| anyhow!("a {curve} raw public key must be 32 bytes"))?;
+                let der = match curve {
+                    "X25519" => x25519_spki(&point),
+                    "Ed25519" => {
+                        use ed25519_dalek::pkcs8::EncodePublicKey;
+                        // Unlike X25519, an Ed25519 point has to decompress
+                        // to a curve point, so a bad one fails here.
+                        ed25519_dalek::VerifyingKey::from_bytes(&point)
+                            .map_err(|_| anyhow!("invalid Ed25519 public key"))?
+                            .to_public_key_der()?
+                            .as_bytes()
+                            .to_vec()
+                    }
+                    other => return Err(anyhow!("cannot import a raw {other} key")),
+                };
+                (der, false)
             } else {
                 let key = crypto_bytes(args, "key")?;
                 let stated = args.get("type").and_then(serde_json::Value::as_str);
@@ -996,10 +1105,7 @@ fn crypto_operation(operation: &str, args: &serde_json::Value) -> Result<serde_j
                     key.verifying_key().to_public_key_der()?.as_bytes().to_vec()
                 }
                 "x25519" => {
-                    let scalar: [u8; 32] = der[der.len() - 32..]
-                        .try_into()
-                        .expect("X25519 PKCS#8 ends with the 32-byte scalar");
-                    let secret = x25519_dalek::StaticSecret::from(scalar);
+                    let secret = x25519_dalek::StaticSecret::from(x25519_material(&der, true)?);
                     x25519_spki(x25519_dalek::PublicKey::from(&secret).as_bytes())
                 }
                 other => return Err(anyhow!("cannot derive a public key for {other}")),
@@ -1179,6 +1285,27 @@ fn crypto_operation(operation: &str, args: &serde_json::Value) -> Result<serde_j
                 Ok(serde_json::json!({ "der": bytes }))
             }
         }
+        // The inverse of the `raw` import above: the 32-byte point inside an
+        // Ed25519 or X25519 SPKI document. Web Crypto's `raw` export of a
+        // Secure Curves public key is those bytes, not the document holding
+        // them, and a peer that receives 44 bytes of SPKI where it expects a
+        // point fails far from here.
+        "asym-key-raw-public" => {
+            let der = crypto_bytes(args, "der")?;
+            let parsed = describe_key(&der, false)?;
+            let point = match parsed.kind {
+                "x25519" => x25519_material(&der, false)?.to_vec(),
+                "ed25519" => {
+                    use ed25519_dalek::pkcs8::DecodePublicKey;
+                    ed25519_dalek::VerifyingKey::from_public_key_der(&der)
+                        .map_err(|_| anyhow!("invalid Ed25519 public key"))?
+                        .to_bytes()
+                        .to_vec()
+                }
+                other => return Err(anyhow!("cannot export a {other} key as raw")),
+            };
+            Ok(serde_json::json!({ "bytes": point }))
+        }
         // Export a normalized key back out. `jwk` is the shape `toCryptoKey`
         // and Node's `export({format:"jwk"})` both want.
         "asym-key-export" => {
@@ -1256,17 +1383,16 @@ fn crypto_operation(operation: &str, args: &serde_json::Value) -> Result<serde_j
                     ec_curve!(crv, export)
                 }
                 ("x25519", _) => {
-                    let raw = &der[der.len() - 32..];
+                    let raw = x25519_material(&der, private)?;
                     let mut jwk = serde_json::json!({ "kty": "OKP", "crv": "X25519" });
                     if private {
-                        let scalar: [u8; 32] = raw.try_into().unwrap();
-                        let secret = x25519_dalek::StaticSecret::from(scalar);
+                        let secret = x25519_dalek::StaticSecret::from(raw);
                         jwk["x"] = serde_json::Value::String(base64url(
                             x25519_dalek::PublicKey::from(&secret).as_bytes(),
                         ));
-                        jwk["d"] = serde_json::Value::String(base64url(raw));
+                        jwk["d"] = serde_json::Value::String(base64url(&raw));
                     } else {
-                        jwk["x"] = serde_json::Value::String(base64url(raw));
+                        jwk["x"] = serde_json::Value::String(base64url(&raw));
                     }
                     jwk
                 }

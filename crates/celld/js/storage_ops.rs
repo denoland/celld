@@ -309,27 +309,23 @@ pub(super) fn op_storage_sync(
         );
         return;
     }
-    // A facet's `sync()` is a statement about the root cell's database, which
-    // is where its writes live. It names that cell and carries that cell's
-    // sample, because a ticket in the facet's name would activate a cell no
-    // Worker exports. The image is copied first, so the proof the ticket waits
-    // for is a proof of a database that contains this facet's writes.
+    // A facet's `sync()` proves the facet's own stream. The ticket names the
+    // root cell, because a ticket in the facet's name would activate a cell
+    // no Worker exports.
     let gate = match frame.root {
-        Some(root) => {
-            let flush = storage::flush_embedded(&cell);
-            match storage::sql_critical_error(&cell) {
-                Some(error) => EgressGate::Unpersisted(error),
-                None if flush == storage::EmbeddedFlush::Deferred => EgressGate::Unpersisted(
-                    "the root transaction has not committed the facet image".to_string(),
-                ),
-                None => EgressGate::Wrote(
+        Some(root) => match storage::sql_critical_error(&cell) {
+            Some(error) => EgressGate::Unpersisted(error),
+            None => EgressGate::Facet(
+                Box::new(EgressGate::Wrote(
                     root.cell,
                     celld_logic::Channel::Sync,
                     root.position,
                     Some(root.epoch),
-                ),
-            }
-        }
+                )),
+                root.stream,
+                root.epoch,
+            ),
+        },
         None => EgressGate::Wrote(
             cell.clone(),
             celld_logic::Channel::Sync,

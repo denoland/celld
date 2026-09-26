@@ -1,7 +1,8 @@
 # Security
 
-celld is an alpha. It is not safe for hostile multi-tenant use. Security fixes
-apply to the latest release only, so older alpha builds do not receive fixes.
+celld v0.6.0 is a beta release. It is not safe for hostile multi-tenant use.
+Security fixes apply to the latest release only, so older beta releases do not
+receive fixes.
 
 ## Security boundary
 
@@ -222,4 +223,4 @@ modify the current cell state.
 
 This fencing protects storage consistency, but it does not isolate hostile
 applications. See [what celld guarantees](guarantees.md) for the storage protocol,
-and see [limitations](limitations.md) for the complete alpha boundary.
+and see [limitations](limitations.md) for the complete beta boundary.

@@ -118,7 +118,11 @@ static POST_HARNESS: &[BootstrapSource] = &[
 // isolate-local; this shares only the original source buffer.
 #[cfg(any(not(celld_internal_tests), all(test, celld_internal_tests)))]
 static HARNESS_SOURCE: v8::OneByteConst =
-    v8::String::create_external_onebyte_const(include_bytes!("harness.js"));
+    v8::String::create_external_onebyte_const(HARNESS.as_bytes());
+
+/// The harness and the services it shares with the workerd engine, which
+/// each end in a function declaration the harness calls.
+const HARNESS: &str = concat!(include_str!("harness.js"), include_str!("services/kv.js"));
 
 fn bootstrap_code_cache() -> &'static std::sync::Mutex<BootstrapCache> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<BootstrapCache>> =
@@ -260,7 +264,7 @@ pub(super) fn install_harness<'s>(
     arguments: &InternalArguments<'s>,
 ) -> Result<()> {
     #[cfg(celld_internal_tests)]
-    let harness = include_str!("harness.js")
+    let harness = HARNESS
         .replace(
             "/*__CELLD_TEST_WORKFLOW_EVENT_CONSUMED__*/",
             "__test_workflow_event_consumed();",
@@ -534,85 +538,16 @@ fn alias_workflow_class(
 /// Built through the V8 object API rather than by compiling a snippet, because
 /// this runs on every isolate load.
 pub(super) fn inject_kv_limits(scope: &mut v8::PinScope) -> Result<()> {
-    use celld_logic::kv;
     let cell = cell_state(scope)?;
     let limits = v8::Object::new(scope);
-    let set = |scope: &mut v8::PinScope, name: &str, value: f64| {
+    let entries = crate::kv_blob::limits();
+    for (name, value) in entries.as_object().expect("kv limits are an object") {
         let key = v8::String::new(scope, name).unwrap();
-        let value = v8::Number::new(scope, value);
-        limits.set(scope, key.into(), value.into());
-    };
-    set(scope, "maxKeyBytes", kv::MAX_KEY_BYTES as f64);
-    set(scope, "maxValueBytes", kv::MAX_VALUE_BYTES as f64);
-    set(
-        scope,
-        "maxInlineValueBytes",
-        kv::MAX_INLINE_VALUE_BYTES as f64,
-    );
-    set(scope, "maxMetadataBytes", kv::MAX_METADATA_BYTES as f64);
-    set(scope, "maxBulkKeys", kv::MAX_BULK_KEYS as f64);
-    set(scope, "maxListLimit", kv::MAX_LIST_LIMIT as f64);
-    set(
-        scope,
-        "sweepBatchRows",
-        celld_logic::sweep::BATCH_ROWS as f64,
-    );
-    // One variable for every KV test knob, not one variable each.
-    //
-    //   CELLD_TEST_KV=no-sweep,fail-after-blob,min-ttl-ms=1000
-    //
-    // These are test-only and they read the production environment rather than
-    // sitting behind `cfg(celld_internal_tests)`, because the code they steer
-    // is JavaScript in the harness and a cfg cannot reach it.
-    //
-    // What each is for, and why a test cannot do without it:
-    //
-    // - `min-ttl-ms` shortens upstream's sixty-second expiry floor, because a
-    //   test cannot wait out a minute of wall clock. Nothing else about the
-    //   deadline arithmetic changes.
-    // - `no-sweep` stops reclamation, so a test that means to pin the *read
-    //   filter* can show the filter hid an expired key rather than the sweep
-    //   having deleted the row underneath it. The first expiry test passed
-    //   with the filter deleted until this existed.
-    // - `fail-after-blob` fails a put between the blob write and the row
-    //   commit. That window is one await wide, and a SIGKILL there would take
-    //   the assertion with it.
-    // - `race-sweep-put` holds a blob sweep after its mark snapshot until a
-    //   new large put starts. The put and the sweep then overlap, so a test
-    //   proves that collection authority is serialized with the put protocol.
-    // - `blob-sweep-ms` shortens the durable collector delay. A crash-orphan
-    //   test must observe the wake without waiting one production minute.
-    // - `legacy-schema` creates the inline-only table from the first KV
-    //   release, so the migration test proves an existing row survives.
-    let knobs = std::env::var("CELLD_TEST_KV").unwrap_or_default();
-    let knob = |name: &str| -> Option<String> {
-        knobs.split(',').map(str::trim).find_map(|entry| {
-            let rest = entry.strip_prefix(name)?;
-            match rest {
-                "" => Some(String::new()),
-                rest => rest.strip_prefix('=').map(str::to_string),
-            }
-        })
-    };
-    let min_ttl = knob("min-ttl-ms")
-        .and_then(|value| value.parse::<i64>().ok())
-        .filter(|ms| *ms > 0)
-        .unwrap_or(kv::MIN_EXPIRATION_TTL_MS);
-    set(scope, "minExpirationTtlMs", min_ttl as f64);
-    let blob_sweep_ms = knob("blob-sweep-ms")
-        .and_then(|value| value.parse::<i64>().ok())
-        .filter(|ms| *ms > 0)
-        .unwrap_or(60_000);
-    set(scope, "blobSweepMs", blob_sweep_ms as f64);
-    for (name, present) in [
-        ("sweepDisabled", knob("no-sweep").is_some()),
-        ("failAfterBlobWrite", knob("fail-after-blob").is_some()),
-        ("raceSweepPut", knob("race-sweep-put").is_some()),
-        ("legacySchema", knob("legacy-schema").is_some()),
-    ] {
-        let key = v8::String::new(scope, name).unwrap();
-        let value = v8::Boolean::new(scope, present);
-        limits.set(scope, key.into(), value.into());
+        let value: v8::Local<v8::Value> = match value {
+            serde_json::Value::Bool(flag) => v8::Boolean::new(scope, *flag).into(),
+            other => v8::Number::new(scope, other.as_f64().expect("kv limit")).into(),
+        };
+        limits.set(scope, key.into(), value);
     }
     let key = v8::String::new(scope, "kvLimits").unwrap();
     cell.set(scope, key.into(), limits.into());
@@ -779,196 +714,21 @@ pub(super) fn build_env(scope: &mut v8::PinScope, config: &WorkerConfig) -> Resu
     Ok(())
 }
 
-#[cfg(celld_internal_tests)]
-thread_local! {
-    static QUEUE_LEASE_DURATION_FOR_TEST: std::cell::Cell<Option<i64>> = const {
-        std::cell::Cell::new(None)
-    };
-    static QUEUE_BATCH_TIMEOUT_FOR_TEST: std::cell::Cell<Option<i64>> = const {
-        std::cell::Cell::new(None)
-    };
-    static QUEUE_RETENTION_FOR_TEST: std::cell::Cell<Option<i64>> = const {
-        std::cell::Cell::new(None)
-    };
-    static QUEUE_SWEEP_BATCH_FOR_TEST: std::cell::Cell<Option<usize>> = const {
-        std::cell::Cell::new(None)
-    };
-}
-
-/// Measure lease expiry without waiting through the production handler budget.
-/// The override is thread-local because runtime tests build
-/// unrelated Workers in parallel, and a process environment variable would
-/// silently shorten their leases too.
-#[cfg(celld_internal_tests)]
-#[doc(hidden)]
-pub fn set_queue_lease_duration_for_test(duration: Option<i64>) {
-    QUEUE_LEASE_DURATION_FOR_TEST.set(duration);
-}
-
-#[cfg(celld_internal_tests)]
-#[doc(hidden)]
-pub fn set_queue_batch_timeout_for_test(duration: Option<i64>) {
-    QUEUE_BATCH_TIMEOUT_FOR_TEST.set(duration);
-}
-
-#[cfg(celld_internal_tests)]
-#[doc(hidden)]
-pub fn set_queue_retention_for_test(duration: Option<i64>) {
-    QUEUE_RETENTION_FOR_TEST.set(duration);
-}
-
-#[cfg(celld_internal_tests)]
-pub fn set_queue_sweep_batch_for_test(rows: Option<usize>) {
-    QUEUE_SWEEP_BATCH_FOR_TEST.set(rows);
-}
-
-#[cfg(celld_internal_tests)]
-fn effective_queue_lease_duration(duration: i64) -> i64 {
-    QUEUE_LEASE_DURATION_FOR_TEST.get().unwrap_or(duration)
-}
-
-#[cfg(not(celld_internal_tests))]
-fn effective_queue_lease_duration(duration: i64) -> i64 {
-    duration
-}
-
-#[cfg(celld_internal_tests)]
-fn effective_queue_batch_timeout(duration: i64) -> i64 {
-    if duration == 0 {
-        0
-    } else {
-        QUEUE_BATCH_TIMEOUT_FOR_TEST.get().unwrap_or(duration)
-    }
-}
-
-#[cfg(celld_internal_tests)]
-fn effective_queue_retention(duration: i64) -> i64 {
-    QUEUE_RETENTION_FOR_TEST.get().unwrap_or(duration)
-}
-
-#[cfg(not(celld_internal_tests))]
-fn effective_queue_retention(duration: i64) -> i64 {
-    duration
-}
-
-#[cfg(celld_internal_tests)]
-fn effective_queue_sweep_batch(rows: usize) -> usize {
-    QUEUE_SWEEP_BATCH_FOR_TEST.get().unwrap_or(rows)
-}
-
-#[cfg(not(celld_internal_tests))]
-fn effective_queue_sweep_batch(rows: usize) -> usize {
-    rows
-}
-
-#[cfg(not(celld_internal_tests))]
-fn effective_queue_batch_timeout(duration: i64) -> i64 {
-    duration
-}
-
 /// Install the deployment-wide Queue consumer catalog and lease budget.
 ///
 /// Every co-hosted config gets the same catalog before an isolate starts, so a
 /// shared `__Queue` class cannot dispatch according to whichever producer
 /// registered the class first.
 pub(super) fn inject_queue_config(scope: &mut v8::PinScope, config: &WorkerConfig) -> Result<()> {
-    let cell = cell_state(scope)?;
-    let consumers = v8::Object::new(scope);
-    for registration in &config.queue_consumers {
-        let value = v8::Object::new(scope);
-        let set_string = |scope: &mut v8::PinScope, name: &str, text: &str| {
-            let key = v8::String::new(scope, name).unwrap();
-            let text = v8::String::new(scope, text).unwrap();
-            value.set(scope, key.into(), text.into());
-        };
-        let set_number = |scope: &mut v8::PinScope, name: &str, number: f64| {
-            let key = v8::String::new(scope, name).unwrap();
-            let number = v8::Number::new(scope, number);
-            value.set(scope, key.into(), number.into());
-        };
-        let config = &registration.config;
-        set_string(scope, "script", &registration.script);
-        set_number(scope, "maxBatchSize", f64::from(config.max_batch_size));
-        set_number(
-            scope,
-            "maxBatchTimeoutMs",
-            effective_queue_batch_timeout(i64::from(config.max_batch_timeout) * 1000) as f64,
-        );
-        set_number(scope, "maxRetries", f64::from(config.max_retries));
-        if let Some(dead_letter_queue) = &config.dead_letter_queue {
-            set_string(scope, "deadLetterQueue", dead_letter_queue);
-        }
-        if let Some(max_concurrency) = config.max_concurrency {
-            set_number(scope, "maxConcurrency", f64::from(max_concurrency));
-        }
-        if let Some(retry_delay) = config.retry_delay {
-            set_number(scope, "retryDelaySeconds", f64::from(retry_delay));
-        }
-        let key = v8::String::new(scope, &config.queue).unwrap();
-        consumers.set(scope, key.into(), value.into());
-    }
-    let key = v8::String::new(scope, "queueConsumers").unwrap();
-    cell.set(scope, key.into(), consumers.into());
-
-    let admission = crate::runtime::admission_wait()
-        .as_millis()
-        .min(i64::MAX as u128) as i64;
-    let handler = super::handler_budget().as_millis().min(i64::MAX as u128) as i64;
-    let settlement = i64::try_from(crate::actor::operation_deadline_ms()?).unwrap_or(i64::MAX);
-    let duration = effective_queue_lease_duration(celld_logic::queue::lease_duration_ms(
-        admission, handler, settlement,
-    ));
-    let key = v8::String::new(scope, "queueLeaseDurationMs").unwrap();
-    let duration = v8::Number::new(scope, duration as f64);
-    cell.set(scope, key.into(), duration.into());
-    let limits = v8::Object::new(scope);
-    let set_limit = |scope: &mut v8::PinScope, name: &str, number: f64| {
-        let key = v8::String::new(scope, name).unwrap();
-        let number = v8::Number::new(scope, number);
-        limits.set(scope, key.into(), number.into());
-    };
-    set_limit(
-        scope,
-        "maxMessageBytes",
-        celld_logic::queue::MAX_MESSAGE_BYTES as f64,
+    let queue = crate::queue_policy::consumer_config(config)?;
+    let source = format!(
+        "const q = {queue};\n\
+         const c = __celld.__cell;\n\
+         c.queueConsumers = q.consumers;\n\
+         c.queueLeaseDurationMs = q.leaseDurationMs;\n\
+         c.queueLimits = q.limits;"
     );
-    set_limit(
-        scope,
-        "maxBatchBytes",
-        celld_logic::queue::MAX_SEND_BATCH_BYTES as f64,
-    );
-    set_limit(
-        scope,
-        "maxBatchMessages",
-        celld_logic::queue::MAX_BATCH_MESSAGES as f64,
-    );
-    set_limit(
-        scope,
-        "producerGroupMs",
-        crate::queue_batching::timing().producer_ms as f64,
-    );
-    set_limit(
-        scope,
-        "maxConcurrency",
-        celld_logic::queue::MAX_CONCURRENCY as f64,
-    );
-    set_limit(
-        scope,
-        "maxDelaySeconds",
-        celld_logic::queue::MAX_DELAY_SECONDS as f64,
-    );
-    set_limit(
-        scope,
-        "retentionMs",
-        effective_queue_retention(celld_logic::queue::RETENTION_MS) as f64,
-    );
-    set_limit(
-        scope,
-        "sweepBatchRows",
-        effective_queue_sweep_batch(celld_logic::sweep::BATCH_ROWS) as f64,
-    );
-    let key = v8::String::new(scope, "queueLimits").unwrap();
-    cell.set(scope, key.into(), limits.into());
+    run_internal_snippet(scope, &source).ok_or_else(|| anyhow!("queue config install failed"))?;
     Ok(())
 }
 
@@ -1154,7 +914,8 @@ pub(super) fn adopt_cell(
 pub(super) struct EmbeddedStartup<'a> {
     pub id: &'a str,
     pub props_sc: Vec<u8>,
-    pub restored_image: Option<Vec<u8>>,
+    pub path: std::path::PathBuf,
+    pub restored: bool,
 }
 
 pub(super) fn adopt_embedded_cell(
@@ -1169,7 +930,8 @@ pub(super) fn adopt_embedded_cell(
         cell,
         parent,
         name,
-        startup.restored_image,
+        &startup.path,
+        startup.restored,
         compat.sqlite_vec,
     )
     .context("facet storage open failed")?;
@@ -1231,6 +993,13 @@ fn finish_cell_adoption(tc: &mut v8::PinScope, cell: &str, owned: bool) -> Resul
     let source = format!("__celld.__cell.release({cell:?});");
     run_internal_snippet(tc, &source).ok_or_else(|| anyhow!("adopt failed"))?;
     if !owned {
+        // A facet of the root's own class lives in this isolate, and nothing
+        // else releases it: its realm and connection would outlive the root.
+        for facet in storage::embedded_facets(cell) {
+            let source = format!("__celld.__cell.release({facet:?});");
+            run_internal_snippet(tc, &source).ok_or_else(|| anyhow!("release failed"))?;
+            storage::close(&facet);
+        }
         storage::close(cell);
         return Ok(None);
     }

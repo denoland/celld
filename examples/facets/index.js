@@ -23,6 +23,7 @@ export class Greeter extends WorkerEntrypoint {
 export class Supervisor extends DurableObject {
   fetch(request) {
     const worker = this.env.LOADER.get("app-v1", () => ({
+      compatibilityDate: "2025-01-01",
       mainModule: "app.js",
       modules: { "app.js": CODE },
       env: {

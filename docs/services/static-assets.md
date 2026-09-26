@@ -52,8 +52,8 @@ A request meets the asset layer before it meets the Worker. celld considers only
 a `GET` or a `HEAD` request for an asset, and it sends every other method to the
 Worker. `run_worker_first` reverses the order. It takes `true`, or a list of up
 to 100 route patterns in which a `!` prefix excludes a path, and a match sends
-the request to the Worker with no asset lookup. Cloudflare describes the same
-control in its
+the request to the Worker with no asset lookup. The exact `/` pattern sends only
+the root path to the Worker. Cloudflare describes the same control in its
 [Worker script routing documentation](https://developers.cloudflare.com/workers/static-assets/routing/worker-script/).
 
 ![The routing decision for one request: the method test, run_worker_first, the _redirects rules, the html_handling lookup, the pointer re-read after a miss, not_found_handling, and the fall through to the Worker](static-assets-flow.svg)

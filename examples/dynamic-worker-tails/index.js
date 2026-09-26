@@ -27,6 +27,7 @@ export class DynamicWorkerTail extends WorkerEntrypoint {
 export default {
   fetch(request, env, ctx) {
     const worker = env.LOADER.get(WORKER_ID, () => ({
+      compatibilityDate: "2025-01-01",
       mainModule: WORKER_MAIN,
       modules: { [WORKER_MAIN]: WORKER_SOURCE },
       tails: [

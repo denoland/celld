@@ -87,15 +87,16 @@ that maps to a missing runtime feature does not work.
 ## Dynamic Workers
 
 A dynamically loaded worker can also carry wasm. Pass the bytes in the
-`modules` map; a `BufferSource` value becomes a compiled-module import
-in the loaded worker.
+`modules` map as `{ wasm: bytes }`, and the loaded worker imports a compiled
+module. celld refuses bare bytes, as workerd does.
 
 ```js
 const worker = env.loader.load({
+  compatibilityDate: "2025-01-01",
   mainModule: "main.js",
   modules: {
     "main.js": `import m from "./add.wasm"; ...`,
-    "add.wasm": wasmBytes,
+    "add.wasm": { wasm: wasmBytes },
   },
 });
 ```

@@ -601,3 +601,44 @@ pub fn cron_rearm(next_ms: Option<Ms>, retry_ms: Option<Ms>) -> Option<Ms> {
         (None, retry) => retry,
     }
 }
+
+/// The reserved cron cell's whole schedule decision, in one place so no
+/// engine arm keeps a copy that can drift from it.
+pub struct Plan {
+    /// Which expressions the fired occurrence belongs to, by index.
+    pub matching: Vec<usize>,
+    /// When to arm next, or `None` when the schedule is exhausted and the
+    /// cell retires.
+    pub arm_at: Option<Ms>,
+    /// Whether that deadline is the failure backoff rather than the next
+    /// occurrence. `cron_rearm` takes the earlier and gives a tie to the
+    /// occurrence, so `arm_at` alone cannot say, and the caller has to
+    /// know: a retry owes the expressions that failed, an occurrence owes
+    /// the ones that match it.
+    pub arm_is_retry: bool,
+}
+
+/// `fired_ms` is the occurrence being handled, or `None` when the cell is
+/// only arming. `retry` counts the failures within that occurrence and
+/// `failed` says whether any expression of it is still owed.
+pub fn plan(crons: &[Cron], fired_ms: Option<Ms>, now_ms: Ms, retry: i64, failed: bool) -> Plan {
+    let matching = fired_ms.map(|at| matching(crons, at)).unwrap_or_default();
+    let next = next_across(crons, now_ms);
+    // The retry backoff is `alarm::alarm_retry`'s, not a second schedule:
+    // a cron that fails behaves like any other failing alarm, except that
+    // `cron_rearm` never lets the backoff outlast the next occurrence.
+    let retry_at = failed
+        .then(|| crate::alarm::alarm_retry(now_ms, retry, retry, true))
+        .flatten();
+    let arm_at = cron_rearm(next, retry_at);
+    let arm_is_retry = match (arm_at, next) {
+        (Some(at), Some(occurrence)) => at < occurrence,
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+    Plan {
+        matching,
+        arm_at,
+        arm_is_retry,
+    }
+}

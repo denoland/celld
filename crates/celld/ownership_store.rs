@@ -219,8 +219,14 @@ pub(crate) struct NodeLogWire {
     pub(crate) epoch: u64,
     pub(crate) ensemble: Vec<String>,
     pub(crate) tiered: u64,
-    #[serde(default)]
-    pub(crate) active: bool,
+    /// False means this epoch has no fleet acknowledgements. True means it
+    /// can have them: the lease writer persists this marker before the first
+    /// fleet credit, and bucket coverage never clears it within that epoch.
+    /// The Rust field was originally named `active`. It was renamed to
+    /// `may_have_fleet_acks` to distinguish acknowledgement history from liveness.
+    /// The JSON key remains `active` for compatibility with existing records.
+    #[serde(default, rename = "active")]
+    pub(crate) may_have_fleet_acks: bool,
     /// The node recovering this log and its last heartbeat, while the state
     /// is `recovering`. Absent from records older than the claim.
     #[serde(default)]

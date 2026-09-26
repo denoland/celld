@@ -523,19 +523,22 @@ pub(crate) async fn outbound_websocket_task(
     Ok(())
 }
 
-fn websocket_close_details(payload: &[u8]) -> (u16, String, bool) {
+/// A close frame the peer sent is a clean close, as workerd reports it, even
+/// when its payload is malformed and the code becomes a protocol error; only
+/// a transport end without a frame (1006) is unclean.
+fn websocket_close_details(payload: &[u8]) -> (u16, String) {
     match payload {
-        [] => (1005, String::new(), true),
-        [_] => (1002, String::new(), false),
+        [] => (1005, String::new()),
+        [_] => (1002, String::new()),
         [first, second, reason @ ..] => {
             let Ok(reason) = std::str::from_utf8(reason) else {
-                return (1007, String::new(), false);
+                return (1007, String::new());
             };
             let code = u16::from_be_bytes([*first, *second]);
             if !celld_logic::schedule::websocket_close_code_is_allowed(code) {
-                return (1002, String::new(), false);
+                return (1002, String::new());
             }
-            (code, reason.to_string(), true)
+            (code, reason.to_string())
         }
     }
 }
@@ -674,8 +677,9 @@ where
                         inbound(celld::js::WsIn::Binary(frame.payload.to_vec())).await
                     }
                     OpCode::Close => {
+                        let (code, reason) = websocket_close_details(&frame.payload);
                         return Some(PumpClose {
-                            state: websocket_close_details(&frame.payload),
+                            state: (code, reason, true),
                             initiator: CloseInitiator::Peer,
                         });
                     }

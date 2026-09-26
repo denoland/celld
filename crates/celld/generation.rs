@@ -15,10 +15,11 @@
 //! therefore has one place it can be computed, and a reload cannot miss what
 //! a boot did, because there is no second path for it to miss.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 
 use crate::assets::AssetResolver;
 use crate::bucket::Bucket;
@@ -447,3 +448,205 @@ pub struct IsolateCensus {
 /// current when the call lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GenerationTag(pub GenerationId);
+impl Generation {
+    /// Build a deployment into a generation that can serve.
+    ///
+    /// Every script in the graph is compiled and its primary pool warmed, so
+    /// a bundle that does not load, or declares a Durable Object class it
+    /// does not export, fails here — before the generation can take traffic
+    /// — rather than on the first request. The Durable Object classes of
+    /// every script form one flat registry, because `start_cell` resolves a
+    /// cell by the class its scope names and nothing else.
+    ///
+    /// Boot and reload both come through here. There is no other function
+    /// that turns a deployment into runtime state.
+    pub fn build(
+        id: GenerationId,
+        graph: DeploymentGraph,
+        options: GenerationOptions,
+    ) -> anyhow::Result<Self> {
+        let GenerationOptions { node, region } = options;
+        let DeploymentGraph { primary, cohosted } = graph;
+        crate::runtime::init_engine();
+
+        // A Queue class is shared by every co-hosted script, but its broker
+        // needs the consumer script rather than whichever script happened to
+        // register `__Queue` first. Resolve one deployment-wide catalog before
+        // constructing any WorkerConfig, then install the same catalog into
+        // every isolate that could host a queue cell.
+        let mut queue_catalog = BTreeMap::new();
+        for (script, consumers) in
+            std::iter::once((&primary.script_name, &primary.options.queue_consumers)).chain(
+                cohosted
+                    .iter()
+                    .map(|target| (&target.script_name, &target.options.queue_consumers)),
+            )
+        {
+            for consumer in consumers {
+                let registration = crate::js::QueueConsumerRegistration {
+                    script: script.clone(),
+                    config: consumer.clone(),
+                };
+                if let Some(previous) = queue_catalog.insert(consumer.queue.clone(), registration) {
+                    return Err(anyhow!(
+                        "queue {:?} is consumed by both {} and {}",
+                        consumer.queue,
+                        previous.script,
+                        script
+                    ));
+                }
+            }
+        }
+        let queue_catalog = queue_catalog.into_values().collect::<Vec<_>>();
+
+        let node: Arc<str> = Arc::from(node);
+        let region: Arc<str> = Arc::from(region);
+        let primary_script = primary.script_name.clone();
+        let version = primary.version.clone();
+        let prefix = primary.prefix.clone();
+        let mut all_containers = Vec::new();
+        let mut fence_image = None;
+        // Only classes the user declared can be a bare-id default. Every
+        // runtime-supplied class rides in `do_classes` so that its namespace
+        // key is minted, and counting one here made adding any D1 binding flip
+        // a one-class project past the `len == 1` condition — every
+        // `/do/<bare-id>` request then failed with "requires exactly one
+        // configured Durable Object class" for a config that still declared
+        // exactly one.
+        //
+        // This asks `deploy::is_reserved_class` rather than naming one class,
+        // because the first version of this filter named `__D1Database` alone
+        // and `__Workflow` walked straight back into the same bug when it
+        // shipped. A fourth reserved class must not be able to do it a third
+        // time.
+        let user_classes: Vec<&String> = primary
+            .options
+            .do_classes
+            .iter()
+            .filter(|class| !crate::deploy::is_reserved_class(class))
+            .collect();
+        let default_do_class =
+            (user_classes.len() == 1).then(|| Arc::from(user_classes[0].as_str()));
+        // Two scripts exporting one class name is genuinely ambiguous and is
+        // refused — but a *reserved* class is not an export, and the two kinds
+        // behave differently:
+        //
+        // `__D1Database` is deliberately shared. Its namespace is fleet-wide so
+        // that several Workers can bind one database and a rename cannot rename
+        // it, so two scripts declaring `d1_databases` address the same cells on
+        // purpose. A D1 cell runs SQL and reads no user code, binding or var,
+        // so whichever config serves it is immaterial and the first wins.
+        // Refusing the second made the node exit instead of start.
+        //
+        // A workflow class is script-scoped (`deploy::workflow_class`), so two
+        // scripts produce two distinct names and never reach this branch. If
+        // one ever did, it would be a real collision and must still be refused.
+        let mut cell_configs: HashMap<String, Arc<WorkerConfig>> = HashMap::new();
+        let mut service_pools = HashMap::new();
+        let mut assets = HashMap::new();
+        // Primary first: shared reserved classes retain the first script's
+        // config. Only this script owns ingress and the node's cron schedule;
+        // bindings and runtime construction follow the same path for all scripts.
+        for (index, deployment) in std::iter::once(primary).chain(cohosted).enumerate() {
+            let is_primary = index == 0;
+            let crate::fleet::LoadedDeployment {
+                options,
+                script_name: script,
+                asset_binding,
+                loader_bindings,
+                assets: resolver,
+                services,
+                crons,
+                containers,
+                fence_image: fence,
+                ..
+            } = deployment;
+            all_containers.extend(containers.iter().cloned());
+            fence_image = fence_image.or(fence);
+            if let Some(resolver) = resolver {
+                assets.insert(script.clone(), resolver);
+            }
+            let classes = options.do_classes.clone();
+            let config = Arc::new(
+                WorkerConfig::new(options)
+                    .with_services(services)
+                    .with_asset_binding(asset_binding)
+                    .with_loaders(loader_bindings)
+                    .with_queue_consumers(queue_catalog.clone())
+                    .with_crons(if is_primary { crons } else { Vec::new() })
+                    .with_containers(containers)
+                    .with_generation(id),
+            );
+            let pool = crate::runtime::StatelessRuntime::start(
+                config.clone(),
+                node.clone(),
+                region.clone(),
+            )?;
+            if service_pools.insert(script.clone(), pool).is_some() {
+                return Err(anyhow!("duplicate co-hosted Worker script {script}"));
+            }
+            for class in classes {
+                register_cell_class(&mut cell_configs, class, config.clone(), &|class| {
+                    if is_primary {
+                        anyhow!("duplicate Durable Object class {class}")
+                    } else {
+                        anyhow!(
+                            "Durable Object class {class} is exported by more than one co-hosted script"
+                        )
+                    }
+                })?;
+            }
+            // Cron is runtime-supplied, not a manifest class. Its alarm calls
+            // the primary script's scheduled handler with that script's bindings.
+            if !config.crons.is_empty() {
+                cell_configs.insert(celld_logic::cron::RESERVED_CLASS.to_string(), config);
+            }
+        }
+        let stateless = service_pools[&primary_script].clone();
+        let cell_isolates: HashMap<String, Arc<crate::pool::Pool>> = cell_configs
+            .values()
+            .map(|config| {
+                (
+                    config.script_name.clone(),
+                    crate::runtime::cell_pool(config.clone()),
+                )
+            })
+            .collect();
+        Ok(Generation {
+            id,
+            version,
+            prefix,
+            script_name: primary_script,
+            stateless,
+            services: service_pools,
+            cell_configs,
+            cell_isolates,
+            default_do_class,
+            assets,
+            containers: all_containers,
+            fence_image,
+        })
+    }
+}
+/// Claim one class name in a deployment's cell registry.
+///
+/// A duplicate is an error for a user class, because `start_cell` resolves a
+/// cell from the class its scope names and two exports of one name are
+/// genuinely ambiguous. A duplicate of a *shared* reserved class is not: see
+/// `deploy::is_shared_reserved_class`. The caller supplies the error so the
+/// message can say whether the collision was inside one script or across two.
+fn register_cell_class(
+    configs: &mut HashMap<String, Arc<WorkerConfig>>,
+    class: String,
+    config: Arc<WorkerConfig>,
+    duplicate: &dyn Fn(&str) -> anyhow::Error,
+) -> anyhow::Result<()> {
+    match configs.entry(class) {
+        Entry::Vacant(slot) => {
+            slot.insert(config);
+            Ok(())
+        }
+        Entry::Occupied(slot) if crate::deploy::is_shared_reserved_class(slot.key()) => Ok(()),
+        Entry::Occupied(slot) => Err(duplicate(slot.key())),
+    }
+}

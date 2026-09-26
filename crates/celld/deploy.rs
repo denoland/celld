@@ -2545,7 +2545,7 @@ fn validate_worker_first(value: &RunWorkerFirst) -> anyhow::Result<()> {
     let mut positive = false;
     let mut seen = std::collections::HashSet::new();
     for route in routes {
-        if route.len() <= 1
+        if route.is_empty()
             || route.len() > 100
             || route.contains(['\\', '\0'])
             || (!route.starts_with('/') && !route.starts_with("!/"))

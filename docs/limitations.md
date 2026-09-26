@@ -1,6 +1,6 @@
 # Limitations
 
-celld is an alpha. The current release has these operational limits. See
+celld v0.6.0 is a beta release. The release has these operational limits. See
 [Cloudflare compatibility](cloudflare-compat.md) for the supported services,
 APIs, and Wrangler configuration.
 

@@ -1,11 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 440 372" role="img">
-  <title>Several facets share one cell, one owner node, and one replication stream, while separate Durable Objects each take their own owner record and node</title>
+  <title>Several facets share one cell, one owner node, and one owner record, while separate Durable Objects each take their own owner record and node</title>
   <desc>Two arrangements of the same three application databases. On the left, a
 Worker calls one supervisor cell on node B at epoch e4. That single cell holds
 the supervisor's SQLite database and, in separate databases beside it, the
-facets app-a and app-b. One owner record and one stream under
-cells/acct-9/ltx/e4/ cover all of them, so the call takes one hop and one output
-gate. On the right, the same three databases are three separate Durable Object
+facets app-a and app-b. One owner record covers all of them, and each database
+replicates as a stream under cells/acct-9/ltx/e4/, so the call takes one hop. On the right, the same three databases are three separate Durable Object
 cells on nodes B, C, and A. Each cell holds its own owner record and its own
 epoch, and the three replicate under three prefixes, so a call takes a hop and
 an output gate for each object.</desc>
@@ -115,13 +114,13 @@ an output gate for each object.</desc>
   <rect class="d-sunk" fill="currentColor" x="6" y="272" width="208" height="52" rx="6" />
   <rect class="d-soft" fill="none" stroke="currentColor" x="6" y="272" width="208" height="52" rx="6" />
   <text class="d-ink" fill="currentColor" x="110" y="293" text-anchor="middle">cells/acct-9/ltx/e4/</text>
-  <text class="d-soft" fill="currentColor" x="110" y="311" text-anchor="middle">one stream covers all</text>
+  <text class="d-soft" fill="currentColor" x="110" y="311" text-anchor="middle">a stream per database</text>
 
   <rect class="d-sunk" fill="currentColor" x="226" y="272" width="208" height="52" rx="6" />
   <rect class="d-soft" fill="none" stroke="currentColor" x="226" y="272" width="208" height="52" rx="6" />
   <text class="d-ink" fill="currentColor" x="330" y="293" text-anchor="middle">three bucket prefixes</text>
   <text class="d-soft" fill="currentColor" x="330" y="311" text-anchor="middle">three epochs</text>
 
-  <text class="d-faint" fill="currentColor" x="110" y="348" text-anchor="middle">one hop, one gate, one proof</text>
+  <text class="d-faint" fill="currentColor" x="110" y="348" text-anchor="middle">one hop, one owner record</text>
   <text class="d-faint" fill="currentColor" x="330" y="348" text-anchor="middle">a hop and a gate for each</text>
 </svg>

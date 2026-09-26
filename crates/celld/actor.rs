@@ -2,6 +2,7 @@
 
 //! The serial lifecycle executor and its shell-side request drivers.
 
+use crate::cell_host::CellHost;
 use crate::js::{HttpResponse, WsOut};
 use crate::machine::{
     ownership_on_evict_from_environment, pressure_config_from_environment,
@@ -10,7 +11,7 @@ use crate::machine::{
 };
 use crate::ownership_store::{now_ms, BucketOwnership, LeaseCasError};
 use crate::peer_auth::{self, PeerAuth};
-use crate::runtime::{CellHost, RuntimeManager};
+use crate::runtime::RuntimeManager;
 use anyhow::Context as _;
 use celld_logic::{
     on_event, AdoptedCell, CapacityPeer, CasGuard, CasOutcome, CellId, Channel, Config, Effect,
@@ -94,33 +95,45 @@ pub struct TimerArm {
 }
 
 /// The shared displacement discipline for production and deterministic timers.
+///
+/// `armed` is the only per-slot map, so what this holds is bounded by the
+/// timers that are armed right now. A second map keyed by slot would not be:
+/// `TimerSlot::OperationDeadline` names a unique `OpId`, and the Actor arms
+/// one deadline for every watched effect, so a slot-keyed entry that outlives
+/// its arm grows once per operation for the lifetime of the process.
 pub struct TimerSlots<V> {
     armed: BTreeMap<TimerSlot, (u64, V)>,
-    ordinals: BTreeMap<TimerSlot, u64>,
+    next_ordinal: u64,
 }
 
 impl<V> Default for TimerSlots<V> {
     fn default() -> Self {
         Self {
             armed: BTreeMap::new(),
-            ordinals: BTreeMap::new(),
+            next_ordinal: 0,
         }
     }
 }
 
 impl<V> TimerSlots<V> {
-    /// Creates one arm, assigns its stable per-slot ordinal, and applies it.
+    /// Creates one arm, assigns its ordinal, and applies it.
+    ///
+    /// The ordinal counts arms of every slot together rather than arms of one
+    /// slot, so no slot-keyed counter has to outlive the arm it numbered. A
+    /// per-slot counter pruned when its slot leaves `armed` would restart at
+    /// zero, and [`fire`](Self::fire) would then accept a spent arm as the
+    /// arm that replaced it.
     pub fn arm(&mut self, timer: Timer, at_mono_ms: u64, value: V) -> (TimerArm, Option<V>) {
         let slot = TimerSlot::of(&timer);
-        let ordinal = self.ordinals.entry(slot.clone()).or_default();
+        let ordinal = self.next_ordinal;
+        self.next_ordinal = ordinal.saturating_add(1);
         let arm = TimerArm {
             slot: slot.clone(),
-            ordinal: *ordinal,
+            ordinal,
             timer,
             at_mono_ms,
         };
-        *ordinal = ordinal.saturating_add(1);
-        let displaced = self.replace(&slot, arm.ordinal, value);
+        let displaced = self.replace(&slot, ordinal, value);
         (arm, displaced)
     }
 
@@ -156,6 +169,17 @@ impl<V> TimerSlots<V> {
 
     fn clear_slot(&mut self, slot: &TimerSlot) {
         self.armed.remove(slot);
+    }
+
+    /// Every slot this map still retains, across all of its bookkeeping.
+    ///
+    /// `TimerSlot::OperationDeadline` carries a unique `OpId`, so a per-slot
+    /// entry that outlives its arm grows once per operation and never
+    /// shrinks. The count exists so a test can prove the map returns to the
+    /// armed set. A map added beside `armed` must be counted here.
+    #[cfg(all(test, celld_internal_tests))]
+    pub fn retained_slots(&self) -> usize {
+        self.armed.len()
     }
 }
 
@@ -1500,7 +1524,7 @@ impl AppHandle {
         origin: &'static str,
     ) -> ActivityGuard {
         let cancellation = self.drain_pins.begin(request, request_id, origin);
-        let host = self.runtime.clone().map(CellHost::V8);
+        let host = self.runtime.clone().map(CellHost::Engine);
         #[cfg(all(test, celld_internal_tests))]
         let host = host.or_else(|| self.scripted_activity_host.clone().map(CellHost::Scripted));
         ActivityGuard {
@@ -2095,7 +2119,16 @@ async fn request_peer_handoff(
         &body,
         &peer.node,
     )?;
-    let response = outbound.body(body).send().await?;
+    let request = outbound.body(body).build()?;
+    // Keep response decoding after transport selection so a test transport
+    // cannot bypass the donor contract with an invented typed acceptance.
+    #[cfg(all(test, celld_internal_tests))]
+    let response = match crate::asyncrt::services().handoff_transport_for_test() {
+        Some(transport) => transport.send(request).await?,
+        None => http.execute(request).await?,
+    };
+    #[cfg(not(all(test, celld_internal_tests)))]
+    let response = http.execute(request).await?;
     peer_auth::validate_response(response.headers())?;
     let status = response.status();
     let response: HandoffResponse = match response.json().await {
@@ -2200,7 +2233,7 @@ impl Actor {
             fail_publish_once,
             fence,
             ActorHostServices {
-                host: runtime.map(CellHost::V8),
+                host: runtime.map(CellHost::Engine),
                 drain_pins: DrainPinRegistry::default(),
                 ownership,
                 peer_http: reqwest::Client::new(),
@@ -2232,7 +2265,7 @@ impl Actor {
             fail_publish_once,
             fence,
             ActorHostServices {
-                host: runtime.map(CellHost::V8),
+                host: runtime.map(CellHost::Engine),
                 drain_pins,
                 ownership,
                 peer_http,

@@ -35,12 +35,16 @@ call.
 
 `getCode` returns a `WorkerCode` object. `mainModule` names the entry module,
 and `modules` maps each module name to its source. A value in that map can also
-be wasm bytes, and the [WebAssembly page](../wasm.md#dynamic-workers) shows
-that form. `compatibilityDate` and `compatibilityFlags` select the runtime
-behavior of the loaded Worker, and celld reads both. The module sources can
-total 64 MiB, which is the workerd limit. A `WorkerCode.limits` object can
-set `cpuMs` and `subRequests` for each invocation. celld refuses a
-`WorkerCode` that sets `allowExperimental`. Read the
+be a module object such as `{ wasm: bytes }`, and the
+[WebAssembly page](../wasm.md#dynamic-workers) shows that form. Bare bytes are
+not a module, so celld refuses them as workerd does. A static or dynamic relative import resolves from the importing
+module's name. Thus, `dir/a.js` can import `./b.js` when the map contains
+`dir/b.js`. `compatibilityDate` is required, as in workerd, and
+`compatibilityFlags` is optional. Both select the runtime behavior of the loaded
+Worker. The module sources can
+total 64 MiB, which is the workerd limit. A `WorkerCode.limits` object can set
+`cpuMs` and `subRequests` for each invocation. celld refuses a `WorkerCode`
+that sets `allowExperimental`. Read the
 [API reference](https://developers.cloudflare.com/dynamic-workers/api-reference/)
 for the complete shape.
 

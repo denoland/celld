@@ -39,6 +39,7 @@ use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::list::PaginatedListOptions;
 use object_store::list::PaginatedListStore;
 use object_store::path::Path;
+use object_store::path::PathPart;
 use object_store::Attribute;
 use object_store::Attributes;
 use object_store::ClientOptions;
@@ -62,6 +63,9 @@ use std::time::Duration;
 mod internal_tests {
     include!(env!("CELLD_INTERNAL_BUCKET_TESTS"));
 }
+
+/// The stored form of an empty blob key segment. See [`Bucket::blob_path`].
+const EMPTY_SEGMENT: &str = "%";
 
 /// Explicit credentials for a managed installation; everything else comes
 /// from the standard `AWS_*` environment.
@@ -856,6 +860,64 @@ impl Bucket {
         key.strip_prefix(self.prefix.as_str()).unwrap_or(key)
     }
 
+    /// The location of a blob: the only way a blob key becomes a [`Path`],
+    /// and [`Self::listed_key`] is its inverse.
+    ///
+    /// Each segment is percent-encoded the way `Path::from` encodes it, so a
+    /// blob written before this mapping existed is still at its location.
+    /// `Path::from` also drops an empty segment, and that made `a/b`, `/a/b`,
+    /// `a//b`, and `a/b/` one object where R2 keeps four. An empty segment
+    /// is therefore stored as [`EMPTY_SEGMENT`], which `Path::from` never
+    /// produces because it encodes every `%`.
+    fn blob_path(&self, key: &str) -> Path {
+        let prefix = self
+            .prefix
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(PathPart::from);
+        // An empty key is the scope itself, not one empty segment below it.
+        let key = key
+            .split('/')
+            .filter(|_| !key.is_empty())
+            .map(|segment| match segment {
+                "" => PathPart::parse(EMPTY_SEGMENT).expect("a lone % is a valid path part"),
+                segment => PathPart::from(segment),
+            });
+        Path::from_iter(prefix.chain(key))
+    }
+
+    /// The key a caller wrote, recovered from a listed location.
+    ///
+    /// A listing answers with the encoded form [`Self::blob_path`] wrote, so
+    /// handing it back unchanged gives an R2 caller `p%C5%99ehled.html` for
+    /// `přehled.html`, and a `get` of it names no object
+    /// (denoland/celld#232). The encoding escapes `%` inside a segment, so
+    /// a lone `%` segment can only be an empty one.
+    ///
+    /// A location that celld did not write can decode to bytes that are not
+    /// UTF-8, such as `a%FF`, and that is an error. A lossy decode lists it
+    /// as `a\u{FFFD}`, which names no object, and the cursor re-encodes that
+    /// key as `a%EF%BF%BD`, which sorts before `a%FF`. A one-key page then
+    /// returns the same location again, and the listing never ends.
+    fn listed_key(&self, location: &Path) -> anyhow::Result<String> {
+        let segments = self
+            .unkey(location.as_ref())
+            .split('/')
+            .map(|segment| match segment {
+                EMPTY_SEGMENT => Ok(std::borrow::Cow::Borrowed("")),
+                segment => percent_encoding::percent_decode_str(segment).decode_utf8(),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| {
+                format!(
+                    "list {}://{}/{location}: the key is not UTF-8",
+                    self.scheme(),
+                    self.name
+                )
+            })?;
+        Ok(segments.join("/"))
+    }
+
     /// Body and CAS token, or `None` when the key does not exist.
     pub async fn get(&self, key: &str) -> anyhow::Result<Option<(Bytes, String)>> {
         let key = self.key(key);
@@ -1033,13 +1095,26 @@ impl Bucket {
     /// Returns the keys that are now gone; an absent key counts as gone,
     /// and a key that fails stays listed for the next pass.
     pub async fn delete_many(&self, keys: &[String]) -> Vec<String> {
-        let locations = futures_util::stream::iter(
+        self.delete_paths(
             keys.iter()
-                .map(|key| Ok(Path::from(self.key(key).as_str())))
-                .collect::<Vec<_>>(),
+                .map(|key| Path::from(self.key(key).as_str()))
+                .collect(),
         )
-        .boxed();
-        let mut gone = Vec::with_capacity(keys.len());
+        .await
+    }
+
+    /// [`Self::delete_many`] for blob keys, which address their objects
+    /// through [`Self::blob_path`]. Returns how many are now gone.
+    pub async fn delete_blobs(&self, keys: &[String]) -> usize {
+        self.delete_paths(keys.iter().map(|key| self.blob_path(key)).collect())
+            .await
+            .len()
+    }
+
+    async fn delete_paths(&self, paths: Vec<Path>) -> Vec<String> {
+        let count = paths.len();
+        let locations = futures_util::stream::iter(paths.into_iter().map(Ok)).boxed();
+        let mut gone = Vec::with_capacity(count);
         let mut results = self.store.delete_stream(locations);
         while let Some(result) = results.next().await {
             match result {
@@ -1220,16 +1295,13 @@ impl Bucket {
     /// does not exist. This is R2's `head`, and the read half of every
     /// conditional write.
     pub async fn head_blob(&self, key: &str) -> anyhow::Result<Option<BlobMeta>> {
+        let path = self.blob_path(key);
         let key = self.key(key);
         let options = GetOptions {
             head: true,
             ..GetOptions::default()
         };
-        match self
-            .store
-            .get_opts(&Path::from(key.as_str()), options)
-            .await
-        {
+        match self.store.get_opts(&path, options).await {
             Ok(result) => Ok(Some(self.blob_meta(&result.meta, &result.attributes))),
             Err(Error::NotFound { .. }) => Ok(None),
             Err(error) => {
@@ -1259,11 +1331,7 @@ impl Bucket {
             if_none_match: conditions.if_none_match.clone(),
             ..GetOptions::default()
         };
-        let result = match self
-            .store
-            .get_opts(&Path::from(scoped.as_str()), options)
-            .await
-        {
+        let result = match self.store.get_opts(&self.blob_path(key), options).await {
             Ok(result) => result,
             // Only an absent key is a miss. A range that overshoots the end
             // of the object is served short, as R2 serves it; a range that
@@ -1369,10 +1437,7 @@ impl Bucket {
             attributes: attributes.write(self.backend),
             ..PutOptions::default()
         };
-        match store
-            .put_opts(&Path::from(scoped.as_str()), body, options)
-            .await
-        {
+        match store.put_opts(&self.blob_path(key), body, options).await {
             Ok(result) => Ok(Some(BlobMeta {
                 size,
                 cas: self
@@ -1416,11 +1481,11 @@ impl Bucket {
         delimiter: Option<&str>,
     ) -> anyhow::Result<BlobPage> {
         let directory = prefix.rsplit_once('/').map_or("", |(head, _)| head);
-        let path = Path::from(self.key(directory).as_str());
+        let path = self.blob_path(directory);
         let mut stream = match after {
             Some(after) => self
                 .store
-                .list_with_offset(Some(&path), &Path::from(self.key(after).as_str())),
+                .list_with_offset(Some(&path), &self.blob_path(after)),
             None => self.store.list(Some(&path)),
         };
         let delimiter = delimiter.filter(|delimiter| !delimiter.is_empty());
@@ -1440,7 +1505,8 @@ impl Bucket {
         while let Some(meta) = stream.next().await {
             let meta =
                 meta.with_context(|| format!("list {}://{}/{path}", self.scheme(), self.name))?;
-            let key = self.unkey(meta.location.as_ref());
+            let key = self.listed_key(&meta.location)?;
+            let key = key.as_str();
             let Some(remainder) = key.strip_prefix(prefix) else {
                 continue;
             };
@@ -1490,13 +1556,14 @@ impl Bucket {
         key: &str,
         attributes: &BlobAttributes,
     ) -> anyhow::Result<Box<dyn MultipartUpload>> {
+        let path = self.blob_path(key);
         let key = self.key(key);
         let options = PutMultipartOptions {
             attributes: attributes.write(self.backend),
             ..PutMultipartOptions::default()
         };
         self.store
-            .put_multipart_opts(&Path::from(key.as_str()), options)
+            .put_multipart_opts(&path, options)
             .await
             .with_context(|| format!("begin multipart {}://{}/{key}", self.scheme(), self.name))
     }
